@@ -94,11 +94,21 @@ pub struct CreateMemory {
     pub ttl_secs: Option<i64>,
 }
 
-fn default_tier() -> Tier { Tier::Mid }
-fn default_namespace() -> String { "global".to_string() }
-fn default_priority() -> i32 { 5 }
-fn default_confidence() -> f64 { 1.0 }
-fn default_source() -> String { "api".to_string() }
+fn default_tier() -> Tier {
+    Tier::Mid
+}
+fn default_namespace() -> String {
+    "global".to_string()
+}
+fn default_priority() -> i32 {
+    5
+}
+fn default_confidence() -> f64 {
+    1.0
+}
+fn default_source() -> String {
+    "api".to_string()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemory {
@@ -131,7 +141,9 @@ pub struct SearchQuery {
     pub tags: Option<String>, // comma-separated
 }
 
-fn default_limit() -> Option<usize> { Some(20) }
+fn default_limit() -> Option<usize> {
+    Some(20)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -166,7 +178,9 @@ pub struct RecallQuery {
     pub since: Option<String>,
 }
 
-fn default_recall_limit() -> Option<usize> { Some(10) }
+fn default_recall_limit() -> Option<usize> {
+    Some(10)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct RecallBody {
@@ -189,7 +203,9 @@ pub struct LinkBody {
     pub relation: String,
 }
 
-fn default_relation() -> String { "related_to".to_string() }
+fn default_relation() -> String {
+    "related_to".to_string()
+}
 
 #[derive(Debug, Deserialize)]
 pub struct ForgetQuery {

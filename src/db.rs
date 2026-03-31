@@ -75,23 +75,37 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", "ON")?;
-    conn.execute_batch(SCHEMA).context("failed to initialize schema")?;
+    conn.execute_batch(SCHEMA)
+        .context("failed to initialize schema")?;
     migrate(&conn)?;
     Ok(conn)
 }
 
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
-        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+        .query_row(
+            "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     if version < 2 {
         // Add confidence and source columns if missing (v1 -> v2)
-        let _ = conn.execute("ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0", []);
-        let _ = conn.execute("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'", []);
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
+            [],
+        );
     }
     if version < CURRENT_SCHEMA_VERSION {
         conn.execute("DELETE FROM schema_version", [])?;
-        conn.execute("INSERT INTO schema_version (version) VALUES (?1)", params![CURRENT_SCHEMA_VERSION])?;
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            params![CURRENT_SCHEMA_VERSION],
+        )?;
     }
     Ok(())
 }
@@ -145,11 +159,13 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
         ],
     )?;
     // Return the actual ID (could be the existing one on conflict)
-    let actual_id: String = conn.query_row(
-        "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
-        params![mem.title, mem.namespace],
-        |r| r.get(0),
-    ).unwrap_or_else(|_| mem.id.clone());
+    let actual_id: String = conn
+        .query_row(
+            "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
+            params![mem.title, mem.namespace],
+            |r| r.get(0),
+        )
+        .unwrap_or_else(|_| mem.id.clone());
     Ok(actual_id)
 }
 
@@ -173,8 +189,12 @@ pub fn touch(conn: &Connection, id: &str) -> Result<()> {
 
     // Extend TTL on access
     let new_expires = match mem.tier {
-        Tier::Short => mem.expires_at.map(|_| (now + chrono::Duration::seconds(SHORT_TTL_EXTEND_SECS)).to_rfc3339()),
-        Tier::Mid => mem.expires_at.map(|_| (now + chrono::Duration::seconds(MID_TTL_EXTEND_SECS)).to_rfc3339()),
+        Tier::Short => mem
+            .expires_at
+            .map(|_| (now + chrono::Duration::seconds(SHORT_TTL_EXTEND_SECS)).to_rfc3339()),
+        Tier::Mid => mem
+            .expires_at
+            .map(|_| (now + chrono::Duration::seconds(MID_TTL_EXTEND_SECS)).to_rfc3339()),
         Tier::Long => None,
     };
 
@@ -193,17 +213,26 @@ pub fn touch(conn: &Connection, id: &str) -> Result<()> {
 
     // Reinforce priority every 10 accesses
     if new_count > 0 && new_count % 10 == 0 && mem.priority < 10 {
-        conn.execute("UPDATE memories SET priority = MIN(priority + 1, 10) WHERE id = ?1", params![id])?;
+        conn.execute(
+            "UPDATE memories SET priority = MIN(priority + 1, 10) WHERE id = ?1",
+            params![id],
+        )?;
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update(
-    conn: &Connection, id: &str,
-    title: Option<&str>, content: Option<&str>,
-    tier: Option<&Tier>, namespace: Option<&str>,
-    tags: Option<&Vec<String>>, priority: Option<i32>,
-    confidence: Option<f64>, expires_at: Option<&str>,
+    conn: &Connection,
+    id: &str,
+    title: Option<&str>,
+    content: Option<&str>,
+    tier: Option<&Tier>,
+    namespace: Option<&str>,
+    tags: Option<&Vec<String>>,
+    priority: Option<i32>,
+    confidence: Option<f64>,
+    expires_at: Option<&str>,
 ) -> Result<bool> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
@@ -239,7 +268,12 @@ pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
 }
 
 /// Forget by pattern — delete memories matching namespace + FTS pattern + tier.
-pub fn forget(conn: &Connection, namespace: Option<&str>, pattern: Option<&str>, tier: Option<&Tier>) -> Result<usize> {
+pub fn forget(
+    conn: &Connection,
+    namespace: Option<&str>,
+    pattern: Option<&str>,
+    tier: Option<&Tier>,
+) -> Result<usize> {
     if pattern.is_none() && namespace.is_none() && tier.is_none() {
         anyhow::bail!("at least one of namespace, pattern, or tier is required");
     }
@@ -269,10 +303,17 @@ pub fn forget(conn: &Connection, namespace: Option<&str>, pattern: Option<&str>,
     Ok(deleted)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn list(
-    conn: &Connection, namespace: Option<&str>, tier: Option<&Tier>,
-    limit: usize, offset: usize, min_priority: Option<i32>,
-    since: Option<&str>, until: Option<&str>, tags_filter: Option<&str>,
+    conn: &Connection,
+    namespace: Option<&str>,
+    tier: Option<&Tier>,
+    limit: usize,
+    offset: usize,
+    min_priority: Option<i32>,
+    since: Option<&str>,
+    until: Option<&str>,
+    tags_filter: Option<&str>,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
@@ -289,16 +330,34 @@ pub fn list(
          LIMIT ?8 OFFSET ?9",
     )?;
     let rows = stmt.query_map(
-        params![namespace, tier_str, min_priority, now, since, until, tags_filter, limit as i64, offset as i64],
+        params![
+            namespace,
+            tier_str,
+            min_priority,
+            now,
+            since,
+            until,
+            tags_filter,
+            limit as i64,
+            offset as i64
+        ],
         row_to_memory,
     )?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn search(
-    conn: &Connection, query: &str, namespace: Option<&str>, tier: Option<&Tier>,
-    limit: usize, min_priority: Option<i32>,
-    since: Option<&str>, until: Option<&str>, tags_filter: Option<&str>,
+    conn: &Connection,
+    query: &str,
+    namespace: Option<&str>,
+    tier: Option<&Tier>,
+    limit: usize,
+    min_priority: Option<i32>,
+    since: Option<&str>,
+    until: Option<&str>,
+    tags_filter: Option<&str>,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
@@ -318,19 +377,41 @@ pub fn search(
            AND (?6 IS NULL OR m.created_at >= ?6)
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR m.tags LIKE '%' || ?8 || '%')
-         ORDER BY (fts.rank * -1) + (m.priority * 0.5) + (m.access_count * 0.1) + (m.confidence * 2.0) DESC
+         ORDER BY (fts.rank * -1)
+           + (m.priority * 0.5)
+           + (m.access_count * 0.1)
+           + (m.confidence * 2.0)
+           + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
+           DESC
          LIMIT ?9",
     )?;
     let rows = stmt.query_map(
-        params![fts_query, namespace, tier_str, min_priority, now, since, until, tags_filter, limit as i64],
+        params![
+            fts_query,
+            namespace,
+            tier_str,
+            min_priority,
+            now,
+            since,
+            until,
+            tags_filter,
+            limit as i64
+        ],
         row_to_memory,
     )?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Recall — fuzzy OR search + touch + auto-promote + TTL extension.
-pub fn recall(conn: &Connection, context: &str, namespace: Option<&str>, limit: usize,
-              tags_filter: Option<&str>, since: Option<&str>) -> Result<Vec<Memory>> {
+pub fn recall(
+    conn: &Connection,
+    context: &str,
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
 
@@ -351,6 +432,7 @@ pub fn recall(conn: &Connection, context: &str, namespace: Option<&str>, limit: 
            + (m.access_count * 0.1)
            + (m.confidence * 2.0)
            + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
+           + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
            DESC
          LIMIT ?6",
     )?;
@@ -381,12 +463,18 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
          LIMIT 5",
     )?;
     let rows = stmt.query_map(params![fts_query, namespace], row_to_memory)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 // --- Links ---
 
-pub fn create_link(conn: &Connection, source_id: &str, target_id: &str, relation: &str) -> Result<()> {
+pub fn create_link(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -398,7 +486,7 @@ pub fn create_link(conn: &Connection, source_id: &str, target_id: &str, relation
 pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
     let mut stmt = conn.prepare(
         "SELECT source_id, target_id, relation, created_at FROM memory_links
-         WHERE source_id = ?1 OR target_id = ?1"
+         WHERE source_id = ?1 OR target_id = ?1",
     )?;
     let rows = stmt.query_map(params![id], |row| {
         Ok(MemoryLink {
@@ -408,9 +496,11 @@ pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
             created_at: row.get(3)?,
         })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
+#[allow(dead_code)]
 pub fn delete_link(conn: &Connection, source_id: &str, target_id: &str) -> Result<bool> {
     let changed = conn.execute(
         "DELETE FROM memory_links WHERE source_id = ?1 AND target_id = ?2",
@@ -423,8 +513,15 @@ pub fn delete_link(conn: &Connection, source_id: &str, target_id: &str) -> Resul
 
 /// Consolidate multiple memories into one. Returns the new memory ID.
 /// Deletes the source memories and creates links from new → old (derived_from).
-pub fn consolidate(conn: &Connection, ids: &[String], title: &str, summary: &str,
-                   namespace: &str, tier: &Tier, source: &str) -> Result<String> {
+pub fn consolidate(
+    conn: &Connection,
+    ids: &[String],
+    title: &str,
+    summary: &str,
+    namespace: &str,
+    tier: &Tier,
+    source: &str,
+) -> Result<String> {
     let now = Utc::now().to_rfc3339();
     let new_id = uuid::Uuid::new_v4().to_string();
 
@@ -481,20 +578,39 @@ pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
         "SELECT namespace, COUNT(*) FROM memories WHERE expires_at IS NULL OR expires_at > ?1 GROUP BY namespace ORDER BY COUNT(*) DESC",
     )?;
     let rows = stmt.query_map(params![now], |row| {
-        Ok(NamespaceCount { namespace: row.get(0)?, count: row.get(1)? })
+        Ok(NamespaceCount {
+            namespace: row.get(0)?,
+            count: row.get(1)?,
+        })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
     let total: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
 
-    let mut stmt = conn.prepare("SELECT tier, COUNT(*) FROM memories GROUP BY tier ORDER BY COUNT(*) DESC")?;
-    let by_tier = stmt.query_map([], |row| Ok(TierCount { tier: row.get(0)?, count: row.get(1)? }))?
+    let mut stmt =
+        conn.prepare("SELECT tier, COUNT(*) FROM memories GROUP BY tier ORDER BY COUNT(*) DESC")?;
+    let by_tier = stmt
+        .query_map([], |row| {
+            Ok(TierCount {
+                tier: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
-    let mut stmt = conn.prepare("SELECT namespace, COUNT(*) FROM memories GROUP BY namespace ORDER BY COUNT(*) DESC")?;
-    let by_namespace = stmt.query_map([], |row| Ok(NamespaceCount { namespace: row.get(0)?, count: row.get(1)? }))?
+    let mut stmt = conn.prepare(
+        "SELECT namespace, COUNT(*) FROM memories GROUP BY namespace ORDER BY COUNT(*) DESC",
+    )?;
+    let by_namespace = stmt
+        .query_map([], |row| {
+            Ok(NamespaceCount {
+                namespace: row.get(0)?,
+                count: row.get(1)?,
+            })
+        })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let now = Utc::now().to_rfc3339();
@@ -504,10 +620,19 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         params![now, one_hour], |r| r.get(0),
     )?;
 
-    let links_count: usize = conn.query_row("SELECT COUNT(*) FROM memory_links", [], |r| r.get(0)).unwrap_or(0);
+    let links_count: usize = conn
+        .query_row("SELECT COUNT(*) FROM memory_links", [], |r| r.get(0))
+        .unwrap_or(0);
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
-    Ok(Stats { total, by_tier, by_namespace, expiring_soon, links_count, db_size_bytes })
+    Ok(Stats {
+        total,
+        by_tier,
+        by_namespace,
+        expiring_soon,
+        links_count,
+        db_size_bytes,
+    })
 }
 
 pub fn gc(conn: &Connection) -> Result<usize> {
@@ -522,15 +647,23 @@ pub fn gc(conn: &Connection) -> Result<usize> {
 pub fn export_all(conn: &Connection) -> Result<Vec<Memory>> {
     let mut stmt = conn.prepare("SELECT * FROM memories ORDER BY created_at ASC")?;
     let rows = stmt.query_map([], row_to_memory)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
-    let mut stmt = conn.prepare("SELECT source_id, target_id, relation, created_at FROM memory_links")?;
+    let mut stmt =
+        conn.prepare("SELECT source_id, target_id, relation, created_at FROM memory_links")?;
     let rows = stmt.query_map([], |row| {
-        Ok(MemoryLink { source_id: row.get(0)?, target_id: row.get(1)?, relation: row.get(2)?, created_at: row.get(3)? })
+        Ok(MemoryLink {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            relation: row.get(2)?,
+            created_at: row.get(3)?,
+        })
     })?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Checkpoint WAL for clean shutdown.
@@ -542,6 +675,9 @@ pub fn checkpoint(conn: &Connection) -> Result<()> {
 /// Deep health check — verifies DB is accessible and FTS is functional.
 pub fn health_check(conn: &Connection) -> Result<bool> {
     let _: i64 = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
-    conn.execute("INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')", [])?;
+    conn.execute(
+        "INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')",
+        [],
+    )?;
     Ok(true)
 }

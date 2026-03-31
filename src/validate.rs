@@ -10,7 +10,16 @@ const MAX_TAGS_COUNT: usize = 50;
 const MAX_RELATION_LEN: usize = 64;
 const MAX_ID_LEN: usize = 128;
 
-const VALID_SOURCES: &[&str] = &["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"];
+const VALID_SOURCES: &[&str] = &[
+    "user",
+    "claude",
+    "hook",
+    "api",
+    "cli",
+    "import",
+    "consolidation",
+    "system",
+];
 const VALID_RELATIONS: &[&str] = &["related_to", "supersedes", "contradicts", "derived_from"];
 
 fn is_valid_rfc3339(s: &str) -> bool {
@@ -54,7 +63,10 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
         bail!("namespace cannot be empty");
     }
     if trimmed.len() > MAX_NAMESPACE_LEN {
-        bail!("namespace exceeds max length of {} bytes", MAX_NAMESPACE_LEN);
+        bail!(
+            "namespace exceeds max length of {} bytes",
+            MAX_NAMESPACE_LEN
+        );
     }
     if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
         bail!("namespace cannot contain slashes or null bytes");
@@ -73,7 +85,11 @@ pub fn validate_source(source: &str) -> Result<()> {
         bail!("source exceeds max length of {} bytes", MAX_SOURCE_LEN);
     }
     if !VALID_SOURCES.contains(&source) {
-        bail!("invalid source '{}' — must be one of: {}", source, VALID_SOURCES.join(", "));
+        bail!(
+            "invalid source '{}' — must be one of: {}",
+            source,
+            VALID_SOURCES.join(", ")
+        );
     }
     Ok(())
 }
@@ -88,7 +104,11 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
             bail!("tags cannot contain empty strings");
         }
         if trimmed.len() > MAX_TAG_LEN {
-            bail!("tag '{}...' exceeds max length of {} bytes", &trimmed[..20.min(trimmed.len())], MAX_TAG_LEN);
+            bail!(
+                "tag '{}...' exceeds max length of {} bytes",
+                &trimmed[..20.min(trimmed.len())],
+                MAX_TAG_LEN
+            );
         }
         if !is_clean_string(trimmed) {
             bail!("tag contains invalid characters");
@@ -144,7 +164,11 @@ pub fn validate_relation(relation: &str) -> Result<()> {
         bail!("relation exceeds max length of {} bytes", MAX_RELATION_LEN);
     }
     if !VALID_RELATIONS.contains(&relation) {
-        bail!("invalid relation '{}' — must be one of: {}", relation, VALID_RELATIONS.join(", "));
+        bail!(
+            "invalid relation '{}' — must be one of: {}",
+            relation,
+            VALID_RELATIONS.join(", ")
+        );
     }
     Ok(())
 }
@@ -154,7 +178,10 @@ pub fn validate_confidence(confidence: f64) -> Result<()> {
         bail!("confidence must be a finite number");
     }
     if !(0.0..=1.0).contains(&confidence) {
-        bail!("confidence must be between 0.0 and 1.0 (got {})", confidence);
+        bail!(
+            "confidence must be between 0.0 and 1.0 (got {})",
+            confidence
+        );
     }
     Ok(())
 }
@@ -215,13 +242,27 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
 
 /// Validate update fields (only validates present fields).
 pub fn validate_update(update: &UpdateMemory) -> Result<()> {
-    if let Some(ref t) = update.title { validate_title(t)?; }
-    if let Some(ref c) = update.content { validate_content(c)?; }
-    if let Some(ref ns) = update.namespace { validate_namespace(ns)?; }
-    if let Some(ref tags) = update.tags { validate_tags(tags)?; }
-    if let Some(p) = update.priority { validate_priority(p)?; }
-    if let Some(c) = update.confidence { validate_confidence(c)?; }
-    if let Some(ref ts) = update.expires_at { validate_expires_at(Some(ts))?; }
+    if let Some(ref t) = update.title {
+        validate_title(t)?;
+    }
+    if let Some(ref c) = update.content {
+        validate_content(c)?;
+    }
+    if let Some(ref ns) = update.namespace {
+        validate_namespace(ns)?;
+    }
+    if let Some(ref tags) = update.tags {
+        validate_tags(tags)?;
+    }
+    if let Some(p) = update.priority {
+        validate_priority(p)?;
+    }
+    if let Some(c) = update.confidence {
+        validate_confidence(c)?;
+    }
+    if let Some(ref ts) = update.expires_at {
+        validate_expires_at(Some(ts))?;
+    }
     Ok(())
 }
 
@@ -237,7 +278,12 @@ pub fn validate_link(source_id: &str, target_id: &str, relation: &str) -> Result
 }
 
 /// Validate consolidation request.
-pub fn validate_consolidate(ids: &[String], title: &str, summary: &str, namespace: &str) -> Result<()> {
+pub fn validate_consolidate(
+    ids: &[String],
+    title: &str,
+    summary: &str,
+    namespace: &str,
+) -> Result<()> {
     if ids.len() < 2 {
         bail!("need at least 2 memory IDs to consolidate");
     }

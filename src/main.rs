@@ -1,10 +1,15 @@
 mod db;
+mod errors;
 mod handlers;
+mod mcp;
 mod models;
 mod validate;
 
 use anyhow::Result;
-use axum::{routing::{delete, get, post, put}, Router};
+use axum::{
+    routing::{delete, get, post, put},
+    Router,
+};
 use chrono::{Duration, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
@@ -21,7 +26,10 @@ const DEFAULT_PORT: u16 = 9077;
 const GC_INTERVAL_SECS: u64 = 1800;
 
 #[derive(Parser)]
-#[command(name = "claude-memory", about = "Persistent memory daemon for Claude Code — short, mid, and long-term recall")]
+#[command(
+    name = "claude-memory",
+    about = "Persistent memory daemon for Claude Code — short, mid, and long-term recall"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -36,6 +44,8 @@ struct Cli {
 enum Command {
     /// Start the HTTP memory daemon
     Serve(ServeArgs),
+    /// Run as an MCP (Model Context Protocol) tool server over stdio
+    Mcp,
     /// Store a new memory
     Store(StoreArgs),
     /// Update an existing memory by ID
@@ -153,7 +163,9 @@ struct SearchArgs {
 }
 
 #[derive(Args)]
-struct GetArgs { id: String }
+struct GetArgs {
+    id: String,
+}
 
 #[derive(Args)]
 struct ListArgs {
@@ -172,10 +184,14 @@ struct ListArgs {
 }
 
 #[derive(Args)]
-struct DeleteArgs { id: String }
+struct DeleteArgs {
+    id: String,
+}
 
 #[derive(Args)]
-struct PromoteArgs { id: String }
+struct PromoteArgs {
+    id: String,
+}
 
 #[derive(Args)]
 struct ForgetArgs {
@@ -238,12 +254,22 @@ fn auto_namespace() -> String {
 }
 
 fn human_age(iso: &str) -> String {
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else { return iso.to_string() };
+    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
+        return iso.to_string();
+    };
     let dur = Utc::now().signed_duration_since(dt);
-    if dur.num_seconds() < 60 { return "just now".to_string() }
-    if dur.num_minutes() < 60 { return format!("{}m ago", dur.num_minutes()) }
-    if dur.num_hours() < 24 { return format!("{}h ago", dur.num_hours()) }
-    if dur.num_days() < 30 { return format!("{}d ago", dur.num_days()) }
+    if dur.num_seconds() < 60 {
+        return "just now".to_string();
+    }
+    if dur.num_minutes() < 60 {
+        return format!("{}m ago", dur.num_minutes());
+    }
+    if dur.num_hours() < 24 {
+        return format!("{}h ago", dur.num_hours());
+    }
+    if dur.num_days() < 30 {
+        return format!("{}d ago", dur.num_days());
+    }
     format!("{}mo ago", dur.num_days() / 30)
 }
 
@@ -253,6 +279,10 @@ async fn main() -> Result<()> {
     let j = cli.json;
     match cli.command {
         Command::Serve(a) => serve(cli.db, a).await,
+        Command::Mcp => {
+            mcp::run_mcp_server(&cli.db)?;
+            Ok(())
+        }
         Command::Store(a) => cmd_store(cli.db, a, j),
         Command::Update(a) => cmd_update(cli.db, a, j),
         Command::Recall(a) => cmd_recall(cli.db, a, j),
@@ -269,15 +299,25 @@ async fn main() -> Result<()> {
         Command::Namespaces => cmd_namespaces(cli.db, j),
         Command::Export => cmd_export(cli.db),
         Command::Import => cmd_import(cli.db, j),
-        Command::Completions(a) => { generate(a.shell, &mut Cli::command(), "claude-memory", &mut std::io::stdout()); Ok(()) }
+        Command::Completions(a) => {
+            generate(
+                a.shell,
+                &mut Cli::command(),
+                "claude-memory",
+                &mut std::io::stdout(),
+            );
+            Ok(())
+        }
     }
 }
 
 async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env()
-            .add_directive("claude_memory=info".parse()?)
-            .add_directive("tower_http=info".parse()?))
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("claude_memory=info".parse()?)
+                .add_directive("tower_http=info".parse()?),
+        )
         .init();
 
     let conn = db::open(&db_path)?;
@@ -333,7 +373,9 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
     tracing::info!("database: {}", db_path.display());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).with_graceful_shutdown(shutdown).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
 }
 
@@ -341,12 +383,23 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
 
 fn cmd_store(db_path: PathBuf, args: StoreArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let tier = Tier::from_str(&args.tier).ok_or_else(|| anyhow::anyhow!("invalid tier: {} (use short, mid, long)", args.tier))?;
+    let tier = Tier::from_str(&args.tier)
+        .ok_or_else(|| anyhow::anyhow!("invalid tier: {} (use short, mid, long)", args.tier))?;
     let namespace = args.namespace.unwrap_or_else(auto_namespace);
     let content = if args.content == "-" {
-        use std::io::Read; let mut buf = String::new(); std::io::stdin().read_to_string(&mut buf)?; buf
-    } else { args.content };
-    let tags: Vec<String> = args.tags.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+        use std::io::Read;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf)?;
+        buf
+    } else {
+        args.content
+    };
+    let tags: Vec<String> = args
+        .tags
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
 
     // Validate all fields before touching the DB
     validate::validate_title(&args.title)?;
@@ -358,27 +411,46 @@ fn cmd_store(db_path: PathBuf, args: StoreArgs, json_out: bool) -> Result<()> {
     validate::validate_confidence(args.confidence)?;
 
     let now = Utc::now();
-    let expires_at = tier.default_ttl_secs().map(|s| (now + Duration::seconds(s)).to_rfc3339());
+    let expires_at = tier
+        .default_ttl_secs()
+        .map(|s| (now + Duration::seconds(s)).to_rfc3339());
     let mem = models::Memory {
-        id: uuid::Uuid::new_v4().to_string(), tier, namespace, title: args.title,
-        content, tags, priority: args.priority.clamp(1, 10),
-        confidence: args.confidence.clamp(0.0, 1.0), source: args.source,
-        access_count: 0, created_at: now.to_rfc3339(), updated_at: now.to_rfc3339(),
-        last_accessed_at: None, expires_at,
+        id: uuid::Uuid::new_v4().to_string(),
+        tier,
+        namespace,
+        title: args.title,
+        content,
+        tags,
+        priority: args.priority.clamp(1, 10),
+        confidence: args.confidence.clamp(0.0, 1.0),
+        source: args.source,
+        access_count: 0,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        last_accessed_at: None,
+        expires_at,
     };
-    let contradictions = db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
+    let contradictions =
+        db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
     let actual_id = db::insert(&conn, &mem)?;
     if json_out {
         let mut j = serde_json::to_value(&mem)?;
         j["id"] = serde_json::json!(actual_id);
         if !contradictions.is_empty() {
-            j["potential_contradictions"] = serde_json::json!(contradictions.iter().map(|c| &c.id).collect::<Vec<_>>());
+            j["potential_contradictions"] =
+                serde_json::json!(contradictions.iter().map(|c| &c.id).collect::<Vec<_>>());
         }
         println!("{}", serde_json::to_string(&j)?);
     } else {
-        println!("stored: {} [{}] (ns={})", actual_id, mem.tier, mem.namespace);
+        println!(
+            "stored: {} [{}] (ns={})",
+            actual_id, mem.tier, mem.namespace
+        );
         if !contradictions.is_empty() {
-            eprintln!("warning: {} similar memories found in same namespace (potential contradictions)", contradictions.len());
+            eprintln!(
+                "warning: {} similar memories found in same namespace (potential contradictions)",
+                contradictions.len()
+            );
         }
     }
     Ok(())
@@ -387,38 +459,98 @@ fn cmd_store(db_path: PathBuf, args: StoreArgs, json_out: bool) -> Result<()> {
 fn cmd_update(db_path: PathBuf, args: UpdateArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let tier = args.tier.as_deref().and_then(Tier::from_str);
-    let tags: Option<Vec<String>> = args.tags.as_ref().map(|t| t.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect());
+    let tags: Option<Vec<String>> = args.tags.as_ref().map(|t| {
+        t.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
     // Validate present fields
-    if let Some(ref t) = args.title { validate::validate_title(t)?; }
-    if let Some(ref c) = args.content { validate::validate_content(c)?; }
-    if let Some(ref ns) = args.namespace { validate::validate_namespace(ns)?; }
-    if let Some(ref tags) = tags { validate::validate_tags(tags)?; }
-    if let Some(p) = args.priority { validate::validate_priority(p)?; }
-    if let Some(c) = args.confidence { validate::validate_confidence(c)?; }
-    let updated = db::update(&conn, &args.id, args.title.as_deref(), args.content.as_deref(),
-        tier.as_ref(), args.namespace.as_deref(), tags.as_ref(), args.priority, args.confidence, None)?;
-    if !updated { eprintln!("not found: {}", args.id); std::process::exit(1); }
+    if let Some(ref t) = args.title {
+        validate::validate_title(t)?;
+    }
+    if let Some(ref c) = args.content {
+        validate::validate_content(c)?;
+    }
+    if let Some(ref ns) = args.namespace {
+        validate::validate_namespace(ns)?;
+    }
+    if let Some(ref tags) = tags {
+        validate::validate_tags(tags)?;
+    }
+    if let Some(p) = args.priority {
+        validate::validate_priority(p)?;
+    }
+    if let Some(c) = args.confidence {
+        validate::validate_confidence(c)?;
+    }
+    let updated = db::update(
+        &conn,
+        &args.id,
+        args.title.as_deref(),
+        args.content.as_deref(),
+        tier.as_ref(),
+        args.namespace.as_deref(),
+        tags.as_ref(),
+        args.priority,
+        args.confidence,
+        None,
+    )?;
+    if !updated {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
+    }
     if let Some(mem) = db::get(&conn, &args.id)? {
-        if json_out { println!("{}", serde_json::to_string(&mem)?); }
-        else { println!("updated: {} [{}]", mem.id, mem.title); }
+        if json_out {
+            println!("{}", serde_json::to_string(&mem)?);
+        } else {
+            println!("updated: {} [{}]", mem.id, mem.title);
+        }
     }
     Ok(())
 }
 
 fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let results = db::recall(&conn, &args.context, args.namespace.as_deref(), args.limit,
-                             args.tags.as_deref(), args.since.as_deref())?;
+    let results = db::recall(
+        &conn,
+        &args.context,
+        args.namespace.as_deref(),
+        args.limit,
+        args.tags.as_deref(),
+        args.since.as_deref(),
+    )?;
     if json_out {
-        println!("{}", serde_json::to_string(&serde_json::json!({"memories": results, "count": results.len()}))?);
+        println!(
+            "{}",
+            serde_json::to_string(
+                &serde_json::json!({"memories": results, "count": results.len()})
+            )?
+        );
         return Ok(());
     }
-    if results.is_empty() { eprintln!("no memories found for: {}", args.context); return Ok(()); }
+    if results.is_empty() {
+        eprintln!("no memories found for: {}", args.context);
+        return Ok(());
+    }
     for mem in &results {
         let age = human_age(&mem.updated_at);
-        let conf = if mem.confidence < 1.0 { format!(" conf={:.0}%", mem.confidence * 100.0) } else { String::new() };
-        println!("[{}/{}] {} (p={}, ns={}, {}x, {}{})",
-            mem.tier, &mem.id[..8], mem.title, mem.priority, mem.namespace, mem.access_count, age, conf);
+        let conf = if mem.confidence < 1.0 {
+            format!(" conf={:.0}%", mem.confidence * 100.0)
+        } else {
+            String::new()
+        };
+        println!(
+            "[{}/{}] {} (p={}, ns={}, {}x, {}{})",
+            mem.tier,
+            &mem.id[..8],
+            mem.title,
+            mem.priority,
+            mem.namespace,
+            mem.access_count,
+            age,
+            conf
+        );
         let preview: String = mem.content.chars().take(200).collect();
         println!("  {}\n", preview);
     }
@@ -429,16 +561,41 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
 fn cmd_search(db_path: PathBuf, args: SearchArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let tier = args.tier.as_deref().and_then(Tier::from_str);
-    let results = db::search(&conn, &args.query, args.namespace.as_deref(), tier.as_ref(), args.limit, None,
-                             args.since.as_deref(), args.until.as_deref(), args.tags.as_deref())?;
+    let results = db::search(
+        &conn,
+        &args.query,
+        args.namespace.as_deref(),
+        tier.as_ref(),
+        args.limit,
+        None,
+        args.since.as_deref(),
+        args.until.as_deref(),
+        args.tags.as_deref(),
+    )?;
     if json_out {
-        println!("{}", serde_json::to_string(&serde_json::json!({"results": results, "count": results.len()}))?);
+        println!(
+            "{}",
+            serde_json::to_string(
+                &serde_json::json!({"results": results, "count": results.len()})
+            )?
+        );
         return Ok(());
     }
-    if results.is_empty() { eprintln!("no results for: {}", args.query); return Ok(()); }
+    if results.is_empty() {
+        eprintln!("no results for: {}", args.query);
+        return Ok(());
+    }
     for mem in &results {
         let age = human_age(&mem.updated_at);
-        println!("[{}/{}] {} (p={}, ns={}, {})", mem.tier, &mem.id[..8], mem.title, mem.priority, mem.namespace, age);
+        println!(
+            "[{}/{}] {} (p={}, ns={}, {})",
+            mem.tier,
+            &mem.id[..8],
+            mem.title,
+            mem.priority,
+            mem.namespace,
+            age
+        );
     }
     println!("\n{} result(s)", results.len());
     Ok(())
@@ -449,16 +606,25 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
     match db::get(&conn, &args.id)? {
         Some(mem) => {
             let links = db::get_links(&conn, &args.id).unwrap_or_default();
-            if json_out { println!("{}", serde_json::to_string(&serde_json::json!({"memory": mem, "links": links}))?); }
-            else {
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({"memory": mem, "links": links}))?
+                );
+            } else {
                 println!("{}", serde_json::to_string_pretty(&mem)?);
                 if !links.is_empty() {
                     println!("\nlinks:");
-                    for l in &links { println!("  {} --[{}]--> {}", l.source_id, l.relation, l.target_id); }
+                    for l in &links {
+                        println!("  {} --[{}]--> {}", l.source_id, l.relation, l.target_id);
+                    }
                 }
             }
         }
-        None => { eprintln!("not found: {}", args.id); std::process::exit(1); }
+        None => {
+            eprintln!("not found: {}", args.id);
+            std::process::exit(1);
+        }
     }
     Ok(())
 }
@@ -466,16 +632,41 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
 fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let tier = args.tier.as_deref().and_then(Tier::from_str);
-    let results = db::list(&conn, args.namespace.as_deref(), tier.as_ref(), args.limit, 0, None,
-                           args.since.as_deref(), args.until.as_deref(), args.tags.as_deref())?;
+    let results = db::list(
+        &conn,
+        args.namespace.as_deref(),
+        tier.as_ref(),
+        args.limit,
+        0,
+        None,
+        args.since.as_deref(),
+        args.until.as_deref(),
+        args.tags.as_deref(),
+    )?;
     if json_out {
-        println!("{}", serde_json::to_string(&serde_json::json!({"memories": results, "count": results.len()}))?);
+        println!(
+            "{}",
+            serde_json::to_string(
+                &serde_json::json!({"memories": results, "count": results.len()})
+            )?
+        );
         return Ok(());
     }
-    if results.is_empty() { eprintln!("no memories stored"); return Ok(()); }
+    if results.is_empty() {
+        eprintln!("no memories stored");
+        return Ok(());
+    }
     for mem in &results {
         let age = human_age(&mem.updated_at);
-        println!("[{}/{}] {} (p={}, ns={}, {})", mem.tier, &mem.id[..8], mem.title, mem.priority, mem.namespace, age);
+        println!(
+            "[{}/{}] {} (p={}, ns={}, {})",
+            mem.tier,
+            &mem.id[..8],
+            mem.title,
+            mem.priority,
+            mem.namespace,
+            age
+        );
     }
     println!("\n{} memory(ies)", results.len());
     Ok(())
@@ -484,32 +675,72 @@ fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool) -> Result<()> {
 fn cmd_delete(db_path: PathBuf, args: DeleteArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     if db::delete(&conn, &args.id)? {
-        if json_out { println!("{}", serde_json::json!({"deleted": true, "id": args.id})); }
-        else { println!("deleted: {}", args.id); }
-    } else { eprintln!("not found: {}", args.id); std::process::exit(1); }
+        if json_out {
+            println!("{}", serde_json::json!({"deleted": true, "id": args.id}));
+        } else {
+            println!("deleted: {}", args.id);
+        }
+    } else {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
+    }
     Ok(())
 }
 
 fn cmd_promote(db_path: PathBuf, args: PromoteArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let updated = db::update(&conn, &args.id, None, None, Some(&Tier::Long), None, None, None, None, Some(""))?;
-    if !updated { eprintln!("not found: {}", args.id); std::process::exit(1); }
+    let updated = db::update(
+        &conn,
+        &args.id,
+        None,
+        None,
+        Some(&Tier::Long),
+        None,
+        None,
+        None,
+        None,
+        Some(""),
+    )?;
+    if !updated {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
+    }
     // Clear expires_at for long-term
-    conn.execute("UPDATE memories SET expires_at = NULL WHERE id = ?1", rusqlite::params![args.id])?;
-    if json_out { println!("{}", serde_json::json!({"promoted": true, "id": args.id, "tier": "long"})); }
-    else { println!("promoted to long-term: {}", args.id); }
+    conn.execute(
+        "UPDATE memories SET expires_at = NULL WHERE id = ?1",
+        rusqlite::params![args.id],
+    )?;
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({"promoted": true, "id": args.id, "tier": "long"})
+        );
+    } else {
+        println!("promoted to long-term: {}", args.id);
+    }
     Ok(())
 }
 
 fn cmd_forget(db_path: PathBuf, args: ForgetArgs, json_out: bool) -> Result<()> {
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let conn = db::open(&db_path)?;
-    match db::forget(&conn, args.namespace.as_deref(), args.pattern.as_deref(), tier.as_ref()) {
+    match db::forget(
+        &conn,
+        args.namespace.as_deref(),
+        args.pattern.as_deref(),
+        tier.as_ref(),
+    ) {
         Ok(n) => {
-            if json_out { println!("{}", serde_json::json!({"deleted": n})); }
-            else { println!("forgot {} memories", n); }
+            if json_out {
+                println!("{}", serde_json::json!({"deleted": n}));
+            } else {
+                println!("forgot {} memories", n);
+            }
         }
-        Err(e) => { eprintln!("error: {}", e); std::process::exit(1); }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
     }
     Ok(())
 }
@@ -518,51 +749,97 @@ fn cmd_link(db_path: PathBuf, args: LinkArgs, json_out: bool) -> Result<()> {
     validate::validate_link(&args.source_id, &args.target_id, &args.relation)?;
     let conn = db::open(&db_path)?;
     db::create_link(&conn, &args.source_id, &args.target_id, &args.relation)?;
-    if json_out { println!("{}", serde_json::json!({"linked": true})); }
-    else { println!("linked: {} --[{}]--> {}", args.source_id, args.relation, args.target_id); }
+    if json_out {
+        println!("{}", serde_json::json!({"linked": true}));
+    } else {
+        println!(
+            "linked: {} --[{}]--> {}",
+            args.source_id, args.relation, args.target_id
+        );
+    }
     Ok(())
 }
 
 fn cmd_consolidate(db_path: PathBuf, args: ConsolidateArgs, json_out: bool) -> Result<()> {
-    let ids: Vec<String> = args.ids.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let ids: Vec<String> = args
+        .ids
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     let namespace = args.namespace.unwrap_or_else(auto_namespace);
     validate::validate_consolidate(&ids, &args.title, &args.summary, &namespace)?;
     let conn = db::open(&db_path)?;
-    let new_id = db::consolidate(&conn, &ids, &args.title, &args.summary, &namespace, &Tier::Long, "cli")?;
-    if json_out { println!("{}", serde_json::json!({"id": new_id, "consolidated": ids.len()})); }
-    else { println!("consolidated {} memories into: {}", ids.len(), new_id); }
+    let new_id = db::consolidate(
+        &conn,
+        &ids,
+        &args.title,
+        &args.summary,
+        &namespace,
+        &Tier::Long,
+        "cli",
+    )?;
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({"id": new_id, "consolidated": ids.len()})
+        );
+    } else {
+        println!("consolidated {} memories into: {}", ids.len(), new_id);
+    }
     Ok(())
 }
 
 fn cmd_gc(db_path: PathBuf, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let count = db::gc(&conn)?;
-    if json_out { println!("{}", serde_json::json!({"expired_deleted": count})); }
-    else { println!("expired memories deleted: {}", count); }
+    if json_out {
+        println!("{}", serde_json::json!({"expired_deleted": count}));
+    } else {
+        println!("expired memories deleted: {}", count);
+    }
     Ok(())
 }
 
 fn cmd_stats(db_path: PathBuf, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let stats = db::stats(&conn, &db_path)?;
-    if json_out { println!("{}", serde_json::to_string(&stats)?); return Ok(()); }
+    if json_out {
+        println!("{}", serde_json::to_string(&stats)?);
+        return Ok(());
+    }
     println!("total memories: {}", stats.total);
     println!("expiring within 1h: {}", stats.expiring_soon);
     println!("links: {}", stats.links_count);
     println!("database size: {} bytes", stats.db_size_bytes);
     println!("\nby tier:");
-    for t in &stats.by_tier { println!("  {}: {}", t.tier, t.count); }
+    for t in &stats.by_tier {
+        println!("  {}: {}", t.tier, t.count);
+    }
     println!("\nby namespace:");
-    for ns in &stats.by_namespace { println!("  {}: {}", ns.namespace, ns.count); }
+    for ns in &stats.by_namespace {
+        println!("  {}: {}", ns.namespace, ns.count);
+    }
     Ok(())
 }
 
 fn cmd_namespaces(db_path: PathBuf, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
     let ns = db::list_namespaces(&conn)?;
-    if json_out { println!("{}", serde_json::to_string(&serde_json::json!({"namespaces": ns}))?); return Ok(()); }
-    if ns.is_empty() { eprintln!("no namespaces"); }
-    else { for n in &ns { println!("  {}: {} memories", n.namespace, n.count); } }
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({"namespaces": ns}))?
+        );
+        return Ok(());
+    }
+    if ns.is_empty() {
+        eprintln!("no namespaces");
+    } else {
+        for n in &ns {
+            println!("  {}: {} memories", n.namespace, n.count);
+        }
+    }
     Ok(())
 }
 
@@ -570,10 +847,13 @@ fn cmd_export(db_path: PathBuf) -> Result<()> {
     let conn = db::open(&db_path)?;
     let memories = db::export_all(&conn)?;
     let links = db::export_links(&conn)?;
-    println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-        "memories": memories, "links": links, "count": memories.len(),
-        "exported_at": Utc::now().to_rfc3339(),
-    }))?);
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "memories": memories, "links": links, "count": memories.len(),
+            "exported_at": Utc::now().to_rfc3339(),
+        }))?
+    );
     Ok(())
 }
 
@@ -582,8 +862,10 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
     let data: serde_json::Value = serde_json::from_str(&buf)?;
-    let memories: Vec<models::Memory> = serde_json::from_value(data.get("memories").cloned().unwrap_or_default())?;
-    let links: Vec<models::MemoryLink> = serde_json::from_value(data.get("links").cloned().unwrap_or_default()).unwrap_or_default();
+    let memories: Vec<models::Memory> =
+        serde_json::from_value(data.get("memories").cloned().unwrap_or_default())?;
+    let links: Vec<models::MemoryLink> =
+        serde_json::from_value(data.get("links").cloned().unwrap_or_default()).unwrap_or_default();
     let conn = db::open(&db_path)?;
     let mut imported = 0usize;
     let mut errors = Vec::new();
@@ -592,16 +874,29 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
             errors.push(format!("{}: {}", mem.id, e));
             continue;
         }
-        match db::insert(&conn, &mem) { Ok(_) => imported += 1, Err(e) => errors.push(format!("{}: {}", mem.id, e)) }
+        match db::insert(&conn, &mem) {
+            Ok(_) => imported += 1,
+            Err(e) => errors.push(format!("{}: {}", mem.id, e)),
+        }
     }
     for link in links {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() { continue; }
+        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+            continue;
+        }
         let _ = db::create_link(&conn, &link.source_id, &link.target_id, &link.relation);
     }
-    if json_out { println!("{}", serde_json::json!({"imported": imported, "errors": errors})); }
-    else {
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({"imported": imported, "errors": errors})
+        );
+    } else {
         println!("imported: {}", imported);
-        if !errors.is_empty() { for e in &errors { eprintln!("  {}", e); } }
+        if !errors.is_empty() {
+            for e in &errors {
+                eprintln!("  {}", e);
+            }
+        }
     }
     Ok(())
 }
