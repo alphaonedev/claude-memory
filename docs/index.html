@@ -1,0 +1,808 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>claude-memory — Persistent Memory for Claude Code</title>
+    <meta name="description" content="A lightweight Rust daemon that gives Claude Code persistent memory across sessions. SQLite + FTS5, three memory tiers, HTTP API, CLI access.">
+    <style>
+        :root {
+            --bg: #0d1117;
+            --bg-card: #161b22;
+            --bg-code: #1c2128;
+            --border: #30363d;
+            --text: #e6edf3;
+            --text-muted: #8b949e;
+            --accent: #58a6ff;
+            --accent-dim: #1f6feb;
+            --green: #3fb950;
+            --orange: #d29922;
+            --purple: #bc8cff;
+            --red: #f85149;
+            --font-mono: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+            --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        html { scroll-behavior: smooth; }
+
+        body {
+            font-family: var(--font-sans);
+            background: var(--bg);
+            color: var(--text);
+            line-height: 1.6;
+            -webkit-font-smoothing: antialiased;
+        }
+
+        a { color: var(--accent); text-decoration: none; }
+        a:hover { text-decoration: underline; }
+
+        code, pre {
+            font-family: var(--font-mono);
+            font-size: 0.875rem;
+        }
+
+        code {
+            background: var(--bg-code);
+            padding: 0.15em 0.4em;
+            border-radius: 4px;
+        }
+
+        pre {
+            background: var(--bg-code);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+            overflow-x: auto;
+            line-height: 1.5;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 960px;
+            margin: 0 auto;
+            padding: 0 1.5rem;
+        }
+
+        /* Nav */
+        nav {
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            background: rgba(13, 17, 23, 0.85);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+            padding: 0.75rem 0;
+        }
+
+        nav .container {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        nav .logo {
+            font-family: var(--font-mono);
+            font-weight: 700;
+            font-size: 1rem;
+            color: var(--text);
+        }
+
+        nav .links { display: flex; gap: 1.5rem; }
+
+        nav .links a {
+            color: var(--text-muted);
+            font-size: 0.875rem;
+            transition: color 0.15s;
+        }
+
+        nav .links a:hover { color: var(--text); text-decoration: none; }
+
+        /* Hero */
+        .hero {
+            padding: 6rem 0 4rem;
+            text-align: center;
+        }
+
+        .hero h1 {
+            font-family: var(--font-mono);
+            font-size: 3rem;
+            font-weight: 800;
+            margin-bottom: 1rem;
+            letter-spacing: -0.02em;
+        }
+
+        .hero h1 .accent { color: var(--accent); }
+
+        .hero .tagline {
+            font-size: 1.25rem;
+            color: var(--text-muted);
+            max-width: 600px;
+            margin: 0 auto 2rem;
+        }
+
+        .hero .stats {
+            display: flex;
+            justify-content: center;
+            gap: 2.5rem;
+            margin-bottom: 2.5rem;
+            flex-wrap: wrap;
+        }
+
+        .hero .stat {
+            text-align: center;
+        }
+
+        .hero .stat .value {
+            font-family: var(--font-mono);
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--green);
+        }
+
+        .hero .stat .label {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .hero .cta {
+            display: inline-flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 0.65rem 1.5rem;
+            border-radius: 6px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            transition: all 0.15s;
+            border: 1px solid transparent;
+        }
+
+        .btn-primary {
+            background: var(--accent-dim);
+            color: #fff;
+            border-color: var(--accent-dim);
+        }
+
+        .btn-primary:hover {
+            background: var(--accent);
+            text-decoration: none;
+        }
+
+        .btn-secondary {
+            background: transparent;
+            color: var(--text);
+            border-color: var(--border);
+        }
+
+        .btn-secondary:hover {
+            border-color: var(--text-muted);
+            text-decoration: none;
+        }
+
+        /* Sections */
+        section {
+            padding: 4rem 0;
+        }
+
+        section + section {
+            border-top: 1px solid var(--border);
+        }
+
+        h2 {
+            font-size: 1.75rem;
+            font-weight: 700;
+            margin-bottom: 1.5rem;
+            letter-spacing: -0.01em;
+        }
+
+        h3 {
+            font-size: 1.15rem;
+            font-weight: 600;
+            margin-bottom: 0.75rem;
+        }
+
+        p + p { margin-top: 0.75rem; }
+
+        /* Feature grid */
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 1.25rem;
+        }
+
+        .feature-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+        }
+
+        .feature-card .icon {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            display: block;
+        }
+
+        .feature-card h3 { margin-bottom: 0.5rem; }
+
+        .feature-card p {
+            font-size: 0.9rem;
+            color: var(--text-muted);
+            line-height: 1.5;
+        }
+
+        /* Tier diagram */
+        .tiers {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1.25rem;
+            margin-top: 1.5rem;
+        }
+
+        .tier-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            text-align: center;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .tier-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+        }
+
+        .tier-card.short::before { background: var(--orange); }
+        .tier-card.mid::before { background: var(--accent); }
+        .tier-card.long::before { background: var(--green); }
+
+        .tier-card .tier-name {
+            font-family: var(--font-mono);
+            font-weight: 700;
+            font-size: 1.1rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .tier-card.short .tier-name { color: var(--orange); }
+        .tier-card.mid .tier-name { color: var(--accent); }
+        .tier-card.long .tier-name { color: var(--green); }
+
+        .tier-card .ttl {
+            font-family: var(--font-mono);
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 0.75rem;
+        }
+
+        .tier-card p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+        }
+
+        /* Tables */
+        .table-wrap {
+            overflow-x: auto;
+            margin-top: 1rem;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.65rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+
+        th {
+            background: var(--bg-card);
+            color: var(--text-muted);
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        td code {
+            white-space: nowrap;
+        }
+
+        tr:hover td { background: rgba(88, 166, 255, 0.04); }
+
+        .method {
+            font-family: var(--font-mono);
+            font-weight: 700;
+            font-size: 0.8rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 4px;
+            display: inline-block;
+        }
+
+        .method.get { color: var(--green); background: rgba(63, 185, 80, 0.12); }
+        .method.post { color: var(--accent); background: rgba(88, 166, 255, 0.12); }
+        .method.put { color: var(--orange); background: rgba(210, 153, 34, 0.12); }
+        .method.delete { color: var(--red); background: rgba(248, 81, 73, 0.12); }
+
+        /* Quick start */
+        .steps {
+            counter-reset: step;
+        }
+
+        .step {
+            margin-bottom: 2rem;
+        }
+
+        .step h3::before {
+            counter-increment: step;
+            content: counter(step) ". ";
+            color: var(--accent);
+            font-family: var(--font-mono);
+        }
+
+        .step p {
+            color: var(--text-muted);
+            font-size: 0.9rem;
+            margin-bottom: 0.75rem;
+        }
+
+        /* CLI reference */
+        .cli-cmd {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.25rem;
+            margin-bottom: 1rem;
+        }
+
+        .cli-cmd h4 {
+            font-family: var(--font-mono);
+            font-size: 0.9rem;
+            color: var(--accent);
+            margin-bottom: 0.25rem;
+        }
+
+        .cli-cmd p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-bottom: 0.5rem;
+        }
+
+        .cli-cmd pre {
+            margin: 0;
+            border: none;
+            background: var(--bg);
+        }
+
+        /* Scoring section */
+        .formula {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-top: 1rem;
+            text-align: center;
+        }
+
+        .formula code {
+            font-size: 1rem;
+            background: none;
+            color: var(--purple);
+        }
+
+        .formula p {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            margin-top: 0.75rem;
+        }
+
+        /* Footer */
+        footer {
+            border-top: 1px solid var(--border);
+            padding: 2.5rem 0;
+            text-align: center;
+        }
+
+        footer p {
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        footer a {
+            color: var(--accent);
+        }
+
+        /* Responsive */
+        @media (max-width: 640px) {
+            .hero h1 { font-size: 2rem; }
+            .hero .tagline { font-size: 1rem; }
+            .tiers { grid-template-columns: 1fr; }
+            .hero .stats { gap: 1.5rem; }
+            nav .links { gap: 1rem; }
+        }
+
+        /* Comment color in code blocks */
+        .comment { color: var(--text-muted); }
+        .str { color: var(--green); }
+        .cmd { color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<nav>
+    <div class="container">
+        <span class="logo">claude-memory</span>
+        <div class="links">
+            <a href="#features">Features</a>
+            <a href="#quickstart">Quick Start</a>
+            <a href="#api">API</a>
+            <a href="#cli">CLI</a>
+            <a href="#architecture">Architecture</a>
+            <a href="https://github.com/alphaonedev/claude-memory">GitHub</a>
+        </div>
+    </div>
+</nav>
+
+<!-- Hero -->
+<header class="hero">
+    <div class="container">
+        <h1><span class="accent">claude</span>-memory</h1>
+        <p class="tagline">
+            Persistent memory for Claude Code. Three tiers of recall &mdash; short, mid, and long-term &mdash; backed by SQLite&nbsp;+&nbsp;FTS5. Remembers so you don't have to.
+        </p>
+        <div class="stats">
+            <div class="stat">
+                <div class="value">~2 MB</div>
+                <div class="label">Memory footprint</div>
+            </div>
+            <div class="stat">
+                <div class="value">4 ms</div>
+                <div class="label">Startup time</div>
+            </div>
+            <div class="stat">
+                <div class="value">0</div>
+                <div class="label">Dependencies at runtime</div>
+            </div>
+            <div class="stat">
+                <div class="value">1 file</div>
+                <div class="label">SQLite database</div>
+            </div>
+        </div>
+        <div class="cta">
+            <a href="#quickstart" class="btn btn-primary">Get Started</a>
+            <a href="https://github.com/alphaonedev/claude-memory" class="btn btn-secondary">View on GitHub</a>
+        </div>
+    </div>
+</header>
+
+<!-- Features -->
+<section id="features">
+    <div class="container">
+        <h2>Features</h2>
+        <div class="feature-grid">
+            <div class="feature-card">
+                <span class="icon">&#x1f9e0;</span>
+                <h3>Three Memory Tiers</h3>
+                <p>Short-term (6h), mid-term (7d), and long-term (permanent) &mdash; mimicking how human memory works. Expired memories are automatically garbage collected.</p>
+            </div>
+            <div class="feature-card">
+                <span class="icon">&#x1f50d;</span>
+                <h3>Full-Text Search</h3>
+                <p>SQLite FTS5 with BM25 ranking, priority boosting, and access frequency weighting. Find what matters fast.</p>
+            </div>
+            <div class="feature-card">
+                <span class="icon">&#x1f4e1;</span>
+                <h3>HTTP API + CLI</h3>
+                <p>Axum-powered REST API on <code>localhost:9077</code> plus a full CLI for direct terminal access. Both interfaces, same database.</p>
+            </div>
+            <div class="feature-card">
+                <span class="icon">&#x1f3af;</span>
+                <h3>/recall Endpoint</h3>
+                <p>The primary "what do I know about X?" interface. Searches across all tiers, boosts long-term and frequently-accessed memories.</p>
+            </div>
+            <div class="feature-card">
+                <span class="icon">&#x1f4c1;</span>
+                <h3>Free-form Namespaces</h3>
+                <p>Organize memories by project, repo, topic &mdash; any string works. Filter queries by namespace to scope results.</p>
+            </div>
+            <div class="feature-card">
+                <span class="icon">&#x26a1;</span>
+                <h3>Zero-Dependency Runtime</h3>
+                <p>Single static binary. SQLite bundled and compiled in. WAL mode for concurrent reads. One file is the entire database.</p>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- Architecture -->
+<section id="architecture">
+    <div class="container">
+        <h2>Architecture</h2>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            claude-memory models its storage after human memory systems. Each memory has a tier that determines its lifetime, plus metadata for intelligent ranking.
+        </p>
+
+        <div class="tiers">
+            <div class="tier-card short">
+                <div class="tier-name">short</div>
+                <div class="ttl">TTL: 6 hours</div>
+                <p>Ephemeral session context. Current task details, scratch notes, temporary state. Auto-expires.</p>
+            </div>
+            <div class="tier-card mid">
+                <div class="tier-name">mid</div>
+                <div class="ttl">TTL: 7 days</div>
+                <p>Working knowledge. Sprint context, recent decisions, active investigation notes. Default tier.</p>
+            </div>
+            <div class="tier-card long">
+                <div class="tier-name">long</div>
+                <div class="ttl">TTL: permanent</div>
+                <p>Durable knowledge. Architecture decisions, project conventions, hard-won lessons. Never expires.</p>
+            </div>
+        </div>
+
+        <h3 style="margin-top: 2.5rem;">Recall Scoring</h3>
+        <p style="color: var(--text-muted);">
+            The <code>/recall</code> endpoint combines multiple signals to surface the most relevant memories:
+        </p>
+        <div class="formula">
+            <code>score = BM25(query) + (priority * 0.5) + (access_count * 0.1) + tier_boost</code>
+            <p>
+                Where <code>tier_boost</code> is: long = 3.0, mid = 1.0, short = 0.0<br>
+                Frequently accessed, high-priority, long-term memories float to the top.
+            </p>
+        </div>
+
+        <h3 style="margin-top: 2.5rem;">Storage</h3>
+        <p style="color: var(--text-muted);">
+            SQLite in WAL mode with bundled compilation &mdash; no system SQLite dependency. The database is a single portable file. FTS5 virtual table with triggers keeps the full-text index in sync automatically. Access counts and recency are tracked on every read.
+        </p>
+    </div>
+</section>
+
+<!-- Quick Start -->
+<section id="quickstart">
+    <div class="container">
+        <h2>Quick Start</h2>
+        <div class="steps">
+            <div class="step">
+                <h3>Build from source</h3>
+                <p>Requires Rust 1.70+. Clone the repo and build in release mode:</p>
+<pre><code>git clone https://github.com/alphaonedev/claude-memory.git
+cd claude-memory
+cargo build --release</code></pre>
+            </div>
+
+            <div class="step">
+                <h3>Start the daemon</h3>
+                <p>Launch the HTTP server on <code>127.0.0.1:9077</code>:</p>
+<pre><code>./target/release/claude-memory serve</code></pre>
+                <p>Custom host/port and database path:</p>
+<pre><code>./target/release/claude-memory --db ~/my-memories.db serve --port 8080</code></pre>
+            </div>
+
+            <div class="step">
+                <h3>Store a memory</h3>
+                <p>Via the HTTP API:</p>
+<pre><code>curl -X POST http://127.0.0.1:9077/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{
+    "tier": "long",
+    "namespace": "my-project",
+    "title": "Database schema uses UUID primary keys",
+    "content": "All tables use UUIDv4 as primary keys. Never use auto-increment.",
+    "tags": ["architecture", "database"],
+    "priority": 8
+  }'</code></pre>
+                <p>Or via the CLI:</p>
+<pre><code>claude-memory store \
+  -t long -n my-project -T "UUID primary keys" \
+  -c "All tables use UUIDv4 as primary keys." \
+  --tags architecture,database -p 8</code></pre>
+            </div>
+
+            <div class="step">
+                <h3>Recall what you know</h3>
+                <p>Ask the memory system what it knows about a topic:</p>
+<pre><code><span class="comment"># HTTP</span>
+curl "http://127.0.0.1:9077/api/v1/recall?context=database+primary+keys&namespace=my-project"
+
+<span class="comment"># CLI</span>
+claude-memory recall "database primary keys" -n my-project</code></pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- API Reference -->
+<section id="api">
+    <div class="container">
+        <h2>API Reference</h2>
+        <p style="color: var(--text-muted); margin-bottom: 1rem;">
+            All endpoints are prefixed with <code>/api/v1</code>. The daemon listens on <code>127.0.0.1:9077</code> by default.
+        </p>
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Method</th>
+                        <th>Endpoint</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/health</code></td>
+                        <td>Health check. Returns <code>{"status": "ok"}</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/recall</code></td>
+                        <td>Recall memories by context. Params: <code>context</code> (required), <code>namespace</code>, <code>limit</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/search</code></td>
+                        <td>Full-text search. Params: <code>q</code> (required), <code>namespace</code>, <code>tier</code>, <code>limit</code>, <code>min_priority</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/memories</code></td>
+                        <td>List memories. Params: <code>namespace</code>, <code>tier</code>, <code>limit</code>, <code>offset</code>, <code>min_priority</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="method post">POST</span></td>
+                        <td><code>/api/v1/memories</code></td>
+                        <td>Create a memory. Body: <code>title</code>, <code>content</code> (required); <code>tier</code>, <code>namespace</code>, <code>tags</code>, <code>priority</code>, <code>ttl_secs</code></td>
+                    </tr>
+                    <tr>
+                        <td><span class="method post">POST</span></td>
+                        <td><code>/api/v1/memories/bulk</code></td>
+                        <td>Bulk create. Body: array of memory objects</td>
+                    </tr>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/memories/{id}</code></td>
+                        <td>Get a single memory by ID. Bumps access count.</td>
+                    </tr>
+                    <tr>
+                        <td><span class="method put">PUT</span></td>
+                        <td><code>/api/v1/memories/{id}</code></td>
+                        <td>Update a memory. Body: any subset of fields</td>
+                    </tr>
+                    <tr>
+                        <td><span class="method delete">DELETE</span></td>
+                        <td><code>/api/v1/memories/{id}</code></td>
+                        <td>Delete a memory by ID</td>
+                    </tr>
+                    <tr>
+                        <td><span class="method get">GET</span></td>
+                        <td><code>/api/v1/stats</code></td>
+                        <td>Database statistics: counts by tier and namespace, DB size</td>
+                    </tr>
+                    <tr>
+                        <td><span class="method post">POST</span></td>
+                        <td><code>/api/v1/gc</code></td>
+                        <td>Trigger garbage collection of expired memories</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3 style="margin-top: 2.5rem;">Memory Object</h3>
+<pre><code>{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "tier": "long",
+  "namespace": "my-project",
+  "title": "Database uses UUID primary keys",
+  "content": "All tables use UUIDv4. Never use auto-increment.",
+  "tags": ["architecture", "database"],
+  "priority": 8,
+  "access_count": 5,
+  "created_at": "2025-01-15T10:30:00+00:00",
+  "updated_at": "2025-01-15T10:30:00+00:00",
+  "last_accessed_at": "2025-01-16T14:22:00+00:00",
+  "expires_at": null
+}</code></pre>
+    </div>
+</section>
+
+<!-- CLI Reference -->
+<section id="cli">
+    <div class="container">
+        <h2>CLI Reference</h2>
+        <p style="color: var(--text-muted); margin-bottom: 1.5rem;">
+            Every operation available via the API is also accessible from the command line. Global flag: <code>--db &lt;path&gt;</code> (default: <code>claude-memory.db</code>, env: <code>CLAUDE_MEMORY_DB</code>).
+        </p>
+
+        <div class="cli-cmd">
+            <h4>serve</h4>
+            <p>Start the HTTP daemon.</p>
+<pre><code>claude-memory serve [--host 127.0.0.1] [--port 9077]</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>store</h4>
+            <p>Store a new memory.</p>
+<pre><code>claude-memory store -T "Title" -c "Content body" \
+  [-t short|mid|long] [-n namespace] [--tags a,b,c] [-p 1-10]</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>recall</h4>
+            <p>Recall memories relevant to a context string. The primary retrieval interface.</p>
+<pre><code>claude-memory recall "what are the database conventions" \
+  [-n namespace] [--limit 10]</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>search</h4>
+            <p>Full-text search across all memories.</p>
+<pre><code>claude-memory search "UUID primary key" \
+  [-n namespace] [-t tier] [--limit 20]</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>get</h4>
+            <p>Retrieve a single memory by ID.</p>
+<pre><code>claude-memory get &lt;uuid&gt;</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>list</h4>
+            <p>List stored memories with optional filters.</p>
+<pre><code>claude-memory list [-n namespace] [-t tier] [--limit 20]</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>delete</h4>
+            <p>Delete a memory by ID.</p>
+<pre><code>claude-memory delete &lt;uuid&gt;</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>gc</h4>
+            <p>Run garbage collection &mdash; removes all expired short-term and mid-term memories.</p>
+<pre><code>claude-memory gc</code></pre>
+        </div>
+
+        <div class="cli-cmd">
+            <h4>stats</h4>
+            <p>Show database statistics: total count, breakdown by tier and namespace, database file size.</p>
+<pre><code>claude-memory stats</code></pre>
+        </div>
+    </div>
+</section>
+
+<!-- Footer -->
+<footer>
+    <div class="container">
+        <p>
+            <strong>claude-memory</strong> &mdash; open source, MIT licensed<br>
+            <a href="https://github.com/alphaonedev/claude-memory">github.com/alphaonedev/claude-memory</a>
+        </p>
+    </div>
+</footer>
+
+</body>
+</html>
