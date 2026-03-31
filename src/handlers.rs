@@ -23,6 +23,11 @@ pub async fn create_memory(
     State(state): State<Db>,
     Json(body): Json<CreateMemory>,
 ) -> impl IntoResponse {
+    if body.content.len() > MAX_CONTENT_SIZE {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "error": format!("content exceeds max size of {} bytes", MAX_CONTENT_SIZE)
+        }))).into_response();
+    }
     let now = Utc::now();
     let expires_at = body.expires_at.or_else(|| {
         body.ttl_secs
@@ -67,6 +72,13 @@ pub async fn update_memory(
     Path(id): Path<String>,
     Json(body): Json<UpdateMemory>,
 ) -> impl IntoResponse {
+    if let Some(ref c) = body.content {
+        if c.len() > MAX_CONTENT_SIZE {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "error": format!("content exceeds max size of {} bytes", MAX_CONTENT_SIZE)
+            }))).into_response();
+        }
+    }
     let lock = state.lock().await;
     match db::update(
         &lock.0, &id,
@@ -123,17 +135,43 @@ pub async fn search_memories(
     }
 }
 
-pub async fn recall_memories(
+/// GET /recall — for short queries via query params
+pub async fn recall_memories_get(
     State(state): State<Db>,
     Query(params): Query<RecallQuery>,
 ) -> impl IntoResponse {
-    if params.context.trim().is_empty() {
+    let context = params.context.unwrap_or_default();
+    if context.trim().is_empty() {
         return (StatusCode::BAD_REQUEST, Json(json!({"error": "context is required"}))).into_response();
     }
     let lock = state.lock().await;
     let limit = params.limit.unwrap_or(10).min(50);
-    match db::recall(&lock.0, &params.context, params.namespace.as_deref(), limit) {
+    match db::recall(&lock.0, &context, params.namespace.as_deref(), limit) {
         Ok(results) => Json(json!({"memories": results, "count": results.len()})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+/// POST /recall — for long context strings via request body
+pub async fn recall_memories_post(
+    State(state): State<Db>,
+    Json(body): Json<RecallBody>,
+) -> impl IntoResponse {
+    if body.context.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "context is required"}))).into_response();
+    }
+    let lock = state.lock().await;
+    let limit = body.limit.unwrap_or(10).min(50);
+    match db::recall(&lock.0, &body.context, body.namespace.as_deref(), limit) {
+        Ok(results) => Json(json!({"memories": results, "count": results.len()})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn list_namespaces(State(state): State<Db>) -> impl IntoResponse {
+    let lock = state.lock().await;
+    match db::list_namespaces(&lock.0) {
+        Ok(namespaces) => Json(json!({"namespaces": namespaces})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -154,6 +192,35 @@ pub async fn run_gc(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
+pub async fn export_memories(State(state): State<Db>) -> impl IntoResponse {
+    let lock = state.lock().await;
+    match db::export_all(&lock.0) {
+        Ok(memories) => Json(json!({"memories": memories, "count": memories.len(), "exported_at": Utc::now().to_rfc3339()})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn import_memories(
+    State(state): State<Db>,
+    Json(body): Json<ImportBody>,
+) -> impl IntoResponse {
+    let lock = state.lock().await;
+    let mut imported = 0usize;
+    let mut errors = Vec::new();
+    for mem in body.memories {
+        match db::insert(&lock.0, &mem) {
+            Ok(()) => imported += 1,
+            Err(e) => errors.push(format!("{}: {}", mem.id, e)),
+        }
+    }
+    Json(json!({"imported": imported, "errors": errors})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct ImportBody {
+    pub memories: Vec<Memory>,
+}
+
 pub async fn bulk_create(
     State(state): State<Db>,
     Json(bodies): Json<Vec<CreateMemory>>,
@@ -163,6 +230,10 @@ pub async fn bulk_create(
     let mut created = 0usize;
     let mut errors = Vec::new();
     for body in bodies {
+        if body.content.len() > MAX_CONTENT_SIZE {
+            errors.push(format!("{}: content exceeds max size", body.title));
+            continue;
+        }
         let expires_at = body.expires_at.or_else(|| {
             body.ttl_secs
                 .or(body.tier.default_ttl_secs())

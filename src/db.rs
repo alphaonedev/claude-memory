@@ -3,7 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 use std::path::Path;
 
-use crate::models::{Memory, NamespaceCount, Stats, Tier, TierCount};
+use crate::models::{Memory, NamespaceCount, Stats, Tier, TierCount, PROMOTION_THRESHOLD};
 
 const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS memories (
@@ -25,6 +25,7 @@ CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
 CREATE INDEX IF NOT EXISTS idx_memories_priority ON memories(priority DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_title_ns ON memories(title, namespace);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     title,
@@ -50,7 +51,13 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN
     INSERT INTO memories_fts(rowid, title, content, tags)
     VALUES (new.rowid, new.title, new.content, new.tags);
 END;
+
+CREATE TABLE IF NOT EXISTS schema_version (
+    version INTEGER NOT NULL
+);
 "#;
+
+const CURRENT_SCHEMA_VERSION: i64 = 1;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -58,7 +65,22 @@ pub fn open(path: &Path) -> Result<Connection> {
     conn.pragma_update(None, "busy_timeout", 5000)?;
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.execute_batch(SCHEMA).context("failed to initialize schema")?;
+    migrate(&conn)?;
     Ok(conn)
+}
+
+fn migrate(conn: &Connection) -> Result<()> {
+    let version: i64 = conn
+        .query_row("SELECT COALESCE(MAX(version), 0) FROM schema_version", [], |r| r.get(0))
+        .unwrap_or(0);
+    if version < CURRENT_SCHEMA_VERSION {
+        conn.execute(
+            "INSERT OR REPLACE INTO schema_version (version) VALUES (?1)",
+            params![CURRENT_SCHEMA_VERSION],
+        )?;
+    }
+    // Future migrations go here: if version < 2 { ... }
+    Ok(())
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
@@ -82,11 +104,23 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
     })
 }
 
+/// Insert a memory, or update if title+namespace already exists (upsert/dedup).
 pub fn insert(conn: &Connection, mem: &Memory) -> Result<()> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     conn.execute(
         "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, access_count, created_at, updated_at, last_accessed_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+         ON CONFLICT(title, namespace) DO UPDATE SET
+            content = excluded.content,
+            tags = excluded.tags,
+            priority = MAX(memories.priority, excluded.priority),
+            tier = CASE WHEN excluded.tier = 'long' THEN 'long'
+                        WHEN memories.tier = 'long' THEN 'long'
+                        WHEN excluded.tier = 'mid' THEN 'mid'
+                        ELSE memories.tier END,
+            updated_at = excluded.updated_at,
+            expires_at = CASE WHEN excluded.tier = 'long' THEN NULL
+                              ELSE COALESCE(excluded.expires_at, memories.expires_at) END",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.access_count, mem.created_at,
@@ -96,24 +130,27 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<()> {
     Ok(())
 }
 
+/// Get a memory by ID. Does NOT bump access count (use `touch` for that).
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Memory>> {
     let mut stmt = conn.prepare(
         "SELECT * FROM memories WHERE id = ?1",
     )?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
     match rows.next() {
-        Some(Ok(m)) => {
-            // Bump access count
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-                params![now, id],
-            )?;
-            Ok(Some(m))
-        }
+        Some(Ok(m)) => Ok(Some(m)),
         Some(Err(e)) => Err(e.into()),
         None => Ok(None),
     }
+}
+
+/// Bump access count and last_accessed_at for a memory.
+pub fn touch(conn: &Connection, id: &str) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
 }
 
 pub fn update(
@@ -127,7 +164,6 @@ pub fn update(
     priority: Option<i32>,
     expires_at: Option<&str>,
 ) -> Result<bool> {
-    // Read without bumping access count
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
     let existing = match rows.next() {
@@ -196,7 +232,7 @@ pub fn search(
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
-    let fts_query = sanitize_fts_query(query);
+    let fts_query = sanitize_fts_query(query, false);
 
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -219,7 +255,8 @@ pub fn search(
 }
 
 /// Recall — the high-level "what do I know about X?" query.
-/// Searches across all tiers, boosts long-term and frequently-accessed memories.
+/// Uses OR semantics so partial matches work. Boosts long-term and frequently-accessed memories.
+/// Bumps access counts for recalled memories and auto-promotes mid→long if threshold hit.
 pub fn recall(
     conn: &Connection,
     context: &str,
@@ -227,7 +264,7 @@ pub fn recall(
     limit: usize,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
-    let fts_query = sanitize_fts_query(context);
+    let fts_query = sanitize_fts_query(context, true); // OR semantics for recall
 
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -249,31 +286,64 @@ pub fn recall(
         params![fts_query, namespace, now, limit as i64],
         row_to_memory,
     )?;
-    // Bump access counts for recalled memories
     let results: Vec<Memory> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+
+    // Bump access counts and auto-promote
     for mem in &results {
-        let _ = conn.execute(
-            "UPDATE memories SET access_count = access_count + 1, last_accessed_at = ?1 WHERE id = ?2",
-            params![now, mem.id],
-        );
+        let new_count = mem.access_count + 1;
+        conn.execute(
+            "UPDATE memories SET access_count = ?1, last_accessed_at = ?2 WHERE id = ?3",
+            params![new_count, now, mem.id],
+        )?;
+
+        // Auto-promote mid → long if access count exceeds threshold
+        if mem.tier == Tier::Mid && new_count >= PROMOTION_THRESHOLD {
+            conn.execute(
+                "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1 WHERE id = ?2 AND tier = 'mid'",
+                params![now, mem.id],
+            )?;
+        }
+
+        // Reinforce priority: bump by 1 every 10 accesses, max 10
+        if new_count > 0 && new_count % 10 == 0 && mem.priority < 10 {
+            conn.execute(
+                "UPDATE memories SET priority = MIN(priority + 1, 10) WHERE id = ?1",
+                params![mem.id],
+            )?;
+        }
     }
     Ok(results)
 }
 
-fn sanitize_fts_query(input: &str) -> String {
+/// Sanitize FTS5 query. When `use_or` is true, joins tokens with OR for fuzzy recall.
+fn sanitize_fts_query(input: &str, use_or: bool) -> String {
     let has_operators = input.contains('"')
-        || input.contains("OR")
-        || input.contains("AND")
-        || input.contains("NOT")
+        || input.contains(" OR ")
+        || input.contains(" AND ")
+        || input.contains(" NOT ")
         || input.contains('*');
     if has_operators {
         return input.to_string();
     }
+    let joiner = if use_or { " OR " } else { " " };
     input
         .split_whitespace()
         .map(|token| format!("\"{}\"", token.replace('"', "")))
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(joiner)
+}
+
+pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT namespace, COUNT(*) FROM memories
+         WHERE expires_at IS NULL OR expires_at > ?1
+         GROUP BY namespace ORDER BY COUNT(*) DESC",
+    )?;
+    let now = Utc::now().to_rfc3339();
+    let rows = stmt.query_map(params![now], |row| {
+        Ok(NamespaceCount { namespace: row.get(0)?, count: row.get(1)? })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }
 
 pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
@@ -289,8 +359,16 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         .query_map([], |row| Ok(NamespaceCount { namespace: row.get(0)?, count: row.get(1)? }))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
+    let now = Utc::now().to_rfc3339();
+    let one_hour_later = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let expiring_soon: usize = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at > ?1 AND expires_at <= ?2",
+        params![now, one_hour_later],
+        |r| r.get(0),
+    )?;
+
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
-    Ok(Stats { total, by_tier, by_namespace, db_size_bytes })
+    Ok(Stats { total, by_tier, by_namespace, expiring_soon, db_size_bytes })
 }
 
 pub fn gc(conn: &Connection) -> Result<usize> {
@@ -300,4 +378,10 @@ pub fn gc(conn: &Connection) -> Result<usize> {
         params![now],
     )?;
     Ok(deleted)
+}
+
+pub fn export_all(conn: &Connection) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare("SELECT * FROM memories ORDER BY created_at ASC")?;
+    let rows = stmt.query_map([], row_to_memory)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
 }

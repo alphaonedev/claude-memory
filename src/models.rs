@@ -127,7 +127,7 @@ pub struct ListQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct RecallQuery {
-    pub context: String,
+    pub context: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
@@ -136,11 +136,22 @@ pub struct RecallQuery {
 
 fn default_recall_limit() -> Option<usize> { Some(10) }
 
+/// POST body for recall (supports long context strings)
+#[derive(Debug, Deserialize)]
+pub struct RecallBody {
+    pub context: String,
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default = "default_recall_limit")]
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct Stats {
     pub total: usize,
     pub by_tier: Vec<TierCount>,
     pub by_namespace: Vec<NamespaceCount>,
+    pub expiring_soon: usize,
     pub db_size_bytes: u64,
 }
 
@@ -155,3 +166,8 @@ pub struct NamespaceCount {
     pub namespace: String,
     pub count: usize,
 }
+
+/// Max content size in bytes (64KB)
+pub const MAX_CONTENT_SIZE: usize = 65_536;
+/// Access count threshold for auto-promotion from mid to long
+pub const PROMOTION_THRESHOLD: i64 = 5;
