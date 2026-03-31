@@ -2,9 +2,32 @@
 
 ## Deployment Options
 
+### MCP Server (Recommended)
+
+The simplest deployment is as an MCP tool server. No daemon process to manage -- Claude Code spawns the process on demand.
+
+Configure in Claude Code `settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "/usr/local/bin/claude-memory",
+      "args": ["--db", "/var/lib/claude-memory/claude-memory.db", "mcp"]
+    }
+  }
+}
+```
+
+The MCP server:
+- Starts when Claude Code opens a session
+- Communicates over stdio (JSON-RPC)
+- Stops when the session ends
+- Uses the same SQLite database as the CLI and HTTP daemon
+
 ### Standalone (Development)
 
-Run directly in the foreground:
+Run the HTTP daemon directly in the foreground:
 
 ```bash
 claude-memory --db /path/to/claude-memory.db serve
@@ -12,7 +35,7 @@ claude-memory --db /path/to/claude-memory.db serve
 
 The daemon listens on `127.0.0.1:9077` by default.
 
-### Systemd (Production)
+### Systemd (Production HTTP Daemon)
 
 ```bash
 sudo tee /etc/systemd/system/claude-memory.service > /dev/null << 'EOF'
@@ -26,6 +49,10 @@ ExecStart=/usr/local/bin/claude-memory --db /var/lib/claude-memory/claude-memory
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=claude_memory=info,tower_http=info
+
+# Graceful shutdown: checkpoints WAL before exit
+KillSignal=SIGINT
+TimeoutStopSec=10
 
 [Install]
 WantedBy=multi-user.target
@@ -98,6 +125,19 @@ These are set in the source code and require recompilation to change:
 | `SHORT_TTL_EXTEND_SECS` | 3600 (1 hour) | `models.rs` |
 | `MID_TTL_EXTEND_SECS` | 86400 (1 day) | `models.rs` |
 
+## Graceful Shutdown
+
+The HTTP daemon handles SIGINT (Ctrl+C) gracefully:
+
+1. Stops accepting new connections
+2. Waits for in-flight requests to complete
+3. Checkpoints the WAL (`PRAGMA wal_checkpoint(TRUNCATE)`)
+4. Exits cleanly
+
+For systemd, use `KillSignal=SIGINT` and `TimeoutStopSec=10` to ensure the checkpoint completes.
+
+The MCP server exits cleanly when stdin closes (Claude Code session ends).
+
 ## Database Management
 
 ### SQLite Settings
@@ -107,7 +147,7 @@ The database uses these pragmas (set automatically on open):
 - **WAL mode** -- write-ahead logging for concurrent reads
 - **busy_timeout = 5000** -- 5 second wait on lock contention
 - **synchronous = NORMAL** -- balanced durability/performance
-- **foreign_keys = ON** -- enforced referential integrity
+- **foreign_keys = ON** -- enforced referential integrity (links cascade on delete)
 
 ### Backup
 
@@ -117,7 +157,7 @@ The database uses these pragmas (set automatically on open):
 sqlite3 /path/to/claude-memory.db ".backup /path/to/backup.db"
 ```
 
-**JSON export:**
+**JSON export (includes links):**
 
 ```bash
 claude-memory --db /path/to/claude-memory.db export > backup.json
@@ -134,7 +174,7 @@ systemctl start claude-memory
 
 ### Restore
 
-**From JSON:**
+**From JSON (preserves links):**
 
 ```bash
 claude-memory --db /path/to/new.db import < backup.json
@@ -151,6 +191,8 @@ systemctl start claude-memory
 ### Migration
 
 The schema is auto-migrated on startup. The `schema_version` table tracks the current version (currently 2). Migrations are forward-only and non-destructive.
+
+- v1 -> v2: Added `confidence` (REAL) and `source` (TEXT) columns
 
 ### Database Maintenance
 
@@ -178,19 +220,18 @@ sqlite3 /path/to/claude-memory.db "INSERT INTO memories_fts(memories_fts) VALUES
 
 ## Monitoring
 
-### Health Endpoint
+### Health Endpoint (Deep Check)
 
 ```bash
 curl http://127.0.0.1:9077/api/v1/health
 ```
 
-Returns `200 OK` with `{"status": "ok", "service": "claude-memory"}` if healthy.
-
-Returns `503 Service Unavailable` if the database is inaccessible or FTS integrity check fails.
-
-The health check verifies:
+The health check performs a **deep verification**:
 1. Database is readable (runs `SELECT COUNT(*) FROM memories`)
-2. FTS index integrity (`INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`)
+2. FTS5 index integrity check (`INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`)
+
+Returns `200 OK` with `{"status": "ok", "service": "claude-memory"}` if healthy.
+Returns `503 Service Unavailable` with `{"status": "error", "service": "claude-memory"}` if the database or FTS index is unhealthy.
 
 ### Stats Endpoint
 
@@ -206,9 +247,23 @@ Returns:
 - Total link count
 - Database file size in bytes
 
+### MCP Server Monitoring
+
+The MCP server logs to stderr. Monitor via:
+
+```bash
+# If running via Claude Code, check Claude Code's MCP logs
+# If running manually:
+claude-memory mcp 2>mcp-server.log
+```
+
+Key log messages:
+- `claude-memory MCP server started (stdio)` -- server is ready
+- `claude-memory MCP server stopped` -- stdin closed, server exiting
+
 ### Logs
 
-The daemon logs via `tracing` with configurable levels:
+The HTTP daemon logs via `tracing` with configurable levels:
 
 ```bash
 # Info level (default recommended)
@@ -239,14 +294,50 @@ if [ "$HEALTH" != "ok" ]; then
 fi
 ```
 
+## CI/CD Pipeline
+
+The project uses GitHub Actions for continuous integration and release automation.
+
+### CI (Every Push and PR)
+
+Runs on `ubuntu-latest` and `macos-latest`:
+
+1. **Formatting** -- `cargo fmt --check`
+2. **Linting** -- `cargo clippy -- -D warnings`
+3. **Tests** -- `cargo test` (41 tests: 8 unit + 33 integration)
+4. **Build** -- `cargo build --release`
+
+Uses `Swatinem/rust-cache@v2` for build caching.
+
+### Release (On Tag Push)
+
+Triggered by tags matching `v*` (e.g., `v0.1.0`):
+
+1. Builds release binaries for:
+   - `x86_64-unknown-linux-gnu` (Ubuntu)
+   - `aarch64-apple-darwin` (macOS ARM)
+2. Packages each as `claude-memory-<target>.tar.gz`
+3. Creates a GitHub Release with the artifacts
+
+### Running CI Locally
+
+```bash
+# Replicate the CI checks
+cargo fmt --check
+cargo clippy -- -D warnings
+cargo test
+cargo build --release
+```
+
 ## Scaling Considerations
 
 `claude-memory` is designed for single-machine use. It is not a distributed system.
 
 - **Concurrency**: The daemon uses `Arc<Mutex<Connection>>` -- one write at a time, but this is fine for a single-user tool. SQLite WAL mode allows concurrent reads.
+- **MCP concurrency**: The MCP server is single-threaded (synchronous stdio loop), one request at a time. This is by design -- Claude Code sends one request at a time.
 - **Database size**: SQLite handles databases up to 281 TB. Practically, performance stays excellent up to millions of rows.
 - **Memory usage**: Minimal. The daemon holds only the connection and a path in memory. All data is on disk.
-- **Multiple instances**: You can run multiple daemons on different ports with different databases. Do not point two daemons at the same database file.
+- **Multiple instances**: You can run multiple daemons on different ports with different databases. Do not point two daemons at the same database file. The MCP server and CLI can share a database (both use WAL mode).
 
 ## Troubleshooting
 
@@ -271,6 +362,17 @@ rm -f claude-memory.db-wal claude-memory.db-shm
 ls -la /path/to/claude-memory.db
 # Ensure the user running the daemon has read/write access
 ```
+
+### MCP server not connecting
+
+**Binary not found:**
+Check that the path in `settings.json` is correct and the binary is executable.
+
+**Database path issues:**
+The MCP server opens the database at the path specified by `--db`. Ensure the directory exists and is writable.
+
+**Protocol errors:**
+Check stderr output. The MCP server logs parse errors and protocol issues to stderr.
 
 ### Slow queries
 
@@ -316,13 +418,9 @@ sqlite3 /path/to/claude-memory.db "VACUUM"
 
 ### Localhost Binding
 
-By default, the daemon binds to `127.0.0.1` only. It is **not accessible from the network**. This is intentional -- `claude-memory` is a local-machine tool.
+By default, the HTTP daemon binds to `127.0.0.1` only. It is **not accessible from the network**. This is intentional -- `claude-memory` is a local-machine tool.
 
-If you need to bind to a different address (not recommended):
-
-```bash
-claude-memory serve --host 0.0.0.0 --port 9077
-```
+The MCP server communicates over stdio only -- no network exposure.
 
 ### No Authentication
 
@@ -331,6 +429,21 @@ There is no authentication mechanism. This is by design -- the daemon is intende
 ### Data at Rest
 
 The SQLite database is stored as a regular file. It is not encrypted. If you need encryption at rest, use filesystem-level encryption (LUKS, FileVault, BitLocker).
+
+### Input Validation
+
+All write paths go through the validation layer (`validate.rs`):
+- Title: max 512 bytes, no null bytes
+- Content: max 64KB, no null bytes
+- Namespace: max 128 bytes, no slashes/spaces/nulls
+- Source: whitelist (user, claude, hook, api, cli, import, consolidation, system)
+- Tags: max 50 tags, each max 128 bytes
+- Priority: 1-10
+- Confidence: 0.0-1.0, finite
+- Relations: whitelist (related_to, supersedes, contradicts, derived_from)
+- IDs: max 128 bytes, no null bytes
+- Timestamps: valid RFC3339
+- TTL: positive, max 1 year
 
 ### WAL Files
 
