@@ -4,7 +4,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -23,17 +23,25 @@ pub async fn create_memory(
     State(state): State<Db>,
     Json(body): Json<CreateMemory>,
 ) -> impl IntoResponse {
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
+    let expires_at = body.expires_at.or_else(|| {
+        body.ttl_secs
+            .or(body.tier.default_ttl_secs())
+            .map(|secs| (now + Duration::seconds(secs)).to_rfc3339())
+    });
     let mem = Memory {
         id: Uuid::new_v4().to_string(),
-        category: body.category,
+        tier: body.tier,
+        namespace: body.namespace,
         title: body.title,
         content: body.content,
         tags: body.tags,
         priority: body.priority.clamp(1, 10),
-        created_at: now.clone(),
-        updated_at: now,
-        expires_at: body.expires_at,
+        access_count: 0,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        last_accessed_at: None,
+        expires_at,
     };
     let lock = state.lock().await;
     match db::insert(&lock.0, &mem) {
@@ -61,14 +69,10 @@ pub async fn update_memory(
 ) -> impl IntoResponse {
     let lock = state.lock().await;
     match db::update(
-        &lock.0,
-        &id,
-        body.title.as_deref(),
-        body.content.as_deref(),
-        body.category.as_ref(),
-        body.tags.as_ref(),
-        body.priority,
-        body.expires_at.as_deref(),
+        &lock.0, &id,
+        body.title.as_deref(), body.content.as_deref(),
+        body.tier.as_ref(), body.namespace.as_deref(),
+        body.tags.as_ref(), body.priority, body.expires_at.as_deref(),
     ) {
         Ok(true) => {
             let mem = db::get(&lock.0, &id).ok().flatten();
@@ -85,7 +89,7 @@ pub async fn delete_memory(
 ) -> impl IntoResponse {
     let lock = state.lock().await;
     match db::delete(&lock.0, &id) {
-        Ok(true) => (StatusCode::OK, Json(json!({"deleted": true}))).into_response(),
+        Ok(true) => Json(json!({"deleted": true})).into_response(),
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -98,7 +102,7 @@ pub async fn list_memories(
     let lock = state.lock().await;
     let limit = params.limit.unwrap_or(20).min(200);
     let offset = params.offset.unwrap_or(0);
-    match db::list(&lock.0, params.category.as_ref(), limit, offset, params.min_priority) {
+    match db::list(&lock.0, params.namespace.as_deref(), params.tier.as_ref(), limit, offset, params.min_priority) {
         Ok(memories) => Json(json!({"memories": memories, "count": memories.len()})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
@@ -113,8 +117,23 @@ pub async fn search_memories(
     }
     let lock = state.lock().await;
     let limit = params.limit.unwrap_or(20).min(200);
-    match db::search(&lock.0, &params.q, params.category.as_ref(), limit, params.min_priority) {
-        Ok(memories) => Json(json!({"results": memories, "count": memories.len(), "query": params.q})).into_response(),
+    match db::search(&lock.0, &params.q, params.namespace.as_deref(), params.tier.as_ref(), limit, params.min_priority) {
+        Ok(results) => Json(json!({"results": results, "count": results.len(), "query": params.q})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
+    }
+}
+
+pub async fn recall_memories(
+    State(state): State<Db>,
+    Query(params): Query<RecallQuery>,
+) -> impl IntoResponse {
+    if params.context.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "context is required"}))).into_response();
+    }
+    let lock = state.lock().await;
+    let limit = params.limit.unwrap_or(10).min(50);
+    match db::recall(&lock.0, &params.context, params.namespace.as_deref(), limit) {
+        Ok(results) => Json(json!({"memories": results, "count": results.len()})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))).into_response(),
     }
 }
@@ -139,26 +158,34 @@ pub async fn bulk_create(
     State(state): State<Db>,
     Json(bodies): Json<Vec<CreateMemory>>,
 ) -> impl IntoResponse {
-    let now = Utc::now().to_rfc3339();
+    let now = Utc::now();
     let lock = state.lock().await;
-    let mut created = Vec::new();
+    let mut created = 0usize;
     let mut errors = Vec::new();
     for body in bodies {
+        let expires_at = body.expires_at.or_else(|| {
+            body.ttl_secs
+                .or(body.tier.default_ttl_secs())
+                .map(|secs| (now + Duration::seconds(secs)).to_rfc3339())
+        });
         let mem = Memory {
             id: Uuid::new_v4().to_string(),
-            category: body.category,
+            tier: body.tier,
+            namespace: body.namespace,
             title: body.title,
             content: body.content,
             tags: body.tags,
             priority: body.priority.clamp(1, 10),
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            expires_at: body.expires_at,
+            access_count: 0,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+            last_accessed_at: None,
+            expires_at,
         };
         match db::insert(&lock.0, &mem) {
-            Ok(()) => created.push(mem),
+            Ok(()) => created += 1,
             Err(e) => errors.push(e.to_string()),
         }
     }
-    Json(json!({"created": created.len(), "errors": errors})).into_response()
+    Json(json!({"created": created, "errors": errors})).into_response()
 }
