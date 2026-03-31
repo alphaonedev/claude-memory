@@ -4,11 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Tier {
-    /// Ephemeral context — current session, auto-expires in hours
     Short,
-    /// Working knowledge — current sprint/week, auto-expires in days
     Mid,
-    /// Durable knowledge — persists until explicitly removed
     Long,
 }
 
@@ -32,9 +29,9 @@ impl Tier {
 
     pub fn default_ttl_secs(&self) -> Option<i64> {
         match self {
-            Self::Short => Some(6 * 3600),       // 6 hours
-            Self::Mid => Some(7 * 24 * 3600),    // 7 days
-            Self::Long => None,                   // never
+            Self::Short => Some(6 * 3600),
+            Self::Mid => Some(7 * 24 * 3600),
+            Self::Long => None,
         }
     }
 }
@@ -54,6 +51,10 @@ pub struct Memory {
     pub content: String,
     pub tags: Vec<String>,
     pub priority: i32,
+    /// 0.0-1.0 — how certain is this memory
+    pub confidence: f64,
+    /// Who/what created this: "user", "claude", "hook", "api", "import"
+    pub source: String,
     pub access_count: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -61,6 +62,14 @@ pub struct Memory {
     pub last_accessed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryLink {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from"
+    pub created_at: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +84,10 @@ pub struct CreateMemory {
     pub tags: Vec<String>,
     #[serde(default = "default_priority")]
     pub priority: i32,
+    #[serde(default = "default_confidence")]
+    pub confidence: f64,
+    #[serde(default = "default_source")]
+    pub source: String,
     #[serde(default)]
     pub expires_at: Option<String>,
     #[serde(default)]
@@ -84,6 +97,8 @@ pub struct CreateMemory {
 fn default_tier() -> Tier { Tier::Mid }
 fn default_namespace() -> String { "global".to_string() }
 fn default_priority() -> i32 { 5 }
+fn default_confidence() -> f64 { 1.0 }
+fn default_source() -> String { "api".to_string() }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemory {
@@ -93,6 +108,7 @@ pub struct UpdateMemory {
     pub namespace: Option<String>,
     pub tags: Option<Vec<String>>,
     pub priority: Option<i32>,
+    pub confidence: Option<f64>,
     pub expires_at: Option<String>,
 }
 
@@ -107,6 +123,12 @@ pub struct SearchQuery {
     pub limit: Option<usize>,
     #[serde(default)]
     pub min_priority: Option<i32>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub tags: Option<String>, // comma-separated
 }
 
 fn default_limit() -> Option<usize> { Some(20) }
@@ -123,6 +145,12 @@ pub struct ListQuery {
     pub offset: Option<usize>,
     #[serde(default)]
     pub min_priority: Option<i32>,
+    #[serde(default)]
+    pub since: Option<String>,
+    #[serde(default)]
+    pub until: Option<String>,
+    #[serde(default)]
+    pub tags: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -132,11 +160,14 @@ pub struct RecallQuery {
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub tags: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
 }
 
 fn default_recall_limit() -> Option<usize> { Some(10) }
 
-/// POST body for recall (supports long context strings)
 #[derive(Debug, Deserialize)]
 pub struct RecallBody {
     pub context: String,
@@ -144,6 +175,30 @@ pub struct RecallBody {
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
     pub limit: Option<usize>,
+    #[serde(default)]
+    pub tags: Option<String>,
+    #[serde(default)]
+    pub since: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkBody {
+    pub source_id: String,
+    pub target_id: String,
+    #[serde(default = "default_relation")]
+    pub relation: String,
+}
+
+fn default_relation() -> String { "related_to".to_string() }
+
+#[derive(Debug, Deserialize)]
+pub struct ForgetQuery {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>, // FTS pattern
+    #[serde(default)]
+    pub tier: Option<Tier>,
 }
 
 #[derive(Debug, Serialize)]
@@ -152,6 +207,7 @@ pub struct Stats {
     pub by_tier: Vec<TierCount>,
     pub by_namespace: Vec<NamespaceCount>,
     pub expiring_soon: usize,
+    pub links_count: usize,
     pub db_size_bytes: u64,
 }
 
@@ -167,7 +223,8 @@ pub struct NamespaceCount {
     pub count: usize,
 }
 
-/// Max content size in bytes (64KB)
 pub const MAX_CONTENT_SIZE: usize = 65_536;
-/// Access count threshold for auto-promotion from mid to long
 pub const PROMOTION_THRESHOLD: i64 = 5;
+/// How much to extend TTL on access (1 hour for short, 1 day for mid)
+pub const SHORT_TTL_EXTEND_SECS: i64 = 3600;
+pub const MID_TTL_EXTEND_SECS: i64 = 86400;
