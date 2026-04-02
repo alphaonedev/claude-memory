@@ -140,6 +140,10 @@ gemini mcp add memory ai-memory -- --db ~/.local/share/ai-memory/memories.db mcp
 }
 ```
 
+Or add via Cursor Settings > Tools & MCP.
+
+> **Notes for Cursor:** Restart Cursor (or reload window) after editing `mcp.json`. Verify server status in Settings > Tools & MCP (green dot = connected). Supports `env` field for environment variables, `envFile` for `.env` files, and `${env:VAR_NAME}` interpolation in config values. Also supports `url` + `headers` for remote HTTP/SSE servers. ~40 tool limit across all MCP servers combined. Project-level `.cursor/mcp.json` overrides global config for same-named servers. See [Cursor MCP docs](https://cursor.com/docs/context/mcp).
+
 **Windsurf (Codeium)** -- create or edit `~/.codeium/windsurf/mcp_config.json`:
 
 ```json

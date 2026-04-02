@@ -480,16 +480,16 @@
                 </div>
 
                 <div id="tab-cursor" class="integration-panel">
-                    <p>Config: <code>~/.cursor/mcp.json</code></p>
+                    <p>Config: <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project)</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
       <span class="tok-str">"command"</span>: <span class="tok-str">"ai-memory"</span>,
-      <span class="tok-str">"args"</span>: [<span class="tok-str">"--db"</span>, <span class="tok-str">"~/.cursor/ai-memory.db"</span>, <span class="tok-str">"mcp"</span>]
+      <span class="tok-str">"args"</span>: [<span class="tok-str">"--db"</span>, <span class="tok-str">"~/.local/share/ai-memory/memories.db"</span>, <span class="tok-str">"mcp"</span>]
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Cursor IDE supports MCP servers natively. After saving, restart Cursor or reload the window. Memory tools appear in the AI chat panel.</p>
+                    <p style="font-size:.85rem">Or add via <strong>Cursor Settings &gt; Tools &amp; MCP</strong>. Restart Cursor after editing. Verify with green dot in Settings. Supports <code>env</code>, <code>envFile</code>, <code>${env:VAR}</code> interpolation. ~40 tool limit across all servers. See <a href="https://cursor.com/docs/context/mcp">Cursor MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-windsurf" class="integration-panel">

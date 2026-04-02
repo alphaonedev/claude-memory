@@ -124,7 +124,7 @@ Or add via CLI: `gemini mcp add memory ai-memory -- --db ~/.local/share/ai-memor
 <details>
 <summary><strong>Cursor IDE</strong></summary>
 
-Add to `~/.cursor/mcp.json`:
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project-level):
 
 ```json
 {
@@ -136,6 +136,8 @@ Add to `~/.cursor/mcp.json`:
   }
 }
 ```
+
+> **Notes:** Restart Cursor after editing `mcp.json`. Verify server status in Cursor Settings > Tools & MCP (green dot = connected). Cursor supports `env`, `envFile`, and `${env:VAR}` interpolation. ~40 tool limit across all MCP servers. See [Cursor MCP docs](https://cursor.com/docs/context/mcp).
 
 </details>
 
