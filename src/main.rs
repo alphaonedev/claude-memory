@@ -436,7 +436,10 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
         .route("/api/v1/memories/{id}", get(handlers::get_memory))
         .route("/api/v1/memories/{id}", put(handlers::update_memory))
         .route("/api/v1/memories/{id}", delete(handlers::delete_memory))
-        .route("/api/v1/memories/{id}/promote", post(handlers::promote_memory))
+        .route(
+            "/api/v1/memories/{id}/promote",
+            post(handlers::promote_memory),
+        )
         .route("/api/v1/search", get(handlers::search_memories))
         .route("/api/v1/recall", get(handlers::recall_memories_get))
         .route("/api/v1/recall", post(handlers::recall_memories_post))
@@ -640,7 +643,10 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
         };
         println!(
             "[{}] {} {} (ns={}, {}x, {}{})",
-            color::tier_color(mem.tier.as_str(), &format!("{}/{}", mem.tier, id_short(&mem.id))),
+            color::tier_color(
+                mem.tier.as_str(),
+                &format!("{}/{}", mem.tier, id_short(&mem.id))
+            ),
             color::bold(&mem.title),
             color::priority_bar(mem.priority),
             color::cyan(&mem.namespace),
@@ -1192,7 +1198,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                    .is_err()
+                {
                     continue;
                 }
                 let _ = db::create_link(
@@ -1225,7 +1233,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                    .is_err()
+                {
                     continue;
                 }
                 let _ = db::create_link(
@@ -1260,7 +1270,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &r_links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                    .is_err()
+                {
                     continue;
                 }
                 let _ = db::create_link(
@@ -1279,7 +1291,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &l_links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                    .is_err()
+                {
                     continue;
                 }
                 let _ = db::create_link(
@@ -1346,7 +1360,10 @@ fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: b
             std::collections::HashMap::new();
         for mem in &memories {
             if mem.tags.is_empty() {
-                tag_groups.entry("_untagged".to_string()).or_default().push(mem);
+                tag_groups
+                    .entry("_untagged".to_string())
+                    .or_default()
+                    .push(mem);
             } else {
                 for tag in &mem.tags {
                     tag_groups.entry(tag.clone()).or_default().push(mem);
@@ -1354,10 +1371,14 @@ fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: b
             }
         }
 
-        let mut consolidated_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut consolidated_ids: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         for (tag, group) in &tag_groups {
             // Skip memories already consolidated in another tag group
-            let group: Vec<&&models::Memory> = group.iter().filter(|m| !consolidated_ids.contains(&m.id)).collect();
+            let group: Vec<&&models::Memory> = group
+                .iter()
+                .filter(|m| !consolidated_ids.contains(&m.id))
+                .collect();
             if group.len() < args.min_count {
                 continue;
             }

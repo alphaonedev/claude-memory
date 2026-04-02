@@ -3,10 +3,7 @@
 #[test]
 fn test_cli_store_and_recall() {
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-cli-test-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-cli-test-{}.db", uuid::Uuid::new_v4()));
     let binary = env!("CARGO_BIN_EXE_ai-memory");
 
     // Store
@@ -128,10 +125,7 @@ fn test_cli_store_and_recall() {
 fn test_deduplication() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-dedup-test-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-dedup-test-{}.db", uuid::Uuid::new_v4()));
 
     // Store same title+namespace twice
     for content in ["first version", "second version"] {
@@ -211,10 +205,7 @@ fn test_gc_removes_expired() {
 fn test_content_size_limit() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-size-test-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-size-test-{}.db", uuid::Uuid::new_v4()));
 
     let huge_content = "x".repeat(70_000);
     let output = std::process::Command::new(binary)
@@ -313,10 +304,7 @@ fn test_import_export_roundtrip() {
 fn test_reject_empty_title() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-val-title-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-val-title-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -339,10 +327,7 @@ fn test_reject_empty_title() {
 fn test_reject_bad_source() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-val-source-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-val-source-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -395,10 +380,7 @@ fn test_reject_bad_namespace() {
 fn test_reject_oversized_content() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-val-size-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-val-size-{}.db", uuid::Uuid::new_v4()));
 
     let huge = "x".repeat(70_000);
     let output = std::process::Command::new(binary)
@@ -422,10 +404,7 @@ fn test_reject_oversized_content() {
 fn test_reject_bad_priority() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-val-prio-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-val-prio-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -466,10 +445,7 @@ fn test_reject_bad_priority() {
 fn test_reject_bad_confidence() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-val-conf-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-val-conf-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -1054,10 +1030,7 @@ fn test_consolidation() {
 fn test_promote_command() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-promote-cmd-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-promote-cmd-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -1200,10 +1173,7 @@ fn test_unicode_handling() {
 fn test_boundary_priority_min() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-bnd-pmin-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-bnd-pmin-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -1229,10 +1199,7 @@ fn test_boundary_priority_min() {
 fn test_boundary_priority_max() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-bnd-pmax-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-bnd-pmax-{}.db", uuid::Uuid::new_v4()));
 
     let output = std::process::Command::new(binary)
         .args([
@@ -1310,10 +1277,7 @@ fn test_boundary_confidence_one() {
 fn test_boundary_max_title_length() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-bnd-tlen-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-bnd-tlen-{}.db", uuid::Uuid::new_v4()));
 
     let long_title = "a".repeat(512);
     let output = std::process::Command::new(binary)
@@ -1551,10 +1515,7 @@ fn test_update_via_cli() {
 fn test_stats_accuracy() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!(
-        "ai-memory-statsacc-{}.db",
-        uuid::Uuid::new_v4()
-    ));
+    let db_path = dir.join(format!("ai-memory-statsacc-{}.db", uuid::Uuid::new_v4()));
 
     let count = 5;
     for i in 0..count {

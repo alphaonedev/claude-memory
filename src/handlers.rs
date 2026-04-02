@@ -196,10 +196,7 @@ pub async fn delete_memory(State(state): State<Db>, Path(id): Path<String>) -> i
     }
 }
 
-pub async fn promote_memory(
-    State(state): State<Db>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn promote_memory(State(state): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -209,7 +206,16 @@ pub async fn promote_memory(
     }
     let lock = state.lock().await;
     match db::update(
-        &lock.0, &id, None, None, Some(&Tier::Long), None, None, None, None, None,
+        &lock.0,
+        &id,
+        None,
+        None,
+        Some(&Tier::Long),
+        None,
+        None,
+        None,
+        None,
+        None,
     ) {
         Ok(true) => {
             if let Err(e) = lock.0.execute(

@@ -252,7 +252,10 @@ pub fn touch(conn: &Connection, id: &str) -> Result<()> {
     })();
 
     match result {
-        Ok(()) => { conn.execute_batch("COMMIT")?; Ok(()) }
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
         Err(e) => {
             if let Err(rb) = conn.execute_batch("ROLLBACK") {
                 tracing::error!("ROLLBACK failed in touch: {}", rb);
@@ -485,7 +488,15 @@ pub fn recall(
          LIMIT ?7",
     )?;
     let rows = stmt.query_map(
-        params![fts_query, namespace, now, tags_filter, since, until, limit as i64],
+        params![
+            fts_query,
+            namespace,
+            now,
+            tags_filter,
+            since,
+            until,
+            limit as i64
+        ],
         row_to_memory,
     )?;
     let results: Vec<Memory> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -614,7 +625,10 @@ pub fn consolidate(
     })();
 
     match result {
-        Ok(id) => { conn.execute_batch("COMMIT")?; Ok(id) }
+        Ok(id) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(id)
+        }
         Err(e) => {
             if let Err(rb) = conn.execute_batch("ROLLBACK") {
                 tracing::error!("ROLLBACK failed in consolidate: {}", rb);
@@ -639,10 +653,16 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
             let clean: String = token
                 .chars()
                 .filter(|c| {
-                    *c != '"' && *c != '*' && *c != '^'
-                        && *c != '{' && *c != '}'
-                        && *c != '(' && *c != ')'
-                        && *c != ':' && *c != '-' && *c != '|'
+                    *c != '"'
+                        && *c != '*'
+                        && *c != '^'
+                        && *c != '{'
+                        && *c != '}'
+                        && *c != '('
+                        && *c != ')'
+                        && *c != ':'
+                        && *c != '-'
+                        && *c != '|'
                 })
                 .collect();
             if clean.is_empty() {
@@ -731,7 +751,11 @@ pub fn gc_if_needed(conn: &Connection) -> Result<usize> {
             |r| r.get(0),
         )
         .unwrap_or(false);
-    if has_expired { gc(conn) } else { Ok(0) }
+    if has_expired {
+        gc(conn)
+    } else {
+        Ok(0)
+    }
 }
 
 pub fn gc(conn: &Connection) -> Result<usize> {

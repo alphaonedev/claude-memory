@@ -299,7 +299,8 @@ fn handle_store(conn: &rusqlite::Connection, params: &Value) -> Result<Value, St
         .collect();
 
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
-    let mut response = json!({"id": actual_id, "tier": mem.tier, "title": mem.title, "namespace": mem.namespace});
+    let mut response =
+        json!({"id": actual_id, "tier": mem.tier, "title": mem.title, "namespace": mem.namespace});
     if !contradiction_ids.is_empty() {
         response["potential_contradictions"] = json!(contradiction_ids);
     }
@@ -478,13 +479,19 @@ fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Stri
 }
 
 fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
-    let source_id = params["source_id"].as_str().ok_or("source_id is required")?;
-    let target_id = params["target_id"].as_str().ok_or("target_id is required")?;
+    let source_id = params["source_id"]
+        .as_str()
+        .ok_or("source_id is required")?;
+    let target_id = params["target_id"]
+        .as_str()
+        .ok_or("target_id is required")?;
     let relation = params["relation"].as_str().unwrap_or("related_to");
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
     db::create_link(conn, source_id, target_id, relation).map_err(|e| e.to_string())?;
-    Ok(json!({"linked": true, "source_id": source_id, "target_id": target_id, "relation": relation}))
+    Ok(
+        json!({"linked": true, "source_id": source_id, "target_id": target_id, "relation": relation}),
+    )
 }
 
 fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
@@ -510,9 +517,16 @@ fn handle_consolidate(conn: &rusqlite::Connection, params: &Value) -> Result<Val
 
     validate::validate_consolidate(&ids, title, summary, namespace).map_err(|e| e.to_string())?;
 
-    let new_id =
-        db::consolidate(conn, &ids, title, summary, namespace, &Tier::Long, "consolidation")
-            .map_err(|e| e.to_string())?;
+    let new_id = db::consolidate(
+        conn,
+        &ids,
+        title,
+        summary,
+        namespace,
+        &Tier::Long,
+        "consolidation",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(json!({"id": new_id, "consolidated": ids.len()}))
 }
 
@@ -523,7 +537,11 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
 
     // Validate JSON-RPC 2.0 version
     if req.jsonrpc != "2.0" {
-        return err_response(id, -32600, "invalid JSON-RPC version (must be \"2.0\")".into());
+        return err_response(
+            id,
+            -32600,
+            "invalid JSON-RPC version (must be \"2.0\")".into(),
+        );
     }
 
     match req.method.as_str() {
