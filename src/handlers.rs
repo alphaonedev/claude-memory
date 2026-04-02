@@ -212,10 +212,17 @@ pub async fn promote_memory(
         &lock.0, &id, None, None, Some(&Tier::Long), None, None, None, None, None,
     ) {
         Ok(true) => {
-            let _ = lock.0.execute(
+            if let Err(e) = lock.0.execute(
                 "UPDATE memories SET expires_at = NULL WHERE id = ?1",
                 rusqlite::params![id],
-            );
+            ) {
+                tracing::error!("promote clear expiry failed: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "internal server error"})),
+                )
+                    .into_response();
+            }
             Json(json!({"promoted": true, "id": id, "tier": "long"})).into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),

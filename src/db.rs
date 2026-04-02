@@ -291,7 +291,12 @@ pub fn update(
     let tags = tags.unwrap_or(&existing.tags);
     let priority = priority.unwrap_or(existing.priority);
     let confidence = confidence.unwrap_or(existing.confidence);
-    let expires_at = expires_at.or(existing.expires_at.as_deref());
+    // Treat empty string as None (clear expiry) — don't store "" in the DB
+    let expires_at = match expires_at {
+        Some("") | Some("null") => None,
+        Some(v) => Some(v),
+        None => existing.expires_at.as_deref(),
+    };
     let tags_json = serde_json::to_string(tags)?;
     let now = Utc::now().to_rfc3339();
 
@@ -582,7 +587,7 @@ pub fn consolidate(
                 Some(mem) => {
                     max_priority = max_priority.max(mem.priority);
                     all_tags.extend(mem.tags);
-                    total_access += mem.access_count;
+                    total_access = total_access.saturating_add(mem.access_count);
                 }
                 None => anyhow::bail!("memory not found: {}", id),
             }

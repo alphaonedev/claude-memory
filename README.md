@@ -1,10 +1,10 @@
 ```
-      _                 _
-  ___| | __ _ _   _  __| | ___       _ __ ___   ___ _ __ ___   ___  _ __ _   _
- / __| |/ _` | | | |/ _` |/ _ \___  | '_ ` _ \ / _ \ '_ ` _ \ / _ \| '__| | | |
-| (__| | (_| | |_| | (_| |  __/___| | | | | | |  __/ | | | | | (_) | |  | |_| |
- \___|_|\__,_|\__,_|\__,_|\___|     |_| |_| |_|\___|_| |_| |_|\___/|_|   \__, |
-               universal AI memory                                        |___/
+        _
+   __ _(_)      _ __ ___   ___ _ __ ___   ___  _ __ _   _
+  / _` | |___  | '_ ` _ \ / _ \ '_ ` _ \ / _ \| '__| | | |
+ | (_| | |___| | | | | | |  __/ | | | | | (_) | |  | |_| |
+  \__,_|_|     |_| |_| |_|\___|_| |_| |_|\___/|_|   \__, |
+                universal AI memory                   |___/
 ```
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
@@ -327,7 +327,7 @@ Every recall query ranks memories by 6 factors:
 ```
 score = (fts_relevance * -1)
       + (priority * 0.5)
-      + (access_count * 0.1)
+      + (MIN(access_count, 50) * 0.1)
       + (confidence * 2.0)
       + tier_boost
       + recency_decay
@@ -337,7 +337,7 @@ score = (fts_relevance * -1)
 |--------|--------|-------|
 | FTS relevance | -1.0x | SQLite FTS5 rank (negative = better match) |
 | Priority | 0.5x | User-assigned 1-10 scale |
-| Access count | 0.1x | How often this memory has been recalled |
+| Access count | 0.1x | How often recalled (capped at 50 for scoring) |
 | Confidence | 2.0x | 0.0-1.0 certainty score |
 | Tier boost | +3.0 / +1.0 / +0.0 | long / mid / short |
 | Recency decay | `1/(1 + days*0.1)` | Recent memories rank higher |

@@ -829,7 +829,7 @@
         <div class="formula-box">
             score = <span class="factor f-fts">fts_rank * -1</span>
             + <span class="factor f-priority">priority * 0.5</span>
-            + <span class="factor f-access">access_count * 0.1</span>
+            + <span class="factor f-access">MIN(access_count, 50) * 0.1</span>
             + <span class="factor f-confidence">confidence * 2.0</span>
             + <span class="factor f-tier">tier_boost</span>
             + <span class="factor f-recency">1/(1 + days * 0.1)</span>

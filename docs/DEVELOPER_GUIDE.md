@@ -220,7 +220,7 @@ The recall function uses a 6-factor composite score to rank results:
 ```
 score = (fts_rank * -1)                                              -- FTS5 relevance (negated: lower = better in SQLite)
       + (priority * 0.5)                                             -- Priority weight (1-10 -> 0.5-5.0)
-      + (access_count * 0.1)                                         -- Frequency bonus
+      + (MIN(access_count, 50) * 0.1)                                         -- Frequency bonus
       + (confidence * 2.0)                                           -- Certainty weight (0.0-1.0 -> 0.0-2.0)
       + tier_boost                                                   -- long=3.0, mid=1.0, short=0.0
       + (1.0 / (1.0 + (julianday('now') - julianday(updated_at)) * 0.1))  -- Recency decay
