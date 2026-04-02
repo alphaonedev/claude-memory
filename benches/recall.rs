@@ -18,7 +18,7 @@ fn binary_path() -> String {
         .expect("failed to get cargo metadata");
     let meta: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let target_dir = meta["target_directory"].as_str().unwrap().to_string();
-    format!("{}/release/claude-memory", target_dir)
+    format!("{}/release/ai-memory", target_dir)
 }
 
 fn seed_memories(binary: &str, db_path: &str, count: usize) {
@@ -58,7 +58,7 @@ fn bench_recall(c: &mut Criterion) {
     let dir = std::env::temp_dir();
     let db_path = dir
         .join(format!(
-            "claude-memory-bench-recall-{}.db",
+            "ai-memory-bench-recall-{}.db",
             uuid::Uuid::new_v4()
         ))
         .to_str()
@@ -130,7 +130,7 @@ fn bench_search(c: &mut Criterion) {
     let dir = std::env::temp_dir();
     let db_path = dir
         .join(format!(
-            "claude-memory-bench-search-{}.db",
+            "ai-memory-bench-search-{}.db",
             uuid::Uuid::new_v4()
         ))
         .to_str()
@@ -181,7 +181,7 @@ fn bench_insert(c: &mut Criterion) {
     let dir = std::env::temp_dir();
     let db_path = dir
         .join(format!(
-            "claude-memory-bench-insert-{}.db",
+            "ai-memory-bench-insert-{}.db",
             uuid::Uuid::new_v4()
         ))
         .to_str()

@@ -7,7 +7,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>claude-memory -- Persistent Memory for Any AI</title>
+    <title>ai-memory -- Persistent Memory for Any AI</title>
     <meta name="description" content="Give any AI persistent memory across sessions. MCP-based memory management for Claude, ChatGPT, Grok, Llama, and any MCP-compatible platform. A single Rust binary with three interfaces (MCP, HTTP, CLI), three-tier recall, SQLite FTS5, and 6-factor ranking.">
     <meta name="theme-color" content="#0d1117">
     <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/">
@@ -295,7 +295,7 @@
      ================================================================ -->
 <nav>
     <div class="container">
-        <span class="logo">claude-memory</span>
+        <span class="logo">ai-memory</span>
         <div class="links">
             <a href="#platforms">Platforms</a>
             <a href="#install">Install</a>
@@ -397,7 +397,7 @@
                 <h4>Build the binary</h4>
                 <p>Clone the repo and compile. You need Rust installed (<a href="https://rustup.rs">rustup.rs</a> if you don't have it).</p>
                 <pre><code><span class="tok-cmd">git clone</span> <span class="tok-url">https://github.com/alphaonedev/ai-memory-mcp.git</span>
-<span class="tok-cmd">cd</span> claude-memory
+<span class="tok-cmd">cd</span> ai-memory
 <span class="tok-cmd">cargo install</span> <span class="tok-flag">--path</span> .<span class="lang-label">bash</span></code></pre>
             </li>
             <li>
@@ -411,11 +411,11 @@
                 </div>
 
                 <div id="tab-mcp-generic" class="integration-panel active">
-                    <p>For any MCP-compatible client, point it to the claude-memory binary with the <code>mcp</code> subcommand:</p>
+                    <p>For any MCP-compatible client, point it to the ai-memory binary with the <code>mcp</code> subcommand:</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
-      <span class="tok-str">"command"</span>: <span class="tok-str">"claude-memory"</span>,
+      <span class="tok-str">"command"</span>: <span class="tok-str">"ai-memory"</span>,
       <span class="tok-str">"args"</span>: [<span class="tok-str">"--db"</span>, <span class="tok-str">"path/to/memory.db"</span>, <span class="tok-str">"mcp"</span>]
     }
   }
@@ -428,8 +428,8 @@
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
-      <span class="tok-str">"command"</span>: <span class="tok-str">"claude-memory"</span>,
-      <span class="tok-str">"args"</span>: [<span class="tok-str">"--db"</span>, <span class="tok-str">"~/.claude/claude-memory.db"</span>, <span class="tok-str">"mcp"</span>]
+      <span class="tok-str">"command"</span>: <span class="tok-str">"ai-memory"</span>,
+      <span class="tok-str">"args"</span>: [<span class="tok-str">"--db"</span>, <span class="tok-str">"~/.claude/ai-memory.db"</span>, <span class="tok-str">"mcp"</span>]
     }
   }
 }<span class="lang-label">json</span></code></pre>
@@ -439,7 +439,7 @@
                 <div id="tab-http" class="integration-panel">
                     <p>For ChatGPT, Grok, Llama, or any AI that supports function calling via HTTP:</p>
                     <pre><code><span class="tok-cm"># Start the memory server (background)</span>
-<span class="tok-cmd">claude-memory</span> serve <span class="tok-flag">--host</span> <span class="tok-num">127.0.0.1</span> <span class="tok-flag">--port</span> <span class="tok-num">9077</span> &amp;
+<span class="tok-cmd">ai-memory</span> serve <span class="tok-flag">--host</span> <span class="tok-num">127.0.0.1</span> <span class="tok-flag">--port</span> <span class="tok-num">9077</span> &amp;
 
 <span class="tok-cm"># Your AI can now call the REST API:</span>
 <span class="tok-cm"># POST http://127.0.0.1:9077/api/v1/memories   (store)</span>
@@ -454,7 +454,7 @@
                 <p>Check that your AI has access to memory tools.</p>
                 <pre><code><span class="tok-cm"># MCP: Ask your AI "What memory tools do you have?"</span>
 <span class="tok-cm"># HTTP: curl http://127.0.0.1:9077/api/v1/health</span>
-<span class="tok-cm"># CLI:  claude-memory stats</span><span class="lang-label">text</span></code></pre>
+<span class="tok-cm"># CLI:  ai-memory stats</span><span class="lang-label">text</span></code></pre>
             </li>
         </ol>
     </div>
@@ -510,7 +510,7 @@
     <div class="container">
         <h2>13 MCP Tools <span class="badge">Universal Integration</span></h2>
         <p class="section-subtitle">
-            claude-memory runs as a Model Context Protocol (MCP) tool server over stdio.
+            ai-memory runs as a Model Context Protocol (MCP) tool server over stdio.
             Any MCP-compatible AI client -- Claude, ChatGPT, Grok, Llama, or custom agents -- discovers these tools automatically.
         </p>
 
@@ -559,7 +559,7 @@
                 <text x="640" y="105" text-anchor="middle" fill="#e6edf3" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5</text>
                 <text x="640" y="125" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="11">WAL mode</text>
 
-                <text x="400" y="210" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="600">claude-memory --db path/to/memory.db mcp</text>
+                <text x="400" y="210" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="600">ai-memory --db path/to/memory.db mcp</text>
             </svg>
         </div>
 
@@ -627,8 +627,8 @@
     <div class="container">
         <h2>20 HTTP API Endpoints <span class="badge">Universal Fallback</span></h2>
         <p class="section-subtitle">
-            Start with <code>claude-memory serve</code> (default: <code>http://127.0.0.1:9077</code>).
-            The HTTP API works with any AI platform, any programming language, any framework. If it can make an HTTP request, it can use claude-memory.
+            Start with <code>ai-memory serve</code> (default: <code>http://127.0.0.1:9077</code>).
+            The HTTP API works with any AI platform, any programming language, any framework. If it can make an HTTP request, it can use ai-memory.
         </p>
 
         <div class="table-wrap">
@@ -1058,7 +1058,7 @@
 <section id="shell">
     <div class="container">
         <h2>Interactive Shell</h2>
-        <p class="section-subtitle"><code>claude-memory shell</code> opens a REPL with color-coded output. Tiers are red/yellow/green, priority is visualized as bars, namespaces appear in cyan.</p>
+        <p class="section-subtitle"><code>ai-memory shell</code> opens a REPL with color-coded output. Tiers are red/yellow/green, priority is visualized as bars, namespaces appear in cyan.</p>
 
         <div class="diagram-wrap">
             <svg viewBox="0 0 700 310" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Interactive shell mockup">
@@ -1069,9 +1069,9 @@
                 <circle cx="42" cy="25" r="6" fill="#f85149"/>
                 <circle cx="62" cy="25" r="6" fill="#d29922"/>
                 <circle cx="82" cy="25" r="6" fill="#3fb950"/>
-                <text x="350" y="28" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="11">claude-memory shell</text>
+                <text x="350" y="28" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="11">ai-memory shell</text>
 
-                <text x="35" y="60" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">claude-memory shell -- type 'help' for commands, 'quit' to exit</text>
+                <text x="35" y="60" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">ai-memory shell -- type 'help' for commands, 'quit' to exit</text>
 
                 <text x="35" y="85" fill="#39d2c0" font-family="monospace" font-size="11">memory&gt;</text>
                 <text x="100" y="85" fill="#e6edf3" font-family="monospace" font-size="11">recall database setup</text>
@@ -1114,22 +1114,22 @@
 
         <h3>CLI Usage</h3>
         <pre><code><span class="tok-cm"># Store a memory</span>
-<span class="tok-cmd">claude-memory</span> store <span class="tok-flag">-T</span> <span class="tok-str">"Project uses Rust 2021 edition"</span> \
+<span class="tok-cmd">ai-memory</span> store <span class="tok-flag">-T</span> <span class="tok-str">"Project uses Rust 2021 edition"</span> \
   <span class="tok-flag">-c</span> <span class="tok-str">"Rust 2021, Axum for HTTP, SQLite for storage."</span> \
   <span class="tok-flag">--tier</span> long <span class="tok-flag">--priority</span> <span class="tok-num">7</span>
 
 <span class="tok-cm"># Recall relevant memories</span>
-<span class="tok-cmd">claude-memory</span> recall <span class="tok-str">"what language and framework"</span>
+<span class="tok-cmd">ai-memory</span> recall <span class="tok-str">"what language and framework"</span>
 
 <span class="tok-cm"># Exact keyword search</span>
-<span class="tok-cmd">claude-memory</span> search <span class="tok-str">"Axum"</span>
+<span class="tok-cmd">ai-memory</span> search <span class="tok-str">"Axum"</span>
 
 <span class="tok-cm"># List all, JSON output</span>
-<span class="tok-cmd">claude-memory</span> list <span class="tok-flag">--json</span><span class="lang-label">bash</span></code></pre>
+<span class="tok-cmd">ai-memory</span> list <span class="tok-flag">--json</span><span class="lang-label">bash</span></code></pre>
 
         <h3>HTTP API Usage</h3>
         <pre><code><span class="tok-cm"># Start the daemon</span>
-<span class="tok-cmd">claude-memory</span> serve &amp;
+<span class="tok-cmd">ai-memory</span> serve &amp;
 
 <span class="tok-cm"># Store via API (works from any language, any AI backend)</span>
 <span class="tok-cmd">curl</span> <span class="tok-flag">-X POST</span> <span class="tok-url">http://127.0.0.1:9077/api/v1/memories</span> \
@@ -1205,7 +1205,7 @@
             <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/ADMIN_GUIDE.md">Admin Guide</a>
         </div>
         <p>
-            <strong>claude-memory</strong> v0.3.0 &mdash; AI-Agnostic MCP Memory Server
+            <strong>ai-memory</strong> v0.3.0 &mdash; AI-Agnostic MCP Memory Server
         </p>
         <p style="margin-top:.5rem">
             Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. All rights reserved.

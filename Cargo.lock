@@ -24,6 +24,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "ai-memory"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "clap",
+ "clap_complete",
+ "clap_mangen",
+ "criterion",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -296,27 +317,6 @@ checksum = "7e30ffc187e2e3aeafcd1c6e2aa416e29739454c0ccaa419226d5ecd181f2d78"
 dependencies = [
  "clap",
  "roff",
-]
-
-[[package]]
-name = "claude-memory"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "axum",
- "chrono",
- "clap",
- "clap_complete",
- "clap_mangen",
- "criterion",
- "rusqlite",
- "serde",
- "serde_json",
- "tokio",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]

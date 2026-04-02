@@ -49,10 +49,10 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: claude-memory
+            artifact: ai-memory
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: claude-memory
+            artifact: ai-memory
     steps:
       - uses: actions/checkout@v4
 
@@ -71,18 +71,18 @@ jobs:
           mkdir -p dist
           cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
           cd dist
-          tar czf claude-memory-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+          tar czf ai-memory-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
 
       - name: Upload release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: claude-memory-${{ matrix.target }}
-          path: dist/claude-memory-${{ matrix.target }}.tar.gz
+          name: ai-memory-${{ matrix.target }}
+          path: dist/ai-memory-${{ matrix.target }}.tar.gz
 
       - name: Create GitHub Release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/claude-memory-${{ matrix.target }}.tar.gz
+          files: dist/ai-memory-${{ matrix.target }}.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

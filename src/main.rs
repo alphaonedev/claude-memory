@@ -25,19 +25,19 @@ use tracing_subscriber::EnvFilter;
 
 use crate::models::Tier;
 
-const DEFAULT_DB: &str = "claude-memory.db";
+const DEFAULT_DB: &str = "ai-memory.db";
 const DEFAULT_PORT: u16 = 9077;
 const GC_INTERVAL_SECS: u64 = 1800;
 
 #[derive(Parser)]
 #[command(
-    name = "claude-memory",
-    about = "Persistent memory daemon for Claude Code — short, mid, and long-term recall"
+    name = "ai-memory",
+    about = "AI-agnostic persistent memory — MCP server, HTTP API, and CLI for any AI platform"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Command,
-    #[arg(long, env = "CLAUDE_MEMORY_DB", default_value = DEFAULT_DB, global = true)]
+    #[arg(long, env = "AI_MEMORY_DB", default_value = DEFAULT_DB, global = true)]
     db: PathBuf,
     /// Output as JSON (machine-parseable)
     #[arg(long, global = true, default_value_t = false)]
@@ -368,7 +368,7 @@ async fn main() -> Result<()> {
             generate(
                 a.shell,
                 &mut Cli::command(),
-                "claude-memory",
+                "ai-memory",
                 &mut std::io::stdout(),
             );
             Ok(())
@@ -386,7 +386,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()
-                .add_directive("claude_memory=info".parse()?)
+                .add_directive("ai_memory=info".parse()?)
                 .add_directive("tower_http=info".parse()?),
         )
         .init();
@@ -441,7 +441,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
-    tracing::info!("claude-memory listening on {addr}");
+    tracing::info!("ai-memory listening on {addr}");
     tracing::info!("database: {}", db_path.display());
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
@@ -1021,7 +1021,7 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
     let conn = db::open(&db_path)?;
     println!(
         "{}",
-        color::bold("claude-memory shell — type 'help' for commands, 'quit' to exit")
+        color::bold("ai-memory shell — type 'help' for commands, 'quit' to exit")
     );
     let stdin = std::io::stdin();
     loop {

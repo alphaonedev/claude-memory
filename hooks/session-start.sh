@@ -2,8 +2,8 @@
 # Claude Code hook: auto-recall relevant memories on session start
 # Add to .claude/settings.json under hooks.PreToolUse or run manually
 
-DB="${CLAUDE_MEMORY_DB:-claude-memory.db}"
-BINARY="${CLAUDE_MEMORY_BIN:-claude-memory}"
+DB="${AI_MEMORY_DB:-ai-memory.db}"
+BINARY="${AI_MEMORY_BIN:-ai-memory}"
 
 # Auto-detect namespace from git
 NS=$($BINARY --db "$DB" --json store --tier short -T "_ns_probe" --content "probe" --source hook 2>/dev/null | grep -o '"namespace":"[^"]*"' | head -1 | cut -d'"' -f4)

@@ -1,10 +1,10 @@
 # User Guide
 
-> **BLUF (Bottom Line Up Front):** `claude-memory` gives any AI assistant persistent memory across sessions. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Configure the MCP server once, and your AI automatically stores and recalls knowledge -- your project architecture, preferences, past decisions, and hard-won lessons.
+> **BLUF (Bottom Line Up Front):** `ai-memory` gives any AI assistant persistent memory across sessions. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Configure the MCP server once, and your AI automatically stores and recalls knowledge -- your project architecture, preferences, past decisions, and hard-won lessons.
 
 ## What Is This and Why Do I Need It?
 
-`claude-memory` gives any AI assistant persistent memory across sessions. Without it, every conversation starts from zero. With it, your AI can:
+`ai-memory` gives any AI assistant persistent memory across sessions. Without it, every conversation starts from zero. With it, your AI can:
 
 - Remember your project architecture, preferences, and past decisions
 - Recall debugging context from yesterday
@@ -15,7 +15,7 @@ Think of it as a brain for your AI assistant -- short-term for what you're doing
 
 ## MCP Integration (Recommended)
 
-The easiest way to use claude-memory is as an **MCP tool server**. MCP (Model Context Protocol) is an open standard supported by multiple AI platforms. Once configured, your AI client can store and recall memories natively without any manual CLI usage.
+The easiest way to use ai-memory is as an **MCP tool server**. MCP (Model Context Protocol) is an open standard supported by multiple AI platforms. Once configured, your AI client can store and recall memories natively without any manual CLI usage.
 
 ### Setup
 
@@ -25,8 +25,8 @@ Each AI platform has its own MCP configuration location. Below is an example for
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -61,7 +61,7 @@ Your AI assistant uses these tools automatically during conversations. You can a
 ### Store Your First Memory
 
 ```bash
-claude-memory store \
+ai-memory store \
   -T "Project uses PostgreSQL 15" \
   -c "The main database is PostgreSQL 15 with pgvector for embeddings." \
   --tier long \
@@ -76,14 +76,14 @@ You can set a custom expiration on any memory:
 
 ```bash
 # Set an explicit expiration timestamp
-claude-memory store \
+ai-memory store \
   -T "Sprint 42 goals" \
   -c "Finish migration, deploy v2 API." \
   --tier mid \
   --expires-at "2026-04-15T00:00:00Z"
 
 # Or set a TTL in seconds (e.g., 2 hours)
-claude-memory store \
+ai-memory store \
   -T "Current debugging session" \
   -c "Investigating auth timeout in login.rs" \
   --tier short \
@@ -93,7 +93,7 @@ claude-memory store \
 ### Recall Memories
 
 ```bash
-claude-memory recall "database setup"
+ai-memory recall "database setup"
 ```
 
 This performs a fuzzy OR search across all your memories and returns the most relevant ones, ranked by a 6-factor composite score:
@@ -113,7 +113,7 @@ Recall also automatically:
 ### Search for Exact Matches
 
 ```bash
-claude-memory search "PostgreSQL"
+ai-memory search "PostgreSQL"
 ```
 
 Search uses AND semantics -- all terms must match. Use this when you know exactly what you're looking for. Search uses the same 6-factor ranking but without the tier boost.
@@ -140,20 +140,20 @@ Namespaces isolate memories per project. If you omit `--namespace`, it auto-dete
 
 ```bash
 # These are equivalent when run inside a git repo named "my-app":
-claude-memory store -T "API uses REST" -c "..." --namespace my-app
-claude-memory store -T "API uses REST" -c "..."  # auto-detects "my-app"
+ai-memory store -T "API uses REST" -c "..." --namespace my-app
+ai-memory store -T "API uses REST" -c "..."  # auto-detects "my-app"
 ```
 
 List all namespaces:
 
 ```bash
-claude-memory namespaces
+ai-memory namespaces
 ```
 
 Filter recall or search to a specific namespace:
 
 ```bash
-claude-memory recall "auth flow" --namespace my-app
+ai-memory recall "auth flow" --namespace my-app
 ```
 
 ## Memory Linking
@@ -161,7 +161,7 @@ claude-memory recall "auth flow" --namespace my-app
 Connect related memories with typed relations:
 
 ```bash
-claude-memory link <source-id> <target-id> --relation supersedes
+ai-memory link <source-id> <target-id> --relation supersedes
 ```
 
 Relation types:
@@ -173,13 +173,13 @@ Relation types:
 When you `get` a memory, its links are shown alongside it:
 
 ```bash
-claude-memory get <id>
+ai-memory get <id>
 # Shows the memory plus all its links
 ```
 
 ## Contradiction Detection
 
-When you store a memory, claude-memory automatically checks for existing memories in the same namespace with similar titles. If potential contradictions are found, you get a warning:
+When you store a memory, ai-memory automatically checks for existing memories in the same namespace with similar titles. If potential contradictions are found, you get a warning:
 
 ```
 stored: abc123 [long] (ns=my-app)
@@ -193,7 +193,7 @@ In JSON mode (`--json`), the response includes `potential_contradictions` with t
 After accumulating scattered memories about a topic, merge them into a single long-term summary:
 
 ```bash
-claude-memory consolidate "id1,id2,id3" \
+ai-memory consolidate "id1,id2,id3" \
   -T "Auth system architecture" \
   -s "JWT tokens with refresh rotation, RBAC via middleware, sessions in Redis."
 ```
@@ -208,10 +208,10 @@ Consolidation:
 Update an existing memory by ID. Only the fields you provide are changed:
 
 ```bash
-claude-memory update <id> -T "New title" -c "New content" --priority 8
+ai-memory update <id> -T "New title" -c "New content" --priority 8
 
 # Set a custom expiration on an existing memory
-claude-memory update <id> --expires-at "2026-06-01T00:00:00Z"
+ai-memory update <id> --expires-at "2026-06-01T00:00:00Z"
 ```
 
 ## Listing with Pagination
@@ -220,13 +220,13 @@ Browse memories with filters and pagination using `--offset`:
 
 ```bash
 # First page (default)
-claude-memory list --namespace my-app --limit 20
+ai-memory list --namespace my-app --limit 20
 
 # Second page
-claude-memory list --namespace my-app --limit 20 --offset 20
+ai-memory list --namespace my-app --limit 20 --offset 20
 
 # Third page
-claude-memory list --namespace my-app --limit 20 --offset 40
+ai-memory list --namespace my-app --limit 20 --offset 40
 ```
 
 ## Common Workflows
@@ -236,7 +236,7 @@ claude-memory list --namespace my-app --limit 20 --offset 40
 Recall context relevant to what you're about to work on:
 
 ```bash
-claude-memory recall "auth module refactor" --namespace my-app --limit 5
+ai-memory recall "auth module refactor" --namespace my-app --limit 5
 ```
 
 ### Learning Something New
@@ -244,7 +244,7 @@ claude-memory recall "auth module refactor" --namespace my-app --limit 5
 When you discover something important during a session:
 
 ```bash
-claude-memory store \
+ai-memory store \
   -T "Rate limiter uses token bucket" \
   -c "The rate limiter in middleware.rs uses a token bucket algorithm with 100 req/min default." \
   --tier mid --priority 6
@@ -255,7 +255,7 @@ claude-memory store \
 When the user corrects you, store it as high-priority long-term:
 
 ```bash
-claude-memory store \
+ai-memory store \
   -T "User correction: always use snake_case for API fields" \
   -c "The user prefers snake_case for all JSON API response fields, not camelCase." \
   --tier long --priority 9 --source user
@@ -266,7 +266,7 @@ claude-memory store \
 If a mid-tier memory turns out to be permanently valuable:
 
 ```bash
-claude-memory promote <memory-id>
+ai-memory promote <memory-id>
 ```
 
 ### Bulk Cleanup
@@ -274,13 +274,13 @@ claude-memory promote <memory-id>
 Delete all short-term memories in a namespace:
 
 ```bash
-claude-memory forget --namespace my-app --tier short
+ai-memory forget --namespace my-app --tier short
 ```
 
 Delete memories matching a pattern:
 
 ```bash
-claude-memory forget --pattern "deprecated API"
+ai-memory forget --pattern "deprecated API"
 ```
 
 ### Time-Filtered Queries
@@ -288,25 +288,25 @@ claude-memory forget --pattern "deprecated API"
 List memories created in the last week:
 
 ```bash
-claude-memory list --since 2026-03-23T00:00:00Z
+ai-memory list --since 2026-03-23T00:00:00Z
 ```
 
 Search within a date range:
 
 ```bash
-claude-memory search "migration" --since 2026-01-01T00:00:00Z --until 2026-03-01T00:00:00Z
+ai-memory search "migration" --since 2026-01-01T00:00:00Z --until 2026-03-01T00:00:00Z
 ```
 
 ### Export and Backup
 
 ```bash
-claude-memory export > memories-backup.json
+ai-memory export > memories-backup.json
 ```
 
 Restore (preserves links):
 
 ```bash
-claude-memory import < memories-backup.json
+ai-memory import < memories-backup.json
 ```
 
 ## Priority Guide
@@ -323,7 +323,7 @@ claude-memory import < memories-backup.json
 Confidence (0.0 to 1.0) indicates how certain a memory is. Default is 1.0. Lower confidence for things that might change:
 
 ```bash
-claude-memory store \
+ai-memory store \
   -T "API might switch to GraphQL" \
   -c "Team is evaluating GraphQL migration." \
   --confidence 0.5
@@ -351,8 +351,8 @@ Every memory tracks its source. Valid sources:
 Tag memories for filtered retrieval:
 
 ```bash
-claude-memory store -T "Deploy process" -c "..." --tags "devops,ci,deploy"
-claude-memory recall "deployment" --tags "devops"
+ai-memory store -T "Deploy process" -c "..." --tags "devops,ci,deploy"
+ai-memory recall "deployment" --tags "devops"
 ```
 
 ## Interactive Shell
@@ -360,7 +360,7 @@ claude-memory recall "deployment" --tags "devops"
 The `shell` command opens a REPL (read-eval-print loop) for browsing and managing memories interactively. Output uses color-coded tier labels and priority bars.
 
 ```bash
-claude-memory shell
+ai-memory shell
 ```
 
 Available REPL commands:
@@ -397,13 +397,13 @@ Sync memories between two SQLite database files. Useful for keeping laptop and s
 
 ```bash
 # Pull all memories from remote database into local
-claude-memory sync /path/to/remote.db --direction pull
+ai-memory sync /path/to/remote.db --direction pull
 
 # Push local memories to remote database
-claude-memory sync /path/to/remote.db --direction push
+ai-memory sync /path/to/remote.db --direction push
 
 # Bidirectional merge -- both databases end up with all memories
-claude-memory sync /path/to/remote.db --direction merge
+ai-memory sync /path/to/remote.db --direction merge
 ```
 
 Sync uses the same dedup-safe upsert as regular stores:
@@ -415,13 +415,13 @@ Sync uses the same dedup-safe upsert as regular stores:
 
 ```bash
 # On laptop, mount remote DB (e.g., via sshfs or rsync'd copy)
-scp server:/var/lib/claude-memory/claude-memory.db /tmp/remote-memory.db
+scp server:/var/lib/ai-memory/ai-memory.db /tmp/remote-memory.db
 
 # Merge both ways
-claude-memory sync /tmp/remote-memory.db --direction merge
+ai-memory sync /tmp/remote-memory.db --direction merge
 
 # Copy merged remote back
-scp /tmp/remote-memory.db server:/var/lib/claude-memory/claude-memory.db
+scp /tmp/remote-memory.db server:/var/lib/ai-memory/ai-memory.db
 ```
 
 ## Auto-Consolidation
@@ -430,16 +430,16 @@ Automatically group memories by namespace and primary tag, then consolidate grou
 
 ```bash
 # Dry run -- see what would be consolidated
-claude-memory auto-consolidate --dry-run
+ai-memory auto-consolidate --dry-run
 
 # Consolidate all namespaces (groups of 3+ memories)
-claude-memory auto-consolidate
+ai-memory auto-consolidate
 
 # Only short-term memories, minimum 5 per group
-claude-memory auto-consolidate --short-only --min-count 5
+ai-memory auto-consolidate --short-only --min-count 5
 
 # Only a specific namespace
-claude-memory auto-consolidate --namespace my-project
+ai-memory auto-consolidate --namespace my-project
 ```
 
 How it works:
@@ -456,7 +456,7 @@ Use `--dry-run` first to preview what would be consolidated.
 When two memories conflict, resolve the contradiction by declaring a winner:
 
 ```bash
-claude-memory resolve <winner_id> <loser_id>
+ai-memory resolve <winner_id> <loser_id>
 ```
 
 This command:
@@ -472,16 +472,16 @@ Generate and view the built-in man page:
 
 ```bash
 # View immediately
-claude-memory man | man -l -
+ai-memory man | man -l -
 
 # Install system-wide
-claude-memory man | sudo tee /usr/local/share/man/man1/claude-memory.1 > /dev/null
+ai-memory man | sudo tee /usr/local/share/man/man1/ai-memory.1 > /dev/null
 ```
 
 ## FAQ
 
 **Q: Where is the database stored?**
-A: By default, `claude-memory.db` in the current directory. Override with `--db /path/to/db` or the `CLAUDE_MEMORY_DB` environment variable.
+A: By default, `ai-memory.db` in the current directory. Override with `--db /path/to/db` or the `AI_MEMORY_DB` environment variable.
 
 **Q: Do I need to run the HTTP daemon?**
 A: No. The MCP server and CLI commands work directly against the SQLite database. The HTTP daemon is an alternative interface that adds automatic background garbage collection.
@@ -496,7 +496,7 @@ A: Content is limited to 65,536 bytes (64 KB).
 A: A factor of `1/(1 + days_old * 0.1)` applied during recall ranking. A memory updated today gets a boost of 1.0, a memory from 10 days ago gets 0.5, and a memory from 100 days ago gets 0.09. This ensures recent memories are preferred when relevance is similar.
 
 **Q: Can I use this with AI tools other than Claude Code?**
-A: Absolutely. `claude-memory` is AI-agnostic. The MCP server speaks standard JSON-RPC over stdio and works with any MCP-compatible client -- Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API at `http://127.0.0.1:9077/api/v1/` is completely platform-independent -- any tool, framework, or script that can make HTTP requests can store and recall memories.
+A: Absolutely. `ai-memory` is AI-agnostic. The MCP server speaks standard JSON-RPC over stdio and works with any MCP-compatible client -- Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API at `http://127.0.0.1:9077/api/v1/` is completely platform-independent -- any tool, framework, or script that can make HTTP requests can store and recall memories.
 
 **Q: Are there limits on bulk operations?**
 A: Yes. Bulk create (`POST /memories/bulk`) and import (`POST /import`) are limited to 1,000 items per request to prevent abuse and memory exhaustion.

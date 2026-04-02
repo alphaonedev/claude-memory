@@ -2,7 +2,7 @@
 
 ## Architecture Overview
 
-`claude-memory` is an AI-agnostic memory management system built as a single Rust binary that serves three roles:
+`ai-memory` is an AI-agnostic memory management system built as a single Rust binary that serves three roles:
 
 1. **MCP tool server** -- stdio JSON-RPC server exposing 13 memory tools for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
@@ -246,8 +246,8 @@ GET /health
 
 Deep health check: verifies DB is readable and FTS5 integrity-check passes.
 
-Response (200): `{"status": "ok", "service": "claude-memory"}`
-Response (503): `{"status": "error", "service": "claude-memory"}`
+Response (200): `{"status": "ok", "service": "ai-memory"}`
+Response (503): `{"status": "error", "service": "ai-memory"}`
 
 ### Create Memory
 
@@ -259,7 +259,7 @@ Content-Type: application/json
   "title": "Project uses Axum",
   "content": "The HTTP server is built with Axum 0.8.",
   "tier": "mid",
-  "namespace": "claude-memory",
+  "namespace": "ai-memory",
   "tags": ["rust", "web"],
   "priority": 6,
   "confidence": 1.0,
@@ -274,7 +274,7 @@ Response (201):
 {
   "id": "a1b2c3d4-...",
   "tier": "mid",
-  "namespace": "claude-memory",
+  "namespace": "ai-memory",
   "title": "Project uses Axum",
   "potential_contradictions": ["id1", "id2"]
 }
@@ -489,7 +489,7 @@ Validates each memory before import. Limited to **1,000 memories per request**. 
 ## CLI Reference
 
 Global flags:
-- `--db <path>` -- database path (default: `claude-memory.db`, env: `CLAUDE_MEMORY_DB`)
+- `--db <path>` -- database path (default: `ai-memory.db`, env: `AI_MEMORY_DB`)
 - `--json` -- output as machine-parseable JSON
 
 ### `serve`
@@ -497,7 +497,7 @@ Global flags:
 Start the HTTP daemon (20 endpoints).
 
 ```bash
-claude-memory serve --host 127.0.0.1 --port 9077
+ai-memory serve --host 127.0.0.1 --port 9077
 ```
 
 ### `mcp`
@@ -505,7 +505,7 @@ claude-memory serve --host 127.0.0.1 --port 9077
 Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 13 tools.
 
 ```bash
-claude-memory mcp
+ai-memory mcp
 ```
 
 Reads JSON-RPC from stdin, writes responses to stdout. Logs to stderr. Correctly handles notifications (no response sent). Works with any MCP-compatible client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, etc.).
@@ -513,7 +513,7 @@ Reads JSON-RPC from stdin, writes responses to stdout. Logs to stderr. Correctly
 ### `store`
 
 ```bash
-claude-memory store \
+ai-memory store \
   -T "Title" \
   -c "Content" \
   --tier mid \
@@ -531,7 +531,7 @@ Use `-c -` to read content from stdin. Validates all fields before writing. `--e
 ### `update`
 
 ```bash
-claude-memory update <id> -T "New title" -c "New content" --priority 8 --expires-at "2026-06-01T00:00:00Z"
+ai-memory update <id> -T "New title" -c "New content" --priority 8 --expires-at "2026-06-01T00:00:00Z"
 ```
 
 The `--expires-at` flag sets or changes the expiration on an existing memory.
@@ -539,19 +539,19 @@ The `--expires-at` flag sets or changes the expiration on an existing memory.
 ### `recall`
 
 ```bash
-claude-memory recall "search context" --namespace my-app --limit 10 --tags auth --since 2026-01-01T00:00:00Z
+ai-memory recall "search context" --namespace my-app --limit 10 --tags auth --since 2026-01-01T00:00:00Z
 ```
 
 ### `search`
 
 ```bash
-claude-memory search "exact terms" --namespace my-app --tier long --limit 20 --since 2026-01-01 --until 2026-12-31 --tags rust
+ai-memory search "exact terms" --namespace my-app --tier long --limit 20 --since 2026-01-01 --until 2026-12-31 --tags rust
 ```
 
 ### `get`
 
 ```bash
-claude-memory get <id>
+ai-memory get <id>
 ```
 
 Shows the memory plus all its links.
@@ -559,7 +559,7 @@ Shows the memory plus all its links.
 ### `list`
 
 ```bash
-claude-memory list --namespace my-app --tier mid --limit 50 --offset 0 --since 2026-01-01 --until 2026-12-31 --tags devops
+ai-memory list --namespace my-app --tier mid --limit 50 --offset 0 --since 2026-01-01 --until 2026-12-31 --tags devops
 ```
 
 The `--offset` flag enables pagination. Use with `--limit` to page through results.
@@ -567,13 +567,13 @@ The `--offset` flag enables pagination. Use with `--limit` to page through resul
 ### `delete`
 
 ```bash
-claude-memory delete <id>
+ai-memory delete <id>
 ```
 
 ### `promote`
 
 ```bash
-claude-memory promote <id>
+ai-memory promote <id>
 ```
 
 Promotes to long-term and clears expiry.
@@ -581,7 +581,7 @@ Promotes to long-term and clears expiry.
 ### `forget`
 
 ```bash
-claude-memory forget --namespace my-app --pattern "old stuff" --tier short
+ai-memory forget --namespace my-app --pattern "old stuff" --tier short
 ```
 
 At least one filter is required.
@@ -589,7 +589,7 @@ At least one filter is required.
 ### `link`
 
 ```bash
-claude-memory link <source-id> <target-id> --relation supersedes
+ai-memory link <source-id> <target-id> --relation supersedes
 ```
 
 Relation types: `related_to` (default), `supersedes`, `contradicts`, `derived_from`. Self-links rejected.
@@ -597,32 +597,32 @@ Relation types: `related_to` (default), `supersedes`, `contradicts`, `derived_fr
 ### `consolidate`
 
 ```bash
-claude-memory consolidate "id1,id2,id3" -T "Summary title" -s "Consolidated content" --namespace my-app
+ai-memory consolidate "id1,id2,id3" -T "Summary title" -s "Consolidated content" --namespace my-app
 ```
 
 ### `gc`
 
 ```bash
-claude-memory gc
+ai-memory gc
 ```
 
 ### `stats`
 
 ```bash
-claude-memory stats
+ai-memory stats
 ```
 
 ### `namespaces`
 
 ```bash
-claude-memory namespaces
+ai-memory namespaces
 ```
 
 ### `export` / `import`
 
 ```bash
-claude-memory export > backup.json
-claude-memory import < backup.json
+ai-memory export > backup.json
+ai-memory import < backup.json
 ```
 
 Export includes memories and links. Import validates each memory and skips invalid ones.
@@ -632,7 +632,7 @@ Export includes memories and links. Import validates each memory and skips inval
 Resolve a contradiction by marking one memory as superseding another.
 
 ```bash
-claude-memory resolve <winner_id> <loser_id>
+ai-memory resolve <winner_id> <loser_id>
 ```
 
 Creates a "supersedes" link from winner to loser. Demotes the loser (priority=1, confidence=0.1). Touches the winner (bumps access count).
@@ -642,7 +642,7 @@ Creates a "supersedes" link from winner to loser. Demotes the loser (priority=1,
 Interactive REPL for browsing and managing memories.
 
 ```bash
-claude-memory shell
+ai-memory shell
 ```
 
 REPL commands: `recall <ctx>`, `search <q>`, `list [ns]`, `get <id>`, `stats`, `namespaces`, `delete <id>`, `help`, `quit`. Color output with tier labels and priority bars.
@@ -652,7 +652,7 @@ REPL commands: `recall <ctx>`, `search <q>`, `list [ns]`, `get <id>`, `stats`, `
 Sync memories between two database files.
 
 ```bash
-claude-memory sync <remote.db> --direction pull|push|merge
+ai-memory sync <remote.db> --direction pull|push|merge
 ```
 
 - `pull` -- import all memories from remote into local
@@ -666,7 +666,7 @@ Uses dedup-safe upsert (title+namespace). Links are synced alongside memories.
 Automatically group and consolidate memories.
 
 ```bash
-claude-memory auto-consolidate [--namespace <ns>] [--short-only] [--min-count 3] [--dry-run]
+ai-memory auto-consolidate [--namespace <ns>] [--short-only] [--min-count 3] [--dry-run]
 ```
 
 Groups memories by namespace+primary tag. Groups with >= min_count members are consolidated into one long-term memory. Use `--dry-run` to preview.
@@ -676,16 +676,16 @@ Groups memories by namespace+primary tag. Groups with >= min_count members are c
 Generate roff man page to stdout.
 
 ```bash
-claude-memory man           # print roff to stdout
-claude-memory man | man -l -  # view immediately
+ai-memory man           # print roff to stdout
+ai-memory man | man -l -  # view immediately
 ```
 
 ### `completions`
 
 ```bash
-claude-memory completions bash
-claude-memory completions zsh
-claude-memory completions fish
+ai-memory completions bash
+ai-memory completions zsh
+ai-memory completions fish
 ```
 
 ## Adding New Features
@@ -762,7 +762,7 @@ On tag push (e.g., `v0.2.0`):
 
 ```bash
 git clone https://github.com/alphaonedev/ai-memory-mcp.git
-cd claude-memory
+cd ai-memory
 
 # Debug build
 cargo build
@@ -770,7 +770,7 @@ cargo build
 # Release build (optimized, stripped)
 cargo build --release
 
-# The binary is at target/release/claude-memory
+# The binary is at target/release/ai-memory
 ```
 
 Release profile settings (from `Cargo.toml`):

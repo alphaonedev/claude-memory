@@ -1,6 +1,6 @@
 # Installation Guide
 
-> **BLUF (Bottom Line Up Front):** `claude-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 13 memory tools instantly. Total time: ~60 seconds.
+> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 13 memory tools instantly. Total time: ~60 seconds.
 
 ## Install in 60 Seconds
 
@@ -14,8 +14,8 @@
    {
      "mcpServers": {
        "memory": {
-         "command": "claude-memory",
-         "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+         "command": "ai-memory",
+         "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
        }
      }
    }
@@ -45,13 +45,13 @@ That's it. Everything below is optional detail.
 cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
 ```
 
-This builds a release binary and places it in `~/.cargo/bin/claude-memory`.
+This builds a release binary and places it in `~/.cargo/bin/ai-memory`.
 
 Or clone and build locally:
 
 ```bash
 git clone https://github.com/alphaonedev/ai-memory-mcp.git
-cd claude-memory
+cd ai-memory
 cargo install --path .
 ```
 
@@ -60,14 +60,14 @@ cargo install --path .
 Pre-built binaries are available on the [Releases](https://github.com/alphaonedev/ai-memory-mcp/releases) page for Linux (x86_64) and macOS (aarch64). Download the tarball for your platform:
 
 ```bash
-tar xzf claude-memory-x86_64-unknown-linux-gnu.tar.gz
-chmod +x claude-memory
-sudo mv claude-memory /usr/local/bin/
+tar xzf ai-memory-x86_64-unknown-linux-gnu.tar.gz
+chmod +x ai-memory
+sudo mv ai-memory /usr/local/bin/
 ```
 
 ## MCP Server Setup (Recommended)
 
-The primary integration path is the **MCP tool server**. MCP (Model Context Protocol) is an open standard -- `claude-memory` works with **any MCP-compatible AI client**, including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others.
+The primary integration path is the **MCP tool server**. MCP (Model Context Protocol) is an open standard -- `ai-memory` works with **any MCP-compatible AI client**, including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others.
 
 ### Step 1: Add MCP configuration
 
@@ -79,8 +79,8 @@ Each AI platform has its own MCP configuration location. The server command and 
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -89,17 +89,17 @@ Each AI platform has its own MCP configuration location. The server command and 
 > **Note for Claude Code:** MCP server configuration does **not** go in `settings.json` or `settings.local.json` -- those files do not support `mcpServers`.
 
 **Other MCP-compatible clients** -- consult your platform's documentation for where to register MCP servers. The server entry is the same:
-- **Command:** `claude-memory` (or full path if not in PATH)
+- **Command:** `ai-memory` (or full path if not in PATH)
 - **Args:** `["--db", "/path/to/memory.db", "mcp"]`
 
-If `claude-memory` is not in your PATH, use the full path to the binary:
+If `ai-memory` is not in your PATH, use the full path to the binary:
 
 ```json
 {
   "mcpServers": {
     "memory": {
-      "command": "/usr/local/bin/claude-memory",
-      "args": ["--db", "/var/lib/claude-memory/claude-memory.db", "mcp"]
+      "command": "/usr/local/bin/ai-memory",
+      "args": ["--db", "/var/lib/ai-memory/ai-memory.db", "mcp"]
     }
   }
 }
@@ -145,25 +145,25 @@ chmod +x ~/.claude/hooks/session-start.sh
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_MEMORY_DB` | `claude-memory.db` | Path to the database |
-| `CLAUDE_MEMORY_BIN` | `claude-memory` | Path to the binary |
+| `AI_MEMORY_DB` | `ai-memory.db` | Path to the database |
+| `AI_MEMORY_BIN` | `ai-memory` | Path to the binary |
 
 ## Systemd Service Setup (HTTP Daemon)
 
 If you want to run the HTTP daemon as a background service (alternative to MCP). The HTTP API at `localhost:9077` works with **any AI platform, framework, or tool** -- no MCP required:
 
 ```bash
-sudo tee /etc/systemd/system/claude-memory.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/ai-memory.service > /dev/null << 'EOF'
 [Unit]
 Description=Claude Memory Daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/claude-memory --db /var/lib/claude-memory/claude-memory.db serve
+ExecStart=/usr/local/bin/ai-memory --db /var/lib/ai-memory/ai-memory.db serve
 Restart=on-failure
 RestartSec=5
-Environment=RUST_LOG=claude_memory=info
+Environment=RUST_LOG=ai_memory=info
 
 # Graceful shutdown checkpoints the WAL
 KillSignal=SIGINT
@@ -177,30 +177,30 @@ EOF
 Create the data directory and enable the service:
 
 ```bash
-sudo mkdir -p /var/lib/claude-memory
+sudo mkdir -p /var/lib/ai-memory
 sudo systemctl daemon-reload
-sudo systemctl enable --now claude-memory
+sudo systemctl enable --now ai-memory
 ```
 
 ## Verify Installation
 
 ```bash
 # Check the binary
-claude-memory --help
+ai-memory --help
 
 # If running as MCP server, test manually:
-echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | claude-memory mcp
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ai-memory mcp
 # Expected: JSON-RPC response with serverInfo
 
 # If running as HTTP daemon, check health:
 curl http://127.0.0.1:9077/api/v1/health
-# Expected: {"status":"ok","service":"claude-memory"}
+# Expected: {"status":"ok","service":"ai-memory"}
 
 # Store a test memory via CLI
-claude-memory store -T "Installation test" -c "It works." --tier short
+ai-memory store -T "Installation test" -c "It works." --tier short
 
 # Recall it
-claude-memory recall "installation"
+ai-memory recall "installation"
 ```
 
 ## Man Page
@@ -209,12 +209,12 @@ Generate and install the man page:
 
 ```bash
 # View immediately
-claude-memory man | man -l -
+ai-memory man | man -l -
 
 # Install system-wide
-claude-memory man | sudo tee /usr/local/share/man/man1/claude-memory.1 > /dev/null
+ai-memory man | sudo tee /usr/local/share/man/man1/ai-memory.1 > /dev/null
 sudo mandb
-man claude-memory
+man ai-memory
 ```
 
 ## Shell Completions
@@ -223,28 +223,28 @@ Generate completions for your shell:
 
 ```bash
 # Bash
-claude-memory completions bash > ~/.local/share/bash-completion/completions/claude-memory
+ai-memory completions bash > ~/.local/share/bash-completion/completions/ai-memory
 
 # Zsh
-claude-memory completions zsh > ~/.zfunc/_claude-memory
+ai-memory completions zsh > ~/.zfunc/_ai-memory
 
 # Fish
-claude-memory completions fish > ~/.config/fish/completions/claude-memory.fish
+ai-memory completions fish > ~/.config/fish/completions/ai-memory.fish
 ```
 
 ## Multi-Node Sync Setup
 
-If you use claude-memory on multiple machines (e.g., laptop and server), you can sync databases:
+If you use ai-memory on multiple machines (e.g., laptop and server), you can sync databases:
 
 ```bash
 # Pull memories from a remote database (e.g., over NFS, sshfs, or rsync'd copy)
-claude-memory sync /mnt/server/claude-memory.db --direction pull
+ai-memory sync /mnt/server/ai-memory.db --direction pull
 
 # Push local memories to remote
-claude-memory sync /mnt/server/claude-memory.db --direction push
+ai-memory sync /mnt/server/ai-memory.db --direction push
 
 # Bidirectional merge (both sides get all memories, dedup-safe)
-claude-memory sync /mnt/server/claude-memory.db --direction merge
+ai-memory sync /mnt/server/ai-memory.db --direction merge
 ```
 
 The sync operation uses the same dedup-safe upsert as regular stores -- title+namespace conflicts are resolved by keeping the higher priority and never downgrading tier.
@@ -253,26 +253,26 @@ The sync operation uses the same dedup-safe upsert as regular stores -- title+na
 
 ```bash
 # Stop and remove the service (if using systemd)
-sudo systemctl stop claude-memory
-sudo systemctl disable claude-memory
-sudo rm /etc/systemd/system/claude-memory.service
+sudo systemctl stop ai-memory
+sudo systemctl disable ai-memory
+sudo rm /etc/systemd/system/ai-memory.service
 sudo systemctl daemon-reload
 
 # Remove MCP configuration from ~/.claude/.mcp.json
 
 # Remove the binary
-cargo uninstall claude-memory
-# or: sudo rm /usr/local/bin/claude-memory
+cargo uninstall ai-memory
+# or: sudo rm /usr/local/bin/ai-memory
 
 # Remove the database (WARNING: deletes all memories)
-rm -f claude-memory.db claude-memory.db-wal claude-memory.db-shm
+rm -f ai-memory.db ai-memory.db-wal ai-memory.db-shm
 # or if using the systemd path:
-# sudo rm -rf /var/lib/claude-memory
+# sudo rm -rf /var/lib/ai-memory
 ```
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_MEMORY_DB` | `claude-memory.db` | Path to the SQLite database file |
-| `RUST_LOG` | (none) | Log level filter (e.g., `claude_memory=info,tower_http=info`) |
+| `AI_MEMORY_DB` | `ai-memory.db` | Path to the SQLite database file |
+| `RUST_LOG` | (none) | Log level filter (e.g., `ai_memory=info,tower_http=info`) |

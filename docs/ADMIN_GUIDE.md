@@ -1,6 +1,6 @@
 # Admin Guide
 
-`claude-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
+`ai-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
 
 ## Deployment Options
 
@@ -14,8 +14,8 @@ Below is an example for **Claude Code** (`~/.claude/.mcp.json`). Other MCP-compa
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -36,7 +36,7 @@ The MCP server:
 Run the HTTP daemon directly in the foreground:
 
 ```bash
-claude-memory --db /path/to/claude-memory.db serve
+ai-memory --db /path/to/ai-memory.db serve
 ```
 
 The daemon listens on `127.0.0.1:9077` by default and exposes 20 HTTP endpoints.
@@ -44,17 +44,17 @@ The daemon listens on `127.0.0.1:9077` by default and exposes 20 HTTP endpoints.
 ### Systemd (Production HTTP Daemon)
 
 ```bash
-sudo tee /etc/systemd/system/claude-memory.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/ai-memory.service > /dev/null << 'EOF'
 [Unit]
 Description=Claude Memory Daemon
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/claude-memory --db /var/lib/claude-memory/claude-memory.db serve
+ExecStart=/usr/local/bin/ai-memory --db /var/lib/ai-memory/ai-memory.db serve
 Restart=on-failure
 RestartSec=5
-Environment=RUST_LOG=claude_memory=info,tower_http=info
+Environment=RUST_LOG=ai_memory=info,tower_http=info
 
 # Graceful shutdown: checkpoints WAL before exit
 KillSignal=SIGINT
@@ -64,16 +64,16 @@ TimeoutStopSec=10
 WantedBy=multi-user.target
 EOF
 
-sudo mkdir -p /var/lib/claude-memory
+sudo mkdir -p /var/lib/ai-memory
 sudo systemctl daemon-reload
-sudo systemctl enable --now claude-memory
+sudo systemctl enable --now ai-memory
 ```
 
 Check status:
 
 ```bash
-sudo systemctl status claude-memory
-sudo journalctl -u claude-memory -f
+sudo systemctl status ai-memory
+sudo journalctl -u ai-memory -f
 ```
 
 ### Docker
@@ -87,17 +87,17 @@ COPY . .
 RUN cargo build --release
 
 FROM debian:bookworm-slim
-COPY --from=builder /src/target/release/claude-memory /usr/local/bin/
+COPY --from=builder /src/target/release/ai-memory /usr/local/bin/
 VOLUME /data
 EXPOSE 9077
-CMD ["claude-memory", "--db", "/data/claude-memory.db", "serve"]
+CMD ["ai-memory", "--db", "/data/ai-memory.db", "serve"]
 ```
 
 Build and run:
 
 ```bash
-docker build -t claude-memory .
-docker run -d -p 127.0.0.1:9077:9077 -v claude-memory-data:/data claude-memory
+docker build -t ai-memory .
+docker run -d -p 127.0.0.1:9077:9077 -v ai-memory-data:/data ai-memory
 ```
 
 ## Configuration
@@ -106,7 +106,7 @@ docker run -d -p 127.0.0.1:9077:9077 -v claude-memory-data:/data claude-memory
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--db <path>` | `claude-memory.db` | Path to SQLite database |
+| `--db <path>` | `ai-memory.db` | Path to SQLite database |
 | `--host <addr>` | `127.0.0.1` | Bind address (serve only) |
 | `--port <port>` | `9077` | Bind port (serve only) |
 | `--json` | `false` | JSON output for CLI commands |
@@ -115,8 +115,8 @@ docker run -d -p 127.0.0.1:9077:9077 -v claude-memory-data:/data claude-memory
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `CLAUDE_MEMORY_DB` | `claude-memory.db` | Database path (overridden by `--db`) |
-| `RUST_LOG` | (none) | Logging filter (e.g., `claude_memory=info,tower_http=debug`) |
+| `AI_MEMORY_DB` | `ai-memory.db` | Database path (overridden by `--db`) |
+| `RUST_LOG` | (none) | Logging filter (e.g., `ai_memory=info,tower_http=debug`) |
 
 ### Compile-Time Constants
 
@@ -160,22 +160,22 @@ The database uses these pragmas (set automatically on open):
 **Live backup (while daemon is running):**
 
 ```bash
-sqlite3 /path/to/claude-memory.db ".backup /path/to/backup.db"
+sqlite3 /path/to/ai-memory.db ".backup /path/to/backup.db"
 ```
 
 **JSON export (includes links):**
 
 ```bash
-claude-memory --db /path/to/claude-memory.db export > backup.json
+ai-memory --db /path/to/ai-memory.db export > backup.json
 ```
 
 **File copy (daemon must be stopped or use WAL checkpoint first):**
 
 ```bash
-systemctl stop claude-memory
-cp /path/to/claude-memory.db /path/to/backup.db
-cp /path/to/claude-memory.db-wal /path/to/backup.db-wal 2>/dev/null
-systemctl start claude-memory
+systemctl stop ai-memory
+cp /path/to/ai-memory.db /path/to/backup.db
+cp /path/to/ai-memory.db-wal /path/to/backup.db-wal 2>/dev/null
+systemctl start ai-memory
 ```
 
 ### Restore
@@ -183,15 +183,15 @@ systemctl start claude-memory
 **From JSON (preserves links):**
 
 ```bash
-claude-memory --db /path/to/new.db import < backup.json
+ai-memory --db /path/to/new.db import < backup.json
 ```
 
 **From SQLite backup:**
 
 ```bash
-systemctl stop claude-memory
-cp /path/to/backup.db /var/lib/claude-memory/claude-memory.db
-systemctl start claude-memory
+systemctl stop ai-memory
+cp /path/to/backup.db /var/lib/ai-memory/ai-memory.db
+systemctl start ai-memory
 ```
 
 ### Migration
@@ -208,7 +208,7 @@ Manually trigger garbage collection:
 
 ```bash
 # Via CLI
-claude-memory gc
+ai-memory gc
 
 # Via API
 curl -X POST http://127.0.0.1:9077/api/v1/gc
@@ -217,13 +217,13 @@ curl -X POST http://127.0.0.1:9077/api/v1/gc
 Compact the database (reduces file size after many deletions):
 
 ```bash
-sqlite3 /path/to/claude-memory.db "VACUUM"
+sqlite3 /path/to/ai-memory.db "VACUUM"
 ```
 
 Rebuild the FTS index (if it becomes corrupt):
 
 ```bash
-sqlite3 /path/to/claude-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+sqlite3 /path/to/ai-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
 ```
 
 ## Security Hardening
@@ -278,7 +278,7 @@ All write paths go through the validation layer (`validate.rs`):
 
 ### Localhost Binding
 
-By default, the HTTP daemon binds to `127.0.0.1` only. It is **not accessible from the network**. This is intentional -- `claude-memory` is a local-machine tool.
+By default, the HTTP daemon binds to `127.0.0.1` only. It is **not accessible from the network**. This is intentional -- `ai-memory` is a local-machine tool.
 
 The MCP server communicates over stdio only -- no network exposure.
 
@@ -297,8 +297,8 @@ The MCP server correctly handles all JSON-RPC notifications (requests without an
 ### WAL Files
 
 SQLite WAL mode creates two additional files alongside the database:
-- `claude-memory.db-wal` -- write-ahead log
-- `claude-memory.db-shm` -- shared memory file
+- `ai-memory.db-wal` -- write-ahead log
+- `ai-memory.db-shm` -- shared memory file
 
 Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint(TRUNCATE)` on SIGINT). If the daemon crashes, these files persist but are automatically recovered on next open.
 
@@ -341,8 +341,8 @@ The health check performs a **deep verification**:
 1. Database is readable (runs `SELECT COUNT(*) FROM memories`)
 2. FTS5 index integrity check (`INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')`)
 
-Returns `200 OK` with `{"status": "ok", "service": "claude-memory"}` if healthy.
-Returns `503 Service Unavailable` with `{"status": "error", "service": "claude-memory"}` if the database or FTS index is unhealthy.
+Returns `200 OK` with `{"status": "ok", "service": "ai-memory"}` if healthy.
+Returns `503 Service Unavailable` with `{"status": "error", "service": "ai-memory"}` if the database or FTS index is unhealthy.
 
 ### Stats Endpoint
 
@@ -365,12 +365,12 @@ The MCP server logs to stderr. Monitor via:
 ```bash
 # If running via an AI client, check your client's MCP logs
 # If running manually:
-claude-memory mcp 2>mcp-server.log
+ai-memory mcp 2>mcp-server.log
 ```
 
 Key log messages:
-- `claude-memory MCP server started (stdio)` -- server is ready
-- `claude-memory MCP server stopped` -- stdin closed (AI client session ended), server exiting
+- `ai-memory MCP server started (stdio)` -- server is ready
+- `ai-memory MCP server stopped` -- stdin closed (AI client session ended), server exiting
 
 ### Logs
 
@@ -378,20 +378,20 @@ The HTTP daemon logs via `tracing` with configurable levels:
 
 ```bash
 # Info level (default recommended)
-RUST_LOG=claude_memory=info,tower_http=info claude-memory serve
+RUST_LOG=ai_memory=info,tower_http=info ai-memory serve
 
 # Debug level (verbose, includes all HTTP requests)
-RUST_LOG=claude_memory=debug,tower_http=debug claude-memory serve
+RUST_LOG=ai_memory=debug,tower_http=debug ai-memory serve
 
 # Trace level (extremely verbose)
-RUST_LOG=claude_memory=trace claude-memory serve
+RUST_LOG=ai_memory=trace ai-memory serve
 ```
 
 With systemd, logs go to the journal:
 
 ```bash
-sudo journalctl -u claude-memory -f
-sudo journalctl -u claude-memory --since "1 hour ago"
+sudo journalctl -u ai-memory -f
+sudo journalctl -u ai-memory --since "1 hour ago"
 ```
 
 ### Monitoring Script Example
@@ -400,8 +400,8 @@ sudo journalctl -u claude-memory --since "1 hour ago"
 #!/bin/bash
 HEALTH=$(curl -sf http://127.0.0.1:9077/api/v1/health | jq -r '.status')
 if [ "$HEALTH" != "ok" ]; then
-    echo "claude-memory health check failed"
-    systemctl restart claude-memory
+    echo "ai-memory health check failed"
+    systemctl restart ai-memory
 fi
 ```
 
@@ -427,7 +427,7 @@ Triggered by tags matching `v*` (e.g., `v0.1.0`):
 1. Builds release binaries for:
    - `x86_64-unknown-linux-gnu` (Ubuntu)
    - `aarch64-apple-darwin` (macOS ARM)
-2. Packages each as `claude-memory-<target>.tar.gz`
+2. Packages each as `ai-memory-<target>.tar.gz`
 3. Creates a GitHub Release with the artifacts
 
 ### Running CI Locally
@@ -448,20 +448,20 @@ For multi-machine deployments (e.g., laptop + server, or multiple workstations),
 
 ```bash
 # Pull remote changes to local
-claude-memory sync /mnt/shared/claude-memory.db --direction pull
+ai-memory sync /mnt/shared/ai-memory.db --direction pull
 
 # Push local changes to remote
-claude-memory sync /mnt/shared/claude-memory.db --direction push
+ai-memory sync /mnt/shared/ai-memory.db --direction push
 
 # Bidirectional merge (recommended)
-claude-memory sync /mnt/shared/claude-memory.db --direction merge
+ai-memory sync /mnt/shared/ai-memory.db --direction merge
 ```
 
 ### Automated Sync via Cron
 
 ```bash
 # Sync every 15 minutes (bidirectional merge)
-*/15 * * * * /usr/local/bin/claude-memory --db /var/lib/claude-memory/claude-memory.db sync /mnt/shared/remote-memory.db --direction merge --json >> /var/log/claude-memory-sync.log 2>&1
+*/15 * * * * /usr/local/bin/ai-memory --db /var/lib/ai-memory/ai-memory.db sync /mnt/shared/remote-memory.db --direction merge --json >> /var/log/ai-memory-sync.log 2>&1
 ```
 
 Sync uses the same dedup-safe upsert as regular stores:
@@ -477,13 +477,13 @@ If the remote database is on another machine, mount it or copy it first:
 ```bash
 # Option 1: sshfs mount
 mkdir -p /mnt/remote-memory
-sshfs user@server:/var/lib/claude-memory /mnt/remote-memory
-claude-memory sync /mnt/remote-memory/claude-memory.db --direction merge
+sshfs user@server:/var/lib/ai-memory /mnt/remote-memory
+ai-memory sync /mnt/remote-memory/ai-memory.db --direction merge
 
 # Option 2: rsync + sync + rsync
-rsync -a server:/var/lib/claude-memory/claude-memory.db /tmp/remote.db
-claude-memory sync /tmp/remote.db --direction merge
-rsync -a /tmp/remote.db server:/var/lib/claude-memory/claude-memory.db
+rsync -a server:/var/lib/ai-memory/ai-memory.db /tmp/remote.db
+ai-memory sync /tmp/remote.db --direction merge
+rsync -a /tmp/remote.db server:/var/lib/ai-memory/ai-memory.db
 ```
 
 ## Auto-Consolidation (Maintenance)
@@ -494,20 +494,20 @@ Auto-consolidation groups memories by namespace and primary tag, then merges gro
 
 ```bash
 # Preview what would be consolidated
-claude-memory auto-consolidate --dry-run
+ai-memory auto-consolidate --dry-run
 
 # Consolidate all namespaces (groups of 3+)
-claude-memory auto-consolidate
+ai-memory auto-consolidate
 
 # Only short-term memories, minimum 5 per group
-claude-memory auto-consolidate --short-only --min-count 5
+ai-memory auto-consolidate --short-only --min-count 5
 ```
 
 ### Cron Schedule
 
 ```bash
 # Run auto-consolidation daily at 3am, short-term memories only
-0 3 * * * /usr/local/bin/claude-memory --db /var/lib/claude-memory/claude-memory.db auto-consolidate --short-only --json >> /var/log/claude-memory-consolidate.log 2>&1
+0 3 * * * /usr/local/bin/ai-memory --db /var/lib/ai-memory/ai-memory.db auto-consolidate --short-only --json >> /var/log/ai-memory-consolidate.log 2>&1
 ```
 
 ## Man Page
@@ -515,14 +515,14 @@ claude-memory auto-consolidate --short-only --min-count 5
 Install the man page for system-wide documentation:
 
 ```bash
-claude-memory man | sudo tee /usr/local/share/man/man1/claude-memory.1 > /dev/null
+ai-memory man | sudo tee /usr/local/share/man/man1/ai-memory.1 > /dev/null
 sudo mandb
-man claude-memory
+man ai-memory
 ```
 
 ## Scaling Considerations
 
-`claude-memory` is designed for single-machine use. It is not a distributed system.
+`ai-memory` is designed for single-machine use. It is not a distributed system.
 
 - **Concurrency**: The daemon uses `Arc<Mutex<Connection>>` -- one write at a time, but this is fine for a single-user tool. SQLite WAL mode allows concurrent reads.
 - **MCP concurrency**: The MCP server is single-threaded (synchronous stdio loop), one request at a time. This is by design -- MCP clients typically send one request at a time.
@@ -538,19 +538,19 @@ man claude-memory
 ```bash
 ss -tlnp | grep 9077
 # Kill the existing process or use a different port
-claude-memory serve --port 9078
+ai-memory serve --port 9078
 ```
 
 **Database locked:**
 ```bash
 # Remove stale WAL files (only if daemon is not running)
-rm -f claude-memory.db-wal claude-memory.db-shm
+rm -f ai-memory.db-wal ai-memory.db-shm
 ```
 
 **Permission denied:**
 ```bash
 # Check file permissions
-ls -la /path/to/claude-memory.db
+ls -la /path/to/ai-memory.db
 # Ensure the user running the daemon has read/write access
 ```
 
@@ -571,10 +571,10 @@ If recall or search is slow:
 
 ```bash
 # Rebuild the FTS index
-sqlite3 /path/to/claude-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+sqlite3 /path/to/ai-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
 
 # Compact the database
-sqlite3 /path/to/claude-memory.db "VACUUM"
+sqlite3 /path/to/ai-memory.db "VACUUM"
 ```
 
 ### FTS index corruption
@@ -583,24 +583,24 @@ Symptoms: search returns no results or errors.
 
 ```bash
 # Check integrity
-sqlite3 /path/to/claude-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')"
+sqlite3 /path/to/ai-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('integrity-check')"
 
 # Rebuild if corrupt
-sqlite3 /path/to/claude-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
+sqlite3 /path/to/ai-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
 ```
 
 ### Database is growing too large
 
 ```bash
 # Check what's taking space
-claude-memory stats
+ai-memory stats
 
 # Delete expired memories
-claude-memory gc
+ai-memory gc
 
 # Delete all short-term memories in a namespace
-claude-memory forget --tier short --namespace my-app
+ai-memory forget --tier short --namespace my-app
 
 # Compact after deletion
-sqlite3 /path/to/claude-memory.db "VACUUM"
+sqlite3 /path/to/ai-memory.db "VACUUM"
 ```

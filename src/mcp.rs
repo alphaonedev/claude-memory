@@ -1,7 +1,7 @@
 // Copyright (c) 2026 AlphaOne LLC. All rights reserved.
 // Licensed under the MIT License. See LICENSE file in the project root.
 
-//! MCP (Model Context Protocol) server for claude-memory.
+//! MCP (Model Context Protocol) server for ai-memory.
 //! Exposes memory operations as tools for any MCP-compatible AI client over stdio JSON-RPC.
 
 use serde::{Deserialize, Serialize};
@@ -525,7 +525,7 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
                 "protocolVersion": "2024-11-05",
                 "capabilities": { "tools": {} },
                 "serverInfo": {
-                    "name": "claude-memory",
+                    "name": "ai-memory",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             }),
@@ -583,7 +583,7 @@ pub fn run_mcp_server(db_path: &Path) -> anyhow::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    eprintln!("claude-memory MCP server started (stdio)");
+    eprintln!("ai-memory MCP server started (stdio)");
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -613,6 +613,6 @@ pub fn run_mcp_server(db_path: &Path) -> anyhow::Result<()> {
         stdout.flush()?;
     }
 
-    eprintln!("claude-memory MCP server stopped");
+    eprintln!("ai-memory MCP server stopped");
     Ok(())
 }

@@ -31,7 +31,7 @@ pub async fn health(State(state): State<Db>) -> impl IntoResponse {
     };
     (
         code,
-        Json(json!({"status": if ok { "ok" } else { "error" }, "service": "claude-memory"})),
+        Json(json!({"status": if ok { "ok" } else { "error" }, "service": "ai-memory"})),
     )
         .into_response()
 }

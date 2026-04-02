@@ -1,8 +1,8 @@
 # Claude Memory Integration
 
-> **Note:** `claude-memory` is AI-agnostic and works with any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others). This file contains **Claude Code-specific** integration instructions.
+> **Note:** `ai-memory` is AI-agnostic and works with any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others). This file contains **Claude Code-specific** integration instructions.
 
-This project is `claude-memory` -- a persistent memory daemon. While it works with any MCP client, this file provides instructions specific to Claude Code.
+This project is `ai-memory` -- a persistent memory daemon. While it works with any MCP client, this file provides instructions specific to Claude Code.
 
 ## Primary Integration: MCP Server
 
@@ -12,8 +12,8 @@ The recommended integration path is the **MCP tool server**. Configure in `~/.cl
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -25,16 +25,16 @@ This gives Claude Code 13 native tools: `memory_store`, `memory_recall`, `memory
 
 ## Alternative: CLI Integration
 
-The CLI binary is at `claude-memory` (or `claude-memory` if in PATH).
+The CLI binary is at `ai-memory` (or `ai-memory` if in PATH).
 
 ### At session start -- recall relevant context:
 ```bash
-claude-memory --db /root/.claude/claude-memory.db recall "<current project or task context>"
+ai-memory --db /root/.claude/ai-memory.db recall "<current project or task context>"
 ```
 
 ### When you learn something important -- store it:
 ```bash
-claude-memory --db /root/.claude/claude-memory.db store \
+ai-memory --db /root/.claude/ai-memory.db store \
   --tier long \
   --namespace "<project-name>" \
   --title "What you learned" \
@@ -50,7 +50,7 @@ claude-memory --db /root/.claude/claude-memory.db store \
 
 ### When the user corrects you -- store as high-priority long-term:
 ```bash
-claude-memory --db /root/.claude/claude-memory.db store \
+ai-memory --db /root/.claude/ai-memory.db store \
   --tier long --priority 9 --source user \
   --title "User correction: <what>" \
   --content "<the correction and why>"

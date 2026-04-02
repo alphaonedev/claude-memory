@@ -1,5 +1,5 @@
 [package]
-name = "claude-memory"
+name = "ai-memory"
 version = "0.3.0"
 edition = "2021"
 authors = ["AlphaOne LLC"]

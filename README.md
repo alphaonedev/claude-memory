@@ -14,13 +14,13 @@
 [![Tests](https://img.shields.io/badge/tests-41-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-13_tools-blueviolet)]()
 
-**claude-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
+**ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
 ---
 
 ## Compatible AI Platforms
 
-claude-memory integrates with any AI platform that supports the **Model Context Protocol (MCP)**. MCP is the universal standard for connecting AI assistants to external tools and data sources.
+ai-memory integrates with any AI platform that supports the **Model Context Protocol (MCP)**. MCP is the universal standard for connecting AI assistants to external tools and data sources.
 
 | Platform | Integration Method | Status |
 |----------|-------------------|--------|
@@ -31,7 +31,7 @@ claude-memory integrates with any AI platform that supports the **Model Context 
 | **Any MCP-compatible AI** | MCP stdio JSON-RPC | Fully supported |
 | **Any AI or tool** | HTTP REST API / CLI | Universal fallback |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (20 endpoints on localhost) and the **CLI** (24 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use claude-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (20 endpoints on localhost) and the **CLI** (24 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -47,7 +47,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 Follow the prompts, then restart your terminal (or run `source ~/.cargo/env`).
 
-**Step 2: Install claude-memory**
+**Step 2: Install ai-memory**
 
 ```bash
 cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
@@ -57,14 +57,14 @@ This compiles the binary and puts it in your PATH. It takes a minute or two.
 
 **Step 3: Connect your AI**
 
-**For MCP-compatible AI platforms** -- add claude-memory as an MCP server in your AI's configuration. The exact location varies by platform, but the server definition is the same:
+**For MCP-compatible AI platforms** -- add ai-memory as an MCP server in your AI's configuration. The exact location varies by platform, but the server definition is the same:
 
 ```json
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -75,7 +75,7 @@ For Claude Code, this file goes at `~/.claude/.mcp.json` (global config). Other 
 **For non-MCP platforms** -- start the HTTP server and point your AI at the REST API:
 
 ```bash
-claude-memory serve
+ai-memory serve
 # API available at http://127.0.0.1:9077/api/v1/
 ```
 
@@ -87,7 +87,7 @@ Restart your AI assistant. If using MCP, it now has 13 memory tools. Ask it: "St
 
 ## What Does It Do?
 
-AI assistants forget everything between conversations. claude-memory fixes that.
+AI assistants forget everything between conversations. ai-memory fixes that.
 
 It runs as an MCP (Model Context Protocol) tool server -- a background process that your AI talks to natively. When your AI learns something important, it stores it. When it needs context, it recalls relevant memories ranked by a 6-factor scoring algorithm. Memories live in three tiers:
 
@@ -97,7 +97,7 @@ It runs as an MCP (Model Context Protocol) tool server -- a background process t
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, claude-memory also exposes a full HTTP REST API (20 endpoints on port 9077) and a complete CLI (24 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 9077) and a complete CLI (24 commands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
@@ -139,7 +139,7 @@ Beyond MCP, claude-memory also exposes a full HTTP REST API (20 endpoints on por
 - **Graceful shutdown** -- SIGTERM/SIGINT checkpoints WAL for clean exit
 - **Deep health check** -- verifies DB accessibility and FTS5 integrity
 - **Shell completions** -- bash, zsh, fish
-- **Man page** -- `claude-memory man` generates roff to stdout
+- **Man page** -- `ai-memory man` generates roff to stdout
 - **Time filters** -- `--since`/`--until` on list and search
 - **Human-readable ages** -- "2h ago", "3d ago" in CLI output
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
@@ -201,8 +201,8 @@ MCP is the recommended integration. Your AI gets 13 native memory tools with zer
 {
   "mcpServers": {
     "memory": {
-      "command": "claude-memory",
-      "args": ["--db", "~/.claude/claude-memory.db", "mcp"]
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
     }
   }
 }
@@ -213,7 +213,7 @@ MCP is the recommended integration. Your AI gets 13 native memory tools with zer
 Start the HTTP server for REST API access. Any AI, script, or automation that can make HTTP calls can use this:
 
 ```bash
-claude-memory serve
+ai-memory serve
 # 20 endpoints at http://127.0.0.1:9077/api/v1/
 ```
 
@@ -222,9 +222,9 @@ claude-memory serve
 The CLI works standalone or as a building block for AI integrations that run shell commands:
 
 ```bash
-claude-memory store --tier long --title "Architecture decision" --content "We use PostgreSQL"
-claude-memory recall "database choice"
-claude-memory search "PostgreSQL"
+ai-memory store --tier long --title "Architecture decision" --content "We use PostgreSQL"
+ai-memory recall "database choice"
+ai-memory search "PostgreSQL"
 ```
 
 ---
@@ -253,7 +253,7 @@ These 13 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## HTTP API
 
-20 endpoints on `127.0.0.1:9077`. Start with `claude-memory serve`.
+20 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -282,7 +282,7 @@ These 13 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## CLI Commands
 
-24 commands. Run `claude-memory <command> --help` for details on any command.
+24 commands. Run `ai-memory <command> --help` for details on any command.
 
 | Command | Description |
 |---------|-------------|
@@ -311,11 +311,11 @@ These 13 tools are available to any MCP-compatible AI when configured as an MCP 
 | `completions` | Generate shell completions (bash, zsh, fish) |
 | `man` | Generate roff man page to stdout |
 
-The top-level `claude-memory` binary also accepts global flags:
+The top-level `ai-memory` binary also accepts global flags:
 
 | Flag | Description |
 |------|-------------|
-| `--db <path>` | Database path (default: `~/.local/share/claude-memory/memories.db`, or `$CLAUDE_MEMORY_DB`) |
+| `--db <path>` | Database path (default: `~/.local/share/ai-memory/memories.db`, or `$AI_MEMORY_DB`) |
 | `--json` | JSON output on all commands |
 
 ---
@@ -364,7 +364,7 @@ score = (fts_relevance * -1)
 
 ## Security
 
-claude-memory includes hardening across all input paths:
+ai-memory includes hardening across all input paths:
 
 - **Transaction safety** -- all multi-step database operations use transactions; no partial writes on failure
 - **FTS injection prevention** -- user input is sanitized before reaching FTS5 queries; special characters are escaped
@@ -382,7 +382,7 @@ claude-memory includes hardening across all input paths:
 |-------|----------|
 | [Installation Guide](docs/INSTALL.md) | Getting it running (includes MCP setup for multiple AI platforms) |
 | [User Guide](docs/USER_GUIDE.md) | AI assistant users who want persistent memory |
-| [Developer Guide](docs/DEVELOPER_GUIDE.md) | Building on or contributing to claude-memory |
+| [Developer Guide](docs/DEVELOPER_GUIDE.md) | Building on or contributing to ai-memory |
 | [Admin Guide](docs/ADMIN_GUIDE.md) | Deploying, monitoring, and troubleshooting |
 | [GitHub Pages](https://alphaonedev.github.io/ai-memory-mcp/) | Visual overview with animated diagrams |
 
