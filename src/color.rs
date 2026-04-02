@@ -4,17 +4,16 @@
 //! ANSI color output for CLI — zero dependencies.
 
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
 
-static mut COLOR_ENABLED: bool = true;
+static COLOR_ENABLED: AtomicBool = AtomicBool::new(true);
 
 pub fn init() {
-    unsafe {
-        COLOR_ENABLED = std::io::stdout().is_terminal();
-    }
+    COLOR_ENABLED.store(std::io::stdout().is_terminal(), Ordering::Relaxed);
 }
 
 fn enabled() -> bool {
-    unsafe { COLOR_ENABLED }
+    COLOR_ENABLED.load(Ordering::Relaxed)
 }
 
 fn wrap(code: &str, text: &str) -> String {

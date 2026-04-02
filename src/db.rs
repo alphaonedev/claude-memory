@@ -92,41 +92,57 @@ fn migrate(conn: &Connection) -> Result<()> {
             |r| r.get(0),
         )
         .unwrap_or(0);
-    if version < 2 {
-        // Check which columns exist using PRAGMA
-        let mut has_confidence = false;
-        let mut has_source = false;
-        let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
-        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        for col in cols {
-            match col?.as_str() {
-                "confidence" => has_confidence = true,
-                "source" => has_source = true,
-                _ => {}
+
+    if version >= CURRENT_SCHEMA_VERSION {
+        return Ok(());
+    }
+
+    conn.execute_batch("BEGIN EXCLUSIVE")?;
+    let result = (|| -> Result<()> {
+        if version < 2 {
+            let mut has_confidence = false;
+            let mut has_source = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                match col?.as_str() {
+                    "confidence" => has_confidence = true,
+                    "source" => has_source = true,
+                    _ => {}
+                }
+            }
+            drop(stmt);
+            if !has_confidence {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+                    [],
+                )?;
+            }
+            if !has_source {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
+                    [],
+                )?;
             }
         }
-        drop(stmt);
-        if !has_confidence {
-            conn.execute(
-                "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
-                [],
-            )?;
-        }
-        if !has_source {
-            conn.execute(
-                "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
-                [],
-            )?;
-        }
-    }
-    if version < CURRENT_SCHEMA_VERSION {
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
             params![CURRENT_SCHEMA_VERSION],
         )?;
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
@@ -557,22 +573,18 @@ pub fn consolidate(
     conn.execute_batch("BEGIN IMMEDIATE")?;
 
     let result = (|| -> Result<String> {
-        // Verify all IDs exist before proceeding
-        for id in ids {
-            if get(conn, id)?.is_none() {
-                anyhow::bail!("memory not found: {}", id);
-            }
-        }
-
-        // Collect max priority and all tags from source memories
+        // Verify all IDs exist and collect metadata in one pass
         let mut max_priority = 5i32;
         let mut all_tags: Vec<String> = Vec::new();
         let mut total_access = 0i64;
         for id in ids {
-            if let Some(mem) = get(conn, id)? {
-                max_priority = max_priority.max(mem.priority);
-                all_tags.extend(mem.tags);
-                total_access += mem.access_count;
+            match get(conn, id)? {
+                Some(mem) => {
+                    max_priority = max_priority.max(mem.priority);
+                    all_tags.extend(mem.tags);
+                    total_access += mem.access_count;
+                }
+                None => anyhow::bail!("memory not found: {}", id),
             }
         }
         all_tags.sort();
@@ -625,7 +637,7 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
                     *c != '"' && *c != '*' && *c != '^'
                         && *c != '{' && *c != '}'
                         && *c != '(' && *c != ')'
-                        && *c != ':' && *c != '-'
+                        && *c != ':' && *c != '-' && *c != '|'
                 })
                 .collect();
             if clean.is_empty() {

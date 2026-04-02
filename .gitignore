@@ -2,3 +2,13 @@
 *.db
 *.db-wal
 *.db-shm
+
+# Secrets & credentials
+.env
+.env.*
+*.key
+*.pem
+*.p12
+*.pfx
+*.secret
+credentials*

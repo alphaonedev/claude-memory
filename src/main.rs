@@ -1002,6 +1002,7 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
 
 fn cmd_resolve(db_path: PathBuf, args: ResolveArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
+    validate::validate_link(&args.winner_id, &args.loser_id, "supersedes")?;
     db::create_link(&conn, &args.winner_id, &args.loser_id, "supersedes")?;
     db::update(
         &conn,
@@ -1191,6 +1192,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &links {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                    continue;
+                }
                 let _ = db::create_link(
                     &local_conn,
                     &link.source_id,
@@ -1221,6 +1225,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &links {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                    continue;
+                }
                 let _ = db::create_link(
                     &remote_conn,
                     &link.source_id,
@@ -1253,6 +1260,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &r_links {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                    continue;
+                }
                 let _ = db::create_link(
                     &local_conn,
                     &link.source_id,
@@ -1269,6 +1279,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 }
             }
             for link in &l_links {
+                if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                    continue;
+                }
                 let _ = db::create_link(
                     &remote_conn,
                     &link.source_id,
