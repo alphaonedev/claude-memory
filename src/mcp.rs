@@ -17,7 +17,6 @@ use crate::validate;
 
 #[derive(Deserialize)]
 struct RpcRequest {
-    #[allow(dead_code)]
     jsonrpc: String,
     id: Option<Value>,
     method: String,
@@ -495,12 +494,16 @@ fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value
 }
 
 fn handle_consolidate(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
-    let ids: Vec<String> = params["ids"]
+    let ids_arr = params["ids"]
         .as_array()
-        .ok_or("ids is required (array of memory IDs)")?
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
+        .ok_or("ids is required (array of memory IDs)")?;
+    let mut ids = Vec::with_capacity(ids_arr.len());
+    for (i, v) in ids_arr.iter().enumerate() {
+        match v.as_str() {
+            Some(s) => ids.push(s.to_string()),
+            None => return Err(format!("ids[{}] must be a string", i)),
+        }
+    }
     let title = params["title"].as_str().ok_or("title is required")?;
     let summary = params["summary"].as_str().ok_or("summary is required")?;
     let namespace = params["namespace"].as_str().unwrap_or("global");
@@ -518,6 +521,11 @@ fn handle_consolidate(conn: &rusqlite::Connection, params: &Value) -> Result<Val
 fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
+    // Validate JSON-RPC 2.0 version
+    if req.jsonrpc != "2.0" {
+        return err_response(id, -32600, "invalid JSON-RPC version (must be \"2.0\")".into());
+    }
+
     match req.method.as_str() {
         "initialize" => ok_response(
             id,
@@ -533,8 +541,16 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
         "notifications/initialized" => ok_response(id, json!({})),
         "tools/list" => ok_response(id, tool_definitions()),
         "tools/call" => {
-            let tool_name = req.params["name"].as_str().unwrap_or("");
-            let arguments = &req.params["arguments"];
+            let tool_name = match req.params["name"].as_str() {
+                Some(name) if !name.is_empty() => name,
+                _ => return err_response(id, -32602, "missing or empty tool name".into()),
+            };
+            let empty_obj = json!({});
+            let arguments = if req.params["arguments"].is_object() {
+                &req.params["arguments"]
+            } else {
+                &empty_obj
+            };
 
             let result = match tool_name {
                 "memory_store" => handle_store(conn, arguments),
@@ -613,6 +629,7 @@ pub fn run_mcp_server(db_path: &Path) -> anyhow::Result<()> {
         stdout.flush()?;
     }
 
+    let _ = db::checkpoint(&conn);
     eprintln!("ai-memory MCP server stopped");
     Ok(())
 }

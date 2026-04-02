@@ -36,6 +36,6 @@ name = "recall"
 harness = false
 
 [profile.release]
-opt-level = 2
+opt-level = 3
 strip = true
 lto = "thin"

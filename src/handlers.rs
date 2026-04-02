@@ -200,6 +200,13 @@ pub async fn promote_memory(
     State(state): State<Db>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate::validate_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
     match db::update(
         &lock.0, &id, None, None, Some(&Tier::Long), None, None, None, None, None,
@@ -212,11 +219,14 @@ pub async fn promote_memory(
             Json(json!({"promoted": true, "id": id, "tier": "long"})).into_response()
         }
         Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
-        Err(_e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"error": "database error"})),
-        )
-            .into_response(),
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -465,9 +475,20 @@ pub async fn run_gc(State(state): State<Db>) -> impl IntoResponse {
 
 pub async fn export_memories(State(state): State<Db>) -> impl IntoResponse {
     let lock = state.lock().await;
-    let memories = db::export_all(&lock.0).unwrap_or_default();
-    let links = db::export_links(&lock.0).unwrap_or_default();
-    Json(json!({"memories": memories, "links": links, "count": memories.len(), "exported_at": Utc::now().to_rfc3339()})).into_response()
+    match (db::export_all(&lock.0), db::export_links(&lock.0)) {
+        (Ok(memories), Ok(links)) => {
+            let count = memories.len();
+            Json(json!({"memories": memories, "links": links, "count": count, "exported_at": Utc::now().to_rfc3339()})).into_response()
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!("export error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 pub async fn import_memories(

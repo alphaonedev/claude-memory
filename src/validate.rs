@@ -107,9 +107,10 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
             bail!("tags cannot contain empty strings");
         }
         if trimmed.len() > MAX_TAG_LEN {
+            let preview: String = trimmed.chars().take(20).collect();
             bail!(
                 "tag '{}...' exceeds max length of {} bytes",
-                &trimmed[..20.min(trimmed.len())],
+                preview,
                 MAX_TAG_LEN
             );
         }
@@ -293,8 +294,12 @@ pub fn validate_consolidate(
     if ids.len() > 100 {
         bail!("cannot consolidate more than 100 memories at once");
     }
+    let mut seen = std::collections::HashSet::new();
     for id in ids {
         validate_id(id)?;
+        if !seen.insert(id) {
+            bail!("duplicate memory ID: {}", id);
+        }
     }
     validate_title(title)?;
     validate_content(summary)?;

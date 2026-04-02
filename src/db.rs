@@ -93,17 +93,30 @@ fn migrate(conn: &Connection) -> Result<()> {
         )
         .unwrap_or(0);
     if version < 2 {
-        // Add confidence and source columns if missing (v1 -> v2)
-        // Ignore "duplicate column" errors but propagate real failures
-        for col_sql in &[
-            "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
-            "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
-        ] {
-            match conn.execute(col_sql, []) {
-                Ok(_) => {}
-                Err(e) if e.to_string().contains("duplicate column") => {}
-                Err(e) => return Err(e.into()),
+        // Check which columns exist using PRAGMA
+        let mut has_confidence = false;
+        let mut has_source = false;
+        let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+        let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        for col in cols {
+            match col?.as_str() {
+                "confidence" => has_confidence = true,
+                "source" => has_source = true,
+                _ => {}
             }
+        }
+        drop(stmt);
+        if !has_confidence {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0",
+                [],
+            )?;
+        }
+        if !has_source {
+            conn.execute(
+                "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
+                [],
+            )?;
         }
     }
     if version < CURRENT_SCHEMA_VERSION {
@@ -195,7 +208,7 @@ pub fn touch(conn: &Connection, id: &str) -> Result<()> {
     let result = (|| -> Result<()> {
         conn.execute(
             "UPDATE memories SET
-                access_count = access_count + 1,
+                access_count = MIN(access_count + 1, 1000000),
                 last_accessed_at = ?1,
                 expires_at = CASE
                     WHEN tier = 'long' THEN expires_at
@@ -224,7 +237,12 @@ pub fn touch(conn: &Connection, id: &str) -> Result<()> {
 
     match result {
         Ok(()) => { conn.execute_batch("COMMIT")?; Ok(()) }
-        Err(e) => { let _ = conn.execute_batch("ROLLBACK"); Err(e) }
+        Err(e) => {
+            if let Err(rb) = conn.execute_batch("ROLLBACK") {
+                tracing::error!("ROLLBACK failed in touch: {}", rb);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -453,7 +471,9 @@ pub fn recall(
 
     // Touch all recalled memories (bumps access, extends TTL, auto-promotes)
     for mem in &results {
-        let _ = touch(conn, &mem.id);
+        if let Err(e) = touch(conn, &mem.id) {
+            tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
+        }
     }
     Ok(results)
 }
@@ -537,6 +557,13 @@ pub fn consolidate(
     conn.execute_batch("BEGIN IMMEDIATE")?;
 
     let result = (|| -> Result<String> {
+        // Verify all IDs exist before proceeding
+        for id in ids {
+            if get(conn, id)?.is_none() {
+                anyhow::bail!("memory not found: {}", id);
+            }
+        }
+
         // Collect max priority and all tags from source memories
         let mut max_priority = 5i32;
         let mut all_tags: Vec<String> = Vec::new();
@@ -571,7 +598,12 @@ pub fn consolidate(
 
     match result {
         Ok(id) => { conn.execute_batch("COMMIT")?; Ok(id) }
-        Err(e) => { let _ = conn.execute_batch("ROLLBACK"); Err(e) }
+        Err(e) => {
+            if let Err(rb) = conn.execute_batch("ROLLBACK") {
+                tracing::error!("ROLLBACK failed in consolidate: {}", rb);
+            }
+            Err(e)
+        }
     }
 }
 
@@ -580,9 +612,22 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
     let tokens: Vec<String> = input
         .split_whitespace()
         .filter(|t| !t.is_empty())
+        .filter(|t| {
+            // Filter out FTS5 boolean operators as standalone tokens
+            let upper = t.to_uppercase();
+            upper != "AND" && upper != "OR" && upper != "NOT" && upper != "NEAR"
+        })
         .map(|token| {
-            // Strip all FTS5 special characters to prevent injection
-            let clean: String = token.chars().filter(|c| *c != '"' && *c != '*' && *c != '^' && *c != '{' && *c != '}').collect();
+            // Strip ALL FTS5 special characters to prevent injection
+            let clean: String = token
+                .chars()
+                .filter(|c| {
+                    *c != '"' && *c != '*' && *c != '^'
+                        && *c != '{' && *c != '}'
+                        && *c != '(' && *c != ')'
+                        && *c != ':' && *c != '-'
+                })
+                .collect();
             if clean.is_empty() {
                 return String::new();
             }
@@ -591,7 +636,7 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
         .filter(|t| !t.is_empty())
         .collect();
     if tokens.is_empty() {
-        return "\"\"".to_string();
+        return "\"_empty_\"".to_string();
     }
     tokens.join(joiner)
 }

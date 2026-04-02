@@ -11,6 +11,7 @@ mod validate;
 
 use anyhow::Result;
 use axum::{
+    extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
     Router,
 };
@@ -20,6 +21,7 @@ use clap_complete::{generate, Shell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
@@ -28,6 +30,16 @@ use crate::models::Tier;
 const DEFAULT_DB: &str = "ai-memory.db";
 const DEFAULT_PORT: u16 = 9077;
 const GC_INTERVAL_SECS: u64 = 1800;
+
+fn id_short(id: &str) -> &str {
+    let end = id.len().min(8);
+    // Find a valid UTF-8 boundary
+    let mut end = end;
+    while end > 0 && !id.is_char_boundary(end) {
+        end -= 1;
+    }
+    &id[..end]
+}
 
 #[derive(Parser)]
 #[command(
@@ -438,6 +450,8 @@ async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
         .route("/api/v1/export", get(handlers::export_memories))
         .route("/api/v1/import", post(handlers::import_memories))
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB max request body
+        .layer(CorsLayer::permissive())
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
@@ -626,7 +640,7 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
         };
         println!(
             "[{}] {} {} (ns={}, {}x, {}{})",
-            color::tier_color(mem.tier.as_str(), &format!("{}/{}", mem.tier, &mem.id[..8])),
+            color::tier_color(mem.tier.as_str(), &format!("{}/{}", mem.tier, id_short(&mem.id))),
             color::bold(&mem.title),
             color::priority_bar(mem.priority),
             color::cyan(&mem.namespace),
@@ -674,7 +688,7 @@ fn cmd_search(db_path: PathBuf, args: SearchArgs, json_out: bool) -> Result<()> 
         println!(
             "[{}/{}] {} (p={}, ns={}, {})",
             mem.tier,
-            &mem.id[..8],
+            id_short(&mem.id),
             mem.title,
             mem.priority,
             mem.namespace,
@@ -746,7 +760,7 @@ fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool) -> Result<()> {
         println!(
             "[{}/{}] {} (p={}, ns={}, {})",
             mem.tier,
-            &mem.id[..8],
+            id_short(&mem.id),
             mem.title,
             mem.priority,
             mem.namespace,
@@ -1168,6 +1182,10 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
             let links = db::export_links(&remote_conn)?;
             let mut n = 0;
             for mem in &mems {
+                if let Err(e) = validate::validate_memory(mem) {
+                    tracing::warn!("sync: skipping invalid memory {}: {}", mem.id, e);
+                    continue;
+                }
                 if db::insert(&local_conn, mem).is_ok() {
                     n += 1;
                 }
@@ -1194,6 +1212,10 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
             let links = db::export_links(&local_conn)?;
             let mut n = 0;
             for mem in &mems {
+                if let Err(e) = validate::validate_memory(mem) {
+                    tracing::warn!("sync: skipping invalid memory {}: {}", mem.id, e);
+                    continue;
+                }
                 if db::insert(&remote_conn, mem).is_ok() {
                     n += 1;
                 }
@@ -1223,6 +1245,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
             let (mut pulled, mut pushed) = (0, 0);
             // Use timestamp-aware insert so newer version wins on conflict
             for mem in &r_mems {
+                if validate::validate_memory(mem).is_err() {
+                    continue;
+                }
                 if db::insert_if_newer(&local_conn, mem).is_ok() {
                     pulled += 1;
                 }
@@ -1236,6 +1261,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                 );
             }
             for mem in &l_mems {
+                if validate::validate_memory(mem).is_err() {
+                    continue;
+                }
                 if db::insert_if_newer(&remote_conn, mem).is_ok() {
                     pushed += 1;
                 }
