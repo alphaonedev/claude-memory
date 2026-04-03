@@ -105,7 +105,7 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "string", "description": "Filter by tag"},
                         "since": {"type": "string", "description": "Only memories created after this RFC3339 timestamp"},
                         "until": {"type": "string", "description": "Only memories created before this RFC3339 timestamp"},
-                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "json", "description": "Response format. 'toon' uses TOON (Token-Oriented Object Notation) for 40-60% fewer tokens. 'toon_compact' omits timestamps."}
+                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]
                 }
@@ -120,7 +120,7 @@ fn tool_definitions() -> Value {
                         "namespace": {"type": "string"},
                         "tier": {"type": "string", "enum": ["short", "mid", "long"]},
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
-                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "json", "description": "Response format. 'toon' for 40-60% fewer tokens."}
+                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     },
                     "required": ["query"]
                 }
@@ -134,7 +134,7 @@ fn tool_definitions() -> Value {
                         "namespace": {"type": "string"},
                         "tier": {"type": "string", "enum": ["short", "mid", "long"]},
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
-                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "json", "description": "Response format. 'toon' for 40-60% fewer tokens."}
+                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     }
                 }
             },
@@ -286,6 +286,87 @@ fn tool_definitions() -> Value {
             }
         ]
     })
+}
+
+// --- MCP Prompts ---
+
+/// Return the list of available prompts.
+fn prompt_definitions() -> Value {
+    json!({
+        "prompts": [
+            {
+                "name": "recall-first",
+                "description": "System prompt for AI clients: proactive memory recall, TOON format, tier strategy.",
+                "arguments": [
+                    {
+                        "name": "namespace",
+                        "description": "Optional namespace to scope recall (e.g. project name)",
+                        "required": false
+                    }
+                ]
+            },
+            {
+                "name": "memory-workflow",
+                "description": "Quick reference card for memory tool usage patterns."
+            }
+        ]
+    })
+}
+
+/// Return the content of a specific prompt.
+fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
+    match name {
+        "recall-first" => {
+            let ns_hint = params
+                .get("arguments")
+                .and_then(|a| a.get("namespace"))
+                .and_then(|v| v.as_str())
+                .map(|ns| format!(" Scope recall to namespace \"{}\" when relevant.", ns))
+                .unwrap_or_default();
+
+            Ok(json!({
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": format!(
+"You have access to a persistent memory system (ai-memory). Follow these rules:\n\
+1. RECALL FIRST: At conversation start, call memory_recall with the user's apparent topic. Before answering any question about prior work, recall first.\n\
+2. STORE LEARNINGS: When the user corrects you or teaches something, call memory_store with tier:long, priority:9.\n\
+3. TOON FORMAT: All recall/list/search responses default to TOON compact (79% smaller than JSON). Pass format:\"json\" only if you need structured parsing.\n\
+4. TIERS: short=6h ephemeral, mid=7d working knowledge, long=permanent. Mid auto-promotes to long at 5 accesses.\n\
+5. DEDUP: Storing with an existing title+namespace updates the existing memory, not a duplicate.\n\
+6. NAMESPACES: Organize by project/topic. Always pass namespace when storing and recalling.\n\
+7. CAPABILITIES: Call memory_capabilities once per session to discover available features (tier-dependent).\n\
+8. TAGS: Use tags for cross-cutting concerns. memory_auto_tag can generate them if available.{ns_hint}")
+                    }
+                }]
+            }))
+        }
+        "memory-workflow" => {
+            Ok(json!({
+                "messages": [{
+                    "role": "user",
+                    "content": {
+                        "type": "text",
+                        "text": "\
+STORE: memory_store(title, content, tier, namespace, tags, priority) — dedup by title+ns\n\
+RECALL: memory_recall(context, namespace) → ranked results (TOON compact default)\n\
+SEARCH: memory_search(query, namespace) → exact AND match (TOON compact default)\n\
+LIST: memory_list(namespace, tier) → browse with filters (TOON compact default)\n\
+GET: memory_get(id) → single memory with links\n\
+PROMOTE: memory_promote(id) — mid→long, clears expiry\n\
+CONSOLIDATE: memory_consolidate(ids, title) — merge N→1, LLM summary if available\n\
+LINK: memory_link(source_id, target_id, relation) — related_to|supersedes|contradicts|derived_from\n\
+TAG: memory_auto_tag(id) — LLM generates tags (smart+ tier)\n\
+EXPAND: memory_expand_query(query) — LLM broadens search terms (smart+ tier)\n\
+CONTRADICT: memory_detect_contradiction(id_a, id_b) — LLM checks conflict (smart+ tier)"
+                    }
+                }]
+            }))
+        }
+        _ => Err(format!("unknown prompt: {name}")),
+    }
 }
 
 // --- Tool handlers ---
@@ -827,7 +908,7 @@ fn handle_request(
             id,
             json!({
                 "protocolVersion": "2024-11-05",
-                "capabilities": { "tools": {} },
+                "capabilities": { "tools": {}, "prompts": {} },
                 "serverInfo": {
                     "name": "ai-memory",
                     "version": env!("CARGO_PKG_VERSION")
@@ -836,6 +917,17 @@ fn handle_request(
         ),
         "notifications/initialized" => ok_response(id, json!({})),
         "tools/list" => ok_response(id, tool_definitions()),
+        "prompts/list" => ok_response(id, prompt_definitions()),
+        "prompts/get" => {
+            let prompt_name = match req.params["name"].as_str() {
+                Some(name) if !name.is_empty() => name,
+                _ => return err_response(id, -32602, "missing or empty prompt name".into()),
+            };
+            match prompt_content(prompt_name, &req.params) {
+                Ok(val) => ok_response(id, val),
+                Err(e) => err_response(id, -32602, e),
+            }
+        }
         "tools/call" => {
             let tool_name = match req.params["name"].as_str() {
                 Some(name) if !name.is_empty() => name,
@@ -872,7 +964,7 @@ fn handle_request(
             match result {
                 Ok(val) => {
                     // Check if TOON format requested for recall/search/list
-                    let format_str = arguments.get("format").and_then(|v| v.as_str()).unwrap_or("json");
+                    let format_str = arguments.get("format").and_then(|v| v.as_str()).unwrap_or("toon_compact");
                     let text = match format_str {
                         "toon" if matches!(tool_name, "memory_recall" | "memory_list") => {
                             crate::toon::memories_to_toon(&val, false)

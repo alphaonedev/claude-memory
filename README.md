@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-81_(41_unit_+_40_integration)-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-84_(41_unit_+_43_integration)-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
@@ -321,7 +321,9 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **81 tests** -- 41 unit tests (config 9, validate 8, reranker 7, toon 6, embeddings 5, hnsw 4, llm 2) + 40 integration tests
+- **84 tests** -- 41 unit tests (config 9, validate 8, reranker 7, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests
+- **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
+- **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
 - **Criterion benchmarks** -- insert, recall, search at 1K scale
 - **GitHub Actions CI/CD** -- fmt, clippy, test, build on Ubuntu + macOS, release on tag
 
