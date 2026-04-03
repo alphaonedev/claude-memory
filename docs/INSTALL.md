@@ -353,32 +353,70 @@ ai-memory completions zsh > ~/.zfunc/_ai-memory
 ai-memory completions fish > ~/.config/fish/completions/ai-memory.fish
 ```
 
-## Ollama Installation (smart/autonomous tiers)
+## Ollama Installation (Smart & Autonomous Tiers)
 
-The `smart` and `autonomous` tiers require [Ollama](https://ollama.ai/) for LLM-powered features (query expansion, auto-tagging, contradiction detection). The `keyword` and `semantic` tiers do **not** require Ollama.
+Smart and autonomous tiers require [Ollama](https://ollama.com) running locally for LLM inference (Gemma 4 models). The `keyword` and `semantic` tiers do **not** require Ollama.
 
-### Install Ollama
-
-```bash
-curl -fsSL https://ollama.ai/install.sh | sh
-```
-
-### Pull a Model
+### macOS
 
 ```bash
-ollama pull llama3.2       # ~1 GB, recommended for smart tier
-ollama pull llama3.1       # ~4 GB, recommended for autonomous tier
+# Install via Homebrew
+brew install ollama
+
+# Or download directly from https://ollama.com/download/mac
+# Drag Ollama.app to Applications
+
+# Start Ollama (runs as a background service)
+ollama serve &
+
+# Pull the model for your tier
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
 ```
 
-### Verify
+### Linux
 
 ```bash
-ollama list                # should show your downloaded model(s)
+# One-line install script
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Start the service
+sudo systemctl enable ollama
+sudo systemctl start ollama
+
+# Or run manually
+ollama serve &
+
+# Pull the model for your tier
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
 ```
 
-### Configure the Tier
+### Windows
 
-Update your MCP config to use the `smart` or `autonomous` tier:
+```powershell
+# Download installer from https://ollama.com/download/windows
+# Run OllamaSetup.exe — installs and starts as a background service
+
+# Or install via winget
+winget install Ollama.Ollama
+
+# Pull the model (in PowerShell or Command Prompt)
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
+```
+
+### Verify Ollama is Running
+
+```bash
+# Check Ollama status
+curl http://localhost:11434/api/tags
+
+# Test the model
+ollama run gemma4:e2b "Hello, world"
+```
+
+### Configure ai-memory for Smart/Autonomous Tier
 
 ```json
 {
@@ -390,6 +428,8 @@ Update your MCP config to use the `smart` or `autonomous` tier:
   }
 }
 ```
+
+> ai-memory connects to Ollama at `http://localhost:11434` automatically. No additional configuration needed. If Ollama is not running, ai-memory gracefully falls back to the semantic tier.
 
 > **Note:** The `semantic` tier (default) downloads a HuggingFace embedding model (~100 MB) on first startup. No account or API key is required. The model is cached in `~/.cache/huggingface/`.
 

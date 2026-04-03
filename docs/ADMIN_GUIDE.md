@@ -131,32 +131,43 @@ ai-memory mcp --tier smart           # enables LLM-powered tools
 ai-memory serve --tier autonomous    # full feature set
 ```
 
-### Ollama Setup (smart/autonomous tiers)
+### Ollama Setup (Smart & Autonomous Tiers)
 
-The `smart` and `autonomous` tiers require a running [Ollama](https://ollama.ai/) instance for LLM inference (query expansion, auto-tagging, contradiction detection).
+The `smart` and `autonomous` tiers require a running [Ollama](https://ollama.com) instance for LLM inference (Gemma 4 models).
 
-1. **Install Ollama:**
-   ```bash
-   curl -fsSL https://ollama.ai/install.sh | sh
-   ```
+#### macOS
+```bash
+brew install ollama
+# Or download from https://ollama.com/download/mac
+ollama serve &
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
+```
 
-2. **Pull a model:**
-   ```bash
-   ollama pull llama3.2       # recommended for smart tier (~1 GB)
-   ollama pull llama3.1       # recommended for autonomous tier (~4 GB)
-   ```
+#### Linux
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+sudo systemctl enable ollama
+sudo systemctl start ollama
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
+```
 
-3. **Start Ollama** (if not already running as a service):
-   ```bash
-   ollama serve
-   ```
+#### Windows
+```powershell
+# Download from https://ollama.com/download/windows, or:
+winget install Ollama.Ollama
+ollama pull gemma4:e2b    # Smart tier (~1GB)
+ollama pull gemma4:e4b    # Autonomous tier (~2.3GB)
+```
 
-4. **Verify:**
-   ```bash
-   curl http://localhost:11434/api/tags
-   ```
+#### Verify
+```bash
+curl http://localhost:11434/api/tags
+ollama run gemma4:e2b "Hello, world"
+```
 
-ai-memory connects to Ollama at `http://localhost:11434` by default. Set `OLLAMA_HOST` to override.
+ai-memory connects to Ollama at `http://localhost:11434` by default. Set `OLLAMA_HOST` to override. If Ollama is not running, ai-memory gracefully falls back to the semantic tier.
 
 ### Embedding Model (semantic tier and above)
 

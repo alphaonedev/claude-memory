@@ -688,6 +688,49 @@
             The <strong style="color:var(--orange)">smart</strong> and <strong style="color:var(--purple)">autonomous</strong> tiers require
             <a href="https://ollama.com">Ollama</a> running locally with Gemma 4 models (USA-only).
         </p>
+
+        <h3 style="margin-top:2.5rem;margin-bottom:.75rem">Ollama Setup <span style="font-size:.65rem;font-weight:700;text-transform:uppercase;background:rgba(210,153,34,.12);color:var(--orange);padding:.2em .6em;border-radius:3px;letter-spacing:.05em;vertical-align:middle;margin-left:.5rem">Smart &amp; Autonomous Only</span></h3>
+        <p style="font-size:.9rem">Install <a href="https://ollama.com">Ollama</a> for your platform, then pull the Gemma 4 model for your tier.</p>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:1rem;margin:1.25rem 0">
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.25rem">
+                <h4 style="font-size:.95rem;margin-bottom:.6rem;color:var(--text)">macOS</h4>
+                <pre style="margin:0;font-size:.8rem"><code><span class="tok-cm"># Homebrew</span>
+<span class="tok-cmd">brew</span> install ollama
+<span class="tok-cm"># Or download from https://ollama.com/download/mac</span>
+
+<span class="tok-cmd">ollama</span> serve &amp;
+<span class="tok-cmd">ollama</span> pull gemma4:e2b    <span class="tok-cm"># Smart (~1GB)</span>
+<span class="tok-cmd">ollama</span> pull gemma4:e4b    <span class="tok-cm"># Autonomous (~2.3GB)</span></code></pre>
+            </div>
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.25rem">
+                <h4 style="font-size:.95rem;margin-bottom:.6rem;color:var(--text)">Linux</h4>
+                <pre style="margin:0;font-size:.8rem"><code><span class="tok-cmd">curl</span> -fsSL https://ollama.com/install.sh | sh
+<span class="tok-cmd">sudo</span> systemctl enable ollama
+<span class="tok-cmd">sudo</span> systemctl start ollama
+
+<span class="tok-cmd">ollama</span> pull gemma4:e2b    <span class="tok-cm"># Smart (~1GB)</span>
+<span class="tok-cmd">ollama</span> pull gemma4:e4b    <span class="tok-cm"># Autonomous (~2.3GB)</span></code></pre>
+            </div>
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.25rem">
+                <h4 style="font-size:.95rem;margin-bottom:.6rem;color:var(--text)">Windows</h4>
+                <pre style="margin:0;font-size:.8rem"><code><span class="tok-cm"># Download from https://ollama.com/download/windows, or:</span>
+<span class="tok-cmd">winget</span> install Ollama.Ollama
+
+<span class="tok-cmd">ollama</span> pull gemma4:e2b    <span class="tok-cm"># Smart (~1GB)</span>
+<span class="tok-cmd">ollama</span> pull gemma4:e4b    <span class="tok-cm"># Autonomous (~2.3GB)</span></code></pre>
+            </div>
+        </div>
+
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:1.25rem;margin-top:1rem">
+            <h4 style="font-size:.95rem;margin-bottom:.6rem;color:var(--text)">Verify &amp; Configure</h4>
+            <pre style="margin:0 0 .75rem;font-size:.8rem"><code><span class="tok-cm"># Check Ollama is running</span>
+<span class="tok-cmd">curl</span> http://localhost:11434/api/tags
+
+<span class="tok-cm"># Test the model</span>
+<span class="tok-cmd">ollama</span> run gemma4:e2b <span class="tok-str">"Hello, world"</span></code></pre>
+            <p style="font-size:.85rem;color:var(--text-muted);margin:0">ai-memory connects to Ollama at <code>localhost:11434</code> automatically. No additional configuration needed. If Ollama is not running, ai-memory gracefully falls back to the semantic tier.</p>
+        </div>
     </div>
 </section>
 
