@@ -635,10 +635,18 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
         args.until.as_deref(),
     )?;
     if json_out {
+        // Include scores in JSON output
+        let scored: Vec<serde_json::Value> = results.iter().map(|(m, s)| {
+            let mut v = serde_json::to_value(m).unwrap_or_default();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("score".to_string(), serde_json::json!((s * 1000.0).round() / 1000.0));
+            }
+            v
+        }).collect();
         println!(
             "{}",
             serde_json::to_string(
-                &serde_json::json!({"memories": results, "count": results.len()})
+                &serde_json::json!({"memories": scored, "count": results.len()})
             )?
         );
         return Ok(());
@@ -647,7 +655,7 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
         eprintln!("no memories found for: {}", args.context);
         return Ok(());
     }
-    for mem in &results {
+    for (mem, score) in &results {
         let age = human_age(&mem.updated_at);
         let conf = if mem.confidence < 1.0 {
             format!(" conf={:.0}%", mem.confidence * 100.0)
@@ -655,13 +663,14 @@ fn cmd_recall(db_path: PathBuf, args: RecallArgs, json_out: bool) -> Result<()> 
             String::new()
         };
         println!(
-            "[{}] {} {} (ns={}, {}x, {}{})",
+            "[{}] {} {} score={:.2} (ns={}, {}x, {}{})",
             color::tier_color(
                 mem.tier.as_str(),
                 &format!("{}/{}", mem.tier, id_short(&mem.id))
             ),
             color::bold(&mem.title),
             color::priority_bar(mem.priority),
+            score,
             color::cyan(&mem.namespace),
             mem.access_count,
             color::dim(&age),
@@ -1088,12 +1097,13 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                 }
                 match db::recall(&conn, &ctx, None, 10, None, None, None) {
                     Ok(results) => {
-                        for mem in &results {
+                        for (mem, score) in &results {
                             println!(
-                                "  [{}] {} {}",
+                                "  [{}] {} {} score={:.2}",
                                 color::tier_color(mem.tier.as_str(), mem.tier.as_str()),
                                 color::bold(&mem.title),
-                                color::priority_bar(mem.priority)
+                                color::priority_bar(mem.priority),
+                                score
                             );
                             let preview: String = mem.content.chars().take(100).collect();
                             println!("    {}", color::dim(&preview));

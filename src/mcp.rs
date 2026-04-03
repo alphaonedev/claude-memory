@@ -340,9 +340,36 @@ fn handle_store(
         expires_at,
     };
 
-    let contradictions =
-        db::find_contradictions(conn, &mem.title, &mem.namespace).unwrap_or_default();
-    let contradiction_ids: Vec<String> = contradictions
+    // True dedup: check for exact title+namespace match (#97)
+    let existing = db::find_contradictions(conn, &mem.title, &mem.namespace).unwrap_or_default();
+    let exact_dup = existing.iter().find(|c| c.title == mem.title && c.namespace == mem.namespace);
+    if let Some(dup) = exact_dup {
+        // Update existing memory instead of creating a duplicate
+        // update(conn, id, title, content, tier, namespace, tags, priority, confidence, expires_at)
+        db::update(
+            conn,
+            &dup.id,
+            None,                   // title (unchanged)
+            Some(mem.content.as_str()), // content (update)
+            Some(&mem.tier),        // tier
+            None,                   // namespace (unchanged)
+            Some(&mem.tags),        // tags
+            Some(mem.priority),     // priority
+            Some(mem.confidence),   // confidence
+            None,                   // expires_at
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(json!({
+            "id": dup.id,
+            "tier": mem.tier,
+            "title": mem.title,
+            "namespace": mem.namespace,
+            "duplicate": true,
+            "action": "updated existing memory"
+        }));
+    }
+
+    let contradiction_ids: Vec<String> = existing
         .iter()
         .filter(|c| c.id != mem.id)
         .map(|c| c.id.clone())
@@ -392,6 +419,20 @@ fn handle_recall(
     let since = params["since"].as_str();
     let until = params["until"].as_str();
 
+    // Helper: serialize scored memories with score field (#95)
+    fn scored_memories(results: Vec<(Memory, f64)>) -> Vec<Value> {
+        results
+            .into_iter()
+            .map(|(mem, score)| {
+                let mut val = serde_json::to_value(&mem).unwrap_or_default();
+                if let Some(obj) = val.as_object_mut() {
+                    obj.insert("score".to_string(), json!((score * 1000.0).round() / 1000.0));
+                }
+                val
+            })
+            .collect()
+    }
+
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
         match emb.embed(context) {
@@ -411,16 +452,13 @@ fn handle_recall(
 
                 // Apply cross-encoder reranking if available
                 if let Some(ce) = reranker {
-                    let scored: Vec<(Memory, f64)> = results
-                        .into_iter()
-                        .map(|m| (m, 1.0)) // original score = 1.0 (already ranked)
-                        .collect();
-                    let reranked = ce.rerank(context, scored);
-                    let memories: Vec<Memory> = reranked.into_iter().map(|(m, _)| m).collect();
+                    let reranked = ce.rerank(context, results);
+                    let memories = scored_memories(reranked);
                     return Ok(json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"}));
                 }
 
-                return Ok(json!({"memories": results, "count": results.len(), "mode": "hybrid"}));
+                let memories = scored_memories(results);
+                return Ok(json!({"memories": memories, "count": memories.len(), "mode": "hybrid"}));
             }
             Err(e) => {
                 tracing::warn!("embedding failed, falling back to FTS: {}", e);
@@ -431,11 +469,20 @@ fn handle_recall(
     // Fallback to keyword-only recall
     let results = db::recall(conn, context, namespace, limit.min(50), tags, since, until)
         .map_err(|e| e.to_string())?;
-    Ok(json!({"memories": results, "count": results.len(), "mode": "keyword"}))
+    let memories = scored_memories(results);
+    Ok(json!({"memories": memories, "count": memories.len(), "mode": "keyword"}))
 }
 
-fn handle_capabilities(tier_config: &TierConfig) -> Result<Value, String> {
-    let caps = tier_config.capabilities();
+fn handle_capabilities(tier_config: &TierConfig, reranker: Option<&CrossEncoder>) -> Result<Value, String> {
+    let mut caps = tier_config.capabilities();
+    // Report actual cross-encoder state, not just config (#93)
+    if let Some(ce) = reranker {
+        if !ce.is_neural() {
+            caps.features.cross_encoder_reranking = false;
+            caps.features.memory_reflection = false;
+            caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
+        }
+    }
     serde_json::to_value(caps).map_err(|e| e.to_string())
 }
 
@@ -656,7 +703,12 @@ fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Stri
     match db::get(conn, id).map_err(|e| e.to_string())? {
         Some(mem) => {
             let links = db::get_links(conn, id).unwrap_or_default();
-            Ok(json!({"memory": mem, "links": links}))
+            // Flatten: merge memory fields with links at top level (#96)
+            let mut val = serde_json::to_value(&mem).map_err(|e| e.to_string())?;
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("links".to_string(), json!(links));
+            }
+            Ok(val)
         }
         None => Err("memory not found".into()),
     }
@@ -807,7 +859,7 @@ fn handle_request(
                 "memory_link" => handle_link(conn, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
                 "memory_consolidate" => handle_consolidate(conn, arguments, llm),
-                "memory_capabilities" => handle_capabilities(tier_config),
+                "memory_capabilities" => handle_capabilities(tier_config, reranker),
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
                 "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),

@@ -480,14 +480,21 @@ pub fn recall(
     tags_filter: Option<&str>,
     since: Option<&str>,
     until: Option<&str>,
-) -> Result<Vec<Memory>> {
+) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
 
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at
+                m.last_accessed_at, m.expires_at,
+                (fts.rank * -1)
+                + (m.priority * 0.5)
+                + (MIN(m.access_count, 50) * 0.1)
+                + (m.confidence * 2.0)
+                + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
+                + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
+                AS score
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1
@@ -496,14 +503,7 @@ pub fn recall(
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
            AND (?5 IS NULL OR m.created_at >= ?5)
            AND (?6 IS NULL OR m.created_at <= ?6)
-         ORDER BY
-           (fts.rank * -1)
-           + (m.priority * 0.5)
-           + (MIN(m.access_count, 50) * 0.1)
-           + (m.confidence * 2.0)
-           + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
-           + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
-           DESC
+         ORDER BY score DESC
          LIMIT ?7",
     )?;
     let rows = stmt.query_map(
@@ -516,12 +516,16 @@ pub fn recall(
             until,
             limit as i64
         ],
-        row_to_memory,
+        |row| {
+            let mem = row_to_memory(row)?;
+            let score: f64 = row.get(14)?;
+            Ok((mem, score))
+        },
     )?;
-    let results: Vec<Memory> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    let results: Vec<(Memory, f64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
     // Touch all recalled memories (bumps access, extends TTL, auto-promotes)
-    for mem in &results {
+    for (mem, _) in &results {
         if let Err(e) = touch(conn, &mem.id) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
@@ -931,7 +935,7 @@ pub fn recall_hybrid(
     since: Option<&str>,
     until: Option<&str>,
     vector_index: Option<&crate::hnsw::VectorIndex>,
-) -> Result<Vec<Memory>> {
+) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
 
@@ -1077,16 +1081,14 @@ pub fn recall_hybrid(
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit);
 
-    let memories: Vec<Memory> = results.into_iter().map(|(mem, _)| mem).collect();
-
     // Touch all recalled memories
-    for mem in &memories {
+    for (mem, _) in &results {
         if let Err(e) = touch(conn, &mem.id) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
     }
 
-    Ok(memories)
+    Ok(results)
 }
 
 /// Checkpoint WAL for clean shutdown.

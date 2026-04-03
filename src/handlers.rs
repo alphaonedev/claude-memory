@@ -331,7 +331,16 @@ pub async fn recall_memories_get(
         p.since.as_deref(),
         p.until.as_deref(),
     ) {
-        Ok(r) => Json(json!({"memories": r, "count": r.len()})).into_response(),
+        Ok(r) => {
+            let scored: Vec<serde_json::Value> = r.iter().map(|(m, s)| {
+                let mut v = serde_json::to_value(m).unwrap_or_default();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("score".to_string(), json!((*s * 1000.0).round() / 1000.0));
+                }
+                v
+            }).collect();
+            Json(json!({"memories": scored, "count": scored.len()})).into_response()
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
@@ -365,7 +374,16 @@ pub async fn recall_memories_post(
         body.since.as_deref(),
         body.until.as_deref(),
     ) {
-        Ok(r) => Json(json!({"memories": r, "count": r.len()})).into_response(),
+        Ok(r) => {
+            let scored: Vec<serde_json::Value> = r.iter().map(|(m, s)| {
+                let mut v = serde_json::to_value(m).unwrap_or_default();
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("score".to_string(), json!((*s * 1000.0).round() / 1000.0));
+                }
+                v
+            }).collect();
+            Json(json!({"memories": scored, "count": scored.len()})).into_response()
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
