@@ -2,26 +2,33 @@
 
 > **Note:** `ai-memory` is AI-agnostic and works with any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others). This file contains **Claude Code-specific** integration instructions.
 
-This project is `ai-memory` -- a persistent memory daemon. While it works with any MCP client, this file provides instructions specific to Claude Code.
+This project is `ai-memory` -- a persistent memory daemon that replaces Claude Code's built-in auto-memory. **Zero token cost until recall** -- unlike auto-memory which loads 200+ lines into every conversation, ai-memory uses zero context tokens until explicitly called. **TOON compact** is the default response format (79% smaller than JSON). 158 tests, 14/14 modules, 95%+ coverage.
 
-## Primary Integration: MCP Server
+## Step 1: Disable Auto-Memory
 
-The recommended integration path is the **MCP tool server**. Configure in `~/.claude/.mcp.json` (global config -- applies to all projects):
+ai-memory replaces Claude Code's built-in auto-memory. Disable it to stop paying for idle context tokens on every message:
+
+```json
+// Add to ~/.claude/settings.json
+{ "autoMemoryEnabled": false }
+```
+
+## Step 2: Configure MCP Server
+
+Configure in your project's `.mcp.json` or `~/.claude/.mcp.json`:
 
 ```json
 {
   "mcpServers": {
     "memory": {
       "command": "ai-memory",
-      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "smart"]
     }
   }
 }
 ```
 
-> The `--tier` flag controls the feature tier: `keyword`, `semantic` (default), `smart`, or `autonomous`. Example: `ai-memory mcp --tier semantic`.
-
-> MCP server configuration does **not** go in `settings.json`, `settings.local.json`, or project-level `.mcp.json` files. Memory is a global service -- always configure it in `~/.claude/.mcp.json`.
+> The `--tier` flag is **required** in MCP args (config.toml tier is not used when launched by AI clients). Options: `keyword`, `semantic`, `smart`, `autonomous`. Smart and autonomous tiers require [Ollama](https://ollama.com).
 
 This gives Claude Code 17 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
 
@@ -92,6 +99,24 @@ If you omit `--namespace`, it auto-detects from the git remote or directory name
 - `semantic` (default) -- adds embedding-based recall with hybrid scoring (semantic + keyword blending)
 - `smart` -- adds query expansion, auto-tagging, and contradiction detection (requires Ollama)
 - `autonomous` -- full autonomous memory management (requires Ollama)
+
+### TOON Format (Token-Oriented Object Notation):
+All recall, search, and list responses default to **TOON compact** format -- 79% smaller than JSON. Field names declared once as a header, values as pipe-delimited rows. Pass `format: "json"` only when you need structured parsing.
+
+Example TOON compact recall:
+```
+count:3|mode:hybrid
+memories[id|title|tier|namespace|priority|score|tags]:
+abc123|PostgreSQL 16|long|infra|9|0.763|postgres,db
+def456|Redis cache|long|infra|8|0.541|redis,cache
+```
+
+### MCP Prompts (recall-first behavior):
+The MCP server provides 2 prompts via `prompts/list`:
+- **recall-first** -- System prompt with 9 rules: recall at session start, store corrections, TOON format, tier strategy, dedup awareness, namespace organization, capabilities check
+- **memory-workflow** -- Quick reference card for all 17 tool usage patterns
+
+These prompts teach AI clients to use memory proactively. The `recall-first` prompt supports an optional `namespace` argument for scoped recall.
 
 ### Recall scoring (6 factors + hybrid):
 Memories are ranked by: FTS relevance + priority weight + access frequency + confidence + tier boost (long=3.0, mid=1.0) + recency decay (1/(1 + days_old * 0.1)). At the `semantic` tier and above, recall uses **hybrid scoring** that blends semantic (embedding similarity) and keyword (FTS5) results for better relevance.

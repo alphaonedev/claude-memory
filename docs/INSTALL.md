@@ -42,6 +42,8 @@
 
    This stops the built-in system from injecting 200+ lines of memory context into every conversation. ai-memory uses zero tokens until `memory_recall` is called -- only relevant memories are returned, ranked by score.
 
+7. **Token savings are automatic.** All recall, search, and list responses use TOON compact format by default -- 79% smaller than JSON. The MCP server also provides `recall-first` and `memory-workflow` prompts that teach AI clients to use memory proactively.
+
 That's it. Everything below is optional detail.
 
 ---

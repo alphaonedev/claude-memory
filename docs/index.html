@@ -710,6 +710,11 @@
                 <h4 style="color:var(--orange)">TOON Format</h4>
                 <p>Token-Oriented Object Notation eliminates repeated field names in recall responses. Pass <code>format: "toon"</code> for 61% fewer bytes or <code>"toon_compact"</code> for 79% fewer. Field names declared once as a header, values as pipe-delimited rows. LLMs parse it natively.</p>
             </div>
+            <div class="feature-card" style="border:1px solid var(--purple);background:rgba(188,140,255,.04)">
+                <div class="icon-box icon-sync">P</div>
+                <h4 style="color:var(--purple)">MCP Prompts</h4>
+                <p>Two MCP prompts teach AI clients to use memory proactively. <strong>recall-first</strong>: 9 behavioral rules (recall at start, store corrections, TOON format, tier strategy, dedup). <strong>memory-workflow</strong>: quick reference card for all tool patterns. AI clients receive these at connection time via <code>prompts/list</code>.</p>
+            </div>
         </div>
     </div>
 </section>

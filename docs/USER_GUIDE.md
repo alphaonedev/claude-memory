@@ -68,6 +68,25 @@ With MCP configured, your AI client gains 17 memory tools:
 
 Your AI assistant uses these tools automatically during conversations. You can also ask directly: "Remember that we use PostgreSQL 15" or "What do you remember about our auth system?"
 
+## Zero Token Cost
+
+Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation, ai-memory uses **zero context tokens until recalled**. Only relevant memories come back, ranked by a 6-factor scoring algorithm. For Claude Code users: disable auto-memory (`"autoMemoryEnabled": false` in settings.json) to stop paying for 200+ lines of idle context.
+
+## TOON Format (Token-Oriented Object Notation)
+
+All recall, search, and list responses default to **TOON compact** format -- 79% smaller than JSON. Field names are declared once as a header, then values as pipe-delimited rows. This saves tokens on every recall.
+
+- `format: "toon_compact"` (default) -- 79% smaller, omits timestamps
+- `format: "toon"` -- 61% smaller, includes all fields
+- `format: "json"` -- full JSON (use only when you need structured parsing)
+
+## MCP Prompts
+
+The server provides 2 MCP prompts via `prompts/list` that teach AI clients to use memory proactively:
+
+- **recall-first** -- 9 behavioral rules: recall at session start, store corrections as long-term, use TOON format, tier strategy, dedup awareness
+- **memory-workflow** -- Quick reference card for all tool usage patterns
+
 ## Feature Tiers
 
 ai-memory supports 4 feature tiers, controlled by the `--tier` flag when starting the MCP server (e.g., `ai-memory mcp --tier semantic`). Each tier builds on the previous one:
