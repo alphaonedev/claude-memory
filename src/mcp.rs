@@ -9,8 +9,12 @@ use serde_json::{json, Value};
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+use crate::config::{FeatureTier, TierConfig};
 use crate::db;
+use crate::embeddings::Embedder;
+use crate::llm::OllamaClient;
 use crate::models::*;
+use crate::reranker::CrossEncoder;
 use crate::validate;
 
 // --- JSON-RPC types ---
@@ -235,6 +239,45 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["ids", "title", "summary"]
                 }
+            },
+            {
+                "name": "memory_capabilities",
+                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system.",
+                "inputSchema": { "type": "object", "properties": {} }
+            },
+            {
+                "name": "memory_expand_query",
+                "description": "Use LLM to expand a search query into additional semantically related terms. Requires smart or autonomous tier.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string", "description": "The search query to expand"}
+                    },
+                    "required": ["query"]
+                }
+            },
+            {
+                "name": "memory_auto_tag",
+                "description": "Use LLM to auto-generate tags for a memory. Requires smart or autonomous tier.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Memory ID to auto-tag"}
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "memory_detect_contradiction",
+                "description": "Use LLM to check if two memories contradict each other. Requires smart or autonomous tier.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id_a": {"type": "string", "description": "First memory ID"},
+                        "id_b": {"type": "string", "description": "Second memory ID"}
+                    },
+                    "required": ["id_a", "id_b"]
+                }
             }
         ]
     })
@@ -242,7 +285,11 @@ fn tool_definitions() -> Value {
 
 // --- Tool handlers ---
 
-fn handle_store(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_store(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    embedder: Option<&Embedder>,
+) -> Result<Value, String> {
     let title = params["title"].as_str().ok_or("title is required")?;
     let content = params["content"].as_str().ok_or("content is required")?;
     let tier_str = params["tier"].as_str().unwrap_or("mid");
@@ -299,6 +346,22 @@ fn handle_store(conn: &rusqlite::Connection, params: &Value) -> Result<Value, St
         .collect();
 
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
+
+    // Generate and store embedding if embedder is available
+    if let Some(emb) = embedder {
+        let text = format!("{} {}", mem.title, mem.content);
+        match emb.embed(&text) {
+            Ok(embedding) => {
+                if let Err(e) = db::set_embedding(conn, &actual_id, &embedding) {
+                    tracing::warn!("failed to store embedding for {}: {}", &actual_id, e);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to generate embedding for {}: {}", &actual_id, e);
+            }
+        }
+    }
+
     let mut response =
         json!({"id": actual_id, "tier": mem.tier, "title": mem.title, "namespace": mem.namespace});
     if !contradiction_ids.is_empty() {
@@ -307,7 +370,11 @@ fn handle_store(conn: &rusqlite::Connection, params: &Value) -> Result<Value, St
     Ok(response)
 }
 
-fn handle_recall(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_recall(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    embedder: Option<&Embedder>,
+) -> Result<Value, String> {
     let _ = db::gc_if_needed(conn);
     let context = params["context"].as_str().ok_or("context is required")?;
     let namespace = params["namespace"].as_str();
@@ -316,9 +383,97 @@ fn handle_recall(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let since = params["since"].as_str();
     let until = params["until"].as_str();
 
+    // Use hybrid recall if embedder is available
+    if let Some(emb) = embedder {
+        match emb.embed(context) {
+            Ok(query_emb) => {
+                let results = db::recall_hybrid(
+                    conn,
+                    context,
+                    &query_emb,
+                    namespace,
+                    limit.min(50),
+                    tags,
+                    since,
+                    until,
+                )
+                .map_err(|e| e.to_string())?;
+                return Ok(json!({"memories": results, "count": results.len(), "mode": "hybrid"}));
+            }
+            Err(e) => {
+                tracing::warn!("embedding failed, falling back to FTS: {}", e);
+            }
+        }
+    }
+
+    // Fallback to keyword-only recall
     let results = db::recall(conn, context, namespace, limit.min(50), tags, since, until)
         .map_err(|e| e.to_string())?;
-    Ok(json!({"memories": results, "count": results.len()}))
+    Ok(json!({"memories": results, "count": results.len(), "mode": "keyword"}))
+}
+
+fn handle_capabilities(tier_config: &TierConfig) -> Result<Value, String> {
+    let caps = tier_config.capabilities();
+    serde_json::to_value(caps).map_err(|e| e.to_string())
+}
+
+fn handle_expand_query(
+    llm: Option<&OllamaClient>,
+    params: &Value,
+) -> Result<Value, String> {
+    let llm = llm.ok_or("query expansion requires smart or autonomous tier (Ollama LLM)")?;
+    let query = params["query"].as_str().ok_or("query is required")?;
+    let terms = llm.expand_query(query).map_err(|e| e.to_string())?;
+    Ok(json!({"original": query, "expanded_terms": terms}))
+}
+
+fn handle_auto_tag(
+    conn: &rusqlite::Connection,
+    llm: Option<&OllamaClient>,
+    params: &Value,
+) -> Result<Value, String> {
+    let llm = llm.ok_or("auto-tagging requires smart or autonomous tier (Ollama LLM)")?;
+    let id = params["id"].as_str().ok_or("id is required")?;
+    let mem = db::get(conn, id)
+        .map_err(|e| e.to_string())?
+        .ok_or("memory not found")?;
+    let tags = llm
+        .auto_tag(&mem.title, &mem.content)
+        .map_err(|e| e.to_string())?;
+    // Apply tags to the memory
+    let mut all_tags = mem.tags.clone();
+    for t in &tags {
+        if !all_tags.contains(t) {
+            all_tags.push(t.clone());
+        }
+    }
+    db::update(conn, id, None, None, None, None, Some(&all_tags), None, None, None)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({"id": id, "new_tags": tags, "all_tags": all_tags}))
+}
+
+fn handle_detect_contradiction(
+    conn: &rusqlite::Connection,
+    llm: Option<&OllamaClient>,
+    params: &Value,
+) -> Result<Value, String> {
+    let llm = llm.ok_or("contradiction detection requires smart or autonomous tier (Ollama LLM)")?;
+    let id_a = params["id_a"].as_str().ok_or("id_a is required")?;
+    let id_b = params["id_b"].as_str().ok_or("id_b is required")?;
+    let mem_a = db::get(conn, id_a)
+        .map_err(|e| e.to_string())?
+        .ok_or("memory A not found")?;
+    let mem_b = db::get(conn, id_b)
+        .map_err(|e| e.to_string())?
+        .ok_or("memory B not found")?;
+    let contradicts = llm
+        .detect_contradiction(&mem_a.content, &mem_b.content)
+        .map_err(|e| e.to_string())?;
+    Ok(json!({
+        "contradicts": contradicts,
+        "memory_a": {"id": id_a, "title": mem_a.title},
+        "memory_b": {"id": id_b, "title": mem_b.title}
+    }))
 }
 
 fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
@@ -532,7 +687,15 @@ fn handle_consolidate(conn: &rusqlite::Connection, params: &Value) -> Result<Val
 
 // --- MCP protocol handler ---
 
-fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest) -> RpcResponse {
+fn handle_request(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    req: &RpcRequest,
+    embedder: Option<&Embedder>,
+    llm: Option<&OllamaClient>,
+    reranker: Option<&CrossEncoder>,
+    tier_config: &TierConfig,
+) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
     // Validate JSON-RPC 2.0 version
@@ -571,8 +734,8 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
             };
 
             let result = match tool_name {
-                "memory_store" => handle_store(conn, arguments),
-                "memory_recall" => handle_recall(conn, arguments),
+                "memory_store" => handle_store(conn, arguments, embedder),
+                "memory_recall" => handle_recall(conn, arguments, embedder),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments),
@@ -584,6 +747,10 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
                 "memory_link" => handle_link(conn, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
                 "memory_consolidate" => handle_consolidate(conn, arguments),
+                "memory_capabilities" => handle_capabilities(tier_config),
+                "memory_expand_query" => handle_expand_query(llm, arguments),
+                "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
+                "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -612,12 +779,96 @@ fn handle_request(conn: &rusqlite::Connection, db_path: &Path, req: &RpcRequest)
 }
 
 /// Run the MCP server over stdio. Blocks until stdin closes.
-pub fn run_mcp_server(db_path: &Path) -> anyhow::Result<()> {
+/// Initializes components based on the requested feature tier.
+pub fn run_mcp_server(db_path: &Path, tier: FeatureTier) -> anyhow::Result<()> {
     let conn = db::open(db_path)?;
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
-    eprintln!("ai-memory MCP server started (stdio)");
+    let tier_config = tier.config();
+    eprintln!("ai-memory: requested tier = {}", tier.as_str());
+
+    // --- Initialize embedder (semantic tier and above) ---
+    let embedder = if tier_config.embedding_model.is_some() {
+        match Embedder::new() {
+            Ok(emb) => {
+                eprintln!("ai-memory: embedder loaded (all-MiniLM-L6-v2, 384-dim)");
+                // Backfill embeddings for memories that don't have them
+                match db::get_unembedded_ids(&conn) {
+                    Ok(unembedded) if !unembedded.is_empty() => {
+                        eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
+                        let mut ok = 0usize;
+                        for (id, title, content) in &unembedded {
+                            let text = format!("{} {}", title, content);
+                            match emb.embed(&text) {
+                                Ok(embedding) => {
+                                    if db::set_embedding(&conn, id, &embedding).is_ok() {
+                                        ok += 1;
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("ai-memory: embed failed for {}: {}", &id[..8.min(id.len())], e);
+                                }
+                            }
+                        }
+                        eprintln!("ai-memory: backfilled {}/{}", ok, unembedded.len());
+                    }
+                    _ => {}
+                }
+                Some(emb)
+            }
+            Err(e) => {
+                eprintln!("ai-memory: embedder failed: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // --- Initialize LLM (smart tier and above) ---
+    let llm = if let Some(ref llm_model) = tier_config.llm_model {
+        let model_id = llm_model.ollama_model_id();
+        eprintln!("ai-memory: connecting to Ollama for {} ...", llm_model.display_name());
+        match OllamaClient::new(model_id) {
+            Ok(client) => {
+                eprintln!("ai-memory: Ollama connected, ensuring model {} is available...", model_id);
+                if let Err(e) = client.ensure_model() {
+                    eprintln!("ai-memory: model pull failed: {e} (LLM features disabled)");
+                    None
+                } else {
+                    eprintln!("ai-memory: LLM ready ({})", llm_model.display_name());
+                    Some(client)
+                }
+            }
+            Err(e) => {
+                eprintln!("ai-memory: Ollama not available: {e} (LLM features disabled)");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // --- Initialize cross-encoder reranker (autonomous tier) ---
+    let reranker = if tier_config.cross_encoder {
+        eprintln!("ai-memory: cross-encoder reranker active");
+        Some(CrossEncoder::new())
+    } else {
+        None
+    };
+
+    // Report effective tier
+    let effective_tier = if llm.is_some() && embedder.is_some() && reranker.is_some() {
+        "autonomous"
+    } else if llm.is_some() && embedder.is_some() {
+        "smart"
+    } else if embedder.is_some() {
+        "semantic"
+    } else {
+        "keyword"
+    };
+    eprintln!("ai-memory MCP server started (stdio, tier={})", effective_tier);
 
     for line in stdin.lock().lines() {
         let line = line?;
@@ -641,7 +892,15 @@ pub fn run_mcp_server(db_path: &Path) -> anyhow::Result<()> {
             continue;
         }
 
-        let resp = handle_request(&conn, db_path, &req);
+        let resp = handle_request(
+            &conn,
+            db_path,
+            &req,
+            embedder.as_ref(),
+            llm.as_ref(),
+            reranker.as_ref(),
+            &tier_config,
+        );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
         stdout.flush()?;

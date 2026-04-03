@@ -15,7 +15,7 @@ Below is an example for **Claude Code** (`~/.claude/.mcp.json`). Other MCP-compa
   "mcpServers": {
     "memory": {
       "command": "ai-memory",
-      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
     }
   }
 }
@@ -110,6 +110,71 @@ docker run -d -p 127.0.0.1:9077:9077 -v ai-memory-data:/data ai-memory
 | `--host <addr>` | `127.0.0.1` | Bind address (serve only) |
 | `--port <port>` | `9077` | Bind port (serve only) |
 | `--json` | `false` | JSON output for CLI commands |
+| `--tier <tier>` | `semantic` | Feature tier: `keyword`, `semantic`, `smart`, `autonomous` (mcp/serve only) |
+
+### Feature Tiers
+
+The `--tier` flag controls which features are enabled. Each tier builds on the previous one:
+
+| Tier | Tools | Embedding Model | LLM Required | Approx. Memory |
+|------|-------|----------------|--------------|----------------|
+| `keyword` | 14 | No | No | Minimal |
+| `semantic` (default) | 14 | Yes (HuggingFace) | No | ~256 MB |
+| `smart` | 17 | Yes | Yes (Ollama) | ~1 GB |
+| `autonomous` | 17 | Yes | Yes (Ollama) | ~4 GB |
+
+Set the tier when starting the MCP server or HTTP daemon:
+
+```bash
+ai-memory mcp --tier semantic        # default
+ai-memory mcp --tier smart           # enables LLM-powered tools
+ai-memory serve --tier autonomous    # full feature set
+```
+
+### Ollama Setup (smart/autonomous tiers)
+
+The `smart` and `autonomous` tiers require a running [Ollama](https://ollama.ai/) instance for LLM inference (query expansion, auto-tagging, contradiction detection).
+
+1. **Install Ollama:**
+   ```bash
+   curl -fsSL https://ollama.ai/install.sh | sh
+   ```
+
+2. **Pull a model:**
+   ```bash
+   ollama pull llama3.2       # recommended for smart tier (~1 GB)
+   ollama pull llama3.1       # recommended for autonomous tier (~4 GB)
+   ```
+
+3. **Start Ollama** (if not already running as a service):
+   ```bash
+   ollama serve
+   ```
+
+4. **Verify:**
+   ```bash
+   curl http://localhost:11434/api/tags
+   ```
+
+ai-memory connects to Ollama at `http://localhost:11434` by default. Set `OLLAMA_HOST` to override.
+
+### Embedding Model (semantic tier and above)
+
+At the `semantic` tier and above, ai-memory downloads a sentence-transformer model from HuggingFace on first startup. The model is cached in the HuggingFace cache directory (`~/.cache/huggingface/` by default).
+
+- **First startup** may take 30-60 seconds while the model downloads (~100 MB)
+- **Subsequent startups** load from cache (2-5 seconds)
+- Set `HF_HOME` to override the cache directory
+- No HuggingFace account or API key is required
+
+### Memory Budget Guidance
+
+| Tier | RAM Requirement | Notes |
+|------|----------------|-------|
+| `keyword` | Minimal (~10 MB) | SQLite + FTS5 only |
+| `semantic` | ~256 MB | Embedding model loaded in memory |
+| `smart` | ~1 GB | Embedding model + Ollama with smaller LLM |
+| `autonomous` | ~4 GB | Embedding model + Ollama with larger LLM |
 
 ### Environment Variables
 
@@ -196,9 +261,10 @@ systemctl start ai-memory
 
 ### Migration
 
-The schema is auto-migrated on startup. The `schema_version` table tracks the current version (currently 2). Migrations are forward-only and non-destructive.
+The schema is auto-migrated on startup. The `schema_version` table tracks the current version (currently 3). Migrations are forward-only and non-destructive.
 
 - v1 -> v2: Added `confidence` (REAL) and `source` (TEXT) columns
+- v2 -> v3: Added `embedding` (BLOB) column for storing dense vector embeddings
 
 Migration error handling: only expected errors (e.g., "duplicate column" when re-running a migration) are silently ignored. Real failures are propagated and will prevent startup, ensuring data integrity.
 

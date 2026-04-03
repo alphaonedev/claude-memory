@@ -11,8 +11,8 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-48-brightgreen)]()
-[![MCP](https://img.shields.io/badge/MCP-13_tools-blueviolet)]()
+[![Tests](https://img.shields.io/badge/tests-40-brightgreen)]()
+[![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
@@ -250,7 +250,7 @@ ai-memory serve
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 13 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has 17 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -273,9 +273,10 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 ## Features
 
 ### Core
-- **MCP tool server** -- 13 tools over stdio JSON-RPC, compatible with any MCP client
+- **MCP tool server** -- 17 tools over stdio JSON-RPC, compatible with any MCP client
 - **Three-tier memory** -- short (6h TTL), mid (7d TTL), long (permanent)
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
+- **Hybrid recall** -- FTS5 keyword + cosine similarity blending when running at semantic tier or above
 - **6-factor recall scoring** -- FTS relevance + priority + access frequency + confidence + tier boost + recency decay
 - **Auto-promotion** -- memories accessed 5+ times promote from mid to long
 - **TTL extension** -- each recall extends expiry (short +1h, mid +1d)
@@ -297,7 +298,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 ### Interfaces
 - **20 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
 - **24 CLI commands** -- complete CLI with identical capabilities
-- **13 MCP tools** -- native integration for any MCP-compatible AI
+- **17 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
 
@@ -314,9 +315,16 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **48 tests** -- 8 unit + 40 integration
+- **40 tests** -- unit + integration
 - **Criterion benchmarks** -- insert, recall, search at 1K scale
 - **GitHub Actions CI/CD** -- fmt, clippy, test, build on Ubuntu + macOS, release on tag
+
+### ML and LLM Dependencies (semantic tier+)
+- **candle-core, candle-nn, candle-transformers** -- Hugging Face Candle ML framework for native Rust inference
+- **hf-hub** -- download models from Hugging Face Hub
+- **tokenizers** -- Hugging Face tokenizers for text preprocessing
+- **instant-distance** -- approximate nearest neighbor search
+- **reqwest** -- HTTP client for Ollama API communication (smart/autonomous tiers)
 
 ---
 
@@ -356,6 +364,21 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
                                 |     ^
                                 |     | auto-promote
                                 +-----+ (5+ accesses)
+
+     Embedding Pipeline (semantic tier+):
+     +--------------------------------------------------+
+     | Candle ML Framework (candle-core, candle-nn)      |
+     |   all-MiniLM-L6-v2 model (384-dim vectors)       |
+     |   Vectors stored as BLOBs in SQLite               |
+     |   Hybrid recall: FTS5 keyword + cosine similarity |
+     +--------------------------------------------------+
+
+     LLM Pipeline (smart/autonomous tier):
+     +--------------------------------------------------+
+     | Ollama (local)                                    |
+     |   smart: Gemma 4 E2B (query expansion, tagging)  |
+     |   autonomous: Gemma 4 E4B + cross-encoder rerank |
+     +--------------------------------------------------+
 ```
 
 ---
@@ -364,7 +387,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 
 ### MCP (Primary -- for MCP-compatible AI platforms)
 
-MCP is the recommended integration. Your AI gets 13 native memory tools with zero glue code. Configure the MCP server in your AI platform's config:
+MCP is the recommended integration. Your AI gets 17 native memory tools with zero glue code. Configure the MCP server in your AI platform's config:
 
 ```json
 {
@@ -398,9 +421,40 @@ ai-memory search "PostgreSQL"
 
 ---
 
+## Feature Tiers
+
+ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --tier <tier>`. Higher tiers add ML capabilities at the cost of disk and RAM:
+
+| Tier | Recall Method | Extra Capabilities | Approx. Overhead |
+|------|---------------|-------------------|-----------------|
+| **keyword** | FTS5 only | Baseline 13 tools | 0 MB |
+| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings, 384-dim vectors | ~256 MB |
+| **smart** | Hybrid + LLM query expansion | + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction` | ~1 GB |
+| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, cross-encoder reranking | ~4 GB |
+
+**Keyword tier** is the default and requires no additional dependencies. **Semantic tier** bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~80 MB). **Smart** and **autonomous** tiers require Ollama running locally with the appropriate Gemma 4 models installed (Google, USA-only license).
+
+```bash
+# Keyword (default)
+ai-memory mcp
+
+# Semantic -- hybrid recall with embeddings
+ai-memory mcp --tier semantic
+
+# Smart -- adds LLM-powered query expansion, auto-tagging, contradiction detection
+ai-memory mcp --tier smart
+
+# Autonomous -- adds cross-encoder reranking
+ai-memory mcp --tier autonomous
+```
+
+The `memory_capabilities` tool reports the active tier, loaded models, and available capabilities at runtime.
+
+---
+
 ## MCP Tools
 
-These 13 tools are available to any MCP-compatible AI when configured as an MCP server:
+These 17 tools are available to any MCP-compatible AI when configured as an MCP server:
 
 | Tool | Description |
 |------|-------------|
@@ -417,6 +471,10 @@ These 13 tools are available to any MCP-compatible AI when configured as an MCP 
 | `memory_get_links` | Get all links for a memory |
 | `memory_consolidate` | Merge multiple memories into one long-term summary |
 | `memory_stats` | Get memory store statistics |
+| `memory_capabilities` | Report active feature tier, loaded models, and available capabilities |
+| `memory_expand_query` | Use LLM to expand search query into related terms (smart+ tier) |
+| `memory_auto_tag` | Use LLM to auto-generate tags for a memory (smart+ tier) |
+| `memory_detect_contradiction` | Use LLM to check if two memories contradict (smart+ tier) |
 
 ---
 
@@ -486,6 +544,12 @@ The top-level `ai-memory` binary also accepts global flags:
 |------|-------------|
 | `--db <path>` | Database path (default: `ai-memory.db`, or `$AI_MEMORY_DB`) |
 | `--json` | JSON output on all commands |
+
+The `mcp` subcommand accepts an additional flag:
+
+| Flag | Description |
+|------|-------------|
+| `--tier <keyword\|semantic\|smart\|autonomous>` | Feature tier (default: `keyword`). See [Feature Tiers](#feature-tiers). |
 
 ---
 

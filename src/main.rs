@@ -2,11 +2,15 @@
 // Licensed under the MIT License. See LICENSE file in the project root.
 
 mod color;
+mod config;
 mod db;
+mod embeddings;
 mod errors;
 mod handlers;
+mod llm;
 mod mcp;
 mod models;
+mod reranker;
 mod validate;
 
 use anyhow::Result;
@@ -61,7 +65,11 @@ enum Command {
     /// Start the HTTP memory daemon
     Serve(ServeArgs),
     /// Run as an MCP (Model Context Protocol) tool server over stdio
-    Mcp,
+    Mcp {
+        /// Feature tier: keyword (FTS only) or semantic (embeddings + FTS)
+        #[arg(long, default_value = "semantic")]
+        tier: String,
+    },
     /// Store a new memory
     Store(StoreArgs),
     /// Update an existing memory by ID
@@ -352,8 +360,10 @@ async fn main() -> Result<()> {
     let j = cli.json;
     match cli.command {
         Command::Serve(a) => serve(cli.db, a).await,
-        Command::Mcp => {
-            mcp::run_mcp_server(&cli.db)?;
+        Command::Mcp { tier } => {
+            let feature_tier = config::FeatureTier::from_str(&tier)
+                .unwrap_or(config::FeatureTier::Semantic);
+            mcp::run_mcp_server(&cli.db, feature_tier)?;
             Ok(())
         }
         Command::Store(a) => cmd_store(cli.db, a, j),

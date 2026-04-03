@@ -4,7 +4,7 @@
 
 `ai-memory` is an AI-agnostic memory management system built as a single Rust binary that serves three roles:
 
-1. **MCP tool server** -- stdio JSON-RPC server exposing 13 memory tools for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
+1. **MCP tool server** -- stdio JSON-RPC server exposing 17 memory tools for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
 3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 20 endpoints (completely AI-agnostic)
 
@@ -15,11 +15,24 @@ main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (2
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 13 tools, notification handling
+mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 17 tools, notification handling
 validate.rs      -- Input validation for all write paths
 errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
 color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
+config.rs        -- Tier configuration system (keyword, semantic, smart, autonomous) and feature gating
+embeddings.rs    -- Embedding pipeline: HuggingFace model loading, vector generation, cosine similarity
+llm.rs           -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
+reranker.rs      -- Hybrid recall algorithm: blends semantic (embedding) and keyword (FTS5) scores
 ```
+
+### Embedding Pipeline (semantic tier and above)
+
+When running at the `semantic` tier or higher, ai-memory loads a HuggingFace embedding model at startup and generates dense vector embeddings for each memory. The pipeline:
+
+1. **Model loading** (`embeddings.rs`) -- downloads and caches a sentence-transformer model from HuggingFace on first run
+2. **Embedding generation** -- new memories are embedded at insert time; existing memories are backfilled on first startup with embeddings enabled
+3. **Storage** -- embeddings are stored as BLOB columns in the `memories` table (schema migration v3)
+4. **Hybrid recall** (`reranker.rs`) -- at recall time, the query is embedded and compared against stored embeddings via cosine similarity, then blended with FTS5 keyword scores to produce a final ranking
 
 ## Code Structure
 
@@ -46,10 +59,10 @@ color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects t
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **13 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **17 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
-- `tool_definitions()` -- returns the 13 tool schemas for `tools/list`
+- `tool_definitions()` -- returns the 17 tool schemas for `tools/list` (4 new: `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`)
   - `memory_recall` schema includes `until` parameter
   - `memory_search` and `memory_list` schemas enforce `maximum: 200` on limit
   - `memory_consolidate` schema enforces `minItems: 2, maxItems: 100` on IDs
@@ -171,7 +184,8 @@ CREATE TABLE memories (
     created_at       TEXT NOT NULL,           -- ISO 8601 / RFC3339
     updated_at       TEXT NOT NULL,
     last_accessed_at TEXT,
-    expires_at       TEXT                     -- NULL for long-term
+    expires_at       TEXT,                    -- NULL for long-term
+    embedding        BLOB                     -- dense vector (v3 migration, NULL if keyword tier)
 );
 
 -- Indexes
@@ -211,7 +225,7 @@ Relation types: `related_to`, `supersedes`, `contradicts`, `derived_from`.
 
 ### `schema_version` table
 
-Tracks migration state. Current version: 2.
+Tracks migration state. Current version: 3.
 
 ## Recall Scoring Formula
 
@@ -227,6 +241,28 @@ score = (fts_rank * -1)                                              -- FTS5 rel
 ```
 
 The `search` function uses the same formula minus the tier boost.
+
+### Hybrid Recall Algorithm (semantic tier and above)
+
+At the `semantic` tier and above, the `reranker.rs` module blends two scoring signals:
+
+1. **Semantic score** -- cosine similarity between the query embedding and each memory's stored embedding (0.0 to 1.0)
+2. **Keyword score** -- the existing 6-factor FTS5 composite score, normalized to 0.0-1.0
+
+The final score is a weighted blend: `final = (semantic_weight * semantic_score) + (keyword_weight * keyword_score)`. The default weights are 0.6 semantic / 0.4 keyword. Results from both pipelines are merged, deduplicated by memory ID, and sorted by the blended score.
+
+### Tier Configuration System
+
+The `config.rs` module defines 4 feature tiers that gate functionality:
+
+| Tier | Embeddings | LLM | Tools Available |
+|------|-----------|-----|-----------------|
+| `keyword` | No | No | 13 base tools + `memory_capabilities` |
+| `semantic` | Yes | No | 14 base tools + `memory_capabilities` |
+| `smart` | Yes | Yes | All 17 tools |
+| `autonomous` | Yes | Yes | All 17 tools + autonomous behaviors |
+
+The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be changed at runtime. The `memory_capabilities` tool reports the active tier and which features are available, allowing AI clients to adapt their behavior.
 
 The recency decay factor ensures that recent memories rank higher when other factors are similar. A memory updated today gets a boost of ~1.0, a memory from 10 days ago gets ~0.5, and a memory from 100 days ago gets ~0.09.
 
@@ -502,10 +538,12 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 13 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 17 tools.
 
 ```bash
 ai-memory mcp
+ai-memory mcp --tier semantic   # default
+ai-memory mcp --tier smart      # enables LLM-powered tools (requires Ollama)
 ```
 
 Reads JSON-RPC from stdin, writes responses to stdout. Logs to stderr. Correctly handles notifications (no response sent). Works with any MCP-compatible client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, etc.).
@@ -772,6 +810,15 @@ cargo build --release
 
 # The binary is at target/release/ai-memory
 ```
+
+### New Dependencies (v0.4.0)
+
+- `candle-core`, `candle-nn`, `candle-transformers` -- HuggingFace Candle for local embedding model inference
+- `hf-hub` -- HuggingFace Hub client for downloading embedding models
+- `tokenizers` -- HuggingFace tokenizers for text preprocessing
+- `reqwest` -- HTTP client for Ollama API communication (LLM inference)
+
+These dependencies are compiled conditionally based on feature flags. The `keyword` tier build excludes embedding and LLM dependencies entirely.
 
 Release profile settings (from `Cargo.toml`):
 - `opt-level = 3`

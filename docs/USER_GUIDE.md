@@ -44,7 +44,7 @@ Below is an example for **Claude Code** (`~/.claude/.mcp.json`) -- one of many s
 
 ### How It Works
 
-With MCP configured, your AI client gains 13 memory tools:
+With MCP configured, your AI client gains 17 memory tools:
 
 - **memory_store** -- Store new knowledge (auto-deduplicates by title+namespace, reports contradictions)
 - **memory_recall** -- Recall relevant memories for the current context (supports `until` date filter)
@@ -59,8 +59,42 @@ With MCP configured, your AI client gains 13 memory tools:
 - **memory_link** -- Create a link between two memories
 - **memory_get_links** -- Get all links for a memory
 - **memory_consolidate** -- Consolidate multiple memories into one long-term summary (2-100 memories)
+- **memory_capabilities** -- Report which features are available at the current tier
+- **memory_expand_query** -- Expand a recall query with synonyms and related terms (smart+ tier)
+- **memory_auto_tag** -- Automatically suggest tags for a memory based on its content (smart+ tier)
+- **memory_detect_contradiction** -- Detect contradictions between a new memory and existing ones (smart+ tier)
 
 Your AI assistant uses these tools automatically during conversations. You can also ask directly: "Remember that we use PostgreSQL 15" or "What do you remember about our auth system?"
+
+## Feature Tiers
+
+ai-memory supports 4 feature tiers, controlled by the `--tier` flag when starting the MCP server (e.g., `ai-memory mcp --tier semantic`). Each tier builds on the previous one:
+
+| Tier | Recall Method | Extra Features | Requirements |
+|------|--------------|----------------|--------------|
+| **keyword** | FTS5 only | None | None (lightest) |
+| **semantic** (default) | Hybrid: semantic + keyword blending | Embedding-based recall | HuggingFace embedding model (~256 MB RAM) |
+| **smart** | Hybrid | Query expansion, auto-tagging, contradiction detection | Ollama + LLM (~1 GB RAM) |
+| **autonomous** | Hybrid | Full autonomous memory management | Ollama + LLM (~4 GB RAM) |
+
+### Hybrid Recall (semantic tier and above)
+
+At the `semantic` tier and above, recall uses **hybrid scoring** that blends two signals:
+
+1. **Semantic similarity** -- the query and each memory are converted to embeddings (dense vectors), and cosine similarity measures how close they are in meaning. This catches relevant results even when exact keywords differ.
+2. **Keyword matching** -- the existing FTS5 full-text search with the 6-factor composite score.
+
+The final ranking blends both signals, so you get the precision of keyword matching plus the flexibility of semantic understanding.
+
+### Query Expansion, Auto-Tagging, and Contradiction Detection (smart+ tier)
+
+At the `smart` and `autonomous` tiers, three additional capabilities are available via LLM inference (requires Ollama):
+
+- **Query expansion** (`memory_expand_query`) -- expands a recall query with synonyms, related terms, and alternative phrasings to improve recall coverage.
+- **Auto-tagging** (`memory_auto_tag`) -- analyzes memory content and suggests relevant tags automatically.
+- **Contradiction detection** (`memory_detect_contradiction`) -- compares a new memory against existing ones to detect semantic contradictions, even when the wording is different.
+
+These tools are available to your AI assistant automatically at the smart+ tier. At lower tiers, calling them returns a tier-requirement notice.
 
 ## Getting Started (CLI)
 

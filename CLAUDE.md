@@ -13,15 +13,17 @@ The recommended integration path is the **MCP tool server**. Configure in `~/.cl
   "mcpServers": {
     "memory": {
       "command": "ai-memory",
-      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
     }
   }
 }
 ```
 
+> The `--tier` flag controls the feature tier: `keyword`, `semantic` (default), `smart`, or `autonomous`. Example: `ai-memory mcp --tier semantic`.
+
 > MCP server configuration does **not** go in `settings.json`, `settings.local.json`, or project-level `.mcp.json` files. Memory is a global service -- always configure it in `~/.claude/.mcp.json`.
 
-This gives Claude Code 13 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`.
+This gives Claude Code 17 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
 
 ## Alternative: CLI Integration
 
@@ -85,8 +87,14 @@ If you omit `--namespace`, it auto-detects from the git remote or directory name
 - `completions` -- generate shell completions (bash, zsh, fish)
 - `man` -- generate roff man page to stdout (pipe to `man -l -` to view)
 
-### Recall scoring (6 factors):
-Memories are ranked by: FTS relevance + priority weight + access frequency + confidence + tier boost (long=3.0, mid=1.0) + recency decay (1/(1 + days_old * 0.1)).
+### Feature tiers:
+- `keyword` -- FTS5 only, no embedding model, lowest resource usage
+- `semantic` (default) -- adds embedding-based recall with hybrid scoring (semantic + keyword blending)
+- `smart` -- adds query expansion, auto-tagging, and contradiction detection (requires Ollama)
+- `autonomous` -- full autonomous memory management (requires Ollama)
+
+### Recall scoring (6 factors + hybrid):
+Memories are ranked by: FTS relevance + priority weight + access frequency + confidence + tier boost (long=3.0, mid=1.0) + recency decay (1/(1 + days_old * 0.1)). At the `semantic` tier and above, recall uses **hybrid scoring** that blends semantic (embedding similarity) and keyword (FTS5) results for better relevance.
 
 ### Automatic behaviors:
 - TTL extension on recall: short +1h, mid +1d

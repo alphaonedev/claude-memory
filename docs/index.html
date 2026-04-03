@@ -160,6 +160,17 @@
         .method-put{color:var(--orange);background:rgba(210,153,34,.1)}
         .method-delete{color:var(--red);background:rgba(248,81,73,.1)}
 
+        /* Feature tier highlights */
+        .tier-keyword{color:var(--green)}
+        .tier-semantic{color:var(--accent)}
+        .tier-smart{color:var(--orange)}
+        .tier-autonomous{color:var(--purple)}
+        .tier-tag{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:.15em .55em;border-radius:3px;white-space:nowrap}
+        .tier-tag-keyword{color:var(--green);background:rgba(63,185,80,.12)}
+        .tier-tag-semantic{color:var(--accent);background:rgba(88,166,255,.12)}
+        .tier-tag-smart{color:var(--orange);background:rgba(210,153,34,.12)}
+        .tier-tag-autonomous{color:var(--purple);background:rgba(188,140,255,.12)}
+
         /* Category label in CLI table */
         .cat-label{font-size:.65rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em;padding:.15em .5em;border-radius:3px;white-space:nowrap}
         .cat-core{color:var(--accent);background:rgba(88,166,255,.1)}
@@ -300,10 +311,11 @@
             <a href="#platforms">Platforms</a>
             <a href="#install">Install</a>
             <a href="#features">Features</a>
+            <a href="#feature-tiers">Feature Tiers</a>
             <a href="#mcp">MCP Tools</a>
             <a href="#api">HTTP API</a>
             <a href="#cli">CLI</a>
-            <a href="#tiers">Tiers</a>
+            <a href="#tiers">Memory Tiers</a>
             <a href="#ranking">Ranking</a>
             <a href="#security">Security</a>
             <a href="#architecture">Architecture</a>
@@ -325,10 +337,10 @@
             remembers your projects, preferences, and past decisions across every conversation.
         </p>
         <div class="stats-row">
-            <div class="stat"><span class="num">13</span><span class="label">MCP Tools</span></div>
+            <div class="stat"><span class="num">17</span><span class="label">MCP Tools</span></div>
             <div class="stat"><span class="num">20</span><span class="label">HTTP Endpoints</span></div>
             <div class="stat"><span class="num">24</span><span class="label">CLI Commands</span></div>
-            <div class="stat"><span class="num">41</span><span class="label">Tests</span></div>
+            <div class="stat"><span class="num">40</span><span class="label">Tests</span></div>
             <div class="stat"><span class="num">6</span><span class="label">Ranking Factors</span></div>
         </div>
         <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
@@ -450,7 +462,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 13 memory tools natively. No daemon, no ports. Do not place this in <code>settings.json</code> or project-level <code>.mcp.json</code> -- memory is a global service.</p>
+                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 17 memory tools natively. No daemon, no ports. Do not place this in <code>settings.json</code> or project-level <code>.mcp.json</code> -- memory is a global service.</p>
                 </div>
 
                 <div id="tab-codex" class="integration-panel">
@@ -567,7 +579,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">The MCP server exposes 13 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
+                    <p style="font-size:.85rem">The MCP server exposes 17 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
                 </div>
             </li>
             <li>
@@ -587,7 +599,7 @@
 <section id="features" class="alt">
     <div class="container">
         <h2>What It Does</h2>
-        <p class="section-subtitle">Every capability at a glance. Three interfaces, one shared database, zero configuration drift. Works with any AI that supports MCP or HTTP.</p>
+        <p class="section-subtitle">Every capability at a glance. 4 feature tiers (keyword to autonomous), 17 MCP tools, three interfaces, one shared database. Works with any AI that supports MCP or HTTP.</p>
 
         <div class="feature-grid">
             <div class="feature-card">
@@ -602,13 +614,13 @@
             </div>
             <div class="feature-card">
                 <div class="icon-box icon-fast">FTS</div>
-                <h4>Full-Text Search</h4>
-                <p>SQLite FTS5 powers both fuzzy OR recall and exact AND search. Queries run entirely in SQL -- no external search engine needed.</p>
+                <h4>Full-Text + Semantic Search</h4>
+                <p>SQLite FTS5 for keyword search plus vector embeddings for semantic similarity. Hybrid recall blends both FTS5 and cosine similarity for best-of-both-worlds relevance.</p>
             </div>
             <div class="feature-card">
-                <div class="icon-box icon-auto">A</div>
-                <h4>Automatic Behaviors</h4>
-                <p>Deduplication on store, contradiction detection, TTL extension on recall, auto-promotion at 5 accesses, priority reinforcement every 10 accesses.</p>
+                <div class="icon-box icon-auto">4T</div>
+                <h4>4 Feature Tiers</h4>
+                <p>Scale from zero-dependency keyword search to full autonomous memory management. Each tier adds capabilities: keyword, semantic, smart, and autonomous.</p>
             </div>
             <div class="feature-card">
                 <div class="icon-box icon-sync">L</div>
@@ -616,20 +628,75 @@
                 <p>Connect memories with typed relations: related_to, supersedes, contradicts, derived_from. Resolve contradictions with a single command.</p>
             </div>
             <div class="feature-card">
-                <div class="icon-box icon-secure">Tx</div>
-                <h4>Transaction-Safe</h4>
-                <p>Every write is wrapped in a SQLite transaction. WAL mode for concurrent reads. Schema v2 with 5 indexes for fast lookups.</p>
+                <div class="icon-box icon-secure">LLM</div>
+                <h4>LLM-Powered Features</h4>
+                <p>Smart and autonomous tiers use Ollama (Gemma 4) for query expansion, auto-tagging, auto-consolidation, cross-encoder reranking, and contradiction analysis.</p>
             </div>
         </div>
     </div>
 </section>
 
 <!-- ================================================================
-     13 MCP TOOLS
+     FEATURE TIERS
+     ================================================================ -->
+<section id="feature-tiers">
+    <div class="container">
+        <h2>Feature Tiers</h2>
+        <p class="section-subtitle">Choose the tier that fits your resources. Each tier builds on the one below it. Set via <code>ai-memory mcp --tier &lt;name&gt;</code>.</p>
+
+        <div class="table-wrap">
+            <table class="api-table">
+                <thead>
+                    <tr><th>Tier</th><th>Memory</th><th>Embeddings</th><th>LLM</th><th>Key Features</th></tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><span class="tier-tag tier-tag-keyword">keyword</span></td>
+                        <td>0 MB</td>
+                        <td class="matrix-dash">&mdash;</td>
+                        <td class="matrix-dash">&mdash;</td>
+                        <td>FTS5 full-text search</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tier-tag tier-tag-semantic">semantic</span></td>
+                        <td>256 MB</td>
+                        <td>MiniLM-L6-v2</td>
+                        <td class="matrix-dash">&mdash;</td>
+                        <td>+ Hybrid recall (keyword + cosine similarity)</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tier-tag tier-tag-smart">smart</span></td>
+                        <td>1 GB</td>
+                        <td>nomic-embed v1.5</td>
+                        <td>Gemma 4 E2B</td>
+                        <td>+ Query expansion, auto-tagging, auto-consolidation</td>
+                    </tr>
+                    <tr>
+                        <td><span class="tier-tag tier-tag-autonomous">autonomous</span></td>
+                        <td>4 GB</td>
+                        <td>nomic-embed v1.5</td>
+                        <td>Gemma 4 E4B</td>
+                        <td>+ Cross-encoder reranking, contradiction analysis</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <p style="font-size:.88rem;margin-top:1rem">
+            The <strong style="color:var(--green)">keyword</strong> tier has zero dependencies beyond the binary itself.
+            The <strong style="color:var(--accent)">semantic</strong> tier downloads a small embedding model on first run.
+            The <strong style="color:var(--orange)">smart</strong> and <strong style="color:var(--purple)">autonomous</strong> tiers require
+            <a href="https://ollama.com">Ollama</a> running locally with Gemma 4 models (USA-only).
+        </p>
+    </div>
+</section>
+
+<!-- ================================================================
+     17 MCP TOOLS
      ================================================================ -->
 <section id="mcp">
     <div class="container">
-        <h2>13 MCP Tools <span class="badge">Universal Integration</span></h2>
+        <h2>17 MCP Tools <span class="badge">Universal Integration</span></h2>
         <p class="section-subtitle">
             ai-memory runs as a Model Context Protocol (MCP) tool server over stdio.
             Any MCP-compatible AI client -- Claude, ChatGPT, Grok, Llama, or custom agents -- discovers these tools automatically.
@@ -669,7 +736,7 @@
                 <!-- MCP Server -->
                 <rect x="275" y="80" width="190" height="60" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="2"/>
                 <text x="370" y="105" text-anchor="middle" fill="#e6edf3" font-family="system-ui" font-size="13" font-weight="700">MCP Server</text>
-                <text x="370" y="125" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="11">JSON-RPC / 13 tools</text>
+                <text x="370" y="125" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="11">JSON-RPC / 17 tools</text>
 
                 <line x1="465" y1="110" x2="530" y2="110" stroke="#bc8cff" stroke-width="2" class="animate-flow"/>
                 <polygon points="530,105 540,110 530,115" fill="#bc8cff"/>
@@ -736,6 +803,22 @@
             <div class="card">
                 <span class="tool-name">memory_stats</span>
                 <p>Database statistics: counts by tier, namespaces, link count, DB size.</p>
+            </div>
+            <div class="card">
+                <span class="tool-name">memory_capabilities</span>
+                <p>Returns available capabilities for the current feature tier. Lets the AI discover what tools and features are active.</p>
+            </div>
+            <div class="card">
+                <span class="tool-name">memory_expand_query</span>
+                <p>LLM-powered query expansion. Broadens a recall query with synonyms and related terms for better recall coverage. (smart+ tiers)</p>
+            </div>
+            <div class="card">
+                <span class="tool-name">memory_auto_tag</span>
+                <p>LLM-powered auto-tagging. Analyzes memory content and suggests relevant tags automatically. (smart+ tiers)</p>
+            </div>
+            <div class="card">
+                <span class="tool-name">memory_detect_contradiction</span>
+                <p>LLM-powered contradiction analysis. Compares a memory against existing memories to detect conflicts and inconsistencies. (smart+ tiers)</p>
             </div>
         </div>
     </div>
@@ -1112,7 +1195,7 @@
                 <!-- MCP -->
                 <rect x="280" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
                 <text x="350" y="102" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="12" font-weight="700">MCP Server</text>
-                <text x="350" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">13 tools / stdio</text>
+                <text x="350" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">17 tools / stdio</text>
 
                 <!-- HTTP -->
                 <rect x="530" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
@@ -1140,7 +1223,7 @@
                 <!-- DB layer -->
                 <rect x="170" y="257" width="360" height="55" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="2"/>
                 <text x="350" y="280" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 (db.rs)</text>
-                <text x="350" y="300" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v2 | 5 indexes | 48 tests</text>
+                <text x="350" y="300" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v2 | 5 indexes | 40 tests</text>
 
                 <!-- Tiers -->
                 <rect x="200" y="325" width="70" height="22" rx="4" fill="rgba(248,81,73,.15)" stroke="#f85149" stroke-width="1"/>
@@ -1316,7 +1399,7 @@
 
                 <rect x="327" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1"/>
                 <text x="367" y="48" text-anchor="middle" fill="#bc8cff" font-family="monospace" font-size="10">test</text>
-                <text x="367" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">48 tests</text>
+                <text x="367" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">40 tests</text>
 
                 <line x1="407" y1="50" x2="427" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
 
@@ -1350,7 +1433,7 @@
             <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/ADMIN_GUIDE.md">Admin Guide</a>
         </div>
         <p>
-            <strong>ai-memory</strong> v0.3.0 &mdash; AI-Agnostic MCP Memory Server
+            <strong>ai-memory</strong> v0.4.0 &mdash; AI-Agnostic MCP Memory Server
         </p>
         <p style="margin-top:.5rem">
             Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. All rights reserved.

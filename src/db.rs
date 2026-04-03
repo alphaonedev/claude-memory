@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 "#;
 
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -121,6 +121,25 @@ fn migrate(conn: &Connection) -> Result<()> {
             if !has_source {
                 conn.execute(
                     "ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'api'",
+                    [],
+                )?;
+            }
+        }
+
+        if version < 3 {
+            // Add embedding column for semantic search (Phase 1+2)
+            let mut has_embedding = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                if col?.as_str() == "embedding" {
+                    has_embedding = true;
+                }
+            }
+            drop(stmt);
+            if !has_embedding {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN embedding BLOB",
                     [],
                 )?;
             }
@@ -822,6 +841,190 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
         |r| r.get(0),
     )?;
     Ok(actual_id)
+}
+
+// --- Embedding support ---
+
+/// Store an embedding vector for a memory.
+pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
+    let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    conn.execute(
+        "UPDATE memories SET embedding = ?1 WHERE id = ?2",
+        params![bytes, id],
+    )?;
+    Ok(())
+}
+
+/// Load an embedding vector for a memory. Returns None if not set.
+pub fn get_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
+    let result: Option<Vec<u8>> = conn
+        .query_row(
+            "SELECT embedding FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .ok();
+    match result {
+        Some(bytes) if !bytes.is_empty() => {
+            let floats: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+            Ok(Some(floats))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// Get all memory IDs that are missing embeddings.
+pub fn get_unembedded_ids(conn: &Connection) -> Result<Vec<(String, String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, title, content FROM memories WHERE embedding IS NULL"
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(Into::into)
+}
+
+/// Hybrid recall — FTS5 keyword search + semantic cosine similarity.
+/// Returns memories ranked by a blended score of keyword and semantic relevance.
+#[allow(clippy::too_many_arguments)]
+pub fn recall_hybrid(
+    conn: &Connection,
+    context: &str,
+    query_embedding: &[f32],
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+) -> Result<Vec<Memory>> {
+    let now = Utc::now().to_rfc3339();
+    let fts_query = sanitize_fts_query(context, true);
+
+    // Step 1: Get FTS candidates (up to 3x limit to have a good pool)
+    let fts_limit = (limit * 3).max(30);
+    let mut fts_stmt = conn.prepare(
+        "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
+                m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
+                m.last_accessed_at, m.expires_at, m.embedding,
+                (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
+                + (m.confidence * 2.0)
+                + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
+                + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
+                AS fts_score
+         FROM memories_fts fts
+         JOIN memories m ON m.rowid = fts.rowid
+         WHERE memories_fts MATCH ?1
+           AND (?2 IS NULL OR m.namespace = ?2)
+           AND (m.expires_at IS NULL OR m.expires_at > ?3)
+           AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
+           AND (?5 IS NULL OR m.created_at >= ?5)
+           AND (?6 IS NULL OR m.created_at <= ?6)
+         ORDER BY fts_score DESC
+         LIMIT ?7",
+    )?;
+
+    // Step 2: Get semantic candidates — all memories with embeddings
+    let mut sem_stmt = conn.prepare(
+        "SELECT id, tier, namespace, title, content, tags, priority,
+                confidence, source, access_count, created_at, updated_at,
+                last_accessed_at, expires_at, embedding
+         FROM memories
+         WHERE embedding IS NOT NULL
+           AND (?1 IS NULL OR namespace = ?1)
+           AND (expires_at IS NULL OR expires_at > ?2)
+           AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?3))
+           AND (?4 IS NULL OR created_at >= ?4)
+           AND (?5 IS NULL OR created_at <= ?5)",
+    )?;
+
+    use std::collections::HashMap;
+
+    // Collect FTS results with scores
+    let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
+
+    let fts_rows = fts_stmt.query_map(
+        params![fts_query, namespace, now, tags_filter, since, until, fts_limit as i64],
+        |row| {
+            let mem = row_to_memory(row)?;
+            let fts_score: f64 = row.get(15)?;
+            Ok((mem, fts_score))
+        },
+    )?;
+
+    let mut max_fts_score: f64 = 1.0;
+    for row in fts_rows {
+        let (mem, fts_score) = row?;
+        if fts_score > max_fts_score {
+            max_fts_score = fts_score;
+        }
+        // Compute cosine similarity if embedding exists
+        let cosine = get_embedding(conn, &mem.id)?
+            .map(|emb| crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb) as f64)
+            .unwrap_or(0.0);
+        scored.insert(mem.id.clone(), (mem, fts_score, cosine));
+    }
+
+    // Semantic-only candidates (may not overlap with FTS results)
+    let sem_rows = sem_stmt.query_map(
+        params![namespace, now, tags_filter, since, until],
+        |row| {
+            let mem = row_to_memory(row)?;
+            let emb_bytes: Option<Vec<u8>> = row.get(14)?;
+            Ok((mem, emb_bytes))
+        },
+    )?;
+
+    for row in sem_rows {
+        let (mem, emb_bytes) = row?;
+        if scored.contains_key(&mem.id) {
+            continue; // Already in FTS results
+        }
+        if let Some(bytes) = emb_bytes {
+            if !bytes.is_empty() {
+                let emb: Vec<f32> = bytes
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let cosine = crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb) as f64;
+                // Only include if cosine similarity is meaningful
+                if cosine > 0.3 {
+                    scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                }
+            }
+        }
+    }
+
+    // Normalize FTS scores and compute blended score
+    let mut results: Vec<(Memory, f64)> = scored
+        .into_values()
+        .map(|(mem, fts_score, cosine)| {
+            let norm_fts = if max_fts_score > 0.0 { fts_score / max_fts_score } else { 0.0 };
+            // Blend: 40% semantic, 60% keyword (FTS is already a composite score)
+            let blended = 0.4 * cosine + 0.6 * norm_fts;
+            (mem, blended)
+        })
+        .collect();
+
+    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.truncate(limit);
+
+    let memories: Vec<Memory> = results.into_iter().map(|(mem, _)| mem).collect();
+
+    // Touch all recalled memories
+    for mem in &memories {
+        if let Err(e) = touch(conn, &mem.id) {
+            tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
+        }
+    }
+
+    Ok(memories)
 }
 
 /// Checkpoint WAL for clean shutdown.

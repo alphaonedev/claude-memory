@@ -1,6 +1,6 @@
 # Installation Guide
 
-> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 13 memory tools instantly. Total time: ~60 seconds.
+> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 17 memory tools instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds.
 
 ## Install in 60 Seconds
 
@@ -15,16 +15,17 @@
      "mcpServers": {
        "memory": {
          "command": "ai-memory",
-         "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
+         "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
        }
      }
    }
    ```
+   > The `--tier` flag is optional (defaults to `semantic`). Options: `keyword`, `semantic`, `smart`, `autonomous`.
    > **Other AI platforms** (OpenAI ChatGPT, xAI Grok, META Llama, etc.) have their own MCP configuration locations. Consult your platform's documentation for where to add MCP server entries. The server command and args are the same -- only the config file location differs.
 
 3. **Restart your AI client.**
 
-4. **Verify** -- you should see 13 new tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`.
+4. **Verify** -- you should see 17 new tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
 
 5. **Test** -- ask your AI assistant to store a memory. It should use `memory_store` automatically.
 
@@ -80,7 +81,7 @@ Each AI platform has its own MCP configuration location. The server command and 
   "mcpServers": {
     "memory": {
       "command": "ai-memory",
-      "args": ["--db", "~/.claude/ai-memory.db", "mcp"]
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
     }
   }
 }
@@ -219,7 +220,7 @@ If `ai-memory` is not in your PATH, use the full path to the binary in any of th
   "mcpServers": {
     "memory": {
       "command": "/usr/local/bin/ai-memory",
-      "args": ["--db", "/var/lib/ai-memory/ai-memory.db", "mcp"]
+      "args": ["--db", "/var/lib/ai-memory/ai-memory.db", "mcp", "--tier", "semantic"]
     }
   }
 }
@@ -227,7 +228,7 @@ If `ai-memory` is not in your PATH, use the full path to the binary in any of th
 
 ### Step 2: Verify
 
-Restart your AI client. You should see 13 new tools available: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`.
+Restart your AI client. You should see 17 new tools available: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
 
 ### Step 3: Test
 
@@ -351,6 +352,46 @@ ai-memory completions zsh > ~/.zfunc/_ai-memory
 # Fish
 ai-memory completions fish > ~/.config/fish/completions/ai-memory.fish
 ```
+
+## Ollama Installation (smart/autonomous tiers)
+
+The `smart` and `autonomous` tiers require [Ollama](https://ollama.ai/) for LLM-powered features (query expansion, auto-tagging, contradiction detection). The `keyword` and `semantic` tiers do **not** require Ollama.
+
+### Install Ollama
+
+```bash
+curl -fsSL https://ollama.ai/install.sh | sh
+```
+
+### Pull a Model
+
+```bash
+ollama pull llama3.2       # ~1 GB, recommended for smart tier
+ollama pull llama3.1       # ~4 GB, recommended for autonomous tier
+```
+
+### Verify
+
+```bash
+ollama list                # should show your downloaded model(s)
+```
+
+### Configure the Tier
+
+Update your MCP config to use the `smart` or `autonomous` tier:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "smart"]
+    }
+  }
+}
+```
+
+> **Note:** The `semantic` tier (default) downloads a HuggingFace embedding model (~100 MB) on first startup. No account or API key is required. The model is cached in `~/.cache/huggingface/`.
 
 ## Multi-Node Sync Setup
 
