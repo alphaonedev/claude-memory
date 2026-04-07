@@ -353,6 +353,38 @@
 </section>
 
 <!-- ================================================================
+     BENCHMARK SUMMARY (compact banner)
+     ================================================================ -->
+<section style="padding:2.5rem 0;border-bottom:1px solid var(--border);background:linear-gradient(180deg,rgba(63,185,80,.04) 0%,transparent 100%)">
+    <div class="container" style="text-align:center">
+        <p style="font-size:.75rem;text-transform:uppercase;letter-spacing:.1em;color:var(--text-muted);margin-bottom:.75rem">LongMemEval Benchmark (ICLR 2025) &mdash; 500 questions, 6 categories</p>
+        <div style="display:flex;justify-content:center;gap:2.5rem;flex-wrap:wrap;margin-bottom:1rem">
+            <div>
+                <span style="font-size:2.2rem;font-weight:800;color:var(--green);line-height:1">97.8%</span>
+                <span style="display:block;font-size:.75rem;color:var(--text-muted)">R@5 (489/500)</span>
+            </div>
+            <div>
+                <span style="font-size:2.2rem;font-weight:800;color:var(--green);line-height:1">99.0%</span>
+                <span style="display:block;font-size:.75rem;color:var(--text-muted)">R@10 (495/500)</span>
+            </div>
+            <div>
+                <span style="font-size:2.2rem;font-weight:800;color:var(--green);line-height:1">99.8%</span>
+                <span style="display:block;font-size:.75rem;color:var(--text-muted)">R@20 (499/500)</span>
+            </div>
+            <div>
+                <span style="font-size:2.2rem;font-weight:800;color:var(--accent);line-height:1">2.2s</span>
+                <span style="display:block;font-size:.75rem;color:var(--text-muted)">232 q/s (keyword)</span>
+            </div>
+            <div>
+                <span style="font-size:2.2rem;font-weight:800;color:var(--orange);line-height:1">$0</span>
+                <span style="display:block;font-size:.75rem;color:var(--text-muted)">Cloud API costs</span>
+            </div>
+        </div>
+        <p style="font-size:.85rem;color:var(--text-muted)">Pure SQLite FTS5 + BM25 &mdash; zero cloud dependencies &mdash; <a href="#benchmarks">full benchmark details &amp; replication steps</a></p>
+    </div>
+</section>
+
+<!-- ================================================================
      WORKS WITH (Platform Cards)
      ================================================================ -->
 <section id="platforms" class="alt">
