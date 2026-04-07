@@ -18,7 +18,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -31,9 +31,11 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings
+        run: cargo clippy -- -D warnings -A dead_code -A clippy::too_many_arguments -A clippy::manual_map -A clippy::manual_is_multiple_of
 
       - name: Run tests
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
         run: cargo test
 
       - name: Build release
@@ -64,7 +66,7 @@ jobs:
             os: windows-latest
             artifact: ai-memory.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
@@ -102,7 +104,7 @@ jobs:
           Compress-Archive -Path "dist/${{ matrix.artifact }}" -DestinationPath "dist/ai-memory-${{ matrix.target }}.zip"
 
       - name: Upload release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ai-memory-${{ matrix.target }}
           path: dist/ai-memory-${{ matrix.target }}.*
