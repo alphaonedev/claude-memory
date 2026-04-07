@@ -56,9 +56,8 @@ jobs:
             os: ubuntu-latest
             artifact: ai-memory
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04-arm
             artifact: ai-memory
-            cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact: ai-memory
@@ -78,17 +77,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install cross
-        if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
       - name: Build release binary
-        if: ${{ !matrix.cross }}
         run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Build release binary (cross)
-        if: matrix.cross
-        run: cross build --release --target ${{ matrix.target }}
 
       - name: Package binary (unix)
         if: ${{ !contains(matrix.target, 'windows') }}
