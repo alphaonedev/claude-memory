@@ -15,7 +15,15 @@ ai-memory replaces Claude Code's built-in auto-memory. Disable it to stop paying
 
 ## Step 2: Configure MCP Server
 
-Configure in your project's `.mcp.json` or `~/.claude/.mcp.json`:
+Claude Code supports three MCP configuration scopes:
+
+| Scope | File | Applies to |
+|-------|------|------------|
+| **User** (global) | `~/.claude.json` — add `mcpServers` key | All projects on your machine |
+| **Project** (shared) | `.mcp.json` in project root | Everyone on the project |
+| **Local** (private) | `~/.claude.json` — under `projects."/path".mcpServers` | One project, just you |
+
+**User scope (recommended)** — merge into your existing `~/.claude.json`:
 
 ```json
 {
@@ -28,7 +36,24 @@ Configure in your project's `.mcp.json` or `~/.claude/.mcp.json`:
 }
 ```
 
+**Project scope** — create `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
+    }
+  }
+}
+```
+
+> **Important:** MCP servers do **not** go in `settings.json` or `settings.local.json`.
+
 > The `--tier` flag is **required** in MCP args (config.toml tier is not used when launched by AI clients). Options: `keyword`, `semantic`, `smart`, `autonomous`. Smart and autonomous tiers require [Ollama](https://ollama.com).
+
+> **Windows:** Use `%USERPROFILE%\.claude.json` and forward slashes in db paths: `"C:/Users/YourName/.claude/ai-memory.db"`.
 
 This gives Claude Code 17 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
 

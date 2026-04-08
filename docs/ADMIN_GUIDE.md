@@ -10,7 +10,7 @@
 
 The simplest deployment is as an MCP tool server. No daemon process to manage -- your AI client spawns the process on demand. MCP (Model Context Protocol) is an open standard supported by multiple AI platforms.
 
-Below is an example for **Claude Code** (`~/.claude/.mcp.json`). Other MCP-compatible clients have their own configuration locations -- consult your platform's documentation.
+Below is an example for **Claude Code** (user scope: merge `mcpServers` into `~/.claude.json`; or project scope: `.mcp.json` in project root). Other MCP-compatible clients have their own configuration locations — consult your platform's documentation.
 
 ```json
 {
@@ -636,7 +636,7 @@ ls -la /path/to/ai-memory.db
 ### MCP server not connecting
 
 **Binary not found:**
-Check that the path in your MCP configuration (e.g., `~/.claude/.mcp.json` for Claude Code) is correct and the binary is executable.
+Check that the path in your MCP configuration (e.g., `~/.claude.json` for Claude Code user scope, or `.mcp.json` for project scope) is correct and the binary is executable.
 
 **Database path issues:**
 The MCP server opens the database at the path specified by `--db`. Ensure the directory exists and is writable.

@@ -596,7 +596,14 @@
                 </div>
 
                 <div id="tab-claude" class="integration-panel active">
-                    <p>Config: <code>~/.claude/.mcp.json</code> (global config -- memory works across all projects)</p>
+                    <p><strong>Claude Code MCP Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>User</strong> (global)</td><td style="padding:4px 8px;"><code>~/.claude.json</code></td><td style="padding:4px 8px;">All projects on your machine</td></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>Project</strong> (shared)</td><td style="padding:4px 8px;"><code>.mcp.json</code> in project root</td><td style="padding:4px 8px;">Everyone on the project (via git)</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Local</strong> (private)</td><td style="padding:4px 8px;"><code>~/.claude.json</code> under <code>projects</code></td><td style="padding:4px 8px;">One project, just you</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>User scope (recommended)</strong> — merge <code>mcpServers</code> into your existing <code>~/.claude.json</code> (macOS/Linux) or <code>%USERPROFILE%\.claude.json</code> (Windows):</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -605,22 +612,23 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 17 memory tools natively. No daemon, no ports. Do not place this in <code>settings.json</code> or project-level <code>.mcp.json</code> -- memory is a global service. The <code>--tier</code> flag is required -- options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
+                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 17 memory tools natively. No daemon, no ports. MCP servers do <strong>not</strong> go in <code>settings.json</code> or <code>settings.local.json</code>. The <code>--tier</code> flag is required — options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> Use <code>ai-memory.exe</code> for the command and forward slashes in paths: <code>"C:/Users/YourName/.claude/ai-memory.db"</code></p>
                 </div>
 
                 <div id="tab-codex" class="integration-panel">
-                    <p>Config: <code>~/.codex/config.toml</code> (global) or <code>.codex/config.toml</code> (project)</p>
+                    <p>Config: <code>~/.codex/config.toml</code> (global) or <code>.codex/config.toml</code> (project). Windows: <code>%USERPROFILE%\.codex\config.toml</code>. Override with <code>CODEX_HOME</code> env var.</p>
                     <pre><code><span class="tok-cm"># OpenAI Codex CLI MCP configuration</span>
 <span class="tok-flag">[mcp_servers.memory]</span>
 <span class="tok-str">command</span> = <span class="tok-str">"ai-memory"</span>
 <span class="tok-str">args</span> = [<span class="tok-str">"--db"</span>, <span class="tok-str">"~/.local/share/ai-memory/memories.db"</span>, <span class="tok-str">"mcp"</span>, <span class="tok-str">"--tier"</span>, <span class="tok-str">"semantic"</span>]
 <span class="tok-str">enabled</span> = <span class="tok-str">true</span><span class="lang-label">toml</span></code></pre>
                     <p style="font-size:.85rem">CLI shortcut: <code>codex mcp add memory -- ai-memory --db ~/.local/share/ai-memory/memories.db mcp --tier semantic</code></p>
-                    <p style="font-size:.85rem">Codex CLI uses TOML config. Use <code>enabled_tools</code> to restrict which memory tools are exposed. Use <code>/mcp</code> in the TUI to view server status. Supports <code>startup_timeout_sec</code>, <code>tool_timeout_sec</code>, and HTTP servers via <code>url</code>. See <a href="https://developers.openai.com/codex/mcp">Codex MCP docs</a>.</p>
+                    <p style="font-size:.85rem">Codex uses TOML with underscored key <code>mcp_servers</code> (not camelCase). Supports <code>env</code>, <code>env_vars</code>, <code>enabled_tools</code>, <code>disabled_tools</code>, <code>startup_timeout_sec</code>, <code>tool_timeout_sec</code>. Use <code>/mcp</code> in the TUI to view server status. <strong>Windows/WSL:</strong> WSL uses Linux home by default — set <code>CODEX_HOME</code> to share config with Windows host. See <a href="https://developers.openai.com/codex/mcp">Codex MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-gemini" class="integration-panel">
-                    <p>Config: <code>~/.gemini/settings.json</code> (user) or <code>.gemini/settings.json</code> (project)</p>
+                    <p>Config: <code>~/.gemini/settings.json</code> (user) or <code>.gemini/settings.json</code> (project). Windows: <code>%USERPROFILE%\.gemini\settings.json</code>.</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -631,11 +639,11 @@
   }
 }<span class="lang-label">json</span></code></pre>
                     <p style="font-size:.85rem">CLI shortcut: <code>gemini mcp add memory ai-memory -- --db ~/.local/share/ai-memory/memories.db mcp --tier semantic</code></p>
-                    <p style="font-size:.85rem">Avoid underscores in server names (use hyphens). Tool names are auto-prefixed as <code>mcp_memory_&lt;toolName&gt;</code>. Gemini sanitizes env vars -- declare needed vars in <code>env</code> field. Add <code>"trust": true</code> to skip confirmation prompts. See <a href="https://geminicli.com/docs/tools/mcp-server/">Gemini CLI MCP docs</a>.</p>
+                    <p style="font-size:.85rem">Avoid underscores in server names (use hyphens). Tool names are auto-prefixed as <code>mcp_memory_&lt;toolName&gt;</code>. Env vars in <code>env</code> field support <code>$VAR</code> / <code>${VAR}</code> (all platforms) and <code>%VAR%</code> (Windows). Gemini sanitizes sensitive patterns (<code>*TOKEN*</code>, <code>*SECRET*</code>) from inherited env unless declared. Add <code>"trust": true</code> to skip confirmation. CLI: <code>gemini mcp list/remove/enable/disable</code>. See <a href="https://geminicli.com/docs/tools/mcp-server/">Gemini CLI MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-cursor" class="integration-panel">
-                    <p>Config: <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project)</p>
+                    <p>Config: <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project). Windows: <code>%USERPROFILE%\.cursor\mcp.json</code>. Project overrides global for same-named servers.</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -644,11 +652,11 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Or add via <strong>Cursor Settings &gt; Tools &amp; MCP</strong>. Restart Cursor after editing. Verify with green dot in Settings. Supports <code>env</code>, <code>envFile</code>, <code>${env:VAR}</code> interpolation. ~40 tool limit across all servers. See <a href="https://cursor.com/docs/context/mcp">Cursor MCP docs</a>.</p>
+                    <p style="font-size:.85rem">Or add via <strong>Cursor Settings &gt; Tools &amp; MCP</strong>. Restart Cursor after editing. Verify with green dot in Settings. Supports <code>env</code>, <code>envFile</code>, <code>${env:VAR_NAME}</code> interpolation (can be unreliable for shell profile vars — use <code>envFile</code> as workaround). <strong>~40 tool limit</strong> across all servers. See <a href="https://cursor.com/docs/context/mcp">Cursor MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-windsurf" class="integration-panel">
-                    <p>Config: <code>~/.codeium/windsurf/mcp_config.json</code></p>
+                    <p>Config: <code>~/.codeium/windsurf/mcp_config.json</code> (<strong>global only</strong> — no project scope). Windows: <code>%USERPROFILE%\.codeium\windsurf\mcp_config.json</code>.</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -657,11 +665,11 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Windsurf (by Codeium) loads MCP servers from its config directory. Restart Windsurf after editing. Tools appear in the Cascade AI panel.</p>
+                    <p style="font-size:.85rem">Supports <code>${env:VAR_NAME}</code> interpolation in <code>command</code>, <code>args</code>, <code>env</code>, <code>serverUrl</code>, <code>url</code>, and <code>headers</code>. <strong>100 tool limit</strong> across all servers. Can also add via MCP Marketplace or Settings &gt; Cascade &gt; MCP Servers. See <a href="https://docs.windsurf.com/windsurf/cascade/mcp">Windsurf MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-continue" class="integration-panel">
-                    <p>Config: <code>~/.continue/config.yaml</code></p>
+                    <p>Config: <code>~/.continue/config.yaml</code> (user) or <code>.continue/mcpServers/</code> dir in project root (per-server YAML/JSON files). Windows: <code>%USERPROFILE%\.continue\config.yaml</code>.</p>
                     <pre><code><span class="tok-cm"># Continue.dev MCP configuration</span>
 <span class="tok-flag">mcpServers</span>:
   - <span class="tok-str">name</span>: <span class="tok-str">memory</span>
@@ -672,7 +680,7 @@
       - <span class="tok-str">"mcp"</span>
       - <span class="tok-str">"--tier"</span>
       - <span class="tok-str">"semantic"</span><span class="lang-label">yaml</span></code></pre>
-                    <p style="font-size:.85rem">Continue.dev uses YAML configuration. Add the MCP server block to your existing config. Restart the Continue extension after saving.</p>
+                    <p style="font-size:.85rem">MCP tools only work in agent mode. Supports <code>${{ secrets.SECRET_NAME }}</code> for secret interpolation. Project-level <code>.continue/mcpServers/</code> directory auto-detects JSON configs from other tools (Claude Code, Cursor, etc.). See <a href="https://docs.continue.dev/customize/deep-dives/mcp">Continue MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-grok" class="integration-panel">
@@ -695,7 +703,7 @@
     }],
     "input": "What do you remember about our project?"
   }'</span><span class="lang-label">bash</span></code></pre>
-                    <p style="font-size:.85rem"><strong>HTTPS required.</strong> <code>server_label</code> is required. Supports Streamable HTTP and SSE transports. See <a href="https://docs.x.ai/developers/tools/remote-mcp">xAI Remote MCP docs</a>.</p>
+                    <p style="font-size:.85rem"><strong>HTTPS required.</strong> <code>server_label</code> is required. Supports Streamable HTTP and SSE transports. Optional: <code>allowed_tools</code>, <code>authorization</code>, <code>headers</code>. Works with xAI SDK, OpenAI-compatible Responses API, and Voice Agent API. See <a href="https://docs.x.ai/docs/guides/tools/remote-mcp-tools">xAI Remote MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-llama" class="integration-panel">
@@ -711,7 +719,7 @@
 
 <span class="tok-cm"># Or use the REST API directly in custom tool definitions:</span>
 <span class="tok-cm">#   POST /api/v1/memories, GET /api/v1/recall, etc.</span><span class="lang-label">bash</span></code></pre>
-                    <p style="font-size:.85rem">META Llama uses Llama Stack for tool registration. Run <code>ai-memory serve</code> and register it as a remote MCP endpoint or wrap the REST API in your toolgroup definitions.</p>
+                    <p style="font-size:.85rem">META Llama uses Llama Stack for tool registration. Run <code>ai-memory serve</code> and register as a toolgroup via Python SDK or <code>run.yaml</code> (supports <code>${env.VAR_NAME}</code> interpolation). Transport migrating from SSE to Streamable HTTP. See <a href="https://llama-stack.readthedocs.io/en/latest/building_applications/tools.html">Llama Stack Tools docs</a>.</p>
                 </div>
 
                 <div id="tab-mcp-generic" class="integration-panel">

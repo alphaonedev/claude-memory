@@ -26,7 +26,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 
 | Platform | Integration Method | Config Format | Status |
 |----------|-------------------|---------------|--------|
-| **Claude Code** (Anthropic) | MCP stdio | JSON (`~/.claude/.mcp.json`) | Fully supported |
+| **Claude Code** (Anthropic) | MCP stdio | JSON (`~/.claude.json` or `.mcp.json`) | Fully supported |
 | **Codex CLI** (OpenAI) | MCP stdio | TOML (`~/.codex/config.toml`) | Fully supported |
 | **Gemini CLI** (Google) | MCP stdio | JSON (`~/.gemini/settings.json`) | Fully supported |
 | **Grok** (xAI) | MCP remote HTTPS | API-level | Fully supported |
@@ -81,7 +81,17 @@ Configuration varies by platform. Find yours below:
 <details>
 <summary><strong>Claude Code</strong> (Anthropic)</summary>
 
-Add to `~/.claude/.mcp.json`:
+Claude Code supports three MCP configuration scopes:
+
+| Scope | File | Applies to |
+|-------|------|------------|
+| **User** (global) | `~/.claude.json` — add `mcpServers` key | All projects on your machine |
+| **Project** (shared) | `.mcp.json` in project root (checked into git) | Everyone on the project |
+| **Local** (private) | `~/.claude.json` — under `projects."/path".mcpServers` | One project, just you |
+
+**User scope (recommended — works everywhere):**
+
+Add the `mcpServers` key to `~/.claude.json` (macOS/Linux) or `%USERPROFILE%\.claude.json` (Windows):
 
 ```json
 {
@@ -94,14 +104,35 @@ Add to `~/.claude/.mcp.json`:
 }
 ```
 
-> **Tier flag:** The `--tier` flag selects the feature tier: `keyword`, `semantic` (default), `smart`, or `autonomous`. Smart and autonomous tiers require [Ollama](https://ollama.com) running locally. The `--tier` flag **must** be passed in the args -- the `config.toml` tier setting is not used when the MCP server is launched by an AI client.
+> **Note:** `~/.claude.json` likely already exists with other settings. Merge the `mcpServers` key into the existing file — do not overwrite it.
+
+**Project scope (shared with team):**
+
+Create `.mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
+    }
+  }
+}
+```
+
+> **Windows paths:** Use forward slashes or escaped backslashes in `--db`. Example: `"--db", "C:/Users/YourName/.claude/ai-memory.db"`.
+
+> **Tier flag:** The `--tier` flag selects the feature tier: `keyword`, `semantic` (default), `smart`, or `autonomous`. Smart and autonomous tiers require [Ollama](https://ollama.com) running locally. The `--tier` flag **must** be passed in the args — the `config.toml` tier setting is not used when the MCP server is launched by an AI client.
+
+> **Important:** MCP servers are **not** configured in `settings.json` or `settings.local.json` — those files do not support `mcpServers`.
 
 </details>
 
 <details>
 <summary><strong>OpenAI Codex CLI</strong></summary>
 
-Add to `~/.codex/config.toml` (global) or `.codex/config.toml` (project):
+Add to `~/.codex/config.toml` (global) or `.codex/config.toml` (project). Windows: `%USERPROFILE%\.codex\config.toml`. Override with `CODEX_HOME` env var.
 
 ```toml
 [mcp_servers.memory]
@@ -112,14 +143,14 @@ enabled = true
 
 Or add via CLI: `codex mcp add memory -- ai-memory --db ~/.local/share/ai-memory/memories.db mcp --tier semantic`
 
-> **Notes:** Codex uses TOML format with underscored key `mcp_servers`. Use `enabled_tools` to restrict which memory tools are exposed. Use `/mcp` in the TUI to view server status. See [Codex MCP docs](https://developers.openai.com/codex/mcp).
+> **Notes:** Codex uses TOML format with underscored key `mcp_servers` (not camelCase, not hyphenated). Supports `env` (key/value pairs), `env_vars` (list to forward), `enabled_tools`, `disabled_tools`, `startup_timeout_sec`, `tool_timeout_sec`. Use `/mcp` in the TUI to view server status. See [Codex MCP docs](https://developers.openai.com/codex/mcp).
 
 </details>
 
 <details>
 <summary><strong>Google Gemini CLI</strong></summary>
 
-Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
+Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project). Windows: `%USERPROFILE%\.gemini\settings.json`.
 
 ```json
 {
@@ -135,14 +166,14 @@ Add to `~/.gemini/settings.json` (user) or `.gemini/settings.json` (project):
 
 Or add via CLI: `gemini mcp add memory ai-memory -- --db ~/.local/share/ai-memory/memories.db mcp --tier semantic`
 
-> **Notes:** Avoid underscores in server names (use hyphens). Tool names are auto-prefixed as `mcp_memory_<toolName>`. Gemini sanitizes environment variables -- explicitly declare needed vars in the `env` field. Add `"trust": true` to skip confirmation prompts. See [Gemini CLI MCP docs](https://geminicli.com/docs/tools/mcp-server/).
+> **Notes:** Avoid underscores in server names (use hyphens). Tool names are auto-prefixed as `mcp_memory_<toolName>`. Env vars in the `env` field support `$VAR` / `${VAR}` (all platforms) and `%VAR%` (Windows). Gemini sanitizes sensitive patterns from inherited env unless explicitly declared. Add `"trust": true` to skip confirmation prompts. CLI management: `gemini mcp list/remove/enable/disable`. See [Gemini CLI MCP docs](https://geminicli.com/docs/tools/mcp-server/).
 
 </details>
 
 <details>
 <summary><strong>Cursor IDE</strong></summary>
 
-Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project-level):
+Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project). Windows: `%USERPROFILE%\.cursor\mcp.json`. Project config overrides global for same-named servers.
 
 ```json
 {
@@ -155,14 +186,14 @@ Add to `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project-level):
 }
 ```
 
-> **Notes:** Restart Cursor after editing `mcp.json`. Verify server status in Cursor Settings > Tools & MCP (green dot = connected). Cursor supports `env`, `envFile`, and `${env:VAR}` interpolation. ~40 tool limit across all MCP servers. See [Cursor MCP docs](https://cursor.com/docs/context/mcp).
+> **Notes:** Restart Cursor after editing `mcp.json`. Verify server status in Settings > Tools & MCP (green dot = connected). Supports `env`, `envFile`, and `${env:VAR_NAME}` interpolation (env var interpolation can be unreliable for shell profile variables — use `envFile` as workaround). **~40 tool limit** across all MCP servers. See [Cursor MCP docs](https://cursor.com/docs/context/mcp).
 
 </details>
 
 <details>
 <summary><strong>Windsurf</strong> (Codeium)</summary>
 
-Add to `~/.codeium/windsurf/mcp_config.json`:
+Add to `~/.codeium/windsurf/mcp_config.json` (global only — no project-level scope). Windows: `%USERPROFILE%\.codeium\windsurf\mcp_config.json`.
 
 ```json
 {
@@ -175,12 +206,14 @@ Add to `~/.codeium/windsurf/mcp_config.json`:
 }
 ```
 
+> **Notes:** Supports `${env:VAR_NAME}` interpolation in `command`, `args`, `env`, `serverUrl`, `url`, and `headers`. **100 tool limit** across all MCP servers. Can also add via MCP Marketplace or Settings > Cascade > MCP Servers. See [Windsurf MCP docs](https://docs.windsurf.com/windsurf/cascade/mcp).
+
 </details>
 
 <details>
 <summary><strong>Continue.dev</strong></summary>
 
-Add to `~/.continue/config.yaml`:
+Add to `~/.continue/config.yaml` (user) or `.continue/mcpServers/` directory in project root (per-server YAML/JSON files). Windows: `%USERPROFILE%\.continue\config.yaml`.
 
 ```yaml
 mcpServers:
@@ -194,12 +227,14 @@ mcpServers:
       - "semantic"
 ```
 
+> **Notes:** MCP tools only work in agent mode. Supports `${{ secrets.SECRET_NAME }}` for secret interpolation. Project-level `.continue/mcpServers/` directory auto-detects JSON configs from other tools (Claude Code, Cursor, etc.). See [Continue MCP docs](https://docs.continue.dev/customize/deep-dives/mcp).
+
 </details>
 
 <details>
 <summary><strong>xAI Grok</strong> (API-level, remote MCP)</summary>
 
-Grok connects to MCP servers over HTTPS (remote only, no stdio). Start ai-memory as an HTTP server behind HTTPS:
+Grok connects to MCP servers over HTTPS (remote only, no stdio). No config file — servers are specified per API request.
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
@@ -218,26 +253,27 @@ curl https://api.x.ai/v1/responses \
       "type": "mcp",
       "server_url": "https://your-server.example.com/mcp",
       "server_label": "memory",
-      "server_description": "Persistent AI memory with recall and search"
+      "server_description": "Persistent AI memory with recall and search",
+      "allowed_tools": ["memory_store", "memory_recall", "memory_search"]
     }],
     "input": "What do you remember about our project?"
   }'
 ```
 
-**Requirements:** HTTPS required. Supports Streamable HTTP and SSE transports. See [xAI Remote MCP docs](https://docs.x.ai/developers/tools/remote-mcp).
+> **Requirements:** HTTPS required. `server_label` is required. Supports Streamable HTTP and SSE transports. Optional: `allowed_tools`, `authorization`, `headers`. Works with xAI SDK, OpenAI-compatible Responses API, and Voice Agent API. See [xAI Remote MCP docs](https://docs.x.ai/docs/guides/tools/remote-mcp-tools).
 
 </details>
 
 <details>
 <summary><strong>META Llama</strong> (via Llama Stack)</summary>
 
-Llama Stack registers MCP servers as toolgroups. Start the HTTP server first:
+Llama Stack registers MCP servers as toolgroups. No standardized config file path — deployment-specific.
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
 ```
 
-Then register via the Python SDK:
+**Python SDK:**
 
 ```python
 client.toolgroups.register(
@@ -246,6 +282,18 @@ client.toolgroups.register(
     mcp_endpoint={"uri": "http://localhost:9077/sse"}
 )
 ```
+
+**Or declaratively in run.yaml:**
+
+```yaml
+tool_groups:
+  - toolgroup_id: mcp::memory
+    provider_id: model-context-protocol
+    mcp_endpoint:
+      uri: "http://localhost:9077/sse"
+```
+
+> **Notes:** Supports `${env.VAR_NAME}` interpolation in run.yaml. Transport is migrating from SSE to Streamable HTTP. See [Llama Stack Tools docs](https://llama-stack.readthedocs.io/en/latest/building_applications/tools.html).
 
 </details>
 

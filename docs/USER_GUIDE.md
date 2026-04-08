@@ -21,7 +21,7 @@ The easiest way to use ai-memory is as an **MCP tool server**. MCP (Model Contex
 
 Each AI platform has its own MCP configuration path and format. See the [Installation Guide](INSTALL.md) for platform-specific setup instructions.
 
-Below is an example for **Claude Code** (`~/.claude/.mcp.json`) -- one of many supported platforms:
+Below is an example for **Claude Code** (user scope: merge `mcpServers` into `~/.claude.json`; or project scope: `.mcp.json` in project root) — one of many supported platforms:
 
 ```json
 {
