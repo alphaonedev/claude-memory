@@ -1,0 +1,20 @@
+Source: ai-memory
+Section: utils
+Priority: optional
+Maintainer: Justin Jessup <Justin@alpha-one.mobi>
+Build-Depends: debhelper-compat (= 13), cargo, rustc (>= 1.75), pkg-config, libssl-dev, build-essential
+Standards-Version: 4.6.2
+Homepage: https://alphaonedev.github.io/ai-memory-mcp/
+Vcs-Git: https://github.com/alphaonedev/ai-memory-mcp.git
+Vcs-Browser: https://github.com/alphaonedev/ai-memory-mcp
+
+Package: ai-memory
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}
+Description: AI-agnostic persistent memory system
+ Persistent memory for any AI assistant with zero token cost until recall.
+ MCP server (17 tools), HTTP API (20 endpoints), and CLI (25 commands).
+ Hybrid recall with FTS5 keyword + semantic embedding search, TOON compact
+ format (79% smaller than JSON), 4 feature tiers from keyword to autonomous
+ with local LLMs via Ollama. Works with Claude, ChatGPT, Grok, Cursor,
+ Windsurf, Continue.dev, OpenClaw, Llama, and any MCP client.
