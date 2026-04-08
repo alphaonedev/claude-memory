@@ -625,7 +625,13 @@
                 </div>
 
                 <div id="tab-codex" class="integration-panel">
-                    <p>Config: <code>~/.codex/config.toml</code> (global) or <code>.codex/config.toml</code> (project). Windows: <code>%USERPROFILE%\.codex\config.toml</code>. Override with <code>CODEX_HOME</code> env var.</p>
+                    <p><strong>OpenAI Codex CLI Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>Global</strong> (user)</td><td style="padding:4px 8px;"><code>~/.codex/config.toml</code></td><td style="padding:4px 8px;">All projects on your machine</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Project</strong></td><td style="padding:4px 8px;"><code>.codex/config.toml</code> in project root</td><td style="padding:4px 8px;">Trusted projects only</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> <code>%USERPROFILE%\.codex\config.toml</code>. Override config dir with <code>CODEX_HOME</code> env var.</p>
                     <pre><code><span class="tok-cm"># OpenAI Codex CLI MCP configuration</span>
 <span class="tok-flag">[mcp_servers.memory]</span>
 <span class="tok-str">command</span> = <span class="tok-str">"ai-memory"</span>
@@ -636,7 +642,13 @@
                 </div>
 
                 <div id="tab-gemini" class="integration-panel">
-                    <p>Config: <code>~/.gemini/settings.json</code> (user) or <code>.gemini/settings.json</code> (project). Windows: <code>%USERPROFILE%\.gemini\settings.json</code>.</p>
+                    <p><strong>Google Gemini CLI Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>User</strong> (global)</td><td style="padding:4px 8px;"><code>~/.gemini/settings.json</code></td><td style="padding:4px 8px;">All projects on your machine</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Project</strong></td><td style="padding:4px 8px;"><code>.gemini/settings.json</code> in project root</td><td style="padding:4px 8px;">Scoped to that project</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> <code>%USERPROFILE%\.gemini\settings.json</code>. Env vars: <code>$VAR</code> / <code>${VAR}</code> (all platforms), <code>%VAR%</code> (Windows).</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -651,7 +663,13 @@
                 </div>
 
                 <div id="tab-cursor" class="integration-panel">
-                    <p>Config: <code>~/.cursor/mcp.json</code> (global) or <code>.cursor/mcp.json</code> (project). Windows: <code>%USERPROFILE%\.cursor\mcp.json</code>. Project overrides global for same-named servers.</p>
+                    <p><strong>Cursor IDE Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>Global</strong> (user)</td><td style="padding:4px 8px;"><code>~/.cursor/mcp.json</code></td><td style="padding:4px 8px;">All projects on your machine</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Project</strong></td><td style="padding:4px 8px;"><code>.cursor/mcp.json</code> in project root</td><td style="padding:4px 8px;">Overrides global for same-named servers</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> <code>%USERPROFILE%\.cursor\mcp.json</code>. Also configurable via <strong>Settings &gt; Tools &amp; MCP</strong>.</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -664,7 +682,12 @@
                 </div>
 
                 <div id="tab-windsurf" class="integration-panel">
-                    <p>Config: <code>~/.codeium/windsurf/mcp_config.json</code> (<strong>global only</strong> — no project scope). Windows: <code>%USERPROFILE%\.codeium\windsurf\mcp_config.json</code>.</p>
+                    <p><strong>Windsurf (Codeium) Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Global only</strong></td><td style="padding:4px 8px;"><code>~/.codeium/windsurf/mcp_config.json</code></td><td style="padding:4px 8px;">All projects (no project scope)</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> <code>%USERPROFILE%\.codeium\windsurf\mcp_config.json</code>. Also configurable via MCP Marketplace or <strong>Settings &gt; Cascade &gt; MCP Servers</strong>.</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
@@ -677,7 +700,13 @@
                 </div>
 
                 <div id="tab-continue" class="integration-panel">
-                    <p>Config: <code>~/.continue/config.yaml</code> (user) or <code>.continue/mcpServers/</code> dir in project root (per-server YAML/JSON files). Windows: <code>%USERPROFILE%\.continue\config.yaml</code>.</p>
+                    <p><strong>Continue.dev Configuration Scopes:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>User</strong> (global)</td><td style="padding:4px 8px;"><code>~/.continue/config.yaml</code></td><td style="padding:4px 8px;">All projects on your machine</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Project</strong></td><td style="padding:4px 8px;"><code>.continue/mcpServers/</code> dir in project root</td><td style="padding:4px 8px;">Per-server YAML/JSON files</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Windows:</strong> <code>%USERPROFILE%\.continue\config.yaml</code>. Project dir auto-detects JSON configs from other tools.</p>
                     <pre><code><span class="tok-cm"># Continue.dev MCP configuration</span>
 <span class="tok-flag">mcpServers</span>:
   - <span class="tok-str">name</span>: <span class="tok-str">memory</span>
@@ -692,7 +721,12 @@
                 </div>
 
                 <div id="tab-grok" class="integration-panel">
-                    <p>Grok connects to MCP servers over HTTPS (remote only, no stdio). Start ai-memory behind an HTTPS reverse proxy.</p>
+                    <p><strong>xAI Grok Configuration:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">Method</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Per-request</strong></td><td style="padding:4px 8px;">API <code>tools</code> array (no config file)</td><td style="padding:4px 8px;">Each API call individually</td></tr>
+                    </table>
+                    <p style="font-size:.85rem">Remote HTTPS only (no stdio). Start ai-memory behind an HTTPS reverse proxy.</p>
                     <pre><code><span class="tok-cm"># Step 1: Start the ai-memory HTTP server</span>
 <span class="tok-cmd">ai-memory</span> serve <span class="tok-flag">--host</span> <span class="tok-num">127.0.0.1</span> <span class="tok-flag">--port</span> <span class="tok-num">9077</span> &amp;
 <span class="tok-cm"># Expose via HTTPS reverse proxy (nginx, caddy, cloudflare tunnel, etc.)</span>
@@ -715,7 +749,13 @@
                 </div>
 
                 <div id="tab-llama" class="integration-panel">
-                    <p>Llama Stack uses toolgroup registration with an HTTP backend.</p>
+                    <p><strong>META Llama Stack Configuration:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">Method</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>Declarative</strong></td><td style="padding:4px 8px;"><code>run.yaml</code> — <code>tool_groups</code> section</td><td style="padding:4px 8px;">Deployment-wide (supports <code>${env.VAR}</code>)</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Programmatic</strong></td><td style="padding:4px 8px;">Python/Node SDK — <code>toolgroups.register()</code></td><td style="padding:4px 8px;">Runtime registration</td></tr>
+                    </table>
+                    <p style="font-size:.85rem">Llama Stack uses toolgroup registration with an HTTP backend.</p>
                     <pre><code><span class="tok-cm"># Step 1: Start the ai-memory HTTP server</span>
 <span class="tok-cmd">ai-memory</span> serve <span class="tok-flag">--host</span> <span class="tok-num">127.0.0.1</span> <span class="tok-flag">--port</span> <span class="tok-num">9077</span> &amp;
 
@@ -731,7 +771,13 @@
                 </div>
 
                 <div id="tab-mcp-generic" class="integration-panel">
-                    <p>For any MCP-compatible client, point it to the ai-memory binary with the <code>mcp</code> subcommand. Standard stdio JSON-RPC config:</p>
+                    <p><strong>Generic MCP Client Configuration:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Transport</th><th style="text-align:left;padding:4px 8px;">Method</th><th style="text-align:left;padding:4px 8px;">Details</th></tr>
+                        <tr style="border-bottom:1px solid #eee;"><td style="padding:4px 8px;"><strong>stdio</strong></td><td style="padding:4px 8px;"><code>ai-memory mcp</code></td><td style="padding:4px 8px;">JSON-RPC 2.0, spawned by AI client</td></tr>
+                        <tr><td style="padding:4px 8px;"><strong>HTTP</strong></td><td style="padding:4px 8px;"><code>ai-memory serve</code></td><td style="padding:4px 8px;">REST API on localhost:9077</td></tr>
+                    </table>
+                    <p style="font-size:.85rem">Point your MCP client at the ai-memory binary with the <code>mcp</code> subcommand:</p>
                     <pre><code>{
   <span class="tok-str">"mcpServers"</span>: {
     <span class="tok-str">"memory"</span>: {
