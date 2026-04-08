@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-158_(115_unit_+_43_integration)-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-167_(124_unit_+_43_integration)-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
@@ -335,7 +335,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **158 tests** -- 115 unit tests across all 14 modules (db 29, mcp 12, config 9, main 9, validate 8, reranker 7, color 6, errors 6, handlers 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **14/14 modules** have unit tests — 95%+ coverage.
+- **167 tests** -- 124 unit tests across all 14 modules (db 29, mcp 12, config 9, main 9, validate 8, reranker 7, color 6, errors 6, handlers 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **14/14 modules** have unit tests — 95%+ coverage.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)

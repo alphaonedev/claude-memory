@@ -853,7 +853,7 @@
             </div>
             <div class="feature-card" style="border-left:3px solid var(--accent)">
                 <h4 style="color:var(--accent)">Semantic Tier <span style="font-size:.7rem;color:var(--text-muted)">(default)</span></h4>
-                <p>Adds dense vector embeddings via <strong>all-MiniLM-L6-v2</strong> (384-dim), loaded locally through the Candle ML framework. Recall blends FTS5 keyword scores with cosine similarity (60/40 split). HNSW index for fast approximate nearest-neighbor search. The model auto-downloads from HuggingFace on first run (~90MB).</p>
+                <p>Adds dense vector embeddings via <strong>all-MiniLM-L6-v2</strong> (384-dim), loaded locally through the Candle ML framework. Recall blends FTS5 keyword scores with cosine similarity using adaptive content-length weighting (50/50 for short memories, 85/15 FTS-weighted for long content). HNSW index for fast approximate nearest-neighbor search. The model auto-downloads from HuggingFace on first run (~90MB).</p>
             </div>
             <div class="feature-card" style="border-left:3px solid var(--orange)">
                 <h4 style="color:var(--orange)">Smart Tier</h4>
@@ -883,7 +883,7 @@
                     <tr><td colspan="5" style="color:var(--text-muted);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;background:var(--bg-raised)">Search &amp; Recall</td></tr>
                     <tr><td>FTS5 keyword search (<code>memory_search</code>)</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
                     <tr><td>Semantic embedding (cosine similarity)</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
-                    <tr><td>Hybrid recall (FTS5 + cosine, 60/40 blend)</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
+                    <tr><td>Hybrid recall (FTS5 + cosine, adaptive blend)</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
                     <tr><td>HNSW approximate nearest-neighbor index</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
                     <tr><td>LLM query expansion (<code>memory_expand_query</code>)</td><td class="matrix-dash">&mdash;</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td><td class="matrix-check">Yes</td></tr>
                     <tr><td>Neural cross-encoder reranking (ms-marco-MiniLM)</td><td class="matrix-dash">&mdash;</td><td class="matrix-dash">&mdash;</td><td class="matrix-dash">&mdash;</td><td class="matrix-check">Yes</td></tr>
@@ -1551,7 +1551,7 @@
                 <!-- DB layer -->
                 <rect x="120" y="352" width="360" height="55" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="2"/>
                 <text x="300" y="375" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 + HNSW (db.rs)</text>
-                <text x="300" y="395" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v3 | embeddings | 158 tests</text>
+                <text x="300" y="395" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v3 | embeddings | 167 tests</text>
 
                 <!-- Memory tiers -->
                 <rect x="145" y="420" width="70" height="22" rx="4" fill="rgba(248,81,73,.15)" stroke="#f85149" stroke-width="1"/>
@@ -1730,7 +1730,7 @@
 
                 <rect x="327" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1"/>
                 <text x="367" y="48" text-anchor="middle" fill="#bc8cff" font-family="monospace" font-size="10">test</text>
-                <text x="367" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">158 tests</text>
+                <text x="367" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">167 tests</text>
 
                 <line x1="407" y1="50" x2="427" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
 

@@ -16,6 +16,39 @@
    irm https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/install.ps1 | iex
    ```
 
+   **Cargo (crates.io):**
+   ```bash
+   cargo install ai-memory
+   ```
+
+   **Homebrew (macOS + Linux):**
+   ```bash
+   brew install alphaonedev/tap/ai-memory
+   ```
+
+   **cargo-binstall (pre-built, no compile):**
+   ```bash
+   cargo binstall ai-memory
+   ```
+
+   **Ubuntu/Debian (.deb):**
+   ```bash
+   # Download from https://github.com/alphaonedev/ai-memory-mcp/releases/latest
+   sudo dpkg -i ai-memory_0.5.0_amd64.deb   # or arm64
+   ```
+
+   **Fedora/RHEL (.rpm):**
+   ```bash
+   # Download from https://github.com/alphaonedev/ai-memory-mcp/releases/latest
+   sudo rpm -i ai-memory-0.5.0.x86_64.rpm    # or aarch64
+   ```
+
+   **Docker:**
+   ```bash
+   docker build -t ai-memory https://github.com/alphaonedev/ai-memory-mcp.git
+   docker run -p 9077:9077 -v data:/data ai-memory
+   ```
+
    **From source (requires Rust + C compiler):**
    ```bash
    cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
