@@ -101,8 +101,9 @@ jobs:
       - name: Build deb and rpm packages
         if: matrix.nfpm_arch
         run: |
-          # Install nfpm
-          curl -sfL https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_$(uname -s)_$(uname -m).tar.gz | tar xz -C /usr/local/bin nfpm
+          # Install nfpm (map aarch64 -> arm64 for nfpm release naming)
+          NFPM_ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          curl -sfL https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_$(uname -s)_${NFPM_ARCH}.tar.gz | tar xz -C /usr/local/bin nfpm
 
           VERSION="${GITHUB_REF_NAME#v}"
 
