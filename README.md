@@ -430,56 +430,9 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 
 ## Architecture
 
-```
-    +-------------+   +-------------+   +-------------+   +-------------+
-    | Claude Code |   |   ChatGPT   |   |    Grok     |   |   Llama     |
-    |  (Anthropic)|   |   (OpenAI)  |   |    (xAI)    |   |   (META)    |
-    +------+------+   +------+------+   +------+------+   +------+------+
-           |                 |                 |                 |
-           +--------+--------+--------+--------+--------+--------+
-                    |                 |                 |
-              +-----v------+  +------v--------+  +----v----------+
-              |    CLI      |  | MCP Server    |  |  HTTP API     |
-              | 25 commands |  | stdio JSON-RPC|  | 127.0.0.1:9077|
-              +-----+------+  +------+--------+  +----+----------+
-                    |                 |                 |
-                    +--------+--------+--------+--------+
-                             |                 |
-                       +-----v------+    +-----v------+
-                       | Validation |    |   Errors   |
-                       | validate.rs|    |  errors.rs |
-                       +-----+------+    +-----+------+
-                             |                 |
-                             +--------+--------+
-                                      |
-                            +---------v---------+
-                            |   SQLite + FTS5   |
-                            |   WAL mode        |
-                            +---+-----+-----+---+
-                                |     |     |
-                           +----+  +--+--+  +----+
-                           |short| | mid | | long|
-                           |6h   | | 7d  | | inf |
-                           +-----+ +-----+ +-----+
-                                |     ^
-                                |     | auto-promote
-                                +-----+ (5+ accesses)
-
-     Embedding Pipeline (semantic tier+):
-     +--------------------------------------------------+
-     | Candle ML Framework (candle-core, candle-nn)      |
-     |   all-MiniLM-L6-v2 model (384-dim vectors)       |
-     |   Vectors stored as BLOBs in SQLite               |
-     |   Hybrid recall: FTS5 keyword + cosine similarity |
-     +--------------------------------------------------+
-
-     LLM Pipeline (smart/autonomous tier):
-     +--------------------------------------------------+
-     | Ollama (local)                                    |
-     |   smart: Gemma 4 E2B (query expansion, tagging)  |
-     |   autonomous: Gemma 4 E4B + cross-encoder rerank |
-     +--------------------------------------------------+
-```
+<p align="center">
+  <img src="docs/architecture.svg" alt="ai-memory architecture diagram" width="900">
+</p>
 
 ---
 
