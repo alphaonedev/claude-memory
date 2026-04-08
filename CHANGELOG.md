@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-04-08
+
+### Added
+
+- Docker image auto-published to GitHub Container Registry (ghcr.io) on tag push
+- `server.json` manifest for Official MCP Registry (modelcontextprotocol/registry)
+- CONTRIBUTING.md, CHANGELOG.md, CODE_OF_CONDUCT.md
+- Open Graph and Twitter Card meta tags on GitHub Pages
+- Scope tables for all 9 AI platform tabs on GitHub Pages
+- `mine` command documented across all docs (USER_GUIDE, ADMIN_GUIDE, DEVELOPER_GUIDE, index.html)
+- Error code reference in DEVELOPER_GUIDE (NOT_FOUND, VALIDATION_FAILED, DATABASE_ERROR, CONFLICT)
+- config.toml reference section in ADMIN_GUIDE
+- Store command flags (`--source`, `--expires-at`, `--ttl-secs`) documented in README
+
+### Changed
+
+- Dockerfile: Rust 1.82 → 1.86, added build-essential, added benches/ copy
+- Dockerfile: version label 0.4.0 → 0.5.0
+- CI workflow: added Docker (GHCR) job triggered on tag push
+- Claude Code MCP config: corrected from `~/.claude/.mcp.json` to three-scope model (`~/.claude.json`, `.mcp.json`, project-local)
+- All 8 AI platform configs: added Windows paths, env var syntax, scope tables
+- Hybrid recall blend weights: corrected docs from 50/50 & 85/15 to 60/40 (matches code)
+- Default tier: corrected docs from "keyword" to "semantic" (matches code)
+- Test count: corrected from 167 to 161 (118 unit + 43 integration)
+- Module count: corrected from 14 to 15 (added mine.rs)
+- CLI command count: corrected from 24 to 25 (added mine)
+
+### Fixed
+
+- Dockerfile build failure: missing benches/ directory, outdated Rust version, missing C++ compiler
+
 ## [0.5.0] — 2026-04-08
 
 ### Added
@@ -87,6 +118,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core data model for memory entries
 - Basic search functionality
 
+[0.5.1]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.2.0...v0.3.0
