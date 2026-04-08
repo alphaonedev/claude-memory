@@ -319,15 +319,8 @@
             <a href="#platforms">Platforms</a>
             <a href="#install">Install</a>
             <a href="#features">Features</a>
-            <a href="#feature-tiers">Feature Tiers</a>
-            <a href="#mcp">MCP Tools</a>
-            <a href="#api">HTTP API</a>
-            <a href="#cli">CLI</a>
-            <a href="#tiers">Memory Tiers</a>
-            <a href="#ranking">Ranking</a>
-            <a href="#security">Security</a>
+            <a href="#mcp">Interfaces</a>
             <a href="#architecture">Architecture</a>
-            <a href="#matrix">Matrix</a>
             <a href="#benchmarks">Benchmarks</a>
             <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
         </div>
@@ -340,22 +333,18 @@
 <section class="hero">
     <div class="container">
         <h1>Persistent Memory for <span>Any AI</span></h1>
-        <p class="bluf">
-            Give any AI a memory that persists -- <strong style="color:var(--green)">without burning tokens on every message.</strong>
-            Built-in memory systems (Claude auto-memory, ChatGPT memory) load your entire memory into every conversation, costing tokens and money whether used or not.
-            ai-memory uses <strong>zero context tokens until recalled</strong> -- only relevant memories come back, ranked by a 6-factor algorithm.
-            <strong>TOON format</strong> (Token-Oriented Object Notation) cuts recall response tokens by another 61-79%, saving even more.
-            Four feature tiers from zero-dependency keyword search to autonomous recall with local LLMs via Ollama.
-            Works with Claude, ChatGPT, Grok, Cursor, Windsurf, Continue.dev, <strong>OpenClaw</strong>, Llama, and any MCP client.
+        <p class="bluf" style="max-width:680px;margin:0 auto 1.5rem">
+            <strong style="color:var(--green)">Zero token cost until recalled.</strong>
+            Built-in memory systems load your entire memory into every message. ai-memory uses zero context tokens until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked and compressed via TOON format (79% smaller than JSON).
+        </p>
+        <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
+            Works with Claude &middot; ChatGPT &middot; Grok &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw &middot; Llama &middot; any MCP client
         </p>
         <div class="stats-row">
-            <div class="stat"><span class="num">4</span><span class="label">Feature Tiers</span></div>
+            <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
             <div class="stat"><span class="num">17</span><span class="label">MCP Tools</span></div>
-            <div class="stat"><span class="num">20</span><span class="label">HTTP Endpoints</span></div>
-            <div class="stat"><span class="num">25</span><span class="label">CLI Commands</span></div>
+            <div class="stat"><span class="num">4</span><span class="label">Feature Tiers</span></div>
             <div class="stat"><span class="num">161</span><span class="label">Tests</span></div>
-            <div class="stat"><span class="num">2</span><span class="label">MCP Prompts</span></div>
-            <div class="stat"><span class="num">6</span><span class="label">Ranking Factors</span></div>
         </div>
         <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
     </div>
