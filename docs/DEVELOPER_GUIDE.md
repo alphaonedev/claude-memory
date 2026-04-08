@@ -13,7 +13,7 @@
 All three interfaces share the same database layer (`db.rs`) and validation layer (`validate.rs`). The daemon adds automatic garbage collection (every 30 minutes) and graceful shutdown with WAL checkpointing.
 
 ```
-main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (24 commands)
+main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (25 commands)
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
@@ -24,6 +24,7 @@ color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects t
 config.rs        -- Tier configuration system (keyword, semantic, smart, autonomous) and feature gating
 embeddings.rs    -- Embedding pipeline: HuggingFace model loading, vector generation, cosine similarity
 llm.rs           -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
+mine.rs          -- Retroactive conversation import from Claude, ChatGPT, and Slack exports
 reranker.rs      -- Hybrid recall algorithm: blends semantic (embedding) and keyword (FTS5) scores
 ```
 
@@ -41,7 +42,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 ### `src/main.rs`
 
 - `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`)
-- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man` (24 commands)
+- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine` (25 commands)
 - `StoreArgs` includes `--expires-at` and `--ttl-secs` flags for custom expiration
 - `UpdateArgs` includes `--expires-at` flag for setting expiration on existing memories
 - `ListArgs` includes `--offset` flag for pagination
@@ -65,8 +66,9 @@ The MCP (Model Context Protocol) server implementation. MCP is an open standard 
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
 - `tool_definitions()` -- returns the 17 tool schemas for `tools/list` (4 new: `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`)
-  - `memory_recall` schema includes `until` parameter
-  - `memory_search` and `memory_list` schemas enforce `maximum: 200` on limit
+  - `memory_recall` schema includes `until` parameter and `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`)
+  - `memory_search` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
+  - `memory_list` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_consolidate` schema enforces `minItems: 2, maxItems: 100` on IDs
   - `memory_update` schema includes `expires_at` parameter
 - `handle_store()`, `handle_recall()`, `handle_search()`, `handle_list()`, `handle_delete()`, `handle_promote()`, `handle_forget()`, `handle_stats()`, `handle_update()`, `handle_get()`, `handle_link()`, `handle_get_links()`, `handle_consolidate()` -- one handler per tool
@@ -524,6 +526,19 @@ Content-Type: application/json
 
 Validates each memory before import. Limited to **1,000 memories per request**. Response: `{"imported": 50, "errors": []}`
 
+## Error Code Reference
+
+Structured error codes returned by the HTTP API and MCP server:
+
+| Code | HTTP Status | Description |
+|------|-------------|-------------|
+| `NOT_FOUND` | 404 | Memory or resource not found |
+| `VALIDATION_FAILED` | 400 | Invalid input parameters |
+| `DATABASE_ERROR` | 500 | SQLite or internal error |
+| `CONFLICT` | 409 | Duplicate or conflicting operation |
+
+Error responses are JSON: `{"code": "NOT_FOUND", "message": "Memory not found"}`. `DATABASE_ERROR` responses are sanitized -- clients receive a generic `"Internal server error"` message; detailed errors are logged server-side only.
+
 ## CLI Reference
 
 Global flags:
@@ -711,6 +726,18 @@ ai-memory auto-consolidate [--namespace <ns>] [--short-only] [--min-count 3] [--
 
 Groups memories by namespace+primary tag. Groups with >= min_count members are consolidated into one long-term memory. Use `--dry-run` to preview.
 
+### `mine`
+
+Import memories from historical conversations (Claude, ChatGPT, Slack exports).
+
+```bash
+ai-memory mine --format claude <path-to-export>
+ai-memory mine --format chatgpt <path-to-export>
+ai-memory mine --format slack <path-to-export>
+```
+
+Takes `--format` to specify the input file format (`claude`, `chatgpt`, `slack`) and a path to the export file or directory.
+
 ### `man`
 
 Generate roff man page to stdout.
@@ -741,7 +768,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **167 tests** total: 124 unit tests across all 14 modules (`src/db.rs` 29, `src/mcp.rs` 12, `src/config.rs` 9, `src/main.rs` 9, `src/validate.rs` 8, `src/reranker.rs` 7, `src/color.rs` 6, `src/errors.rs` 6, `src/handlers.rs` 6, `src/models.rs` 6, `src/toon.rs` 6, `src/embeddings.rs` 5, `src/hnsw.rs` 4, `src/llm.rs` 2) and 43 integration tests in `tests/integration.rs`. **14/14 modules** have unit tests — 95%+ coverage.
+The project has **161 tests** total: 118 unit tests across all 15 modules (`src/db.rs` 29, `src/mcp.rs` 12, `src/config.rs` 9, `src/main.rs` 9, `src/mine.rs` 9, `src/validate.rs` 8, `src/reranker.rs` 7, `src/color.rs` 6, `src/errors.rs` 6, `src/models.rs` 6, `src/toon.rs` 6, `src/embeddings.rs` 5, `src/hnsw.rs` 4, `src/llm.rs` 2, `src/handlers.rs` 0) and 43 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
 
 ```bash
 # Run all tests

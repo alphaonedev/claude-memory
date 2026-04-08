@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-167_(124_unit_+_43_integration)-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-161_(118_unit_+_43_integration)-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
@@ -36,7 +36,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **Llama Stack** (META) | MCP remote HTTP | YAML / Python SDK | Fully supported |
 | **Any MCP client** | MCP stdio or HTTP | Varies | Universal |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (20 endpoints on localhost) and the **CLI** (24 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (20 endpoints on localhost) and the **CLI** (25 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -334,7 +334,7 @@ It runs as an MCP (Model Context Protocol) tool server -- a background process t
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 9077) and a complete CLI (24 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 9077) and a complete CLI (25 commands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
@@ -344,7 +344,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **MCP tool server** -- 17 tools over stdio JSON-RPC, compatible with any MCP client
 - **Three-tier memory** -- short (6h TTL), mid (7d TTL), long (permanent)
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
-- **Hybrid recall** -- FTS5 keyword + cosine similarity with adaptive content-length blending (50/50 for short memories, 85/15 FTS-weighted for long content)
+- **Hybrid recall** -- FTS5 keyword + cosine similarity with fixed 0.6 semantic / 0.4 keyword (60/40) blend weights
 - **6-factor recall scoring** -- FTS relevance + priority + access frequency + confidence + tier boost + recency decay
 - **Auto-promotion** -- memories accessed 5+ times promote from mid to long
 - **TTL extension** -- each recall extends expiry (short +1h, mid +1d)
@@ -365,7 +365,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 
 ### Interfaces
 - **20 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
-- **24 CLI commands** -- complete CLI with identical capabilities
+- **25 CLI commands** -- complete CLI with identical capabilities
 - **17 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
@@ -383,7 +383,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **167 tests** -- 124 unit tests across all 14 modules (db 29, mcp 12, config 9, main 9, validate 8, reranker 7, color 6, errors 6, handlers 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **14/14 modules** have unit tests — 95%+ coverage.
+- **161 tests** -- 118 unit tests across all 15 modules (db 29, mcp 12, config 9, main 9, mine 9, validate 8, reranker 7, color 6, errors 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
@@ -411,7 +411,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
                     |                 |                 |
               +-----v------+  +------v--------+  +----v----------+
               |    CLI      |  | MCP Server    |  |  HTTP API     |
-              | 24 commands |  | stdio JSON-RPC|  | 127.0.0.1:9077|
+              | 25 commands |  | stdio JSON-RPC|  | 127.0.0.1:9077|
               +-----+------+  +------+--------+  +----+----------+
                     |                 |                 |
                     +--------+--------+--------+--------+
@@ -512,7 +512,7 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 | **Search & Recall** | | | | |
 | FTS5 keyword search | Yes | Yes | Yes | Yes |
 | Semantic embedding (cosine similarity) | -- | Yes | Yes | Yes |
-| Hybrid recall (FTS5 + cosine, adaptive blend) | -- | Yes | Yes | Yes |
+| Hybrid recall (FTS5 + cosine, 60/40 semantic/keyword blend) | -- | Yes | Yes | Yes |
 | HNSW nearest-neighbor index | -- | Yes | Yes | Yes |
 | LLM query expansion (`memory_expand_query`) | -- | -- | Yes | Yes |
 | Neural cross-encoder reranking | -- | -- | -- | Yes |
@@ -618,7 +618,7 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## CLI Commands
 
-24 commands. Run `ai-memory <command> --help` for details on any command.
+25 commands. Run `ai-memory <command> --help` for details on any command.
 
 | Command | Description |
 |---------|-------------|
@@ -626,10 +626,10 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 | `serve` | Start the HTTP daemon on port 9077 |
 | `store` | Store a new memory (deduplicates by title+namespace) |
 | `update` | Update an existing memory by ID |
-| `recall` | Fuzzy OR search with ranked results + auto-touch (supports `--tier` for hybrid recall) |
-| `search` | AND search for precise keyword matches |
+| `recall` | Fuzzy OR search with ranked results + auto-touch (supports `--tier` for hybrid recall). Max 200 items per request. |
+| `search` | AND search for precise keyword matches. Max 200 items per request. |
 | `get` | Retrieve a single memory by ID (includes links) |
-| `list` | Browse memories with filters (namespace, tier, tags, date range) |
+| `list` | Browse memories with filters (namespace, tier, tags, date range). Max 200 items per request. |
 | `delete` | Delete a memory by ID |
 | `promote` | Promote a memory to long-term (clears expiry) |
 | `forget` | Bulk delete by pattern + namespace + tier |
@@ -646,19 +646,28 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 | `import` | Import memories and links from JSON (stdin) |
 | `completions` | Generate shell completions (bash, zsh, fish) |
 | `man` | Generate roff man page to stdout |
+| `mine` | Import memories from historical conversations (Claude, ChatGPT, Slack exports) |
 
 The top-level `ai-memory` binary also accepts global flags:
 
 | Flag | Description |
 |------|-------------|
 | `--db <path>` | Database path (default: `ai-memory.db`, or `$AI_MEMORY_DB`) |
-| `--json` | JSON output on all commands |
+| `--json` | JSON output on all commands (machine-parseable output) |
+
+The `store` subcommand accepts additional flags:
+
+| Flag | Description |
+|------|-------------|
+| `--source` / `-S` | Who created this memory (user, claude, hook, api, cli, import, consolidation, system). Default: `cli` |
+| `--expires-at` | RFC3339 expiry timestamp |
+| `--ttl-secs` | TTL in seconds (alternative to `--expires-at`) |
 
 The `mcp` subcommand accepts an additional flag:
 
 | Flag | Description |
 |------|-------------|
-| `--tier <keyword\|semantic\|smart\|autonomous>` | Feature tier (default: `keyword`). See [Feature Tiers](#feature-tiers). |
+| `--tier <keyword\|semantic\|smart\|autonomous>` | Feature tier (default: `semantic`). See [Feature Tiers](#feature-tiers). |
 
 ---
 

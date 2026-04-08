@@ -1,8 +1,8 @@
 # Installation Guide
 
-> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 17 memory tools instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds.
+> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. Install the binary, configure your AI client's MCP settings, and you get 17 memory tools instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds (pre-built binary + fast internet; first semantic-tier run also downloads a ~100MB embedding model).
 
-## Install in 60 Seconds
+## Install in 60 Seconds (pre-built binary + fast internet)
 
 1. **Install the binary** (pick one):
 

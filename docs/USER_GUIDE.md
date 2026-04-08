@@ -358,6 +358,18 @@ Search within a date range:
 ai-memory search "migration" --since 2026-01-01T00:00:00Z --until 2026-03-01T00:00:00Z
 ```
 
+### Importing Historical Conversations
+
+Use the `mine` command to import memories from past conversations across platforms:
+
+```bash
+ai-memory mine              # import from Claude conversation history
+ai-memory mine --chatgpt    # import from ChatGPT exports
+ai-memory mine --slack       # import from Slack exports
+```
+
+This extracts key knowledge from historical conversations and stores them as memories, giving your AI assistant a head start with context it would otherwise have lost.
+
 ### Export and Backup
 
 ```bash

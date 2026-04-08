@@ -2,7 +2,7 @@
 
 `ai-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
 
-**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 167 tests with 95%+ coverage across 14/14 modules.
+**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 161 tests with 95%+ coverage across 15/15 modules.
 
 ## Deployment Options
 
@@ -195,6 +195,24 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 |----------|---------|-------------|
 | `AI_MEMORY_DB` | `ai-memory.db` | Database path (overridden by `--db`) |
 | `RUST_LOG` | (none) | Logging filter (e.g., `ai_memory=info,tower_http=debug`) |
+
+### Configuration File (config.toml)
+
+`ai-memory` supports an optional configuration file at `~/.config/ai-memory/config.toml`. This file is read on startup and supports the following keys:
+
+| Key | Description |
+|-----|-------------|
+| `tier` | Feature tier (`keyword`, `semantic`, `smart`, `autonomous`) |
+| `db` | Path to the SQLite database file |
+| `ollama_url` | URL for the Ollama instance |
+| `embed_url` | URL for the embedding service |
+| `embedding_model` | Name of the embedding model to use |
+| `llm_model` | Name of the LLM model to use |
+| `cross_encoder` | Name of the cross-encoder model |
+| `default_namespace` | Default namespace for memories |
+| `max_memory_mb` | Maximum memory budget in MB |
+
+**Precedence:** CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting.
 
 ### Compile-Time Constants
 
@@ -494,7 +512,7 @@ Runs on `ubuntu-latest` and `macos-latest`:
 
 1. **Formatting** -- `cargo fmt --check`
 2. **Linting** -- `cargo clippy -- -D warnings`
-3. **Tests** -- `cargo test` (167 tests: 124 unit + 43 integration, 14/14 modules)
+3. **Tests** -- `cargo test` (161 tests: 118 unit + 43 integration, 15/15 modules)
 4. **Build** -- `cargo build --release`
 
 Uses `Swatinem/rust-cache@v2` for build caching.
