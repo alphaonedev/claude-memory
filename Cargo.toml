@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/alphaonedev/ai-memory-mcp"
 homepage = "https://alphaonedev.github.io/ai-memory-mcp/"
 keywords = ["mcp", "ai", "memory", "sqlite", "llm"]
-categories = ["command-line-utilities", "database"]
+categories = ["artificial-intelligence", "command-line-utilities", "database"]
 
 [dependencies]
 anyhow = "1"
