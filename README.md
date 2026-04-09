@@ -72,6 +72,14 @@ Follow the prompts, then restart your terminal (or run `source ~/.cargo/env`).
 
 **Step 2: From source (requires Rust)**
 
+Latest release from [Crates.io](https://crates.io/crates/ai-memory):
+
+```bash
+cargo install ai-memory
+```
+
+Latest from the git repository:
+
 ```bash
 cargo install --git https://github.com/alphaonedev/ai-memory-mcp.git
 ```
