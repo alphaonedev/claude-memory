@@ -46,7 +46,7 @@
 
    **Fedora/RHEL (COPR — recommended):**
    ```bash
-   sudo dnf copr enable alphaonedev/ai-memory
+   sudo dnf copr enable alpha-one-ai/ai-memory
    sudo dnf install ai-memory
    ```
 

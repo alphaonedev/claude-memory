@@ -55,7 +55,7 @@ curl -fsSL https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/inst
 sudo add-apt-repository ppa:jbridger2021/ai-memory && sudo apt install ai-memory
 
 # Fedora/RHEL (COPR)
-sudo dnf copr enable alphaonedev/ai-memory && sudo dnf install ai-memory
+sudo dnf copr enable alpha-one-ai/ai-memory && sudo dnf install ai-memory
 
 # Windows (PowerShell)
 irm https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/install.ps1 | iex

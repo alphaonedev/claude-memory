@@ -248,5 +248,5 @@ jobs:
 
       - name: Upload to COPR
         run: |
-          copr-cli build ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.x86_64.rpm
-          copr-cli build ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.aarch64.rpm
+          copr-cli build alpha-one-ai/ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.x86_64.rpm
+          copr-cli build alpha-one-ai/ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.aarch64.rpm
