@@ -467,7 +467,7 @@
 <section id="install">
     <div class="container">
         <h2>Install</h2>
-        <p class="section-subtitle">One command. No dependencies for pre-built binaries. Seven installation methods.</p>
+        <p class="section-subtitle">One command. No dependencies for pre-built binaries. Eight installation methods.</p>
 
         <!-- ---- Install Methods ---- -->
         <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:1.25rem;margin:2rem 0">
@@ -488,6 +488,12 @@
                 <pre style="margin:0;font-size:.78rem"><code><span class="tok-cmd">sudo</span> add-apt-repository ppa:jbridger2021/ai-memory
 <span class="tok-cmd">sudo</span> apt update
 <span class="tok-cmd">sudo</span> apt install ai-memory</code></pre>
+            </div>
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.5rem">
+                <h4 style="font-size:1rem;margin-bottom:.25rem;color:var(--text)">Fedora / RHEL <span style="font-size:.7rem;color:var(--text-muted);font-weight:400">(COPR)</span></h4>
+                <p style="font-size:.8rem;color:var(--text-muted);margin-bottom:.75rem">Native dnf package. Auto-updates with system.</p>
+                <pre style="margin:0;font-size:.78rem"><code><span class="tok-cmd">sudo</span> dnf copr enable alphaonedev/ai-memory
+<span class="tok-cmd">sudo</span> dnf install ai-memory</code></pre>
             </div>
             <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.5rem">
                 <h4 style="font-size:1rem;margin-bottom:.25rem;color:var(--text)">Homebrew <span style="font-size:.7rem;color:var(--text-muted);font-weight:400">(macOS + Linux)</span></h4>

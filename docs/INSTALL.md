@@ -44,7 +44,13 @@
    sudo dpkg -i ai-memory_0.5.1_amd64.deb   # or arm64
    ```
 
-   **Fedora/RHEL (.rpm):**
+   **Fedora/RHEL (COPR — recommended):**
+   ```bash
+   sudo dnf copr enable alphaonedev/ai-memory
+   sudo dnf install ai-memory
+   ```
+
+   **Fedora/RHEL (.rpm manual install):**
    ```bash
    # Download from https://github.com/alphaonedev/ai-memory-mcp/releases/latest
    sudo rpm -i ai-memory-0.5.1-1.x86_64.rpm    # or aarch64
