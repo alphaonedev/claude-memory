@@ -338,7 +338,7 @@
             Built-in memory systems load your entire memory into every message. ai-memory uses zero context tokens until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked and compressed via TOON format (79% smaller than JSON).
         </p>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
-            Works with Claude &middot; ChatGPT &middot; Grok &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw &middot; Llama &middot; any MCP client
+            Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw &middot; Llama &middot; any MCP client
         </p>
         <div class="stats-row">
             <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
@@ -427,10 +427,16 @@
                 <p>Open-source AI code assistant with YAML-based MCP config</p>
                 <span class="platform-tag tag-mcp">MCP Native</span>
             </div>
+            <div class="platform-card" style="border-color:#60a5fa;">
+                <span class="platform-icon">G</span>
+                <h4><a href="https://github.com/alphaonedev/grok-cli" style="color:inherit;text-decoration:none;">Grok CLI</a></h4>
+                <p>Deep integration &mdash; auto-recall, compaction store, all-mode MCP</p>
+                <span class="platform-tag tag-mcp">MCP Native (stdio)</span>
+            </div>
             <div class="platform-card">
                 <span class="platform-icon">X</span>
-                <h4>xAI Grok</h4>
-                <p>Grok and any xAI-based applications via remote MCP</p>
+                <h4>xAI Grok API</h4>
+                <p>Grok API and xAI-based applications via remote MCP</p>
                 <span class="platform-tag tag-http">Remote MCP (HTTPS)</span>
             </div>
             <div class="platform-card">
@@ -612,7 +618,8 @@
                     <span class="integration-tab" onclick="switchTab('tab-cursor')">Cursor</span>
                     <span class="integration-tab" onclick="switchTab('tab-windsurf')">Windsurf</span>
                     <span class="integration-tab" onclick="switchTab('tab-continue')">Continue.dev</span>
-                    <span class="integration-tab" onclick="switchTab('tab-grok')">Grok</span>
+                    <span class="integration-tab" onclick="switchTab('tab-grok-cli')">Grok CLI</span>
+                    <span class="integration-tab" onclick="switchTab('tab-grok')">Grok API</span>
                     <span class="integration-tab" onclick="switchTab('tab-llama')">Llama</span>
                     <span class="integration-tab" onclick="switchTab('tab-openclaw')">OpenClaw</span>
                     <span class="integration-tab" onclick="switchTab('tab-mcp-generic')">Any MCP Client</span>
@@ -735,8 +742,32 @@
                     <p style="font-size:.85rem">MCP tools only work in agent mode. Supports <code>${{ secrets.SECRET_NAME }}</code> for secret interpolation. Project-level <code>.continue/mcpServers/</code> directory auto-detects JSON configs from other tools (Claude Code, Cursor, etc.). See <a href="https://docs.continue.dev/customize/deep-dives/mcp">Continue MCP docs</a>.</p>
                 </div>
 
+                <div id="tab-grok-cli" class="integration-panel">
+                    <p><strong><a href="https://github.com/alphaonedev/grok-cli">Grok CLI</a> (AlphaOne fork) &mdash; Deep Integration:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">Config File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr><td style="padding:4px 8px;"><strong>User-level</strong></td><td style="padding:4px 8px;"><code>~/.grok/user-settings.json</code></td><td style="padding:4px 8px;">All sessions</td></tr>
+                    </table>
+                    <pre><code><span class="tok-cm">// ~/.grok/user-settings.json</span>
+{
+  <span class="tok-key">"mcp"</span>: {
+    <span class="tok-key">"servers"</span>: [
+      {
+        <span class="tok-key">"id"</span>: <span class="tok-str">"ai-memory"</span>,
+        <span class="tok-key">"label"</span>: <span class="tok-str">"AI Memory"</span>,
+        <span class="tok-key">"enabled"</span>: <span class="tok-num">true</span>,
+        <span class="tok-key">"transport"</span>: <span class="tok-str">"stdio"</span>,
+        <span class="tok-key">"command"</span>: <span class="tok-str">"ai-memory"</span>,
+        <span class="tok-key">"args"</span>: [<span class="tok-str">"mcp"</span>, <span class="tok-str">"--tier"</span>, <span class="tok-str">"semantic"</span>]
+      }
+    ]
+  }
+}<span class="lang-label">json</span></code></pre>
+                    <p style="font-size:.85rem"><strong>Deep integration features:</strong> Auto-recall on session start (injects relevant memories into system prompt), compaction summaries auto-stored as mid-tier memories, MCP tools available in all modes (agent, plan, ask), session-scoped connections (binary spawns once per session, not per message). Default tier <code>semantic</code> uses local MiniLM embeddings &mdash; no Ollama required. Install: <code>curl -fsSL https://raw.githubusercontent.com/alphaonedev/grok-cli/main/install.sh | bash</code></p>
+                </div>
+
                 <div id="tab-grok" class="integration-panel">
-                    <p><strong>xAI Grok Configuration:</strong></p>
+                    <p><strong>xAI Grok API Configuration:</strong></p>
                     <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
                         <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">Method</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
                         <tr><td style="padding:4px 8px;"><strong>Per-request</strong></td><td style="padding:4px 8px;">API <code>tools</code> array (no config file)</td><td style="padding:4px 8px;">Each API call individually</td></tr>

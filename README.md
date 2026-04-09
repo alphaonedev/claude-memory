@@ -29,7 +29,8 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **Claude Code** (Anthropic) | MCP stdio | JSON (`~/.claude.json` or `.mcp.json`) | Fully supported |
 | **Codex CLI** (OpenAI) | MCP stdio | TOML (`~/.codex/config.toml`) | Fully supported |
 | **Gemini CLI** (Google) | MCP stdio | JSON (`~/.gemini/settings.json`) | Fully supported |
-| **Grok** (xAI) | MCP remote HTTPS | API-level | Fully supported |
+| **[Grok CLI](https://github.com/alphaonedev/grok-cli)** (xAI) | MCP stdio | JSON (`~/.grok/user-settings.json`) | **Deep integration** |
+| **Grok API** (xAI) | MCP remote HTTPS | API-level | Fully supported |
 | **Cursor IDE** | MCP stdio | JSON (`~/.cursor/mcp.json`) | Fully supported |
 | **Windsurf** (Codeium) | MCP stdio | JSON (`~/.codeium/windsurf/mcp_config.json`) | Fully supported |
 | **Continue.dev** | MCP stdio | YAML (`~/.continue/config.yaml`) | Fully supported |
@@ -239,7 +240,35 @@ mcpServers:
 </details>
 
 <details>
-<summary><strong>xAI Grok</strong> (API-level, remote MCP)</summary>
+<summary><strong>Grok CLI</strong> (AlphaOne fork — deep integration with auto-recall)</summary>
+
+The [AlphaOne fork of grok-cli](https://github.com/alphaonedev/grok-cli) has built-in ai-memory support with session-scoped MCP connections, automatic memory recall on session start, compaction summary storage, and memory-aware system prompts.
+
+Add to `~/.grok/user-settings.json`:
+
+```json
+{
+  "mcp": {
+    "servers": [
+      {
+        "id": "ai-memory",
+        "label": "AI Memory",
+        "enabled": true,
+        "transport": "stdio",
+        "command": "ai-memory",
+        "args": ["mcp", "--tier", "semantic"]
+      }
+    ]
+  }
+}
+```
+
+> **Features:** Auto-recall on session start (injects relevant memories into system prompt), compaction summaries stored as mid-tier memories, MCP tools available in all modes (agent, plan, ask), session-scoped connections (no per-message cold starts). Uses `--tier semantic` by default (local embeddings, no Ollama required). See [grok-cli docs](https://github.com/alphaonedev/grok-cli/blob/main/docs/CONFIGURATION.md) for full setup.
+
+</details>
+
+<details>
+<summary><strong>xAI Grok API</strong> (API-level, remote MCP)</summary>
 
 Grok connects to MCP servers over HTTPS (remote only, no stdio). No config file — servers are specified per API request.
 
