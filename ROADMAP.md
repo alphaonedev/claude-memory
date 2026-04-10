@@ -56,6 +56,34 @@ Promotion path: `feature/*` → `develop` → `main` → upstream release
 - [ ] **Memory compaction** — automatic deduplication and consolidation of stale memories
 - [ ] **Benchmark target:** 500+ q/s keyword tier, 99%+ R@5 LLM-expanded tier
 
+## v0.9.5 — Data Tier Integrations
+
+**Focus:** Pluggable storage backends beyond local SQLite — vector databases, graph databases, and cloud-native stores.
+
+### Vector Databases
+- [ ] **Pinecone** — managed vector search, serverless indexes, metadata filtering
+- [ ] **Qdrant** — high-performance vector similarity search with payload filtering
+- [ ] **Weaviate** — AI-native vector database with hybrid search (BM25 + vector)
+- [ ] **Milvus / Zilliz** — open-source vector DB (self-hosted Milvus or Zilliz Cloud managed)
+
+### Graph + Multi-Model Databases
+- [ ] **Neo4j + Aura Agent** — native graph storage for memory links/relationships, Aura for managed cloud
+- [ ] **SurrealDB 3.0** — multi-model (document + graph + vector) in a single backend
+
+### Relational + Vector Extensions
+- [ ] **PostgreSQL + pgvector** — familiar Postgres with vector similarity search extension
+- [ ] **TiDB / TiDB Cloud** — distributed SQL with vector search, MySQL-compatible
+
+### Cache + Search Engines
+- [ ] **Redis (RediSearch)** — in-memory store with vector similarity + full-text search modules
+- [ ] **MongoDB Atlas Vector** — document store with native vector search indexes
+
+### Architecture
+- [ ] **Storage adapter trait** — `MemoryBackend` trait with async CRUD + recall + search interface
+- [ ] **Backend registry** — config-driven backend selection (`--backend pinecone`, `--backend postgres`, etc.)
+- [ ] **Migration tooling** — `ai-memory migrate --from sqlite --to <backend>` for zero-downtime backend switches
+- [ ] **Hybrid mode** — local SQLite cache + remote backend (offline-first with sync)
+
 ## v1.0.0 — Production GA
 
 **Focus:** Stability, documentation, ecosystem.
