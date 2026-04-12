@@ -340,6 +340,8 @@ pub async fn recall_memories_get(
         p.tags.as_deref(),
         p.since.as_deref(),
         p.until.as_deref(),
+        lock.2.short_extend_secs,
+        lock.2.mid_extend_secs,
     ) {
         Ok(r) => {
             let scored: Vec<serde_json::Value> = r
@@ -386,6 +388,8 @@ pub async fn recall_memories_post(
         body.tags.as_deref(),
         body.since.as_deref(),
         body.until.as_deref(),
+        lock.2.short_extend_secs,
+        lock.2.mid_extend_secs,
     ) {
         Ok(r) => {
             let scored: Vec<serde_json::Value> = r
@@ -718,6 +722,9 @@ pub async fn restore_archive(
     State(state): State<Db>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    if let Err(e) = validate::validate_id(&id) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response();
+    }
     let lock = state.lock().await;
     match db::restore_archived(&lock.0, &id) {
         Ok(true) => Json(json!({"restored": true, "id": id})).into_response(),
@@ -833,6 +840,8 @@ mod tests {
             None,
             None,
             None,
+            crate::models::SHORT_TTL_EXTEND_SECS,
+            crate::models::MID_TTL_EXTEND_SECS,
         )
         .unwrap();
         assert!(!results.is_empty());

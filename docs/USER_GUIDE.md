@@ -46,7 +46,7 @@ Below is an example for **Claude Code** (user scope: merge `mcpServers` into `~/
 
 ### How It Works
 
-With MCP configured, your AI client gains 17 memory tools:
+With MCP configured, your AI client gains 21 memory tools:
 
 - **memory_store** -- Store new knowledge (auto-deduplicates by title+namespace, reports contradictions)
 - **memory_recall** -- Recall relevant memories for the current context (supports `until` date filter)
@@ -65,6 +65,10 @@ With MCP configured, your AI client gains 17 memory tools:
 - **memory_expand_query** -- Expand a recall query with synonyms and related terms (smart+ tier)
 - **memory_auto_tag** -- Automatically suggest tags for a memory based on its content (smart+ tier)
 - **memory_detect_contradiction** -- Detect contradictions between a new memory and existing ones (smart+ tier)
+- **memory_archive_list** -- List archived memories (memories preserved by GC when archiving is enabled)
+- **memory_archive_restore** -- Restore an archived memory back to active status
+- **memory_archive_purge** -- Permanently delete all archived memories
+- **memory_archive_stats** -- View archive statistics (count, size, oldest/newest)
 
 Your AI assistant uses these tools automatically during conversations. You can also ask directly: "Remember that we use PostgreSQL 15" or "What do you remember about our auth system?"
 
@@ -192,7 +196,7 @@ Search uses AND semantics -- all terms must match. Use this when you know exactl
 - **TTL extension**: Every time a memory is recalled, its expiry extends (1 hour for short, 1 day for mid)
 - **Auto-promotion**: A mid-tier memory recalled 5+ times automatically becomes long-term (expiry cleared)
 - **Priority reinforcement**: Every 10 accesses, a memory's priority increases by 1 (max 10)
-- **Garbage collection**: Expired memories are cleaned up every 30 minutes
+- **Garbage collection**: Expired memories are cleaned up every 30 minutes (optionally archived instead of deleted when `archive_on_gc = true` in `config.toml`)
 - **Deduplication**: Storing a memory with the same title+namespace updates the existing one (tier never downgrades, priority takes the higher value)
 
 ## Namespaces
@@ -523,6 +527,53 @@ How it works:
 5. Source memories are deleted; the new memory inherits the highest priority and all tags
 
 Use `--dry-run` first to preview what would be consolidated.
+
+## Configurable TTL
+
+Memory TTLs (time-to-live) can be customized per tier via `config.toml`. This lets you tune how long short-term and mid-term memories survive before expiring:
+
+```toml
+# ~/.config/ai-memory/config.toml
+[ttl]
+short_secs = 43200   # 12 hours (default: 21600 = 6 hours)
+mid_secs = 1209600   # 14 days (default: 604800 = 7 days)
+```
+
+Long-term memories never expire regardless of TTL settings. CLI flags `--ttl-secs` and `--expires-at` on individual memories override the tier defaults.
+
+## Archive Management
+
+When `archive_on_gc = true` is set in `config.toml`, garbage collection archives expired memories instead of permanently deleting them. This gives you a safety net to recover accidentally expired memories.
+
+### List archived memories
+
+```bash
+ai-memory archive list
+```
+
+### Restore an archived memory
+
+```bash
+ai-memory archive restore <id>
+```
+
+This moves the memory back to active status with its original tier and content intact.
+
+### Purge the archive
+
+```bash
+ai-memory archive purge
+```
+
+Permanently deletes all archived memories. This cannot be undone.
+
+### Archive statistics
+
+```bash
+ai-memory archive stats
+```
+
+Shows the total count, size, and date range of archived memories.
 
 ## Contradiction Resolution
 

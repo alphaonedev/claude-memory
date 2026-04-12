@@ -12,7 +12,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
 [![Tests](https://img.shields.io/badge/tests-161_(118_unit_+_43_integration)-brightgreen)]()
-[![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
+[![MCP](https://img.shields.io/badge/MCP-21_tools-blueviolet)]()
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
@@ -39,7 +39,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **OpenClaw** | MCP stdio | JSON (`mcp.servers` in config) | Fully supported |
 | **Any MCP client** | MCP stdio or HTTP | Varies | Universal |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (20 endpoints on localhost) and the **CLI** (25 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (24 endpoints on localhost) and the **CLI** (26 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -386,14 +386,14 @@ For HTTP-only clients, start the REST API:
 
 ```bash
 ai-memory serve
-# 20 endpoints at http://127.0.0.1:9077/api/v1/
+# 24 endpoints at http://127.0.0.1:9077/api/v1/
 ```
 
 </details>
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 17 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has 21 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -403,21 +403,21 @@ AI assistants forget everything between conversations. ai-memory fixes that.
 
 It runs as an MCP (Model Context Protocol) tool server -- a background process that your AI talks to natively. When your AI learns something important, it stores it. When it needs context, it recalls relevant memories ranked by a 6-factor scoring algorithm. Memories live in three tiers:
 
-- **Short-term** (6 hours) -- throwaway context like current debugging state
-- **Mid-term** (7 days) -- working knowledge like sprint goals and recent decisions
+- **Short-term** (6 hours default, configurable) -- throwaway context like current debugging state
+- **Mid-term** (7 days default, configurable) -- working knowledge like sprint goals and recent decisions
 - **Long-term** (permanent) -- architecture, user preferences, hard-won lessons
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 9077) and a complete CLI (25 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 9077) and a complete CLI (26 commands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
 ## Features
 
 ### Core
-- **MCP tool server** -- 17 tools over stdio JSON-RPC, compatible with any MCP client
-- **Three-tier memory** -- short (6h TTL), mid (7d TTL), long (permanent)
+- **MCP tool server** -- 21 tools over stdio JSON-RPC, compatible with any MCP client
+- **Three-tier memory** -- short (6h TTL default), mid (7d TTL default), long (permanent) -- TTLs are configurable
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
 - **Hybrid recall** -- FTS5 keyword + cosine similarity with fixed 0.6 semantic / 0.4 keyword (60/40) blend weights
 - **6-factor recall scoring** -- FTS relevance + priority + access frequency + confidence + tier boost + recency decay
@@ -439,9 +439,9 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Tagging** -- comma-separated tags with filter support
 
 ### Interfaces
-- **20 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
-- **25 CLI commands** -- complete CLI with identical capabilities
-- **17 MCP tools** -- native integration for any MCP-compatible AI
+- **24 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
+- **26 CLI commands** -- complete CLI with identical capabilities
+- **21 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
 
@@ -502,7 +502,7 @@ Evaluated on the [ICLR 2025 LongMemEval-S](benchmarks/longmemeval/) dataset (500
 
 ### MCP (Primary -- for MCP-compatible AI platforms)
 
-MCP is the recommended integration. Your AI gets 17 native memory tools with zero glue code. Configure the MCP server in your AI platform's config:
+MCP is the recommended integration. Your AI gets 21 native memory tools with zero glue code. Configure the MCP server in your AI platform's config:
 
 ```json
 {
@@ -521,7 +521,7 @@ Start the HTTP server for REST API access. Any AI, script, or automation that ca
 
 ```bash
 ai-memory serve
-# 20 endpoints at http://127.0.0.1:9077/api/v1/
+# 24 endpoints at http://127.0.0.1:9077/api/v1/
 ```
 
 ### CLI (Universal -- for scripting and direct use)
@@ -542,10 +542,10 @@ ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --ti
 
 | Tier | Recall Method | Extra Capabilities | Approx. Overhead |
 |------|---------------|-------------------|-----------------|
-| **keyword** | FTS5 only | Baseline 13 tools | 0 MB |
-| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 14 tools | ~256 MB |
-| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 17 tools | ~1 GB |
-| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 17 tools | ~4 GB |
+| **keyword** | FTS5 only | Baseline 17 tools | 0 MB |
+| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 18 tools | ~256 MB |
+| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 21 tools | ~1 GB |
+| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 21 tools | ~4 GB |
 
 ### Capability Matrix
 
@@ -573,11 +573,11 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 | **Resources** | | | | |
 | RAM | 0 MB | ~256 MB | ~1 GB | ~4 GB |
 | External dependencies | None | None | Ollama | Ollama |
-| MCP tools exposed | 13 | 14 | 17 | 17 |
+| MCP tools exposed | 17 | 18 | 21 | 21 |
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 
-**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 17 tools + reranker) with the faster e2b model:
+**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 21 tools + reranker) with the faster e2b model:
 
 ```toml
 # ~/.config/ai-memory/config.toml
@@ -607,7 +607,7 @@ The `memory_capabilities` tool reports the active tier, loaded models, and avail
 
 ## MCP Tools
 
-These 17 tools are available to any MCP-compatible AI when configured as an MCP server:
+These 21 tools are available to any MCP-compatible AI when configured as an MCP server:
 
 | Tool | Description |
 |------|-------------|
@@ -628,12 +628,16 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 | `memory_expand_query` | Use LLM to expand search query into related terms (smart+ tier) |
 | `memory_auto_tag` | Use LLM to auto-generate tags for a memory (smart+ tier) |
 | `memory_detect_contradiction` | Use LLM to check if two memories contradict (smart+ tier) |
+| `memory_archive_list` | List archived memories (with optional namespace/tier/tag filters) |
+| `memory_archive_restore` | Restore an archived memory back to the active store |
+| `memory_archive_purge` | Permanently delete archived memories matching filters |
+| `memory_archive_stats` | Get archive statistics (counts by tier, namespace, age) |
 
 ---
 
 ## HTTP API
 
-20 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
+24 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
@@ -657,12 +661,16 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 | POST | `/api/v1/gc` | Trigger garbage collection |
 | GET | `/api/v1/export` | Export all memories + links as JSON |
 | POST | `/api/v1/import` | Import memories + links from JSON |
+| GET | `/api/v1/archive` | List archived memories (with optional filters) |
+| POST | `/api/v1/archive/{id}/restore` | Restore an archived memory to the active store |
+| DELETE | `/api/v1/archive` | Purge archived memories matching filters |
+| GET | `/api/v1/archive/stats` | Archive statistics (counts by tier, namespace, age) |
 
 ---
 
 ## CLI Commands
 
-25 commands. Run `ai-memory <command> --help` for details on any command.
+26 commands. Run `ai-memory <command> --help` for details on any command.
 
 | Command | Description |
 |---------|-------------|
@@ -691,6 +699,7 @@ These 17 tools are available to any MCP-compatible AI when configured as an MCP 
 | `completions` | Generate shell completions (bash, zsh, fish) |
 | `man` | Generate roff man page to stdout |
 | `mine` | Import memories from historical conversations (Claude, ChatGPT, Slack exports) |
+| `archive` | Manage the memory archive (list, restore, purge, stats) |
 
 The top-level `ai-memory` binary also accepts global flags:
 
@@ -743,8 +752,8 @@ score = (fts_relevance * -1)
 
 | Tier | TTL | Use Case | Examples |
 |------|-----|----------|----------|
-| `short` | 6 hours | Throwaway context | Current debugging state, temp variables, error traces |
-| `mid` | 7 days | Working knowledge | Sprint goals, recent decisions, current branch purpose |
+| `short` | 6 hours (configurable) | Throwaway context | Current debugging state, temp variables, error traces |
+| `mid` | 7 days (configurable) | Working knowledge | Sprint goals, recent decisions, current branch purpose |
 | `long` | Permanent | Hard-won knowledge | Architecture, user preferences, corrections, conventions |
 
 ### Automatic Behaviors
@@ -754,6 +763,69 @@ score = (fts_relevance * -1)
 - **Priority reinforcement**: every 10 accesses, priority increases by 1 (capped at 10)
 - **Contradiction detection**: warns when a new memory conflicts with an existing one in the same namespace
 - **Deduplication**: upsert on title+namespace; tier never downgrades on update
+
+---
+
+## Configurable TTL
+
+Default TTLs (6 hours for short, 7 days for mid) can be overridden in `~/.config/ai-memory/config.toml` under the `[ttl]` section:
+
+```toml
+[ttl]
+short_hours = 6            # short-tier TTL in hours (default: 6)
+mid_days = 7               # mid-tier TTL in days (default: 7)
+extend_short_minutes = 60  # TTL extension on recall for short-tier memories in minutes (default: 60)
+extend_mid_hours = 24      # TTL extension on recall for mid-tier memories in hours (default: 24)
+gc_interval_minutes = 30   # how often garbage collection runs in minutes (default: 30)
+```
+
+All five fields are optional -- omit any to keep the default. Changes take effect on the next server start or GC cycle.
+
+---
+
+## Archive
+
+When garbage collection expires a memory, it can be **archived** instead of permanently deleted. Archived memories are moved to a separate store and can be browsed, restored, or purged later.
+
+### Configuration
+
+Enable archiving in `~/.config/ai-memory/config.toml`:
+
+```toml
+archive_on_gc = true   # archive expired memories instead of deleting them (default: false)
+```
+
+### CLI Commands
+
+The `archive` subcommand manages the archive:
+
+```bash
+ai-memory archive list                          # list archived memories
+ai-memory archive list --namespace my-project   # filter by namespace
+ai-memory archive restore <id>                  # restore an archived memory to active store
+ai-memory archive purge --before 2026-01-01     # permanently delete old archives
+ai-memory archive stats                         # show archive statistics
+```
+
+### MCP Tools
+
+Four archive tools are available to MCP clients:
+
+| Tool | Description |
+|------|-------------|
+| `memory_archive_list` | List archived memories (with optional namespace/tier/tag filters) |
+| `memory_archive_restore` | Restore an archived memory back to the active store |
+| `memory_archive_purge` | Permanently delete archived memories matching filters |
+| `memory_archive_stats` | Get archive statistics (counts by tier, namespace, age) |
+
+### HTTP Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/v1/archive` | List archived memories (with optional filters) |
+| POST | `/api/v1/archive/{id}/restore` | Restore an archived memory to the active store |
+| DELETE | `/api/v1/archive` | Purge archived memories matching filters |
+| GET | `/api/v1/archive/stats` | Archive statistics (counts by tier, namespace, age) |
 
 ---
 

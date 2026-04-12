@@ -55,7 +55,7 @@ Claude Code supports three MCP configuration scopes:
 
 > **Windows:** Use `%USERPROFILE%\.claude.json` and forward slashes in db paths: `"C:/Users/YourName/.claude/ai-memory.db"`.
 
-This gives Claude Code 17 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
+This gives Claude Code 21 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`.
 
 ## Alternative: CLI Integration
 
@@ -93,7 +93,7 @@ ai-memory --db /root/.claude/ai-memory.db store \
 ### Namespace auto-detection:
 If you omit `--namespace`, it auto-detects from the git remote or directory name.
 
-### All 25 commands:
+### All 26 commands:
 - `mcp` -- run as MCP tool server over stdio (primary integration path)
 - `serve` -- start the HTTP daemon on port 9077
 - `store` -- store a new memory (deduplicates by title+namespace)
@@ -119,6 +119,7 @@ If you omit `--namespace`, it auto-detects from the git remote or directory name
 - `completions` -- generate shell completions (bash, zsh, fish)
 - `man` -- generate roff man page to stdout (pipe to `man -l -` to view)
 - `mine` -- import memories from historical conversations (Claude, ChatGPT, Slack exports)
+- `archive` -- manage the memory archive (list, restore, purge, stats)
 
 ### Feature tiers:
 - `keyword` -- FTS5 only, no embedding model, lowest resource usage
@@ -140,7 +141,7 @@ def456|Redis cache|long|infra|8|0.541|redis,cache
 ### MCP Prompts (recall-first behavior):
 The MCP server provides 2 prompts via `prompts/list`:
 - **recall-first** -- System prompt with 9 rules: recall at session start, store corrections, TOON format, tier strategy, dedup awareness, namespace organization, capabilities check
-- **memory-workflow** -- Quick reference card for all 17 tool usage patterns
+- **memory-workflow** -- Quick reference card for all 21 tool usage patterns
 
 These prompts teach AI clients to use memory proactively. The `recall-first` prompt supports an optional `namespace` argument for scoped recall.
 

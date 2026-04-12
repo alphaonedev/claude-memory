@@ -532,6 +532,8 @@ pub fn recall(
     tags_filter: Option<&str>,
     since: Option<&str>,
     until: Option<&str>,
+    short_extend: i64,
+    mid_extend: i64,
 ) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
@@ -578,7 +580,7 @@ pub fn recall(
 
     // Touch all recalled memories (bumps access, extends TTL, auto-promotes)
     for (mem, _) in &results {
-        if let Err(e) = touch(conn, &mem.id, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS) {
+        if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
     }
@@ -939,8 +941,22 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
         if !exists {
             return Ok(false);
         }
+        // Check if ID already exists in active memories to prevent silent overwrite
+        let active_exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM memories WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if active_exists {
+            anyhow::bail!(
+                "cannot restore: memory {} already exists in active table (would overwrite)",
+                id
+            );
+        }
         conn.execute(
-            "INSERT OR REPLACE INTO memories
+            "INSERT INTO memories
              (id, tier, namespace, title, content, tags, priority, confidence,
               source, access_count, created_at, updated_at, last_accessed_at, expires_at)
              SELECT id, tier, namespace, title, content, tags, priority, confidence,
@@ -968,6 +984,9 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
 
 pub fn purge_archive(conn: &Connection, older_than_days: Option<i64>) -> Result<usize> {
     match older_than_days {
+        Some(days) if days < 0 => {
+            anyhow::bail!("older_than_days must be non-negative (got {days})");
+        }
         Some(days) => {
             let cutoff = (Utc::now() - chrono::Duration::days(days)).to_rfc3339();
             let deleted = conn.execute(
@@ -1150,6 +1169,8 @@ pub fn recall_hybrid(
     since: Option<&str>,
     until: Option<&str>,
     vector_index: Option<&crate::hnsw::VectorIndex>,
+    short_extend: i64,
+    mid_extend: i64,
 ) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
@@ -1331,7 +1352,7 @@ pub fn recall_hybrid(
 
     // Touch all recalled memories
     for (mem, _) in &results {
-        if let Err(e) = touch(conn, &mem.id, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS) {
+        if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
     }
@@ -1644,7 +1665,7 @@ mod tests {
         )
         .unwrap();
 
-        let results = recall(&conn, "Rust programming", None, 10, None, None, None).unwrap();
+        let results = recall(&conn, "Rust programming", None, 10, None, None, None, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS).unwrap();
         assert!(!results.is_empty());
         // Score should be present
         let (mem, score) = &results[0];
@@ -1657,7 +1678,7 @@ mod tests {
         let conn = test_db();
         insert(&conn, &make_memory("Test", "test", Tier::Long, 5)).unwrap();
         // Empty context should not crash
-        let results = recall(&conn, "", None, 10, None, None, None);
+        let results = recall(&conn, "", None, 10, None, None, None, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS);
         // May return empty or error, both acceptable
         assert!(results.is_ok() || results.is_err());
     }
@@ -1808,6 +1829,38 @@ mod tests {
         let purged = purge_archive(&conn, None).unwrap();
         assert_eq!(purged, 1);
         assert_eq!(list_archived(&conn, None, 10, 0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn purge_archive_rejects_negative_days() {
+        let conn = test_db();
+        let result = purge_archive(&conn, Some(-1));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("non-negative"));
+    }
+
+    #[test]
+    fn restore_rejects_active_id_collision() {
+        let conn = test_db();
+        let mut mem = make_memory("Collision Test", "test", Tier::Short, 5);
+        mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        let id = insert(&conn, &mem).unwrap();
+
+        // Archive it via GC
+        gc(&conn, true).unwrap();
+        assert!(get(&conn, &id).unwrap().is_none());
+
+        // Manually insert a memory with the SAME id but different title into active table
+        conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at)
+             VALUES (?1, 'long', 'test', 'Blocker Title', 'blocks restore', '[]', 5, 1.0, 'test', 0, datetime('now'), datetime('now'))",
+            rusqlite::params![id],
+        ).unwrap();
+
+        // Restore should fail because id exists in active table
+        let result = restore_archived(&conn, &id);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("already exists in active table"));
     }
 
     #[test]

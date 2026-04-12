@@ -433,9 +433,9 @@ async fn main() -> Result<()> {
         Command::Store(a) => cmd_store(db_path, a, j, &app_config),
         Command::Update(a) => cmd_update(db_path, a, j),
         Command::Recall(a) => cmd_recall(db_path, a, j, &app_config),
-        Command::Search(a) => cmd_search(db_path, a, j),
+        Command::Search(a) => cmd_search(db_path, a, j, &app_config),
         Command::Get(a) => cmd_get(db_path, a, j),
-        Command::List(a) => cmd_list(db_path, a, j),
+        Command::List(a) => cmd_list(db_path, a, j, &app_config),
         Command::Delete(a) => cmd_delete(db_path, a, j),
         Command::Promote(a) => cmd_promote(db_path, a, j),
         Command::Forget(a) => cmd_forget(db_path, a, j),
@@ -465,7 +465,7 @@ async fn main() -> Result<()> {
             man.render(&mut std::io::stdout())?;
             Ok(())
         }
-        Command::Mine(a) => cmd_mine(db_path, a, j),
+        Command::Mine(a) => cmd_mine(db_path, a, j, &app_config),
         Command::Archive(a) => cmd_archive(db_path, a, j),
     }
 }
@@ -558,7 +558,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 fn cmd_store(db_path: PathBuf, args: StoreArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
     let conn = db::open(&db_path)?;
     let resolved_ttl = app_config.effective_ttl();
-    let _ = db::gc_if_needed(&conn, true);
+    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = Tier::from_str(&args.tier)
         .ok_or_else(|| anyhow::anyhow!("invalid tier: {} (use short, mid, long)", args.tier))?;
     let namespace = args.namespace.unwrap_or_else(auto_namespace);
@@ -703,7 +703,7 @@ fn cmd_recall(
     app_config: &config::AppConfig,
 ) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let _ = db::gc_if_needed(&conn, true);
+    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
 
     // Resolve feature tier
     let feature_tier = app_config.effective_tier(args.tier.as_deref());
@@ -778,6 +778,8 @@ fn cmd_recall(
         None
     };
 
+    let resolved_ttl = app_config.effective_ttl();
+
     // Perform recall: hybrid if embedder available, keyword otherwise
     let (results, mode) = if let Some(ref emb) = embedder {
         match emb.embed(&args.context) {
@@ -792,6 +794,8 @@ fn cmd_recall(
                     args.since.as_deref(),
                     args.until.as_deref(),
                     vector_index.as_ref(),
+                    resolved_ttl.short_extend_secs,
+                    resolved_ttl.mid_extend_secs,
                 )?;
                 if let Some(ref ce) = reranker {
                     (ce.rerank(&args.context, results), "hybrid+rerank")
@@ -809,6 +813,8 @@ fn cmd_recall(
                     args.tags.as_deref(),
                     args.since.as_deref(),
                     args.until.as_deref(),
+                    resolved_ttl.short_extend_secs,
+                    resolved_ttl.mid_extend_secs,
                 )?;
                 (results, "keyword")
             }
@@ -822,6 +828,8 @@ fn cmd_recall(
             args.tags.as_deref(),
             args.since.as_deref(),
             args.until.as_deref(),
+            resolved_ttl.short_extend_secs,
+            resolved_ttl.mid_extend_secs,
         )?;
         (results, "keyword")
     };
@@ -880,9 +888,9 @@ fn cmd_recall(
     Ok(())
 }
 
-fn cmd_search(db_path: PathBuf, args: SearchArgs, json_out: bool) -> Result<()> {
+fn cmd_search(db_path: PathBuf, args: SearchArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let _ = db::gc_if_needed(&conn, true);
+    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let results = db::search(
         &conn,
@@ -952,9 +960,9 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool) -> Result<()> {
+fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
     let conn = db::open(&db_path)?;
-    let _ = db::gc_if_needed(&conn, true);
+    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let results = db::list(
         &conn,
@@ -1292,7 +1300,7 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                     eprintln!("usage: recall <context>");
                     continue;
                 }
-                match db::recall(&conn, &ctx, None, 10, None, None, None) {
+                match db::recall(&conn, &ctx, None, 10, None, None, None, models::SHORT_TTL_EXTEND_SECS, models::MID_TTL_EXTEND_SECS) {
                     Ok(results) => {
                         for (mem, score) in &results {
                             println!(
@@ -1684,6 +1692,7 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
             }
         }
         ArchiveAction::Restore { id } => {
+            validate::validate_id(&id)?;
             let restored = db::restore_archived(&conn, &id)?;
             if json_out {
                 println!("{}", serde_json::json!({"restored": restored, "id": id}));
@@ -1726,7 +1735,7 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
     Ok(())
 }
 
-fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool) -> Result<()> {
+fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
     let format = mine::Format::from_str(&args.format).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid format: {} (use claude, chatgpt, slack)",
@@ -1809,7 +1818,7 @@ fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool) -> Result<()> {
 
     // Store memories
     let conn = db::open(&db_path)?;
-    let _ = db::gc_if_needed(&conn, true);
+    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let now = Utc::now();
 
     let mut imported = 0usize;
@@ -1828,8 +1837,7 @@ fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool) -> Result<()> {
             }
         };
 
-        let resolved_ttl = config::AppConfig::load().effective_ttl();
-        let expires_at = resolved_ttl
+        let expires_at = app_config.effective_ttl()
             .ttl_for_tier(&tier)
             .map(|s| (now + Duration::seconds(s)).to_rfc3339());
 

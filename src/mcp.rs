@@ -548,8 +548,10 @@ fn handle_recall(
     embedder: Option<&Embedder>,
     vector_index: Option<&VectorIndex>,
     reranker: Option<&CrossEncoder>,
+    archive_on_gc: bool,
+    resolved_ttl: &crate::config::ResolvedTtl,
 ) -> Result<Value, String> {
-    let _ = db::gc_if_needed(conn, true);
+    let _ = db::gc_if_needed(conn, archive_on_gc);
     let context = params["context"].as_str().ok_or("context is required")?;
     let namespace = params["namespace"].as_str();
     let limit = params["limit"].as_u64().unwrap_or(10) as usize;
@@ -588,6 +590,8 @@ fn handle_recall(
                     since,
                     until,
                     vector_index,
+                    resolved_ttl.short_extend_secs,
+                    resolved_ttl.mid_extend_secs,
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -612,7 +616,7 @@ fn handle_recall(
     }
 
     // Fallback to keyword-only recall
-    let results = db::recall(conn, context, namespace, limit.min(50), tags, since, until)
+    let results = db::recall(conn, context, namespace, limit.min(50), tags, since, until, resolved_ttl.short_extend_secs, resolved_ttl.mid_extend_secs)
         .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
     Ok(json!({"memories": memories, "count": memories.len(), "mode": "keyword"}))
@@ -972,6 +976,7 @@ fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Va
 
 fn handle_archive_restore(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
+    crate::validate::validate_id(id).map_err(|e| e.to_string())?;
     let restored = db::restore_archived(conn, id).map_err(|e| e.to_string())?;
     if !restored {
         return Err("not found in archive".into());
@@ -999,6 +1004,7 @@ fn handle_request(
     tier_config: &TierConfig,
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,
+    archive_on_gc: bool,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -1050,7 +1056,7 @@ fn handle_request(
 
             let result = match tool_name {
                 "memory_store" => handle_store(conn, arguments, embedder, vector_index, resolved_ttl),
-                "memory_recall" => handle_recall(conn, arguments, embedder, vector_index, reranker),
+                "memory_recall" => handle_recall(conn, arguments, embedder, vector_index, reranker, archive_on_gc, resolved_ttl),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index),
@@ -1344,6 +1350,7 @@ pub fn run_mcp_server(
         }
 
         let resolved_ttl = app_config.effective_ttl();
+        let archive_on_gc = app_config.effective_archive_on_gc();
         let resp = handle_request(
             &conn,
             db_path,
@@ -1354,6 +1361,7 @@ pub fn run_mcp_server(
             &tier_config,
             vector_index.as_ref(),
             &resolved_ttl,
+            archive_on_gc,
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;

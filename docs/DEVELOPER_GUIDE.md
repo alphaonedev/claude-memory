@@ -4,24 +4,24 @@
 
 `ai-memory` is an AI-agnostic memory management system built as a single Rust binary that serves three roles:
 
-1. **MCP tool server** -- stdio JSON-RPC server exposing 17 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
+1. **MCP tool server** -- stdio JSON-RPC server exposing 21 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
-3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 20 endpoints (completely AI-agnostic)
+3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 24 endpoints (completely AI-agnostic)
 
 **Key architectural features:** Zero token cost (no context loaded until recall), TOON compact default response format (79% smaller than JSON), MCP prompts capability (`recall-first` behavioral rules + `memory-workflow` reference card), 4 feature tiers with optional local LLMs via Ollama, true dedup on title+namespace, 6-factor recall scoring with score field in responses.
 
 All three interfaces share the same database layer (`db.rs`) and validation layer (`validate.rs`). The daemon adds automatic garbage collection (every 30 minutes) and graceful shutdown with WAL checkpointing.
 
 ```
-main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (25 commands)
+main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (26 commands)
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 17 tools, notification handling
+mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 21 tools, notification handling
 validate.rs      -- Input validation for all write paths
 errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
 color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
-config.rs        -- Tier configuration system (keyword, semantic, smart, autonomous) and feature gating
+config.rs        -- Tier configuration system (keyword, semantic, smart, autonomous), feature gating, TtlConfig, and archive_on_gc
 embeddings.rs    -- Embedding pipeline: HuggingFace model loading, vector generation, cosine similarity
 llm.rs           -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
 mine.rs          -- Retroactive conversation import from Claude, ChatGPT, and Slack exports
@@ -42,13 +42,13 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 ### `src/main.rs`
 
 - `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`)
-- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine` (25 commands)
+- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive` (26 commands)
 - `StoreArgs` includes `--expires-at` and `--ttl-secs` flags for custom expiration
 - `UpdateArgs` includes `--expires-at` flag for setting expiration on existing memories
 - `ListArgs` includes `--offset` flag for pagination
 - `auto_namespace()` -- detects namespace from git remote URL or directory name
 - `human_age()` -- formats ISO timestamps as "2h ago", "3d ago" for CLI output
-- `serve()` -- starts the Axum server with all routes (20 endpoints including `POST /memories/{id}/promote`), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
+- `serve()` -- starts the Axum server with all routes (24 endpoints including `POST /memories/{id}/promote` and 4 archive endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
 - `cmd_*()` functions -- one per CLI command, each opens the DB directly
 
 ### `src/models.rs`
@@ -58,20 +58,22 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 - `MemoryLink` struct -- typed directional links between memories
 - Request types: `CreateMemory`, `UpdateMemory`, `SearchQuery`, `ListQuery`, `RecallQuery`, `RecallBody`, `LinkBody`, `ForgetQuery`, `ConsolidateBody`, `ImportBody`
 - Response types: `Stats`, `TierCount`, `NamespaceCount`
+- `TtlConfig` struct -- per-tier TTL overrides loaded from `config.toml` (`short_secs`, `mid_secs`)
+- `ResolvedTtl` struct -- resolved TTL values after merging config defaults with per-tier overrides
 - Constants: `MAX_CONTENT_SIZE` (65536), `PROMOTION_THRESHOLD` (5), `SHORT_TTL_EXTEND_SECS` (3600), `MID_TTL_EXTEND_SECS` (86400)
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **17 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **21 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
-- `tool_definitions()` -- returns the 17 tool schemas for `tools/list` (4 new: `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`)
+- `tool_definitions()` -- returns the 21 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
   - `memory_recall` schema includes `until` parameter and `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`)
   - `memory_search` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_list` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_consolidate` schema enforces `minItems: 2, maxItems: 100` on IDs
   - `memory_update` schema includes `expires_at` parameter
-- `handle_store()`, `handle_recall()`, `handle_search()`, `handle_list()`, `handle_delete()`, `handle_promote()`, `handle_forget()`, `handle_stats()`, `handle_update()`, `handle_get()`, `handle_link()`, `handle_get_links()`, `handle_consolidate()` -- one handler per tool
+- `handle_store()`, `handle_recall()`, `handle_search()`, `handle_list()`, `handle_delete()`, `handle_promote()`, `handle_forget()`, `handle_stats()`, `handle_update()`, `handle_get()`, `handle_link()`, `handle_get_links()`, `handle_consolidate()`, `handle_archive_list()`, `handle_archive_restore()`, `handle_archive_purge()`, `handle_archive_stats()` -- one handler per tool
 - `handle_request()` -- routes JSON-RPC methods: `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, `ping`
 - Notification handling: all JSON-RPC notifications (requests without an `id` field) are correctly skipped without sending a response, per the JSON-RPC 2.0 specification
 - `run_mcp_server()` -- main loop: reads lines from stdin, parses JSON-RPC, dispatches, writes responses to stdout
@@ -125,7 +127,7 @@ Structured error types for the HTTP API:
 
 ### `src/handlers.rs`
 
-All HTTP handlers for the 20-endpoint REST API. State is `Arc<Mutex<(Connection, PathBuf)>>`. Each handler acquires the lock, validates input, performs DB operations, returns JSON.
+All HTTP handlers for the 24-endpoint REST API. State is `Arc<Mutex<(Connection, PathBuf)>>`. Each handler acquires the lock, validates input, performs DB operations, returns JSON.
 
 Key handlers:
 - `create_memory` / `bulk_create` -- memory creation with deduplication (bulk limited to 1,000 items)
@@ -134,6 +136,7 @@ Key handlers:
 - `search` / `recall` -- FTS-powered search with sanitized queries
 - `forget` / `consolidate` -- bulk operations
 - `import_memories` -- import with 1,000 item limit
+- `archive_list` / `archive_restore` / `archive_purge` / `archive_stats` -- archive management endpoints
 - All ID path parameters are validated before database access
 
 ### `src/db.rs`
@@ -161,6 +164,11 @@ The database layer. Key functions:
 | `list_namespaces()` | List namespaces with memory counts |
 | `export_all()` / `export_links()` | Full data export |
 | `checkpoint()` | WAL checkpoint (TRUNCATE) for clean shutdown |
+| `archive_memory()` | Move a memory to the archive table |
+| `list_archived()` | List all archived memories |
+| `restore_archived()` | Restore an archived memory to the active table |
+| `purge_archive()` | Permanently delete all archived memories |
+| `archive_stats()` | Archive statistics (count, size, date range) |
 | `health_check()` | Verifies DB accessibility and FTS5 integrity |
 
 **Transaction safety**: `touch()` and `consolidate()` use `BEGIN IMMEDIATE` to acquire a write lock upfront, preventing deadlocks and ensuring the entire read-modify-write cycle is atomic. This is critical for `touch()` because it reads the current access count, computes promotion/reinforcement logic, and writes back -- all of which must be atomic under concurrent access.
@@ -261,10 +269,10 @@ The `config.rs` module defines 4 feature tiers that gate functionality:
 
 | Tier | Embeddings | LLM | Tools Available |
 |------|-----------|-----|-----------------|
-| `keyword` | No | No | 13 base tools + `memory_capabilities` |
-| `semantic` | Yes | No | 14 base tools + `memory_capabilities` |
-| `smart` | Yes | Yes | All 17 tools |
-| `autonomous` | Yes | Yes | All 17 tools + autonomous behaviors |
+| `keyword` | No | No | 13 base tools + `memory_capabilities` + 4 archive tools |
+| `semantic` | Yes | No | 14 base tools + `memory_capabilities` + 4 archive tools |
+| `smart` | Yes | Yes | All 21 tools |
+| `autonomous` | Yes | Yes | All 21 tools + autonomous behaviors |
 
 The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be changed at runtime. The `memory_capabilities` tool reports the active tier and which features are available, allowing AI clients to adapt their behavior.
 
@@ -276,7 +284,7 @@ Base URL: `http://127.0.0.1:9077/api/v1`
 
 All responses are JSON. Error responses include `{"error": "message"}`. Database errors are sanitized -- clients receive `"Internal server error"` instead of raw SQLite error details.
 
-The HTTP API exposes **20 endpoints**.
+The HTTP API exposes **24 endpoints**.
 
 ### Health Check
 
@@ -547,7 +555,7 @@ Global flags:
 
 ### `serve`
 
-Start the HTTP daemon (20 endpoints).
+Start the HTTP daemon (24 endpoints).
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
@@ -555,7 +563,7 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 17 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 21 tools.
 
 ```bash
 ai-memory mcp

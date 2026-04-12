@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] — 2026-04-12
+
+### Added
+
+- **Configurable TTL per tier**: `[ttl]` section in config.toml with 5 overrides: `short_ttl_secs`, `mid_ttl_secs`, `long_ttl_secs`, `short_extend_secs`, `mid_extend_secs`. Set to 0 to disable expiry.
+- **Archive before GC deletion**: Expired memories archived to `archived_memories` table before deletion (default: on). Configurable via `archive_on_gc` in config.toml.
+- 4 new MCP tools: `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats` (21 total)
+- 4 new HTTP endpoints: `GET/DELETE /api/v1/archive`, `POST /api/v1/archive/{id}/restore`, `GET /api/v1/archive/stats` (24 total)
+- `archive` CLI subcommand with `list`, `restore`, `purge`, `stats` actions (26 total commands)
+- Schema migration v4: `archived_memories` table with indexes
+- `TtlConfig` and `ResolvedTtl` types in config.rs for type-safe TTL resolution
+- TTL values clamped to 10-year maximum to prevent integer overflow
+- Negative `older_than_days` rejected in archive purge
+- Archive restore checks for active ID collision (prevents silent overwrite)
+- `validate_id()` on all archive restore endpoints (HTTP, MCP, CLI)
+
+### Changed
+
+- `db::update()` returns `(bool, bool)` — `(found, content_changed)` — for embedding regeneration
+- `db::touch()` accepts configurable `short_extend` / `mid_extend` parameters
+- `db::gc()` accepts `archive: bool` parameter
+- `db::recall()` and `db::recall_hybrid()` accept configurable extend values
+- All `gc_if_needed` callers respect `archive_on_gc` config setting
+- Update facility: tier downgrade protection, title collision detection, embedding regeneration on content change
+
+### Fixed
+
+- Embeddings not regenerated on content update via `memory_update` (MCP + dedup store path)
+- Tier downgrade not protected in update path (long never downgrades, mid never to short)
+- Title+namespace collision on update returned opaque error (now returns 409 CONFLICT)
+- MCP and CLI update handlers missing `validate_id()` call
+- Negative TTL extension values now clamped to 0
+
 ## [0.5.2] — 2026-04-08
 
 ### Added

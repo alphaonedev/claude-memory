@@ -41,7 +41,7 @@ Run the HTTP daemon directly in the foreground:
 ai-memory --db /path/to/ai-memory.db serve
 ```
 
-The daemon listens on `127.0.0.1:9077` by default and exposes 20 HTTP endpoints.
+The daemon listens on `127.0.0.1:9077` by default and exposes 24 HTTP endpoints.
 
 ### Systemd (Production HTTP Daemon)
 
@@ -120,10 +120,10 @@ The `--tier` flag controls which features are enabled. Each tier builds on the p
 
 | Tier | Tools | Embedding Model | LLM Required | Approx. Memory |
 |------|-------|----------------|--------------|----------------|
-| `keyword` | 14 | No | No | Minimal |
-| `semantic` (default) | 14 | Yes (HuggingFace) | No | ~256 MB |
-| `smart` | 17 | Yes | Yes (Ollama) | ~1 GB |
-| `autonomous` | 17 | Yes | Yes (Ollama) | ~4 GB |
+| `keyword` | 18 | No | No | Minimal |
+| `semantic` (default) | 18 | Yes (HuggingFace) | No | ~256 MB |
+| `smart` | 21 | Yes | Yes (Ollama) | ~1 GB |
+| `autonomous` | 21 | Yes | Yes (Ollama) | ~4 GB |
 
 Set the tier when starting the MCP server or HTTP daemon:
 
@@ -211,6 +211,10 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 | `cross_encoder` | Name of the cross-encoder model |
 | `default_namespace` | Default namespace for memories |
 | `max_memory_mb` | Maximum memory budget in MB |
+| `archive_on_gc` | Archive expired memories instead of deleting them during GC (`true`/`false`, default: `false`) |
+| `[ttl]` | Section for per-tier TTL overrides |
+| `ttl.short_secs` | TTL for short-tier memories in seconds (default: 21600 = 6 hours) |
+| `ttl.mid_secs` | TTL for mid-tier memories in seconds (default: 604800 = 7 days) |
 
 **Precedence:** CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting.
 
@@ -311,6 +315,22 @@ ai-memory gc
 curl -X POST http://127.0.0.1:9077/api/v1/gc
 ```
 
+By default, GC permanently deletes expired memories. To archive them instead, set `archive_on_gc = true` in `config.toml`. Archived memories are moved to a separate archive table and can be listed, restored, or purged:
+
+```bash
+# List archived memories
+curl http://127.0.0.1:9077/api/v1/archive
+
+# Restore an archived memory
+curl -X POST http://127.0.0.1:9077/api/v1/archive/<id>/restore
+
+# Purge all archived memories permanently
+curl -X POST http://127.0.0.1:9077/api/v1/archive/purge
+
+# View archive statistics
+curl http://127.0.0.1:9077/api/v1/archive/stats
+```
+
 Compact the database (reduces file size after many deletions):
 
 ```bash
@@ -401,7 +421,7 @@ Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint
 
 ## HTTP API Endpoints
 
-The HTTP daemon exposes **20 endpoints** under `/api/v1`:
+The HTTP daemon exposes **24 endpoints** under `/api/v1`:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -425,6 +445,10 @@ The HTTP daemon exposes **20 endpoints** under `/api/v1`:
 | `POST` | `/gc` | Trigger garbage collection |
 | `GET` | `/export` | Export all memories and links |
 | `POST` | `/import` | Import memories and links (max 1,000) |
+| `GET` | `/archive` | List archived memories |
+| `POST` | `/archive/{id}/restore` | Restore an archived memory |
+| `POST` | `/archive/purge` | Permanently delete archived memories |
+| `GET` | `/archive/stats` | Archive statistics |
 
 ## Monitoring
 

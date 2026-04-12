@@ -296,19 +296,28 @@ impl Default for ResolvedTtl {
     }
 }
 
+/// Maximum configurable TTL: 10 years in seconds. Prevents integer overflow
+/// when adding Duration to Utc::now().
+const MAX_TTL_SECS: i64 = 315_360_000;
+
 impl ResolvedTtl {
     /// Build from optional config overrides, falling back to compiled defaults.
+    /// TTL values are clamped to MAX_TTL_SECS (10 years) to prevent overflow.
+    /// Extension values are clamped to non-negative.
     pub fn from_config(cfg: Option<&TtlConfig>) -> Self {
         let defaults = Self::default();
         let Some(c) = cfg else {
             return defaults;
         };
+        let clamp_ttl = |v: i64| -> Option<i64> {
+            if v <= 0 { None } else { Some(v.min(MAX_TTL_SECS)) }
+        };
         Self {
-            short_ttl_secs: c.short_ttl_secs.map(|v| if v <= 0 { None } else { Some(v) }).unwrap_or(defaults.short_ttl_secs),
-            mid_ttl_secs: c.mid_ttl_secs.map(|v| if v <= 0 { None } else { Some(v) }).unwrap_or(defaults.mid_ttl_secs),
-            long_ttl_secs: c.long_ttl_secs.map(|v| if v <= 0 { None } else { Some(v) }).unwrap_or(defaults.long_ttl_secs),
-            short_extend_secs: c.short_extend_secs.unwrap_or(defaults.short_extend_secs),
-            mid_extend_secs: c.mid_extend_secs.unwrap_or(defaults.mid_extend_secs),
+            short_ttl_secs: c.short_ttl_secs.map(clamp_ttl).unwrap_or(defaults.short_ttl_secs),
+            mid_ttl_secs: c.mid_ttl_secs.map(clamp_ttl).unwrap_or(defaults.mid_ttl_secs),
+            long_ttl_secs: c.long_ttl_secs.map(clamp_ttl).unwrap_or(defaults.long_ttl_secs),
+            short_extend_secs: c.short_extend_secs.unwrap_or(defaults.short_extend_secs).max(0),
+            mid_extend_secs: c.mid_extend_secs.unwrap_or(defaults.mid_extend_secs).max(0),
         }
     }
 
@@ -626,6 +635,20 @@ mod tests {
         let resolved = ResolvedTtl::from_config(Some(&cfg));
         assert_eq!(resolved.short_ttl_secs, None); // 0 → no expiry
         assert_eq!(resolved.mid_ttl_secs, None);
+    }
+
+    #[test]
+    fn resolved_ttl_clamps_overflow() {
+        let cfg = TtlConfig {
+            mid_ttl_secs: Some(i64::MAX),
+            short_extend_secs: Some(-3600),
+            ..Default::default()
+        };
+        let resolved = ResolvedTtl::from_config(Some(&cfg));
+        // i64::MAX should be clamped to MAX_TTL_SECS (10 years)
+        assert_eq!(resolved.mid_ttl_secs, Some(super::MAX_TTL_SECS));
+        // negative extend should be clamped to 0
+        assert_eq!(resolved.short_extend_secs, 0);
     }
 
     #[test]
