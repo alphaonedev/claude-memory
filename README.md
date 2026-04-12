@@ -542,8 +542,8 @@ ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --ti
 
 | Tier | Recall Method | Extra Capabilities | Approx. Overhead |
 |------|---------------|-------------------|-----------------|
-| **keyword** | FTS5 only | Baseline 17 tools | 0 MB |
-| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 18 tools | ~256 MB |
+| **keyword** | FTS5 only | Baseline 21 tools | 0 MB |
+| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 21 tools | ~256 MB |
 | **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 21 tools | ~1 GB |
 | **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 21 tools | ~4 GB |
 
@@ -573,7 +573,7 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 | **Resources** | | | | |
 | RAM | 0 MB | ~256 MB | ~1 GB | ~4 GB |
 | External dependencies | None | None | Ollama | Ollama |
-| MCP tools exposed | 17 | 18 | 21 | 21 |
+| MCP tools exposed | 21 | 21 | 21 | 21 |
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 

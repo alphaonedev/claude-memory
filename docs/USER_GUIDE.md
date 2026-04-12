@@ -88,7 +88,7 @@ All recall, search, and list responses default to **TOON compact** format -- 79%
 
 The server provides 2 MCP prompts via `prompts/list` that teach AI clients to use memory proactively:
 
-- **recall-first** -- 9 behavioral rules: recall at session start, store corrections as long-term, use TOON format, tier strategy, dedup awareness
+- **recall-first** -- 8 behavioral rules: recall at session start, store corrections as long-term, use TOON format, tier strategy, dedup awareness
 - **memory-workflow** -- Quick reference card for all tool usage patterns
 
 ## Feature Tiers

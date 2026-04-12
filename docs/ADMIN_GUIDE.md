@@ -120,8 +120,8 @@ The `--tier` flag controls which features are enabled. Each tier builds on the p
 
 | Tier | Tools | Embedding Model | LLM Required | Approx. Memory |
 |------|-------|----------------|--------------|----------------|
-| `keyword` | 18 | No | No | Minimal |
-| `semantic` (default) | 18 | Yes (HuggingFace) | No | ~256 MB |
+| `keyword` | 21 | No | No | Minimal |
+| `semantic` (default) | 21 | Yes (HuggingFace) | No | ~256 MB |
 | `smart` | 21 | Yes | Yes (Ollama) | ~1 GB |
 | `autonomous` | 21 | Yes | Yes (Ollama) | ~4 GB |
 
@@ -202,28 +202,132 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 
 > **Note:** Configuration is loaded once at process startup. Changes to `config.toml` require restarting the ai-memory process (MCP server, HTTP daemon, or CLI) to take effect.
 
-| Key | Description |
-|-----|-------------|
-| `tier` | Feature tier (`keyword`, `semantic`, `smart`, `autonomous`) |
-| `db` | Path to the SQLite database file |
-| `ollama_url` | URL for the Ollama instance |
-| `embed_url` | URL for the embedding service |
-| `embedding_model` | Name of the embedding model to use |
-| `llm_model` | Name of the LLM model to use |
-| `cross_encoder` | Name of the cross-encoder model |
-| `default_namespace` | Default namespace for memories |
-| `max_memory_mb` | Maximum memory budget in MB |
-| `archive_on_gc` | Archive expired memories instead of deleting them during GC (`true`/`false`, default: `true`) |
-| `[ttl]` | Section for per-tier TTL overrides |
-| `ttl.short_ttl_secs` | TTL for short-tier memories in seconds (default: 21600 = 6 hours) |
-| `ttl.mid_ttl_secs` | TTL for mid-tier memories in seconds (default: 604800 = 7 days) |
-| `ttl.long_ttl_secs` | TTL for long-tier memories in seconds (default: 0 = never expires) |
-| `ttl.short_extend_secs` | TTL extension on access for short-tier memories (default: 3600 = +1 hour) |
-| `ttl.mid_extend_secs` | TTL extension on access for mid-tier memories (default: 86400 = +1 day) |
+| Key | Type | Default | Valid Values | Description |
+|-----|------|---------|--------------|-------------|
+| `tier` | String | `"semantic"` | `"keyword"`, `"semantic"`, `"smart"`, `"autonomous"` | Feature tier controlling which AI capabilities are active |
+| `db` | String | `"ai-memory.db"` | Any valid file path | Path to the SQLite database file |
+| `ollama_url` | String | `"http://localhost:11434"` | Any URL | Ollama base URL for LLM generation (smart/autonomous tiers) |
+| `embed_url` | String | Value of `ollama_url` | Any URL | Separate URL for the embedding service; falls back to `ollama_url` if unset |
+| `embedding_model` | String | Tier-dependent | `"mini_lm_l6_v2"` (384-dim, ~90 MB), `"nomic_embed_v15"` (768-dim, ~270 MB) | HuggingFace sentence-transformer model for semantic search |
+| `llm_model` | String | Tier-dependent | `"gemma4:e2b"` (~1 GB Q4), `"gemma4:e4b"` (~2.3 GB Q4) | Ollama LLM model tag for smart/autonomous features |
+| `cross_encoder` | **Bool** | `false` (`true` for autonomous tier) | `true`, `false` | Enable neural cross-encoder reranking (not a string -- must be bare `true`/`false` without quotes) |
+| `default_namespace` | String | `"global"` | Any valid namespace (max 128 bytes, no slashes/spaces/nulls) | Default namespace applied to new memories |
+| `max_memory_mb` | Integer | Tier-dependent | Any positive integer | Maximum memory budget in MB; used for automatic tier selection via `from_memory_budget()` |
+| `archive_on_gc` | Bool | `true` | `true`, `false` | Archive expired memories instead of permanently deleting them during GC |
+| `[ttl]` | Section | -- | -- | Per-tier TTL overrides (all sub-fields are integers in seconds) |
+| `ttl.short_ttl_secs` | Integer | `21600` (6 hours) | `0` = never expires, or positive integer | TTL for short-tier memories in seconds |
+| `ttl.mid_ttl_secs` | Integer | `604800` (7 days) | `0` = never expires, or positive integer | TTL for mid-tier memories in seconds |
+| `ttl.long_ttl_secs` | Integer | `0` (never expires) | `0` = never expires, or positive integer | TTL for long-tier memories in seconds |
+| `ttl.short_extend_secs` | Integer | `3600` (1 hour) | Non-negative integer | TTL extension on access for short-tier memories |
+| `ttl.mid_extend_secs` | Integer | `86400` (1 day) | Non-negative integer | TTL extension on access for mid-tier memories |
 
-> **Note:** Set any TTL to `0` to disable expiry for that tier. Values are clamped to a 10-year maximum.
+> **Note:** Set any TTL to `0` to disable expiry for that tier. Values are clamped to a 10-year maximum (315,360,000 seconds). Negative extension values are clamped to 0.
 
 > **Note:** Restored memories have their `expires_at` cleared (set to NULL) and become permanent.
+
+#### Complete Annotated config.toml
+
+Below is a complete example showing every supported field with explanatory comments. Copy this to `~/.config/ai-memory/config.toml` and uncomment the lines you want to customize.
+
+```toml
+# =============================================================================
+# ai-memory configuration
+# Location: ~/.config/ai-memory/config.toml
+# Docs: https://github.com/alphaonedev/ai-memory-mcp
+#
+# All fields are optional. CLI flags and MCP args override these values.
+# Changes require restarting the ai-memory process to take effect.
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Feature tier (controls which AI capabilities are active)
+# ---------------------------------------------------------------------------
+# Valid values: "keyword", "semantic", "smart", "autonomous"
+#   keyword    — FTS5 keyword search only, no models, minimal RAM
+#   semantic   — adds embedding-based hybrid recall (~256 MB)
+#   smart      — adds query expansion, auto-tagging, contradiction detection (~1 GB, requires Ollama)
+#   autonomous — full feature set with cross-encoder reranking (~4 GB, requires Ollama)
+# Default: "semantic"
+# tier = "semantic"
+
+# ---------------------------------------------------------------------------
+# Database path
+# ---------------------------------------------------------------------------
+# Path to the SQLite database file.
+# Default: "ai-memory.db" (relative to working directory)
+# db = "~/.claude/ai-memory.db"
+
+# ---------------------------------------------------------------------------
+# Ollama URLs (smart and autonomous tiers only)
+# ---------------------------------------------------------------------------
+# Base URL for Ollama LLM generation.
+# Default: "http://localhost:11434"
+# ollama_url = "http://localhost:11434"
+
+# Separate URL for embedding requests. Falls back to ollama_url if unset.
+# Default: same as ollama_url
+# embed_url = "http://localhost:11434"
+
+# ---------------------------------------------------------------------------
+# Model selection
+# ---------------------------------------------------------------------------
+# Embedding model for semantic search (semantic tier and above).
+# Valid values:
+#   "mini_lm_l6_v2"   — sentence-transformers/all-MiniLM-L6-v2, 384-dim, ~90 MB
+#   "nomic_embed_v15"  — nomic-ai/nomic-embed-text-v1.5, 768-dim, ~270 MB
+# Default: tier-dependent (mini_lm_l6_v2 for semantic, nomic_embed_v15 for smart/autonomous)
+# embedding_model = "mini_lm_l6_v2"
+
+# LLM model served via Ollama (smart and autonomous tiers).
+# Valid values:
+#   "gemma4:e2b"  — Google Gemma 4 Effective 2B, ~1 GB Q4 (smart tier default)
+#   "gemma4:e4b"  — Google Gemma 4 Effective 4B, ~2.3 GB Q4 (autonomous tier default)
+# Default: tier-dependent (gemma4:e2b for smart, gemma4:e4b for autonomous)
+# llm_model = "gemma4:e2b"
+
+# ---------------------------------------------------------------------------
+# Cross-encoder reranking
+# ---------------------------------------------------------------------------
+# Enable neural cross-encoder reranking for improved recall precision.
+# NOTE: This is a boolean, NOT a string. Use bare true/false without quotes.
+# Default: false (true for autonomous tier)
+# cross_encoder = true
+
+# ---------------------------------------------------------------------------
+# Namespace and memory limits
+# ---------------------------------------------------------------------------
+# Default namespace applied to new memories when none is specified.
+# Default: "global"
+# default_namespace = "global"
+
+# Maximum memory budget in MB. Used for automatic tier selection when tier
+# is not explicitly set — the highest tier that fits within this budget is chosen.
+# Default: tier-dependent (0/256/1024/4096 for keyword/semantic/smart/autonomous)
+# max_memory_mb = 4096
+
+# ---------------------------------------------------------------------------
+# Garbage collection
+# ---------------------------------------------------------------------------
+# Archive expired memories before GC permanently deletes them.
+# When true, expired memories are moved to the archive table and can be
+# restored later. When false, GC permanently deletes expired memories.
+# Default: true
+# archive_on_gc = true
+
+# ---------------------------------------------------------------------------
+# Per-tier TTL overrides
+# ---------------------------------------------------------------------------
+# Customize time-to-live and access-extension durations per memory tier.
+# Set any TTL to 0 to disable expiry for that tier.
+# Values are clamped to a 10-year maximum (315,360,000 seconds).
+# Negative extension values are clamped to 0.
+# [ttl]
+# short_ttl_secs = 21600        # 6 hours (default)
+# mid_ttl_secs = 604800         # 7 days (default)
+# long_ttl_secs = 0             # 0 = never expires (default)
+# short_extend_secs = 3600      # +1 hour on access (default)
+# mid_extend_secs = 86400       # +1 day on access (default)
+```
 
 **Precedence:** CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting.
 
@@ -305,10 +409,11 @@ systemctl start ai-memory
 
 ### Migration
 
-The schema is auto-migrated on startup. The `schema_version` table tracks the current version (currently 3). Migrations are forward-only and non-destructive.
+The schema is auto-migrated on startup. The `schema_version` table tracks the current version (currently 4). Migrations are forward-only and non-destructive.
 
 - v1 -> v2: Added `confidence` (REAL) and `source` (TEXT) columns
 - v2 -> v3: Added `embedding` (BLOB) column for storing dense vector embeddings
+- v3 -> v4: Added `archived_memories` table for GC archival
 
 Migration error handling: only expected errors (e.g., "duplicate column" when re-running a migration) are silently ignored. Real failures are propagated and will prevent startup, ensuring data integrity.
 
@@ -324,7 +429,7 @@ ai-memory gc
 curl -X POST http://127.0.0.1:9077/api/v1/gc
 ```
 
-By default, GC permanently deletes expired memories. To archive them instead, set `archive_on_gc = true` in `config.toml`. Archived memories are moved to a separate archive table and can be listed, restored, or purged:
+By default, GC archives expired memories before deleting them. To disable archiving and permanently delete instead, set `archive_on_gc = false` in `config.toml`. Archived memories are moved to a separate archive table and can be listed, restored, or purged:
 
 ```bash
 # List archived memories

@@ -860,7 +860,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">The MCP server exposes 17 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
+                    <p style="font-size:.85rem">The MCP server exposes 21 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
                 </div>
             </li>
             <li>
@@ -1239,7 +1239,7 @@ ai-memory list -n my-project                                         <span class
                 <!-- MCP Server -->
                 <rect x="275" y="80" width="190" height="60" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="2"/>
                 <text x="370" y="100" text-anchor="middle" fill="#e6edf3" font-family="system-ui" font-size="13" font-weight="700">MCP Server</text>
-                <text x="370" y="116" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">JSON-RPC / up to 17 tools</text>
+                <text x="370" y="116" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">JSON-RPC / up to 21 tools</text>
                 <text x="370" y="131" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="8">--tier keyword|semantic|smart|autonomous</text>
 
                 <!-- Arrow to SQLite -->
@@ -1718,11 +1718,11 @@ ai-memory list -n my-project                                         <span class
 
                 <rect x="280" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
                 <text x="350" y="102" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="12" font-weight="700">MCP Server</text>
-                <text x="350" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">17 tools / stdio</text>
+                <text x="350" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">21 tools / stdio</text>
 
                 <rect x="530" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
                 <text x="600" y="102" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="12" font-weight="700">HTTP API</text>
-                <text x="600" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">20 endpoints / Axum</text>
+                <text x="600" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">24 endpoints / Axum</text>
 
                 <!-- Labels under interfaces -->
                 <text x="100" y="146" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">Universal</text>
@@ -1769,7 +1769,7 @@ ai-memory list -n my-project                                         <span class
                 <rect x="355" y="252" width="155" height="55" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
                 <text x="432" y="271" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="11" font-weight="700">Smart</text>
                 <text x="432" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E2B</text>
-                <text x="432" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">1 GB | 17 tools</text>
+                <text x="432" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">1 GB | 21 tools</text>
 
                 <!-- Arrow from semantic to smart -->
                 <line x1="340" y1="280" x2="355" y2="280" stroke="#30363d" stroke-width="1" class="animate-flow"/>
@@ -1779,7 +1779,7 @@ ai-memory list -n my-project                                         <span class
                 <rect x="525" y="252" width="190" height="55" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
                 <text x="620" y="271" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="11" font-weight="700">Autonomous</text>
                 <text x="620" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E4B + reranker</text>
-                <text x="620" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">4 GB | 17 tools + cross-encoder</text>
+                <text x="620" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">4 GB | 21 tools + cross-encoder</text>
 
                 <!-- Arrow from smart to autonomous -->
                 <line x1="510" y1="280" x2="525" y2="280" stroke="#30363d" stroke-width="1" class="animate-flow"/>
@@ -1807,7 +1807,7 @@ ai-memory list -n my-project                                         <span class
                 <!-- DB layer -->
                 <rect x="120" y="352" width="360" height="55" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="2"/>
                 <text x="300" y="375" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 + HNSW (db.rs)</text>
-                <text x="300" y="395" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v3 | embeddings | 161 tests</text>
+                <text x="300" y="395" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v4 | embeddings | 161 tests</text>
 
                 <!-- Memory tiers -->
                 <rect x="145" y="420" width="70" height="22" rx="4" fill="rgba(248,81,73,.15)" stroke="#f85149" stroke-width="1"/>

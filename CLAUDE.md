@@ -140,7 +140,7 @@ def456|Redis cache|long|infra|8|0.541|redis,cache
 
 ### MCP Prompts (recall-first behavior):
 The MCP server provides 2 prompts via `prompts/list`:
-- **recall-first** -- System prompt with 9 rules: recall at session start, store corrections, TOON format, tier strategy, dedup awareness, namespace organization, capabilities check
+- **recall-first** -- System prompt with 8 rules: recall at session start, store corrections, TOON format, tier strategy, dedup awareness, namespace organization, capabilities check
 - **memory-workflow** -- Quick reference card for all 21 tool usage patterns
 
 These prompts teach AI clients to use memory proactively. The `recall-first` prompt supports an optional `namespace` argument for scoped recall.

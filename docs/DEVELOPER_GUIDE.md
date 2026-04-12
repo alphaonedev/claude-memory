@@ -235,9 +235,38 @@ CREATE TABLE memory_links (
 
 Relation types: `related_to`, `supersedes`, `contradicts`, `derived_from`.
 
+### `archived_memories` table
+
+```sql
+CREATE TABLE archived_memories (
+    id               TEXT PRIMARY KEY,
+    tier             TEXT NOT NULL,
+    namespace        TEXT NOT NULL DEFAULT 'global',
+    title            TEXT NOT NULL,
+    content          TEXT NOT NULL,
+    tags             TEXT NOT NULL DEFAULT '[]',
+    priority         INTEGER NOT NULL DEFAULT 5,
+    confidence       REAL NOT NULL DEFAULT 1.0,
+    source           TEXT NOT NULL DEFAULT 'api',
+    access_count     INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT NOT NULL,
+    updated_at       TEXT NOT NULL,
+    last_accessed_at TEXT,
+    expires_at       TEXT,
+    archived_at      TEXT NOT NULL,
+    archive_reason   TEXT NOT NULL DEFAULT 'gc'
+);
+
+-- Indexes
+CREATE INDEX idx_archived_memories_namespace ON archived_memories(namespace);
+CREATE INDEX idx_archived_memories_archived_at ON archived_memories(archived_at);
+```
+
+Added in schema migration v3 -> v4. Stores memories archived by GC before deletion. The 16 columns mirror the `memories` table with two additions: `archived_at` (timestamp of archival) and `archive_reason` (why the memory was archived, e.g., `'gc'`).
+
 ### `schema_version` table
 
-Tracks migration state. Current version: 3.
+Tracks migration state. Current version: 4.
 
 ## Recall Scoring Formula
 
