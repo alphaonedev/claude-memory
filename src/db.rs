@@ -1003,7 +1003,7 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
             "INSERT INTO memories
              (id, tier, namespace, title, content, tags, priority, confidence,
               source, access_count, created_at, updated_at, last_accessed_at, expires_at)
-             SELECT id, tier, namespace, title, content, tags, priority, confidence,
+             SELECT id, 'long', namespace, title, content, tags, priority, confidence,
                     source, access_count, created_at, ?1, last_accessed_at, NULL
              FROM archived_memories WHERE id = ?2",
             params![now, id],
