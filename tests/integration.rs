@@ -2157,24 +2157,48 @@ fn test_cli_validate_id_rejects_invalid() {
 
     // get with invalid ID
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "get", "not-a-uuid"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "get",
+            "not-a-uuid",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success(), "get with invalid ID should fail");
 
     // delete with invalid ID
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "delete", "not-a-uuid"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "delete",
+            "not-a-uuid",
+        ])
         .output()
         .unwrap();
-    assert!(!output.status.success(), "delete with invalid ID should fail");
+    assert!(
+        !output.status.success(),
+        "delete with invalid ID should fail"
+    );
 
     // promote with invalid ID
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "promote", "not-a-uuid"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "promote",
+            "not-a-uuid",
+        ])
         .output()
         .unwrap();
-    assert!(!output.status.success(), "promote with invalid ID should fail");
+    assert!(
+        !output.status.success(),
+        "promote with invalid ID should fail"
+    );
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -2190,8 +2214,18 @@ fn test_duplicate_title_no_self_contradiction() {
     // Store a memory
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "long", "-n", "test", "-T", "duplicate test", "--content", "first",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "test",
+            "-T",
+            "duplicate test",
+            "--content",
+            "first",
         ])
         .output()
         .unwrap();
@@ -2202,8 +2236,18 @@ fn test_duplicate_title_no_self_contradiction() {
     // Store again with same title — triggers upsert
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "long", "-n", "test", "-T", "duplicate test", "--content", "second",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "test",
+            "-T",
+            "duplicate test",
+            "--content",
+            "second",
         ])
         .output()
         .unwrap();
@@ -2217,7 +2261,11 @@ fn test_duplicate_title_no_self_contradiction() {
     // potential_contradictions should NOT contain the memory's own ID
     if let Some(contras) = v["potential_contradictions"].as_array() {
         for c in contras {
-            assert_ne!(c.as_str().unwrap(), &id1, "memory should not list itself as a contradiction");
+            assert_ne!(
+                c.as_str().unwrap(),
+                &id1,
+                "memory should not list itself as a contradiction"
+            );
         }
     }
 
@@ -2229,10 +2277,7 @@ fn test_duplicate_title_no_self_contradiction() {
 #[test]
 fn test_version_flag_patch2() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
-    let output = cmd(binary)
-        .args(["--version"])
-        .output()
-        .unwrap();
+    let output = cmd(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
     let version = String::from_utf8_lossy(&output.stdout);
     assert!(
