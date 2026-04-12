@@ -2192,7 +2192,7 @@ fn test_tier_downgrade_rejected() {
     let stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = stored["id"].as_str().unwrap();
 
-    // Attempt to downgrade to short
+    // Attempt to downgrade to short — silently clamped, tier stays long
     let output = cmd(binary)
         .args([
             "--db", db_path.to_str().unwrap(), "--json",
@@ -2200,11 +2200,9 @@ fn test_tier_downgrade_rejected() {
         ])
         .output()
         .unwrap();
-    assert!(!output.status.success(), "should reject long→short downgrade");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("tier downgrade not allowed"), "stderr: {}", stderr);
+    assert!(output.status.success(), "update should succeed (silent clamp, not error)");
 
-    // Verify memory is still long-term
+    // Verify memory is still long-term (downgrade was silently blocked)
     let output = cmd(binary)
         .args(["--db", db_path.to_str().unwrap(), "--json", "get", id])
         .output()
