@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-161_(118_unit_+_43_integration)-brightgreen)]()
+[![Tests](https://img.shields.io/badge/tests-177_(118_unit_+_43_integration)-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-17_tools-blueviolet)]()
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
@@ -416,7 +416,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 ## Features
 
 ### Core
-- **MCP tool server** -- 17 tools over stdio JSON-RPC, compatible with any MCP client
+- **MCP tool server** -- 23 tools over stdio JSON-RPC, compatible with any MCP client
 - **Three-tier memory** -- short (6h TTL), mid (7d TTL), long (permanent)
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
 - **Hybrid recall** -- FTS5 keyword + cosine similarity with fixed 0.6 semantic / 0.4 keyword (60/40) blend weights
@@ -441,7 +441,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 ### Interfaces
 - **20 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
 - **25 CLI commands** -- complete CLI with identical capabilities
-- **17 MCP tools** -- native integration for any MCP-compatible AI
+- **23 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
 
@@ -458,7 +458,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (20 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **161 tests** -- 118 unit tests across all 15 modules (db 29, mcp 12, config 9, main 9, mine 9, validate 8, reranker 7, color 6, errors 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
+- **177 tests** -- 118 unit tests across all 15 modules (db 29, mcp 12, config 9, main 9, mine 9, validate 8, reranker 7, color 6, errors 6, models 6, toon 6, embeddings 5, hnsw 4, llm 2) + 43 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
@@ -544,8 +544,8 @@ ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --ti
 |------|---------------|-------------------|-----------------|
 | **keyword** | FTS5 only | Baseline 13 tools | 0 MB |
 | **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 14 tools | ~256 MB |
-| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 17 tools | ~1 GB |
-| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 17 tools | ~4 GB |
+| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 23 tools | ~1 GB |
+| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 23 tools | ~4 GB |
 
 ### Capability Matrix
 
@@ -577,7 +577,7 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 
-**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 17 tools + reranker) with the faster e2b model:
+**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 23 tools + reranker) with the faster e2b model:
 
 ```toml
 # ~/.config/ai-memory/config.toml
@@ -607,7 +607,7 @@ The `memory_capabilities` tool reports the active tier, loaded models, and avail
 
 ## MCP Tools
 
-These 17 tools are available to any MCP-compatible AI when configured as an MCP server:
+These 23 tools are available to any MCP-compatible AI when configured as an MCP server:
 
 | Tool | Description |
 |------|-------------|

@@ -40,7 +40,7 @@ The entire roadmap depends on decoupling from raw SQLite. This unlocks every mil
 | Task | Sessions | Dependencies | Deliverable |
 |------|:--------:|:------------:|-------------|
 | Design `StorageBackend` trait | 1–2 | None | Trait definition with async CRUD, recall, search, FTS, transaction interfaces |
-| Refactor `db.rs` behind trait | 1–2 | Trait approved | `SqliteBackend` impl, all 33 public functions wrapped, 161 tests green |
+| Refactor `db.rs` behind trait | 1–2 | Trait approved | `SqliteBackend` impl, all 33 public functions wrapped, 177 tests green |
 | Extract scoring to Rust layer | 1 | Trait approved | Portable 6-factor scoring (remove `julianday`, `CASE`, `json_each` from SQL) |
 | FTS abstraction layer | 1 | Trait approved | `TextSearch` trait, `SqliteFts5` impl, pluggable full-text search |
 | Backend registry + CLI flag | 0.5 | All above | `--backend <name>` flag, config-driven backend selection |
@@ -145,7 +145,7 @@ Requires Phase 0 `StorageBackend` trait. Backends can be built in parallel by mu
 |------|:--------:|:------------:|-------------|
 | `ai-memory migrate` CLI | 1 | Any 2 backends | `--from sqlite --to <backend>` zero-downtime migration |
 | Hybrid mode | 1 | Any remote backend | Local SQLite cache + remote backend, offline-first with sync |
-| Integration test matrix | 1 | All backends | CI pipeline testing all backends against 161-test suite |
+| Integration test matrix | 1 | All backends | CI pipeline testing all backends against 177-test suite |
 
 ---
 
@@ -221,7 +221,7 @@ Weeks 9+: [Phase 7: Exploratory]
 ## Quality Gates
 
 Every session must pass before merge to `develop`:
-1. **161 existing tests green** — zero regression
+1. **177 existing tests green** — zero regression
 2. **New tests for new code** — minimum 80% coverage on new modules
 3. **`cargo clippy` clean** — zero warnings
 4. **Human code review** — architecture, correctness, edge cases

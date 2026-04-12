@@ -392,7 +392,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = app_config.effective_db(&cli.db);
     let j = cli.json;
-    match cli.command {
+    // Track whether command writes to DB (for WAL checkpoint)
+    let is_write_command = matches!(
+        cli.command,
+        Command::Store(_) | Command::Update(_) | Command::Delete(_) |
+        Command::Promote(_) | Command::Forget(_) | Command::Link(_) |
+        Command::Consolidate(_) | Command::Resolve(_) | Command::Sync(_) |
+        Command::AutoConsolidate(_) | Command::Gc | Command::Import
+    );
+    let db_path_for_checkpoint = if is_write_command { Some(db_path.clone()) } else { None };
+
+    let result = match cli.command {
         Command::Serve(a) => serve(db_path, a).await,
         Command::Mcp { tier } => {
             let feature_tier = app_config.effective_tier(Some(&tier));
@@ -435,7 +445,18 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Mine(a) => cmd_mine(db_path, a, j),
+    };
+
+    // WAL checkpoint after write commands to prevent unbounded WAL growth
+    if result.is_ok() {
+        if let Some(cp_path) = db_path_for_checkpoint {
+            if let Ok(conn) = db::open(&cp_path) {
+                let _ = db::checkpoint(&conn);
+            }
+        }
     }
+
+    result
 }
 
 async fn serve(db_path: PathBuf, args: ServeArgs) -> Result<()> {
@@ -1575,7 +1596,11 @@ fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: b
                 );
                 let content: String = group
                     .iter()
-                    .map(|m| format!("- {}: {}", m.title, &m.content[..m.content.len().min(200)]))
+                    .map(|m| {
+                        // Safe truncation at char boundary to avoid panic on multi-byte UTF-8
+                        let preview: String = m.content.chars().take(200).collect();
+                        format!("- {}: {}", m.title, preview)
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 db::consolidate(

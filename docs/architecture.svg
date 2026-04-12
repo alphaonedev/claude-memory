@@ -91,7 +91,7 @@
   <g class="fade2">
     <rect x="90" y="140" width="160" height="60" class="card-green"/>
     <text x="170" y="164" text-anchor="middle" class="title">MCP Server</text>
-    <text x="170" y="181" text-anchor="middle" class="subtitle">stdio · JSON-RPC · 17 tools</text>
+    <text x="170" y="181" text-anchor="middle" class="subtitle">stdio · JSON-RPC · 23 tools</text>
 
     <rect x="345" y="140" width="160" height="60" class="card-green"/>
     <text x="425" y="164" text-anchor="middle" class="title">HTTP API</text>

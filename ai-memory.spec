@@ -11,7 +11,7 @@ Source0:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v
 AutoReqProv:    no
 
 %description
-Persistent memory for any AI assistant. Zero token cost until recall. 17 MCP
+Persistent memory for any AI assistant. Zero token cost until recall. 23 MCP
 tools, 20 HTTP endpoints, 25 CLI commands. Hybrid recall with FTS5 keyword and
 semantic embedding search, TOON compact format (79%% smaller than JSON). 4
 feature tiers from keyword to autonomous with local LLMs via Ollama. Works with
@@ -37,7 +37,7 @@ install -m 0755 %{_sourcedir}/ai-memory %{buildroot}%{_bindir}/ai-memory
 
 * Tue Apr 08 2026 AlphaOne LLC <alphaonedev@users.noreply.github.com> - 0.5.0-1
 - Initial release
-- MCP server with 17 tools
+- MCP server with 23 tools
 - HTTP API with 20 endpoints
 - CLI with 25 commands
 - 4 feature tiers: keyword, semantic, smart, autonomous

@@ -2,7 +2,7 @@
 
 > **Note:** `ai-memory` is AI-agnostic and works with any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others). This file contains **Claude Code-specific** integration instructions.
 
-This project is `ai-memory` -- a persistent memory daemon that replaces Claude Code's built-in auto-memory. **Zero token cost until recall** -- unlike auto-memory which loads 200+ lines into every conversation, ai-memory uses zero context tokens until explicitly called. **TOON compact** is the default response format (79% smaller than JSON). 161 tests, 15/15 modules, 95%+ coverage. **LongMemEval benchmark: 97.8% R@5, 99.0% R@10, 99.8% R@20** (489/500, ICLR 2025 dataset).
+This project is `ai-memory` -- a persistent memory daemon that replaces Claude Code's built-in auto-memory. **Zero token cost until recall** -- unlike auto-memory which loads 200+ lines into every conversation, ai-memory uses zero context tokens until explicitly called. **TOON compact** is the default response format (79% smaller than JSON). 177 tests, 15/15 modules, 95%+ coverage. **LongMemEval benchmark: 97.8% R@5, 99.0% R@10, 99.8% R@20** (489/500, ICLR 2025 dataset).
 
 ## Step 1: Disable Auto-Memory
 
@@ -55,7 +55,7 @@ Claude Code supports three MCP configuration scopes:
 
 > **Windows:** Use `%USERPROFILE%\.claude.json` and forward slashes in db paths: `"C:/Users/YourName/.claude/ai-memory.db"`.
 
-This gives Claude Code 17 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`.
+This gives Claude Code 23 native tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_gc`, `memory_session_start`, `memory_archive_list`, `memory_archive_purge`, `memory_archive_restore`, `memory_archive_stats`.
 
 ## Alternative: CLI Integration
 

@@ -1805,7 +1805,7 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 17, "expected 17 MCP tools");
+    assert_eq!(tools.len(), 23, "expected 23 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));

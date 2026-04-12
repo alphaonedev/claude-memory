@@ -38,8 +38,8 @@ pub fn validate_title(title: &str) -> Result<()> {
     if trimmed.is_empty() {
         bail!("title cannot be empty");
     }
-    if trimmed.len() > MAX_TITLE_LEN {
-        bail!("title exceeds max length of {} bytes", MAX_TITLE_LEN);
+    if trimmed.chars().count() > MAX_TITLE_LEN {
+        bail!("title exceeds max length of {} characters", MAX_TITLE_LEN);
     }
     if !is_clean_string(trimmed) {
         bail!("title contains invalid characters");
@@ -65,9 +65,9 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
     if trimmed.is_empty() {
         bail!("namespace cannot be empty");
     }
-    if trimmed.len() > MAX_NAMESPACE_LEN {
+    if trimmed.chars().count() > MAX_NAMESPACE_LEN {
         bail!(
-            "namespace exceeds max length of {} bytes",
+            "namespace exceeds max length of {} characters",
             MAX_NAMESPACE_LEN
         );
     }
@@ -245,6 +245,8 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
 }
 
 /// Validate update fields (only validates present fields).
+/// Note: expires_at allows past dates in updates for programmatic TTL management
+/// and GC testing — only format is validated, not chronological ordering.
 pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     if let Some(ref t) = update.title {
         validate_title(t)?;
@@ -265,7 +267,16 @@ pub fn validate_update(update: &UpdateMemory) -> Result<()> {
         validate_confidence(c)?;
     }
     if let Some(ref ts) = update.expires_at {
-        validate_expires_at(Some(ts))?;
+        // Allow past dates in update for programmatic TTL management
+        validate_expires_at_format(ts)?;
+    }
+    Ok(())
+}
+
+/// Validate expires_at format only (no past-date check). Used by update path.
+pub fn validate_expires_at_format(ts: &str) -> Result<()> {
+    if !is_valid_rfc3339(ts) {
+        bail!("expires_at is not valid RFC3339: '{}'", ts);
     }
     Ok(())
 }
@@ -378,6 +389,36 @@ mod tests {
         assert!(validate_ttl_secs(Some(0)).is_err());
         assert!(validate_ttl_secs(Some(-1)).is_err());
         assert!(validate_ttl_secs(Some(366 * 24 * 3600)).is_err());
+    }
+
+    #[test]
+    fn test_past_expires_at_in_update_allowed() {
+        let update = UpdateMemory {
+            title: None,
+            content: None,
+            tier: None,
+            namespace: None,
+            tags: None,
+            priority: None,
+            confidence: None,
+            expires_at: Some("2020-01-01T00:00:00Z".to_string()),
+        };
+        assert!(validate_update(&update).is_ok(), "past expires_at should be allowed in update");
+    }
+
+    #[test]
+    fn test_past_expires_at_in_create_rejected() {
+        assert!(validate_expires_at(Some("2020-01-01T00:00:00Z")).is_err());
+    }
+
+    #[test]
+    fn test_cjk_title_char_count() {
+        // 512 CJK chars (each 3 bytes = 1536 bytes). Should pass char-based validation.
+        let title: String = std::iter::repeat('中').take(512).collect();
+        assert!(validate_title(&title).is_ok());
+        // 513 chars should fail
+        let title_long: String = std::iter::repeat('中').take(513).collect();
+        assert!(validate_title(&title_long).is_err());
     }
 
     #[test]

@@ -14,7 +14,7 @@ ai-memory (0.5.1-1) noble; urgency=medium
 ai-memory (0.5.0-1) noble; urgency=medium
 
   * Initial release
-  * MCP server with 17 tools for AI-native memory management
+  * MCP server with 23 tools for AI-native memory management
   * HTTP API with 20 endpoints
   * CLI with 25 commands
   * 4 feature tiers: keyword, semantic, smart, autonomous

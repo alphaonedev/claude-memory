@@ -5,6 +5,64 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] — 2026-04-12
+
+### Added
+
+- `memory_gc` MCP tool: on-demand garbage collection with `dry_run` support and archive-before-delete (#45)
+- `memory_session_start` MCP tool: auto-recall recent memories on session start, LLM summary at smart/autonomous tiers (#46)
+- `memory_archive_list` MCP tool: browse archived (GC'd) memories
+- `memory_archive_purge` MCP tool: permanently delete archived memories with optional age filter
+- `memory_archive_restore` MCP tool: restore archived memory back to active as long-term
+- `memory_archive_stats` MCP tool: archive statistics (count, namespaces)
+- Archive system: GC now archives expired memories before deletion, allowing recovery
+- `gc_with_count()` atomic transactional GC (archive + delete in single transaction)
+- Past `expires_at` in `memory_update`: allows programmatic TTL management and E2E GC testing
+- 10 new unit tests for archive pipeline, GC, link validation, TOON escaping, UTF-8 validation
+
+### Changed
+
+- MCP tool count: 17 → 23 (6 new tools)
+- Title/namespace validation: byte-length → character-count (CJK-safe) (#21, #43)
+- FTS5 sanitizer: hyphens now allowed inside words for hyphenated term search (#23)
+- HNSW mutex: poison recovery instead of panic on corrupted state (#6)
+- `memory_promote`: atomic single-UPDATE instead of two-step (#4)
+- MCP priority: validated before i64→i32 cast, prevents silent truncation (#32)
+- CLI write commands: WAL checkpoint after all writes to prevent unbounded WAL growth (#28, #38)
+- Auto-consolidate: safe UTF-8 truncation using `.chars().take()` instead of byte slicing (#41)
+- `export_all`: now excludes expired memories (#19)
+- `export_links`: now filters dangling refs to expired memories (#31)
+- `create_link`: verifies both source and target IDs exist before creating (#5)
+- FTS search: strips zero-width Unicode characters before querying (#13)
+- TOON escaping: added `\r` (carriage return) and `\\` (backslash) handling (#44)
+- Schema version: 3 → 4 (adds `memory_archive` table)
+
+### Fixed
+
+- RT-01 (#4): Promote non-atomic — crash between steps could cause data loss
+- RT-02 (#5): create_link gave opaque error for nonexistent IDs
+- RT-03 (#6): HNSW mutex poisoning caused panic instead of recovery
+- RT-10 (#13): Zero-width Unicode characters bypassed FTS search
+- RT-16 (#19): export_all included expired memories, import resurrected dead data
+- RT-14 (#31): export_links exported dangling refs to expired memories
+- RT-18 (#21): Title validation used byte length, rejecting CJK titles early
+- RT-20 (#23): FTS5 sanitizer stripped hyphens, breaking hyphenated term search
+- RT-25 (#28): CLI commands didn't checkpoint WAL, file grew between GC cycles
+- RT-30 (#32): MCP priority `as i32` silent truncation on large values
+- RT-43 (#38): Missing WAL checkpoint on multiple CLI write paths
+- RT-51 (#41): Auto-consolidate byte truncation panicked on multi-byte UTF-8
+- RT-69 (#43): Namespace validation used bytes while title used chars
+- RT-73/74 (#44): TOON escaping missing `\r` and backslash handling
+
+### Test Coverage
+
+| Metric | Count |
+|--------|-------|
+| Unit tests | 134 |
+| Integration tests | 43 |
+| **Total** | **177** |
+| Modules with tests | 15/15 |
+
 ## [0.5.2] — 2026-04-08
 
 ### Added
@@ -136,6 +194,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Core data model for memory entries
 - Basic search functionality
 
+[0.5.4]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.5.2...v0.5.4
 [0.5.2]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/alphaonedev/ai-memory-mcp/compare/v0.4.0...v0.5.0

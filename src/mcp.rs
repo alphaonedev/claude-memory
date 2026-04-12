@@ -283,6 +283,65 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["id_a", "id_b"]
                 }
+            },
+            {
+                "name": "memory_gc",
+                "description": "Trigger garbage collection on expired memories. Archives them before deletion. Supports dry_run mode.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dry_run": {"type": "boolean", "default": false, "description": "If true, report what would be collected without deleting"}
+                    }
+                }
+            },
+            {
+                "name": "memory_session_start",
+                "description": "Auto-recall recent memories on session start. Returns the most recently accessed/updated memories. If LLM is available (smart/autonomous tier), returns an AI-generated summary.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Optional namespace to scope recall"},
+                        "limit": {"type": "integer", "default": 10, "maximum": 50},
+                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact"}
+                    }
+                }
+            },
+            {
+                "name": "memory_archive_list",
+                "description": "List archived (GC'd) memories. These were expired but preserved in the archive.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Filter by namespace"},
+                        "limit": {"type": "integer", "default": 20, "maximum": 200}
+                    }
+                }
+            },
+            {
+                "name": "memory_archive_purge",
+                "description": "Permanently delete archived memories. Optionally only purge archives older than N days.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "older_than_days": {"type": "integer", "description": "Only purge archives older than this many days. Omit to purge all."}
+                    }
+                }
+            },
+            {
+                "name": "memory_archive_restore",
+                "description": "Restore an archived memory back to active memories as long-term tier.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string", "description": "Archived memory ID to restore"}
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "memory_archive_stats",
+                "description": "Get statistics about the memory archive (count, namespaces).",
+                "inputSchema": { "type": "object", "properties": {} }
             }
         ]
     })
@@ -381,7 +440,11 @@ fn handle_store(
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
     let namespace = params["namespace"].as_str().unwrap_or("global").to_string();
     let source = params["source"].as_str().unwrap_or("claude").to_string();
-    let priority = params["priority"].as_i64().unwrap_or(5) as i32;
+    let priority_i64 = params["priority"].as_i64().unwrap_or(5);
+    if !(1..=10).contains(&priority_i64) {
+        return Err(format!("priority must be between 1 and 10 (got {})", priority_i64));
+    }
+    let priority = priority_i64 as i32;
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
         .as_array()
@@ -708,24 +771,17 @@ fn handle_delete(
 
 fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
-    db::update(
-        conn,
-        id,
-        None,
-        None,
-        Some(&Tier::Long),
-        None,
-        None,
-        None,
-        None,
-        None,
-    )
-    .map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE memories SET expires_at = NULL WHERE id = ?1",
-        rusqlite::params![id],
-    )
-    .map_err(|e| e.to_string())?;
+    // Atomic promote: set tier=long and clear expires_at in a single UPDATE
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = conn
+        .execute(
+            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, id],
+        )
+        .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("memory not found".into());
+    }
     Ok(json!({"promoted": true, "id": id, "tier": "long"}))
 }
 
@@ -753,7 +809,15 @@ fn handle_update(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
-    let priority = params["priority"].as_i64().map(|p| p as i32);
+    let priority = match params["priority"].as_i64() {
+        Some(p) => {
+            if !(1..=10).contains(&p) {
+                return Err(format!("priority must be between 1 and 10 (got {})", p));
+            }
+            Some(p as i32)
+        }
+        None => None,
+    };
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
 
@@ -776,7 +840,8 @@ fn handle_update(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
         validate::validate_confidence(c).map_err(|e| e.to_string())?;
     }
     if let Some(ts) = expires_at {
-        validate::validate_expires_at(Some(ts)).map_err(|e| e.to_string())?;
+        // Allow past dates in update for programmatic TTL management and GC testing
+        validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
     }
 
     let updated = db::update(
@@ -901,6 +966,115 @@ fn handle_consolidate(
     Ok(result)
 }
 
+fn handle_gc(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let dry_run = params["dry_run"].as_bool().unwrap_or(false);
+    let (count, expired) = db::gc_with_count(conn, dry_run).map_err(|e| e.to_string())?;
+    let ids: Vec<&str> = expired.iter().map(|m| m.id.as_str()).collect();
+    Ok(json!({
+        "collected": count,
+        "dry_run": dry_run,
+        "ids": ids,
+    }))
+}
+
+fn handle_session_start(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    llm: Option<&OllamaClient>,
+) -> Result<Value, String> {
+    let namespace = params["namespace"].as_str();
+    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
+
+    // Get recently accessed/updated memories
+    let results = db::list(
+        conn,
+        namespace,
+        None,
+        limit.min(50),
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let memories: Vec<Value> = results
+        .iter()
+        .map(|mem| {
+            let mut val = serde_json::to_value(mem).unwrap_or_default();
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("score".to_string(), json!(0.0));
+            }
+            val
+        })
+        .collect();
+
+    let mut response = json!({
+        "memories": memories,
+        "count": memories.len(),
+        "mode": "session_start",
+    });
+
+    // Generate LLM summary if available
+    if let Some(llm_client) = llm {
+        if !results.is_empty() {
+            let pairs: Vec<(String, String)> = results
+                .iter()
+                .map(|m| (m.title.clone(), m.content.clone()))
+                .collect();
+            match llm_client.summarize_memories(&pairs) {
+                Ok(summary) => {
+                    response["summary"] = json!(summary);
+                }
+                Err(e) => {
+                    tracing::warn!("session_start LLM summary failed: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(response)
+}
+
+fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let namespace = params["namespace"].as_str();
+    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+    let results = db::archive_list(conn, namespace, limit.min(200)).map_err(|e| e.to_string())?;
+    let memories: Vec<Value> = results
+        .into_iter()
+        .map(|(mem, archived_at)| {
+            let mut val = serde_json::to_value(&mem).unwrap_or_default();
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("archived_at".to_string(), json!(archived_at));
+            }
+            val
+        })
+        .collect();
+    Ok(json!({"memories": memories, "count": memories.len()}))
+}
+
+fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let older_than_days = params["older_than_days"].as_u64().map(|d| d as u32);
+    let purged = db::archive_purge(conn, older_than_days).map_err(|e| e.to_string())?;
+    Ok(json!({"purged": purged}))
+}
+
+fn handle_archive_restore(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let id = params["id"].as_str().ok_or("id is required")?;
+    let restored = db::archive_restore(conn, id).map_err(|e| e.to_string())?;
+    if restored {
+        Ok(json!({"restored": true, "id": id, "tier": "long"}))
+    } else {
+        Err("archived memory not found".into())
+    }
+}
+
+fn handle_archive_stats(conn: &rusqlite::Connection) -> Result<Value, String> {
+    let (total, by_namespace) = db::archive_stats(conn).map_err(|e| e.to_string())?;
+    Ok(json!({"total": total, "by_namespace": by_namespace}))
+}
+
 // --- MCP protocol handler ---
 
 fn handle_request(
@@ -979,6 +1153,12 @@ fn handle_request(
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
                 "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
+                "memory_gc" => handle_gc(conn, arguments),
+                "memory_session_start" => handle_session_start(conn, arguments, llm),
+                "memory_archive_list" => handle_archive_list(conn, arguments),
+                "memory_archive_purge" => handle_archive_purge(conn, arguments),
+                "memory_archive_restore" => handle_archive_restore(conn, arguments),
+                "memory_archive_stats" => handle_archive_stats(conn),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -990,10 +1170,10 @@ fn handle_request(
                         .and_then(|v| v.as_str())
                         .unwrap_or("toon_compact");
                     let text = match format_str {
-                        "toon" if matches!(tool_name, "memory_recall" | "memory_list") => {
+                        "toon" if matches!(tool_name, "memory_recall" | "memory_list" | "memory_session_start" | "memory_archive_list") => {
                             crate::toon::memories_to_toon(&val, false)
                         }
-                        "toon_compact" if matches!(tool_name, "memory_recall" | "memory_list") => {
+                        "toon_compact" if matches!(tool_name, "memory_recall" | "memory_list" | "memory_session_start" | "memory_archive_list") => {
                             crate::toon::memories_to_toon(&val, true)
                         }
                         "toon" if tool_name == "memory_search" => {
@@ -1278,10 +1458,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_17_tools() {
+    fn tool_definitions_returns_23_tools() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 23);
     }
 
     #[test]

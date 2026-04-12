@@ -87,7 +87,10 @@ impl VectorIndex {
 
     /// Add a new entry to the index (goes to overflow until next rebuild).
     pub fn insert(&self, id: String, embedding: Vec<f32>) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = match self.inner.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.all_entries.push((id.clone(), embedding.clone()));
         state.overflow.push((id, embedding));
 
@@ -100,7 +103,10 @@ impl VectorIndex {
 
     /// Remove an entry by ID (marks for exclusion; cleaned up on rebuild).
     pub fn remove(&self, id: &str) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = match self.inner.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.all_entries.retain(|(eid, _)| eid != id);
         state.overflow.retain(|(eid, _)| eid != id);
         // Note: the HNSW index itself is immutable — removed IDs are filtered
@@ -112,7 +118,10 @@ impl VectorIndex {
     /// Combines HNSW approximate search with linear scan of overflow entries.
     /// Returns results sorted by ascending distance (closest first).
     pub fn search(&self, query: &[f32], k: usize) -> Vec<VectorHit> {
-        let state = self.inner.lock().unwrap();
+        let state = match self.inner.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         let query_point = EmbeddingPoint(query.to_vec());
 
         let mut results: Vec<VectorHit> = Vec::with_capacity(k * 2);
@@ -169,13 +178,19 @@ impl VectorIndex {
 
     /// Return the total number of indexed entries (HNSW + overflow).
     pub fn len(&self) -> usize {
-        let state = self.inner.lock().unwrap();
+        let state = match self.inner.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.all_entries.len()
     }
 
     /// Force a full rebuild of the HNSW index from all entries.
     pub fn rebuild(&self) {
-        let mut state = self.inner.lock().unwrap();
+        let mut state = match self.inner.lock() {
+            Ok(s) => s,
+            Err(poisoned) => poisoned.into_inner(),
+        };
         state.hnsw = Self::build_hnsw(&state.all_entries);
         state.overflow.clear();
     }
