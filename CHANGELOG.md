@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4-patch.2] — 2026-04-12
+
+### Fixed
+
+- **Consolidate embedding gap**: `handle_consolidate` now receives `embedder` and `vector_index`, generates embeddings for consolidated memories, and removes old HNSW entries. Fixes semantic recall returning no results for consolidated memories.
+- **Self-contradiction exclusion**: MCP `handle_store` and CLI `cmd_store` now filter `actual_id` (not just `mem.id`) from `potential_contradictions`, preventing a memory from listing itself as its own contradiction on upsert.
+- **validate_id() defense-in-depth**: Added `validate_id()` to 8 MCP handlers (get, delete, promote, auto_tag, detect_contradiction, get_links, consolidate, link IDs) and 3 CLI commands (get, delete, promote). Invalid IDs now return clear validation errors instead of "not found".
+
+### Added
+
+- 3 integration tests: `test_cli_validate_id_rejects_invalid`, `test_duplicate_title_no_self_contradiction`, `test_version_flag_patch2`
+- Global `~/.claude/CLAUDE.md` recall-first directive for session-start memory recall via MCP (no shell script required)
+
+### Documentation
+
+- Synced test counts to 185 (139 unit + 46 integration) across README, CLAUDE.md, ADMIN_GUIDE, DEVELOPER_GUIDE, index.html
+- Fixed MCP tool count references from 21 to 23 in README, DEVELOPER_GUIDE, USER_GUIDE
+
 ## [0.5.4] — 2026-04-12
 
 ### Added

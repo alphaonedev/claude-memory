@@ -529,13 +529,14 @@ fn handle_store(
         }));
     }
 
+    let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
+
+    // Exclude self-ID from contradictions (both proposed and actual, since upsert may reuse existing ID)
     let contradiction_ids: Vec<String> = existing
         .iter()
-        .filter(|c| c.id != mem.id)
+        .filter(|c| c.id != mem.id && c.id != actual_id)
         .map(|c| c.id.clone())
         .collect();
-
-    let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
 
     // Generate and store embedding if embedder is available
     if let Some(emb) = embedder {
@@ -684,6 +685,7 @@ fn handle_auto_tag(
 ) -> Result<Value, String> {
     let llm = llm.ok_or("auto-tagging requires smart or autonomous tier (Ollama LLM)")?;
     let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
     let mem = db::get(conn, id)
         .map_err(|e| e.to_string())?
         .ok_or("memory not found")?;
@@ -722,6 +724,8 @@ fn handle_detect_contradiction(
         llm.ok_or("contradiction detection requires smart or autonomous tier (Ollama LLM)")?;
     let id_a = params["id_a"].as_str().ok_or("id_a is required")?;
     let id_b = params["id_b"].as_str().ok_or("id_b is required")?;
+    validate::validate_id(id_a).map_err(|e| e.to_string())?;
+    validate::validate_id(id_b).map_err(|e| e.to_string())?;
     let mem_a = db::get(conn, id_a)
         .map_err(|e| e.to_string())?
         .ok_or("memory A not found")?;
@@ -785,6 +789,7 @@ fn handle_delete(
     vector_index: Option<&VectorIndex>,
 ) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
     let deleted = db::delete(conn, id).map_err(|e| e.to_string())?;
     if deleted {
         if let Some(idx) = vector_index {
@@ -798,6 +803,7 @@ fn handle_delete(
 
 fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
     // Atomic promote: set tier=long and clear expires_at in a single UPDATE
     let now = chrono::Utc::now().to_rfc3339();
     let changed = conn
@@ -909,6 +915,7 @@ fn handle_update(
 
 fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
     match db::get(conn, id).map_err(|e| e.to_string())? {
         Some(mem) => {
             let links = db::get_links(conn, id).unwrap_or_default();
@@ -941,6 +948,7 @@ fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
 
 fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
     let links = db::get_links(conn, id).map_err(|e| e.to_string())?;
     Ok(json!({"links": links, "count": links.len()}))
 }
@@ -949,6 +957,8 @@ fn handle_consolidate(
     conn: &rusqlite::Connection,
     params: &Value,
     llm: Option<&OllamaClient>,
+    embedder: Option<&Embedder>,
+    vector_index: Option<&VectorIndex>,
 ) -> Result<Value, String> {
     let ids_arr = params["ids"]
         .as_array()
@@ -956,7 +966,10 @@ fn handle_consolidate(
     let mut ids = Vec::with_capacity(ids_arr.len());
     for (i, v) in ids_arr.iter().enumerate() {
         match v.as_str() {
-            Some(s) => ids.push(s.to_string()),
+            Some(s) => {
+                validate::validate_id(s).map_err(|e| e.to_string())?;
+                ids.push(s.to_string());
+            }
             None => return Err(format!("ids[{}] must be a string", i)),
         }
     }
@@ -988,6 +1001,14 @@ fn handle_consolidate(
     validate::validate_consolidate(&ids, title, &summary, namespace).map_err(|e| e.to_string())?;
 
     let auto_generated = params["summary"].as_str().is_none();
+
+    // Remove old entries from HNSW index before consolidation deletes them
+    if let Some(idx) = vector_index {
+        for id in &ids {
+            idx.remove(id);
+        }
+    }
+
     let new_id = db::consolidate(
         conn,
         &ids,
@@ -998,6 +1019,24 @@ fn handle_consolidate(
         "consolidation",
     )
     .map_err(|e| e.to_string())?;
+
+    // Generate embedding for the consolidated memory
+    if let Some(emb) = embedder {
+        let text = format!("{} {}", title, summary);
+        match emb.embed(&text) {
+            Ok(embedding) => {
+                if let Err(e) = db::set_embedding(conn, &new_id, &embedding) {
+                    tracing::warn!("failed to store embedding for consolidated {}: {}", &new_id, e);
+                }
+                if let Some(idx) = vector_index {
+                    idx.insert(new_id.clone(), embedding);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("failed to generate embedding for consolidated {}: {}", &new_id, e);
+            }
+        }
+    }
 
     let mut result = json!({"id": new_id, "consolidated": ids.len()});
     if auto_generated {
@@ -1201,7 +1240,7 @@ fn handle_request(
                 "memory_get" => handle_get(conn, arguments),
                 "memory_link" => handle_link(conn, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
-                "memory_consolidate" => handle_consolidate(conn, arguments, llm),
+                "memory_consolidate" => handle_consolidate(conn, arguments, llm, embedder, vector_index),
                 "memory_capabilities" => handle_capabilities(tier_config, reranker),
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),

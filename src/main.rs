@@ -657,12 +657,17 @@ fn cmd_store(
     let contradictions =
         db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
     let actual_id = db::insert(&conn, &mem)?;
+    // Exclude self-ID from contradictions (upsert may reuse existing ID)
+    let filtered: Vec<&String> = contradictions
+        .iter()
+        .filter(|c| c.id != mem.id && c.id != actual_id)
+        .map(|c| &c.id)
+        .collect();
     if json_out {
         let mut j = serde_json::to_value(&mem)?;
         j["id"] = serde_json::json!(actual_id);
-        if !contradictions.is_empty() {
-            j["potential_contradictions"] =
-                serde_json::json!(contradictions.iter().map(|c| &c.id).collect::<Vec<_>>());
+        if !filtered.is_empty() {
+            j["potential_contradictions"] = serde_json::json!(filtered);
         }
         println!("{}", serde_json::to_string(&j)?);
     } else {
@@ -670,10 +675,10 @@ fn cmd_store(
             "stored: {} [{}] (ns={})",
             actual_id, mem.tier, mem.namespace
         );
-        if !contradictions.is_empty() {
+        if !filtered.is_empty() {
             eprintln!(
                 "warning: {} similar memories found in same namespace (potential contradictions)",
-                contradictions.len()
+                filtered.len()
             );
         }
     }
@@ -983,6 +988,7 @@ fn cmd_search(
 
 fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
+    validate::validate_id(&args.id)?;
     match db::get(&conn, &args.id)? {
         Some(mem) => {
             let links = db::get_links(&conn, &args.id).unwrap_or_default();
@@ -1060,6 +1066,7 @@ fn cmd_list(
 
 fn cmd_delete(db_path: PathBuf, args: DeleteArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
+    validate::validate_id(&args.id)?;
     if db::delete(&conn, &args.id)? {
         if json_out {
             println!("{}", serde_json::json!({"deleted": true, "id": args.id}));
@@ -1075,6 +1082,7 @@ fn cmd_delete(db_path: PathBuf, args: DeleteArgs, json_out: bool) -> Result<()> 
 
 fn cmd_promote(db_path: PathBuf, args: PromoteArgs, json_out: bool) -> Result<()> {
     let conn = db::open(&db_path)?;
+    validate::validate_id(&args.id)?;
     let (found, _) = db::update(
         &conn,
         &args.id,

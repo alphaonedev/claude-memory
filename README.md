@@ -488,7 +488,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 ### Interfaces
 - **24 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
 - **26 CLI commands** -- complete CLI with identical capabilities
-- **21 MCP tools** -- native integration for any MCP-compatible AI
+- **23 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
 
@@ -505,7 +505,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **188 tests** -- 139 unit tests across all 15 modules + 49 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
+- **185 tests** -- 139 unit tests across all 15 modules + 46 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)

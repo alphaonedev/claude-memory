@@ -2146,3 +2146,98 @@ fn test_mcp_recall_default_toon() {
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+// --- Patch 2: validate_id rejects invalid IDs ---
+
+#[test]
+fn test_cli_validate_id_rejects_invalid() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-valid-{}.db", uuid::Uuid::new_v4()));
+
+    // get with invalid ID
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "--json", "get", "not-a-uuid"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "get with invalid ID should fail");
+
+    // delete with invalid ID
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "--json", "delete", "not-a-uuid"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "delete with invalid ID should fail");
+
+    // promote with invalid ID
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "--json", "promote", "not-a-uuid"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success(), "promote with invalid ID should fail");
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// --- Patch 2: duplicate title upsert excludes self from contradictions ---
+
+#[test]
+fn test_duplicate_title_no_self_contradiction() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-selfcon-{}.db", uuid::Uuid::new_v4()));
+
+    // Store a memory
+    let output = cmd(binary)
+        .args([
+            "--db", db_path.to_str().unwrap(), "--json",
+            "store", "-t", "long", "-n", "test", "-T", "duplicate test", "--content", "first",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let id1 = v["id"].as_str().unwrap().to_string();
+
+    // Store again with same title — triggers upsert
+    let output = cmd(binary)
+        .args([
+            "--db", db_path.to_str().unwrap(), "--json",
+            "store", "-t", "long", "-n", "test", "-T", "duplicate test", "--content", "second",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+
+    // The returned ID should be the same (upsert reused the existing row)
+    let id2 = v["id"].as_str().unwrap().to_string();
+    assert_eq!(id1, id2, "upsert should reuse existing ID");
+
+    // potential_contradictions should NOT contain the memory's own ID
+    if let Some(contras) = v["potential_contradictions"].as_array() {
+        for c in contras {
+            assert_ne!(c.as_str().unwrap(), &id1, "memory should not list itself as a contradiction");
+        }
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// --- Patch 2: version reports patch.2 ---
+
+#[test]
+fn test_version_flag_patch2() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let output = cmd(binary)
+        .args(["--version"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let version = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        version.contains("0.5.4-patch.2"),
+        "version should contain 0.5.4-patch.2, got: {}",
+        version
+    );
+}

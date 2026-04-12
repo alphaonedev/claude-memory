@@ -72,7 +72,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **23 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
-- `tool_definitions()` -- returns the 21 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
+- `tool_definitions()` -- returns the 23 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
   - `memory_recall` schema includes `until` parameter and `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`)
   - `memory_search` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_list` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
@@ -87,7 +87,7 @@ Protocol version: `2024-11-05`. All tool responses are wrapped in MCP content bl
 
 **MCP Prompts:** The server exposes 2 prompts via `prompts/list`:
 - **recall-first** -- System prompt with 8 behavioral rules for proactive memory use. Supports an optional `namespace` argument for scoped recall.
-- **memory-workflow** -- Quick reference card for all 21 tool usage patterns.
+- **memory-workflow** -- Quick reference card for all 23 tool usage patterns.
 
 **MCP Error Codes:** The server uses standard JSON-RPC 2.0 error codes:
 - `-32700` -- Parse error (malformed JSON)
@@ -948,7 +948,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **188 tests** total: 139 unit tests across all 15 modules + 49 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
+The project has **185 tests** total: 139 unit tests across all 15 modules + 46 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
 
 ```bash
 # Run all tests
