@@ -772,14 +772,14 @@ Default TTLs (6 hours for short, 7 days for mid) can be overridden in `~/.config
 
 ```toml
 [ttl]
-short_hours = 6            # short-tier TTL in hours (default: 6)
-mid_days = 7               # mid-tier TTL in days (default: 7)
-extend_short_minutes = 60  # TTL extension on recall for short-tier memories in minutes (default: 60)
-extend_mid_hours = 24      # TTL extension on recall for mid-tier memories in hours (default: 24)
-gc_interval_minutes = 30   # how often garbage collection runs in minutes (default: 30)
+short_ttl_secs = 21600      # short-tier TTL in seconds (default: 21600 = 6 hours)
+mid_ttl_secs = 604800        # mid-tier TTL in seconds (default: 604800 = 7 days)
+long_ttl_secs = 0            # long-tier TTL in seconds (default: 0 = never expires)
+short_extend_secs = 3600     # TTL extension on recall for short-tier memories in seconds (default: 3600 = +1h)
+mid_extend_secs = 86400      # TTL extension on recall for mid-tier memories in seconds (default: 86400 = +1d)
 ```
 
-All five fields are optional -- omit any to keep the default.
+All five fields are optional -- omit any to keep the default. Set any value to 0 to disable expiry for that tier. Values are clamped to a 10-year maximum; negative extension values are clamped to 0.
 
 > **Note:** Configuration is loaded once at process startup. Changes to `config.toml` require restarting the ai-memory process (MCP server, HTTP daemon, or CLI) to take effect.
 
@@ -794,7 +794,7 @@ When garbage collection expires a memory, it can be **archived** instead of perm
 Enable archiving in `~/.config/ai-memory/config.toml`:
 
 ```toml
-archive_on_gc = true   # archive expired memories instead of deleting them (default: false)
+archive_on_gc = true   # archive expired memories instead of deleting them (default: true)
 ```
 
 ### CLI Commands
@@ -805,9 +805,11 @@ The `archive` subcommand manages the archive:
 ai-memory archive list                          # list archived memories
 ai-memory archive list --namespace my-project   # filter by namespace
 ai-memory archive restore <id>                  # restore an archived memory to active store
-ai-memory archive purge --before 2026-01-01     # permanently delete old archives
+ai-memory archive purge --older-than-days 90     # permanently delete archives older than 90 days
 ai-memory archive stats                         # show archive statistics
 ```
+
+> **Note:** Restored memories get their `expires_at` cleared (become permanent until the next TTL assignment).
 
 ### MCP Tools
 

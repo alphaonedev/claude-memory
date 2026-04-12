@@ -155,6 +155,33 @@ Memories are ranked by: FTS relevance + priority weight + access frequency + con
 - Contradiction detection on store: warns about similar titles in same namespace
 - Deduplication: upsert on title+namespace, tier never downgrades
 
+### Configurable TTL and Archive
+
+TTL defaults are configurable via the `[ttl]` section in `~/.config/ai-memory/config.toml`:
+
+```toml
+[ttl]
+short_ttl_secs = 21600      # 6h  (0 = never expires)
+mid_ttl_secs = 604800        # 7d  (0 = never expires)
+long_ttl_secs = 0            # never expires
+short_extend_secs = 3600     # +1h on recall
+mid_extend_secs = 86400      # +1d on recall
+archive_on_gc = true         # archive expired memories before GC deletes them
+```
+
+Set any TTL to `0` to disable expiry for that tier.
+
+**Archive:** When `archive_on_gc = true` (default), expired memories are archived before GC deletion. Manage the archive via CLI:
+
+```bash
+ai-memory archive list              # browse archived memories
+ai-memory archive restore <id>      # restore (expires_at cleared — becomes permanent)
+ai-memory archive purge             # permanently delete archived memories
+ai-memory archive stats             # archive size and counts
+```
+
+**Per-memory overrides:** Use `--expires-at` or `--ttl-secs` on `store`/`update` to override config defaults for individual memories.
+
 > **Note:** Configuration is loaded once at process startup. Changes to `config.toml` require restarting the ai-memory process (MCP server, HTTP daemon, or CLI) to take effect.
 
 ---

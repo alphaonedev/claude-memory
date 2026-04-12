@@ -58,7 +58,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 - `MemoryLink` struct -- typed directional links between memories
 - Request types: `CreateMemory`, `UpdateMemory`, `SearchQuery`, `ListQuery`, `RecallQuery`, `RecallBody`, `LinkBody`, `ForgetQuery`, `ConsolidateBody`, `ImportBody`
 - Response types: `Stats`, `TierCount`, `NamespaceCount`
-- `TtlConfig` struct -- per-tier TTL overrides loaded from `config.toml` (`short_secs`, `mid_secs`)
+- `TtlConfig` struct -- per-tier TTL overrides loaded from `config.toml` (`short_ttl_secs`, `mid_ttl_secs`, `long_ttl_secs`, `short_extend_secs`, `mid_extend_secs`)
 - `ResolvedTtl` struct -- resolved TTL values after merging config defaults with per-tier overrides
 - Constants: `MAX_CONTENT_SIZE` (65536), `PROMOTION_THRESHOLD` (5), `SHORT_TTL_EXTEND_SECS` (3600), `MID_TTL_EXTEND_SECS` (86400)
 

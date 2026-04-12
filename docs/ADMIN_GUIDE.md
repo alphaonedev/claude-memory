@@ -213,10 +213,17 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 | `cross_encoder` | Name of the cross-encoder model |
 | `default_namespace` | Default namespace for memories |
 | `max_memory_mb` | Maximum memory budget in MB |
-| `archive_on_gc` | Archive expired memories instead of deleting them during GC (`true`/`false`, default: `false`) |
+| `archive_on_gc` | Archive expired memories instead of deleting them during GC (`true`/`false`, default: `true`) |
 | `[ttl]` | Section for per-tier TTL overrides |
-| `ttl.short_secs` | TTL for short-tier memories in seconds (default: 21600 = 6 hours) |
-| `ttl.mid_secs` | TTL for mid-tier memories in seconds (default: 604800 = 7 days) |
+| `ttl.short_ttl_secs` | TTL for short-tier memories in seconds (default: 21600 = 6 hours) |
+| `ttl.mid_ttl_secs` | TTL for mid-tier memories in seconds (default: 604800 = 7 days) |
+| `ttl.long_ttl_secs` | TTL for long-tier memories in seconds (default: 0 = never expires) |
+| `ttl.short_extend_secs` | TTL extension on access for short-tier memories (default: 3600 = +1 hour) |
+| `ttl.mid_extend_secs` | TTL extension on access for mid-tier memories (default: 86400 = +1 day) |
+
+> **Note:** Set any TTL to `0` to disable expiry for that tier. Values are clamped to a 10-year maximum.
+
+> **Note:** Restored memories have their `expires_at` cleared (set to NULL) and become permanent.
 
 **Precedence:** CLI flags and MCP args take precedence over `config.toml` values. When the MCP server is launched by an AI client, the `--tier` flag in the MCP args is used, not the `config.toml` `tier` setting.
 
@@ -326,8 +333,8 @@ curl http://127.0.0.1:9077/api/v1/archive
 # Restore an archived memory
 curl -X POST http://127.0.0.1:9077/api/v1/archive/<id>/restore
 
-# Purge all archived memories permanently
-curl -X POST http://127.0.0.1:9077/api/v1/archive/purge
+# Purge all archived memories permanently (optional: ?older_than_days=N)
+curl -X DELETE http://127.0.0.1:9077/api/v1/archive
 
 # View archive statistics
 curl http://127.0.0.1:9077/api/v1/archive/stats
@@ -449,7 +456,7 @@ The HTTP daemon exposes **24 endpoints** under `/api/v1`:
 | `POST` | `/import` | Import memories and links (max 1,000) |
 | `GET` | `/archive` | List archived memories |
 | `POST` | `/archive/{id}/restore` | Restore an archived memory |
-| `POST` | `/archive/purge` | Permanently delete archived memories |
+| `DELETE` | `/archive` | Permanently delete archived memories (optional `?older_than_days=N`) |
 | `GET` | `/archive/stats` | Archive statistics |
 
 ## Monitoring

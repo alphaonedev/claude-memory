@@ -535,11 +535,16 @@ Memory TTLs (time-to-live) can be customized per tier via `config.toml`. This le
 ```toml
 # ~/.config/ai-memory/config.toml
 [ttl]
-short_secs = 43200   # 12 hours (default: 21600 = 6 hours)
-mid_secs = 1209600   # 14 days (default: 604800 = 7 days)
+short_ttl_secs = 43200       # 12 hours (default: 21600 = 6 hours)
+mid_ttl_secs = 1209600       # 14 days (default: 604800 = 7 days)
+long_ttl_secs = 0            # never expires (default: 0)
+short_extend_secs = 3600     # +1 hour on access (default: 3600)
+mid_extend_secs = 86400      # +1 day on access (default: 86400)
 ```
 
-Long-term memories never expire regardless of TTL settings. CLI flags `--ttl-secs` and `--expires-at` on individual memories override the tier defaults.
+Set any TTL to `0` to disable expiry for that tier. Values are clamped to a 10-year maximum.
+
+CLI flags `--ttl-secs` and `--expires-at` on individual memories override the tier defaults.
 
 > **Note:** Configuration is loaded once at process startup. Changes to `config.toml` require restarting the ai-memory process (MCP server, HTTP daemon, or CLI) to take effect.
 
@@ -559,15 +564,16 @@ ai-memory archive list
 ai-memory archive restore <id>
 ```
 
-This moves the memory back to active status with its original tier and content intact.
+This moves the memory back to active status with its original tier and content intact. Restored memories have their expiry cleared (`expires_at` set to NULL) and become permanent.
 
 ### Purge the archive
 
 ```bash
 ai-memory archive purge
+ai-memory archive purge --older-than-days 30   # only purge archives older than 30 days
 ```
 
-Permanently deletes all archived memories. This cannot be undone.
+Permanently deletes archived memories. This cannot be undone.
 
 ### Archive statistics
 
@@ -576,6 +582,17 @@ ai-memory archive stats
 ```
 
 Shows the total count, size, and date range of archived memories.
+
+### MCP Archive Tool Parameters
+
+When using archive tools via MCP (AI client), the following parameter schemas apply:
+
+| Tool | Parameters |
+|------|-----------|
+| `memory_archive_list` | `namespace` (string, optional), `limit` (int, default 50), `offset` (int, optional) |
+| `memory_archive_restore` | `id` (string, required) |
+| `memory_archive_purge` | `older_than_days` (int, optional) |
+| `memory_archive_stats` | *(no parameters)* |
 
 ## Contradiction Resolution
 
