@@ -17,7 +17,7 @@ main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (2
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 21 tools, notification handling
+mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 23 tools, notification handling
 validate.rs      -- Input validation for all write paths
 errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
 color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
@@ -69,7 +69,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **21 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **23 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
 - `tool_definitions()` -- returns the 21 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
@@ -326,8 +326,8 @@ The `config.rs` module defines 4 feature tiers that gate functionality:
 |------|-----------|-----|-----------------|
 | `keyword` | No | No | 13 base tools + `memory_capabilities` + 4 archive tools |
 | `semantic` | Yes | No | 14 base tools + `memory_capabilities` + 4 archive tools |
-| `smart` | Yes | Yes | All 21 tools |
-| `autonomous` | Yes | Yes | All 21 tools + autonomous behaviors |
+| `smart` | Yes | Yes | All 23 tools |
+| `autonomous` | Yes | Yes | All 23 tools + autonomous behaviors |
 
 The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be changed at runtime. The `memory_capabilities` tool reports the active tier and which features are available, allowing AI clients to adapt their behavior.
 
@@ -735,7 +735,7 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 21 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 23 tools.
 
 ```bash
 ai-memory mcp
@@ -948,7 +948,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **161 tests** total: 118 unit tests across all 15 modules (`src/db.rs` 29, `src/mcp.rs` 12, `src/config.rs` 9, `src/main.rs` 9, `src/mine.rs` 9, `src/validate.rs` 8, `src/reranker.rs` 7, `src/color.rs` 6, `src/errors.rs` 6, `src/models.rs` 6, `src/toon.rs` 6, `src/embeddings.rs` 5, `src/hnsw.rs` 4, `src/llm.rs` 2, `src/handlers.rs` 0) and 43 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
+The project has **188 tests** total: 139 unit tests across all 15 modules + 49 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
 
 ```bash
 # Run all tests
