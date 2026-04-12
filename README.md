@@ -397,6 +397,53 @@ Restart your AI assistant. If using MCP, it now has 21 memory tools. Ask it: "St
 
 ---
 
+## Quickstart
+
+Get from zero to a working memory in under two minutes.
+
+**1. Install**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/install.sh | sh
+```
+
+**2. Configure MCP** (example for Claude Code -- other platforms work the same way)
+
+Merge into `~/.claude.json`:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "command": "ai-memory",
+      "args": ["--db", "~/.claude/ai-memory.db", "mcp", "--tier", "semantic"]
+    }
+  }
+}
+```
+
+**3. Store your first memory**
+
+```bash
+ai-memory store -T "Project uses PostgreSQL 15" -c "Main DB is PG 15 with pgvector." --tier long
+```
+
+**4. Recall it**
+
+```bash
+ai-memory recall "database"
+```
+
+**5. Check stats**
+
+```bash
+ai-memory stats
+```
+
+**6. Use with your AI.** Restart your AI client. It now has **21 memory tools** available via MCP -- it can store and recall memories natively during conversations.
+
+---
+
 ## What Does It Do?
 
 AI assistants forget everything between conversations. ai-memory fixes that.

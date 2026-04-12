@@ -564,6 +564,296 @@ The HTTP daemon exposes **24 endpoints** under `/api/v1`:
 | `DELETE` | `/archive` | Permanently delete archived memories (optional `?older_than_days=N`) |
 | `GET` | `/archive/stats` | Archive statistics |
 
+### HTTP API Request/Response Examples
+
+Below are curl examples showing the exact JSON request bodies and response formats for the most important endpoints. The base URL is `http://127.0.0.1:9077/api/v1`.
+
+#### POST /memories (Store)
+
+Create a new memory. Only `title` and `content` are required; all other fields have defaults.
+
+```bash
+curl -X POST http://127.0.0.1:9077/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Project uses PostgreSQL 16",
+    "content": "The production database runs PostgreSQL 16 with pgvector for embeddings.",
+    "tier": "long",
+    "namespace": "infra",
+    "tags": ["postgres", "database"],
+    "priority": 9,
+    "confidence": 1.0,
+    "source": "user",
+    "ttl_secs": 604800
+  }'
+```
+
+**Required fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | Memory title (max 512 bytes) |
+| `content` | string | Memory content (max 64 KB) |
+
+**Optional fields:**
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tier` | string | `"mid"` | `"short"`, `"mid"`, or `"long"` |
+| `namespace` | string | `"global"` | Namespace for grouping (max 128 bytes, no slashes/spaces) |
+| `tags` | array | `[]` | String tags (max 50 tags, each max 128 bytes) |
+| `priority` | integer | `5` | 1-10 (clamped) |
+| `confidence` | float | `1.0` | 0.0-1.0 (clamped) |
+| `source` | string | `"api"` | One of: `user`, `claude`, `hook`, `api`, `cli`, `import`, `consolidation`, `system` |
+| `expires_at` | string | (none) | Explicit expiry timestamp (RFC3339) |
+| `ttl_secs` | integer | (none) | TTL in seconds (overrides tier default) |
+
+**Response (201 Created):**
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "tier": "long",
+  "namespace": "infra",
+  "title": "Project uses PostgreSQL 16"
+}
+```
+
+If potential contradictions are found (memories with similar titles in the same namespace), the response includes:
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "tier": "long",
+  "namespace": "infra",
+  "title": "Project uses PostgreSQL 16",
+  "potential_contradictions": ["existing-id-1", "existing-id-2"]
+}
+```
+
+Deduplication: if a memory with the same title+namespace already exists, it is upserted (tier never downgrades, priority keeps the maximum).
+
+**Minimal example (defaults applied):**
+
+```bash
+curl -X POST http://127.0.0.1:9077/api/v1/memories \
+  -H "Content-Type: application/json" \
+  -d '{"title": "Quick note", "content": "Something to remember."}'
+```
+
+Response: `{"id": "...", "tier": "mid", "namespace": "global", "title": "Quick note"}`
+
+#### GET /memories/{id} (Get)
+
+Retrieve a single memory by ID, including its links to other memories.
+
+```bash
+curl http://127.0.0.1:9077/api/v1/memories/a1b2c3d4-e5f6-7890-abcd-ef1234567890
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "memory": {
+    "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "tier": "long",
+    "namespace": "infra",
+    "title": "Project uses PostgreSQL 16",
+    "content": "The production database runs PostgreSQL 16 with pgvector for embeddings.",
+    "tags": ["postgres", "database"],
+    "priority": 9,
+    "confidence": 1.0,
+    "source": "user",
+    "access_count": 3,
+    "created_at": "2026-04-03T15:00:00+00:00",
+    "updated_at": "2026-04-03T15:00:00+00:00",
+    "last_accessed_at": "2026-04-10T09:30:00+00:00",
+    "expires_at": null
+  },
+  "links": [
+    {
+      "source_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "target_id": "f7e8d9c0-b1a2-3456-7890-abcdef123456",
+      "relation": "related_to",
+      "created_at": "2026-04-05T12:00:00+00:00"
+    }
+  ]
+}
+```
+
+**Response (404 Not Found):** `{"error": "not found"}`
+
+Note: `last_accessed_at` and `expires_at` are omitted from the JSON when null.
+
+#### GET /recall?context=... (Recall)
+
+Fuzzy OR search with ranked results. Automatically bumps access count, extends TTL, and auto-promotes frequently accessed mid-tier memories to long-term.
+
+```bash
+curl "http://127.0.0.1:9077/api/v1/recall?context=database+migration+postgres&namespace=infra&limit=5"
+```
+
+**Query parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `context` | string | (required) | Search context / query text |
+| `namespace` | string | (none) | Filter by namespace |
+| `limit` | integer | `10` | Max results (capped at 50) |
+| `tags` | string | (none) | Comma-separated tag filter |
+| `since` | string | (none) | Only memories updated after this RFC3339 timestamp |
+| `until` | string | (none) | Only memories updated before this RFC3339 timestamp |
+
+**Response (200 OK):**
+
+```json
+{
+  "memories": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "tier": "long",
+      "namespace": "infra",
+      "title": "Project uses PostgreSQL 16",
+      "content": "The production database runs PostgreSQL 16 with pgvector for embeddings.",
+      "tags": ["postgres", "database"],
+      "priority": 9,
+      "confidence": 1.0,
+      "source": "user",
+      "access_count": 4,
+      "created_at": "2026-04-03T15:00:00+00:00",
+      "updated_at": "2026-04-03T15:00:00+00:00",
+      "last_accessed_at": "2026-04-12T10:00:00+00:00",
+      "score": 0.763
+    }
+  ],
+  "count": 1
+}
+```
+
+Each memory in the response includes a `score` field (float, rounded to 3 decimal places) representing the composite relevance score. Memories are returned sorted by score descending.
+
+Recall is also available via POST for larger query bodies:
+
+```bash
+curl -X POST http://127.0.0.1:9077/api/v1/recall \
+  -H "Content-Type: application/json" \
+  -d '{
+    "context": "database migration postgres",
+    "namespace": "infra",
+    "limit": 5,
+    "tags": "postgres",
+    "since": "2026-01-01T00:00:00Z"
+  }'
+```
+
+#### PUT /memories/{id} (Update)
+
+Partial update -- only provided fields are modified. All fields are optional.
+
+```bash
+curl -X PUT http://127.0.0.1:9077/api/v1/memories/a1b2c3d4-e5f6-7890-abcd-ef1234567890 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "PostgreSQL 16.2 with pgvector 0.7 for embeddings. Upgraded 2026-04-10.",
+    "priority": 10,
+    "tags": ["postgres", "database", "pgvector"]
+  }'
+```
+
+**Updatable fields:**
+| Field | Type | Description |
+|-------|------|-------------|
+| `title` | string | New title |
+| `content` | string | New content |
+| `tier` | string | New tier (`"short"`, `"mid"`, `"long"`) |
+| `namespace` | string | New namespace |
+| `tags` | array | Replace tags entirely |
+| `priority` | integer | New priority (1-10) |
+| `confidence` | float | New confidence (0.0-1.0) |
+| `expires_at` | string | New expiry (RFC3339) |
+
+**Response (200 OK):** Returns the full updated memory object:
+
+```json
+{
+  "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+  "tier": "long",
+  "namespace": "infra",
+  "title": "Project uses PostgreSQL 16",
+  "content": "PostgreSQL 16.2 with pgvector 0.7 for embeddings. Upgraded 2026-04-10.",
+  "tags": ["postgres", "database", "pgvector"],
+  "priority": 10,
+  "confidence": 1.0,
+  "source": "user",
+  "access_count": 4,
+  "created_at": "2026-04-03T15:00:00+00:00",
+  "updated_at": "2026-04-12T10:05:00+00:00"
+}
+```
+
+**Response (404 Not Found):** `{"error": "not found"}`
+
+**Response (409 Conflict):** `{"error": "title already exists in namespace ..."}` (if updating the title to one that already exists in the same namespace)
+
+#### GET /archive (List Archived)
+
+List memories that were archived by garbage collection.
+
+```bash
+curl "http://127.0.0.1:9077/api/v1/archive?namespace=infra&limit=20&offset=0"
+```
+
+**Query parameters:**
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `namespace` | string | (none) | Filter by namespace |
+| `limit` | integer | `50` | Max results (capped at 1000) |
+| `offset` | integer | `0` | Pagination offset |
+
+**Response (200 OK):**
+
+```json
+{
+  "archived": [
+    {
+      "id": "expired-memory-id",
+      "tier": "short",
+      "namespace": "infra",
+      "title": "Temp debug session",
+      "content": "Debugging connection pooling issue...",
+      "tags": ["debug"],
+      "priority": 3,
+      "confidence": 1.0,
+      "source": "claude",
+      "access_count": 1,
+      "created_at": "2026-04-01T10:00:00+00:00",
+      "updated_at": "2026-04-01T10:00:00+00:00",
+      "expires_at": "2026-04-01T16:00:00+00:00",
+      "archived_at": "2026-04-02T00:30:00+00:00",
+      "archive_reason": "gc"
+    }
+  ],
+  "count": 1
+}
+```
+
+#### POST /archive/{id}/restore (Restore)
+
+Restore an archived memory back to the active memories table. The restored memory has its `expires_at` cleared (becomes permanent).
+
+```bash
+curl -X POST http://127.0.0.1:9077/api/v1/archive/expired-memory-id/restore
+```
+
+**Response (200 OK):**
+
+```json
+{
+  "restored": true,
+  "id": "expired-memory-id"
+}
+```
+
+**Response (404 Not Found):** `{"error": "not found in archive"}`
+
 ## Monitoring
 
 ### Health Endpoint (Deep Check)

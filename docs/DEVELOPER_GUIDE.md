@@ -309,6 +309,121 @@ The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be chang
 
 The recency decay factor ensures that recent memories rank higher when other factors are similar. A memory updated today gets a boost of ~1.0, a memory from 10 days ago gets ~0.5, and a memory from 100 days ago gets ~0.09.
 
+### TOON Format Specification
+
+TOON (Token-Oriented Object Notation) is a token-efficient serialization format designed for LLM communication. It replaces JSON for recall, search, and list responses, reducing output size by 40-60% by declaring field names once as a header and listing values row by row with pipe delimiters.
+
+The implementation is in `src/toon.rs`.
+
+#### Structure Overview
+
+A TOON response consists of three parts in order:
+
+1. **Metadata line** (optional) -- key:value pairs for scalar fields
+2. **Header line** -- declares field names once
+3. **Data rows** -- one per object, values matching header column order
+
+#### Metadata Line Syntax
+
+Scalar (non-array) response fields are serialized as pipe-delimited `key:value` pairs on the first line:
+
+```
+count:3|mode:hybrid
+```
+
+If there are no metadata fields, this line is omitted entirely.
+
+#### Header Line Syntax
+
+The header declares the array name followed by field names in square brackets, pipe-delimited, ending with a colon:
+
+```
+memories[id|title|tier|namespace|priority|confidence|score|access_count|tags|source|created_at|updated_at]:
+```
+
+Field names appear exactly once in the entire output regardless of how many data rows follow. This is the primary source of token savings over JSON.
+
+#### Data Row Syntax
+
+Each data row contains values pipe-delimited in the same order as the header fields:
+
+```
+abc-123|PostgreSQL 16 config|long|infra|9|1.0|0.763|2|postgres,database|claude|2026-04-03T15:00:00+00:00|2026-04-03T15:00:00+00:00
+```
+
+- **Strings** are output as-is (unless they require escaping)
+- **Numbers** (integers and floats) are output as their string representation
+- **Booleans** are output as `1` (true) or `0` (false)
+- **Arrays** (e.g., tags) are joined with commas: `postgres,database`
+- **Objects** are output as the literal `[object]`
+- **Null/missing values** are represented as an empty string (zero characters between the delimiters), e.g., `abc||mid` means the second field is null
+
+#### Escaping Rules
+
+Two characters require escaping in TOON values:
+
+| Character | Escaped As | Reason |
+|-----------|-----------|--------|
+| `\|` (pipe) | `\\|` | Pipe is the field delimiter |
+| `\n` (newline) | `\\n` | Newline is the row delimiter |
+
+Escaping is only applied when the value actually contains a pipe or newline character. Values without these characters are output verbatim with no additional escaping.
+
+Example: a title containing a pipe like `A|B` is serialized as `A\|B` in the data row.
+
+#### Compact vs Full Mode
+
+TOON supports two modes that differ only in which fields are included:
+
+**Full mode** (12 fields):
+```
+memories[id|title|tier|namespace|priority|confidence|score|access_count|tags|source|created_at|updated_at]:
+```
+
+**Compact mode** (7 fields) -- omits timestamps, confidence, access_count, and source for tighter output:
+```
+memories[id|title|tier|namespace|priority|score|tags]:
+```
+
+The MCP server defaults to compact mode (`toon_compact`). Clients can request `"toon"` for full mode or `"json"` for standard JSON via the `format` parameter on recall, search, and list tools.
+
+#### Search Response Normalization
+
+Search responses use a `"results"` key instead of `"memories"`. The TOON serializer normalizes this internally -- the output always uses the `memories[...]` header regardless of the source key.
+
+#### Complete Parsing Example
+
+Given this JSON response:
+
+```json
+{
+  "memories": [
+    {"id": "abc-123", "title": "PostgreSQL config", "tier": "long", "namespace": "infra", "priority": 9, "score": 0.763, "tags": ["postgres", "db"]},
+    {"id": "def-456", "title": "Redis cache", "tier": "long", "namespace": "infra", "priority": 8, "score": 0.541, "tags": ["redis"]},
+    {"id": "ghi-789", "title": "Deploy notes", "tier": "mid", "namespace": "infra", "priority": 5, "score": 0.320, "tags": []}
+  ],
+  "count": 3,
+  "mode": "hybrid"
+}
+```
+
+TOON compact output:
+
+```
+count:3|mode:hybrid
+memories[id|title|tier|namespace|priority|score|tags]:
+abc-123|PostgreSQL config|long|infra|9|0.763|postgres,db
+def-456|Redis cache|long|infra|8|0.541|redis
+ghi-789|Deploy notes|mid|infra|5|0.32|
+```
+
+To parse TOON:
+
+1. Read the first line. If it does not start with a bracket-containing identifier (e.g., `memories[`), parse it as metadata: split on `|`, then split each segment on `:` to get key-value pairs.
+2. Read the header line. Extract the array name and field list: strip the trailing `:`, extract the portion inside `[...]`, and split on `|` to get the ordered field names.
+3. Read each subsequent non-empty line as a data row. Split on `|` (respecting `\|` escapes), mapping each positional value to the corresponding header field name.
+4. Unescape `\|` to `|` and `\n` to newline in each value. Empty values represent null/missing fields.
+
 ## API Reference
 
 Base URL: `http://127.0.0.1:9077/api/v1`
