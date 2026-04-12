@@ -51,6 +51,7 @@ fn id_short(id: &str) -> &str {
 #[derive(Parser)]
 #[command(
     name = "ai-memory",
+    version,
     about = "AI-agnostic persistent memory — MCP server, HTTP API, and CLI for any AI platform"
 )]
 struct Cli {
@@ -657,7 +658,7 @@ fn cmd_update(db_path: PathBuf, args: UpdateArgs, json_out: bool) -> Result<()> 
     }
     if let Some(ref ts) = args.expires_at {
         if !ts.is_empty() {
-            validate::validate_expires_at(Some(ts))?;
+            validate::validate_expires_at_format(ts)?;
         }
     }
     let updated = db::update(
