@@ -2,7 +2,7 @@
 
 > **Note:** `ai-memory` is AI-agnostic and works with any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others). This file contains **Claude Code-specific** integration instructions.
 
-This project is `ai-memory` -- a persistent memory daemon that replaces Claude Code's built-in auto-memory. **Zero token cost until recall** -- unlike auto-memory which loads 200+ lines into every conversation, ai-memory uses zero context tokens until explicitly called. **TOON compact** is the default response format (79% smaller than JSON). 188 tests, 15/15 modules, 95%+ coverage. **LongMemEval benchmark: 97.8% R@5, 99.0% R@10, 99.8% R@20** (489/500, ICLR 2025 dataset).
+This project is `ai-memory` -- a persistent memory daemon that replaces Claude Code's built-in auto-memory. **Zero token cost until recall** -- unlike auto-memory which loads 200+ lines into every conversation, ai-memory uses zero context tokens until explicitly called. **TOON compact** is the default response format (79% smaller than JSON). 185 tests, 15/15 modules, 95%+ coverage. **LongMemEval benchmark: 97.8% R@5, 99.0% R@10, 99.8% R@20** (489/500, ICLR 2025 dataset).
 
 ## Step 1: Disable Auto-Memory
 
@@ -251,9 +251,28 @@ For the best experience, use **both** MCP and CLAUDE.md together:
 
 Without CLAUDE.md, Claude has the tools but may not use them unless asked. Without MCP, Claude falls back to the CLI commands in CLAUDE.md. Both together gives you proactive, tool-native memory.
 
-### Session Hooks (Optional)
+### Session Recall (Recommended: CLAUDE.md)
 
-For automatic recall at session start without relying on CLAUDE.md directives, use the session-start hook in `hooks/session-start.sh`:
+The recommended approach for automatic memory recall at session start is `~/.claude/CLAUDE.md`. This is a pure MCP approach — no shell scripts, no hooks. Claude calls `memory_session_start` and `memory_recall` via the MCP server, keeping the entire flow in the Rust binary.
+
+Create `~/.claude/CLAUDE.md` with recall-first directives:
+
+```markdown
+# Global Claude Instructions
+
+## AI Memory (MANDATORY)
+
+### On every conversation start:
+1. Call `memory_session_start` to load recent context
+2. Call `memory_recall` with the user's apparent topic or current working directory name
+3. Review recalled memories before responding
+```
+
+This applies to all projects globally. Claude Code loads `~/.claude/CLAUDE.md` at the start of every session.
+
+### Session Hooks (Alternative)
+
+If you prefer a shell-based approach instead of CLAUDE.md, use the session-start hook in `hooks/session-start.sh`:
 
 ```json
 // Add to ~/.claude/settings.json
@@ -266,4 +285,4 @@ For automatic recall at session start without relying on CLAUDE.md directives, u
 }
 ```
 
-This auto-recalls memories matching the current working directory on every session start.
+The CLAUDE.md approach is preferred because it keeps the entire memory pipeline in Rust (MCP server) with no external shell dependencies.

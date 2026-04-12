@@ -966,7 +966,10 @@ fn handle_consolidate(
     let mut ids = Vec::with_capacity(ids_arr.len());
     for (i, v) in ids_arr.iter().enumerate() {
         match v.as_str() {
-            Some(s) => ids.push(s.to_string()),
+            Some(s) => {
+                validate::validate_id(s).map_err(|e| e.to_string())?;
+                ids.push(s.to_string());
+            }
             None => return Err(format!("ids[{}] must be a string", i)),
         }
     }
@@ -998,6 +1001,14 @@ fn handle_consolidate(
     validate::validate_consolidate(&ids, title, &summary, namespace).map_err(|e| e.to_string())?;
 
     let auto_generated = params["summary"].as_str().is_none();
+
+    // Remove old entries from HNSW index before consolidation deletes them
+    if let Some(idx) = vector_index {
+        for id in &ids {
+            idx.remove(id);
+        }
+    }
+
     let new_id = db::consolidate(
         conn,
         &ids,
