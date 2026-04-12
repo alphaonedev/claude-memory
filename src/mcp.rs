@@ -1026,7 +1026,11 @@ fn handle_consolidate(
         match emb.embed(&text) {
             Ok(embedding) => {
                 if let Err(e) = db::set_embedding(conn, &new_id, &embedding) {
-                    tracing::warn!("failed to store embedding for consolidated {}: {}", &new_id, e);
+                    tracing::warn!(
+                        "failed to store embedding for consolidated {}: {}",
+                        &new_id,
+                        e
+                    );
                 }
                 if let Some(idx) = vector_index {
                     // Remove old embeddings from HNSW index
@@ -1037,7 +1041,11 @@ fn handle_consolidate(
                 }
             }
             Err(e) => {
-                tracing::warn!("failed to generate embedding for consolidated {}: {}", &new_id, e);
+                tracing::warn!(
+                    "failed to generate embedding for consolidated {}: {}",
+                    &new_id,
+                    e
+                );
             }
         }
     }
@@ -1244,7 +1252,9 @@ fn handle_request(
                 "memory_get" => handle_get(conn, arguments),
                 "memory_link" => handle_link(conn, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
-                "memory_consolidate" => handle_consolidate(conn, arguments, llm, embedder, vector_index),
+                "memory_consolidate" => {
+                    handle_consolidate(conn, arguments, llm, embedder, vector_index)
+                }
                 "memory_capabilities" => handle_capabilities(tier_config, reranker),
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),

@@ -2160,13 +2160,24 @@ fn test_cli_validate_id_rejects_invalid() {
         .args(["--db", db_path.to_str().unwrap(), "--json", "delete", "   "])
         .output()
         .unwrap();
-    assert!(!output.status.success(), "should reject empty/whitespace ID");
+    assert!(
+        !output.status.success(),
+        "should reject empty/whitespace ID"
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("id cannot be empty"), "stderr: {}", stderr);
 
     // update with empty ID
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "update", "  ", "--content", "test"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "update",
+            "  ",
+            "--content",
+            "test",
+        ])
         .output()
         .unwrap();
     assert!(!output.status.success(), "should reject empty ID on update");
@@ -2177,14 +2188,25 @@ fn test_cli_validate_id_rejects_invalid() {
 #[test]
 fn test_tier_downgrade_rejected() {
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!("ai-memory-tier-downgrade-{}.db", uuid::Uuid::new_v4()));
+    let db_path = dir.join(format!(
+        "ai-memory-tier-downgrade-{}.db",
+        uuid::Uuid::new_v4()
+    ));
     let binary = env!("CARGO_BIN_EXE_ai-memory");
 
     // Store a long-term memory
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "long", "-T", "Important Fact", "--content", "This is permanent",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-T",
+            "Important Fact",
+            "--content",
+            "This is permanent",
         ])
         .output()
         .unwrap();
@@ -2195,12 +2217,20 @@ fn test_tier_downgrade_rejected() {
     // Attempt to downgrade to short — silently clamped, tier stays long
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "update", id, "--tier", "short",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "update",
+            id,
+            "--tier",
+            "short",
         ])
         .output()
         .unwrap();
-    assert!(output.status.success(), "update should succeed (silent clamp, not error)");
+    assert!(
+        output.status.success(),
+        "update should succeed (silent clamp, not error)"
+    );
 
     // Verify memory is still long-term (downgrade was silently blocked)
     let output = cmd(binary)
@@ -2216,14 +2246,25 @@ fn test_tier_downgrade_rejected() {
 #[test]
 fn test_tier_upgrade_allowed() {
     let dir = std::env::temp_dir();
-    let db_path = dir.join(format!("ai-memory-tier-upgrade-{}.db", uuid::Uuid::new_v4()));
+    let db_path = dir.join(format!(
+        "ai-memory-tier-upgrade-{}.db",
+        uuid::Uuid::new_v4()
+    ));
     let binary = env!("CARGO_BIN_EXE_ai-memory");
 
     // Store a short-term memory
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "short", "-T", "Temp Note", "--content", "Upgrade me",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "short",
+            "-T",
+            "Temp Note",
+            "--content",
+            "Upgrade me",
         ])
         .output()
         .unwrap();
@@ -2234,8 +2275,13 @@ fn test_tier_upgrade_allowed() {
     // Upgrade to long
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "update", id, "--tier", "long",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "update",
+            id,
+            "--tier",
+            "long",
         ])
         .output()
         .unwrap();
@@ -2253,8 +2299,16 @@ fn test_duplicate_title_no_self_contradiction() {
     // Store a memory
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "long", "-T", "Dupe Test", "--content", "Original",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-T",
+            "Dupe Test",
+            "--content",
+            "Original",
         ])
         .output()
         .unwrap();
@@ -2263,8 +2317,16 @@ fn test_duplicate_title_no_self_contradiction() {
     // Store again with same title (upsert)
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "long", "-T", "Dupe Test", "--content", "Updated via upsert",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-T",
+            "Dupe Test",
+            "--content",
+            "Updated via upsert",
         ])
         .output()
         .unwrap();
@@ -2290,15 +2352,26 @@ fn test_promote_clears_expires_at() {
     // Store a short-term memory (has expires_at)
     let output = cmd(binary)
         .args([
-            "--db", db_path.to_str().unwrap(), "--json",
-            "store", "-t", "short", "-T", "Promote Expiry", "--content", "Should clear expiry",
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "short",
+            "-T",
+            "Promote Expiry",
+            "--content",
+            "Should clear expiry",
         ])
         .output()
         .unwrap();
     assert!(output.status.success());
     let stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let id = stored["id"].as_str().unwrap();
-    assert!(stored["expires_at"].as_str().is_some(), "short should have expires_at");
+    assert!(
+        stored["expires_at"].as_str().is_some(),
+        "short should have expires_at"
+    );
 
     // Promote
     let output = cmd(binary)
