@@ -337,9 +337,9 @@ pub fn update(
     // Tier downgrade protection: never downgrade, consistent with insert path.
     let effective_tier = match (tier, &existing.tier) {
         (Some(requested), existing_tier) => match (existing_tier, requested) {
-            (Tier::Long, _) => &Tier::Long,           // long never downgrades
-            (Tier::Mid, Tier::Short) => &Tier::Mid,    // mid never downgrades to short
-            (_, requested) => requested,               // upgrades and same-tier are fine
+            (Tier::Long, _) => &Tier::Long,         // long never downgrades
+            (Tier::Mid, Tier::Short) => &Tier::Mid, // mid never downgrades to short
+            (_, requested) => requested,            // upgrades and same-tier are fine
         },
         (None, existing_tier) => existing_tier,
     };
@@ -369,7 +369,9 @@ pub fn update(
         if let Some(other_id) = collision {
             anyhow::bail!(
                 "title '{}' already exists in namespace '{}' (memory {})",
-                new_title, namespace, other_id
+                new_title,
+                namespace,
+                other_id
             );
         }
     }
@@ -613,6 +615,27 @@ pub fn create_link(
     target_id: &str,
     relation: &str,
 ) -> Result<()> {
+    // Verify both IDs exist before creating link
+    let source_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+            params![source_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !source_exists {
+        anyhow::bail!("source memory not found: {}", source_id);
+    }
+    let target_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+            params![target_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !target_exists {
+        anyhow::bail!("target memory not found: {}", target_id);
+    }
     let now = Utc::now().to_rfc3339();
     conn.execute(
         "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, created_at) VALUES (?1, ?2, ?3, ?4)",
@@ -715,9 +738,25 @@ pub fn consolidate(
     }
 }
 
+/// Strip zero-width and invisible Unicode characters that could bypass FTS search.
+fn strip_invisible(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            !matches!(c,
+                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' |
+                '\u{00AD}' | '\u{034F}' | '\u{061C}' |
+                '\u{180E}' | '\u{2060}' | '\u{2061}'..='\u{2064}' |
+                '\u{FE00}'..='\u{FE0F}' | '\u{200E}' | '\u{200F}' |
+                '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+            )
+        })
+        .collect()
+}
+
 fn sanitize_fts_query(input: &str, use_or: bool) -> String {
     let joiner = if use_or { " OR " } else { " " };
-    let tokens: Vec<String> = input
+    let cleaned = strip_invisible(input);
+    let tokens: Vec<String> = cleaned
         .split_whitespace()
         .filter(|t| !t.is_empty())
         .filter(|t| {
@@ -726,7 +765,8 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
             upper != "AND" && upper != "OR" && upper != "NOT" && upper != "NEAR"
         })
         .map(|token| {
-            // Strip ALL FTS5 special characters to prevent injection
+            // Strip FTS5 special characters to prevent injection.
+            // Hyphens are allowed inside words (e.g. "well-known").
             let clean: String = token
                 .chars()
                 .filter(|c| {
@@ -738,7 +778,6 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
                         && *c != '('
                         && *c != ')'
                         && *c != ':'
-                        && *c != '-'
                         && *c != '|'
                 })
                 .collect();
@@ -889,7 +928,11 @@ pub fn list_archived(
              FROM archived_memories WHERE namespace = ?1 \
              ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3"
                 .to_string(),
-            vec![Box::new(ns.to_string()), Box::new(limit as i64), Box::new(offset as i64)],
+            vec![
+                Box::new(ns.to_string()),
+                Box::new(limit as i64),
+                Box::new(offset as i64),
+            ],
         ),
         None => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
@@ -901,7 +944,8 @@ pub fn list_archived(
             vec![Box::new(limit as i64), Box::new(offset as i64)],
         ),
     };
-    let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|p| p.as_ref()).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(serde_json::json!({
@@ -964,10 +1008,7 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
              FROM archived_memories WHERE id = ?2",
             params![now, id],
         )?;
-        conn.execute(
-            "DELETE FROM archived_memories WHERE id = ?1",
-            params![id],
-        )?;
+        conn.execute("DELETE FROM archived_memories WHERE id = ?1", params![id])?;
         Ok(true)
     })();
     match result {
@@ -1003,11 +1044,7 @@ pub fn purge_archive(conn: &Connection, older_than_days: Option<i64>) -> Result<
 }
 
 pub fn archive_stats(conn: &Connection) -> Result<serde_json::Value> {
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM archived_memories",
-        [],
-        |r| r.get(0),
-    )?;
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM archived_memories", [], |r| r.get(0))?;
     let mut stmt = conn.prepare(
         "SELECT namespace, COUNT(*) FROM archived_memories GROUP BY namespace ORDER BY COUNT(*) DESC",
     )?;
@@ -1026,16 +1063,24 @@ pub fn archive_stats(conn: &Connection) -> Result<serde_json::Value> {
 }
 
 pub fn export_all(conn: &Connection) -> Result<Vec<Memory>> {
-    let mut stmt = conn.prepare("SELECT * FROM memories ORDER BY created_at ASC")?;
-    let rows = stmt.query_map([], row_to_memory)?;
+    let now = Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT * FROM memories WHERE expires_at IS NULL OR expires_at > ?1 ORDER BY created_at ASC",
+    )?;
+    let rows = stmt.query_map(params![now], row_to_memory)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
 }
 
 pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
-    let mut stmt =
-        conn.prepare("SELECT source_id, target_id, relation, created_at FROM memory_links")?;
-    let rows = stmt.query_map([], |row| {
+    let now = Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT ml.source_id, ml.target_id, ml.relation, ml.created_at
+         FROM memory_links ml
+         JOIN memories ms ON ms.id = ml.source_id AND (ms.expires_at IS NULL OR ms.expires_at > ?1)
+         JOIN memories mt ON mt.id = ml.target_id AND (mt.expires_at IS NULL OR mt.expires_at > ?1)",
+    )?;
+    let rows = stmt.query_map(params![now], |row| {
         Ok(MemoryLink {
             source_id: row.get(0)?,
             target_id: row.get(1)?,
@@ -1469,15 +1514,36 @@ mod tests {
         let id = insert(&conn, &mem).unwrap();
 
         // Updating only priority — content_changed should be false
-        let (found, content_changed) =
-            update(&conn, &id, None, None, None, None, None, Some(8), None, None).unwrap();
+        let (found, content_changed) = update(
+            &conn,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(8),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(found);
         assert!(!content_changed);
 
         // Updating content — content_changed should be true
-        let (found, content_changed) =
-            update(&conn, &id, None, Some("New content"), None, None, None, None, None, None)
-                .unwrap();
+        let (found, content_changed) = update(
+            &conn,
+            &id,
+            None,
+            Some("New content"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert!(found);
         assert!(content_changed);
     }
@@ -1509,7 +1575,16 @@ mod tests {
         let id = insert(&conn, &mem).unwrap();
 
         let (found, _) = update(
-            &conn, &id, None, None, Some(&Tier::Short), None, None, None, None, None,
+            &conn,
+            &id,
+            None,
+            None,
+            Some(&Tier::Short),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1521,7 +1596,16 @@ mod tests {
         let id2 = insert(&conn, &mem2).unwrap();
 
         let (found, _) = update(
-            &conn, &id2, None, None, Some(&Tier::Short), None, None, None, None, None,
+            &conn,
+            &id2,
+            None,
+            None,
+            Some(&Tier::Short),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1530,7 +1614,16 @@ mod tests {
 
         // Mid-tier CAN upgrade to long
         let (found, _) = update(
-            &conn, &id2, None, None, Some(&Tier::Long), None, None, None, None, None,
+            &conn,
+            &id2,
+            None,
+            None,
+            Some(&Tier::Long),
+            None,
+            None,
+            None,
+            None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1548,7 +1641,16 @@ mod tests {
 
         // Updating Alpha's title to "Beta" in same namespace should fail
         let result = update(
-            &conn, &id_a, Some("Beta"), None, None, None, None, None, None, None,
+            &conn,
+            &id_a,
+            Some("Beta"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -1665,7 +1767,18 @@ mod tests {
         )
         .unwrap();
 
-        let results = recall(&conn, "Rust programming", None, 10, None, None, None, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS).unwrap();
+        let results = recall(
+            &conn,
+            "Rust programming",
+            None,
+            10,
+            None,
+            None,
+            None,
+            SHORT_TTL_EXTEND_SECS,
+            MID_TTL_EXTEND_SECS,
+        )
+        .unwrap();
         assert!(!results.is_empty());
         // Score should be present
         let (mem, score) = &results[0];
@@ -1678,7 +1791,17 @@ mod tests {
         let conn = test_db();
         insert(&conn, &make_memory("Test", "test", Tier::Long, 5)).unwrap();
         // Empty context should not crash
-        let results = recall(&conn, "", None, 10, None, None, None, SHORT_TTL_EXTEND_SECS, MID_TTL_EXTEND_SECS);
+        let results = recall(
+            &conn,
+            "",
+            None,
+            10,
+            None,
+            None,
+            None,
+            SHORT_TTL_EXTEND_SECS,
+            MID_TTL_EXTEND_SECS,
+        );
         // May return empty or error, both acceptable
         assert!(results.is_ok() || results.is_err());
     }
@@ -1860,7 +1983,10 @@ mod tests {
         // Restore should fail because id exists in active table
         let result = restore_archived(&conn, &id);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("already exists in active table"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("already exists in active table"));
     }
 
     #[test]

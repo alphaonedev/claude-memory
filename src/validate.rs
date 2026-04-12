@@ -38,8 +38,8 @@ pub fn validate_title(title: &str) -> Result<()> {
     if trimmed.is_empty() {
         bail!("title cannot be empty");
     }
-    if trimmed.len() > MAX_TITLE_LEN {
-        bail!("title exceeds max length of {} bytes", MAX_TITLE_LEN);
+    if trimmed.chars().count() > MAX_TITLE_LEN {
+        bail!("title exceeds max length of {} characters", MAX_TITLE_LEN);
     }
     if !is_clean_string(trimmed) {
         bail!("title contains invalid characters");
@@ -65,9 +65,9 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
     if trimmed.is_empty() {
         bail!("namespace cannot be empty");
     }
-    if trimmed.len() > MAX_NAMESPACE_LEN {
+    if trimmed.chars().count() > MAX_NAMESPACE_LEN {
         bail!(
-            "namespace exceeds max length of {} bytes",
+            "namespace exceeds max length of {} characters",
             MAX_NAMESPACE_LEN
         );
     }
@@ -245,6 +245,8 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
 }
 
 /// Validate update fields (only validates present fields).
+/// Note: expires_at allows past dates in updates for programmatic TTL management
+/// and GC testing — only format is validated, not chronological ordering.
 pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     if let Some(ref t) = update.title {
         validate_title(t)?;
@@ -265,7 +267,15 @@ pub fn validate_update(update: &UpdateMemory) -> Result<()> {
         validate_confidence(c)?;
     }
     if let Some(ref ts) = update.expires_at {
-        validate_expires_at(Some(ts))?;
+        validate_expires_at_format(ts)?;
+    }
+    Ok(())
+}
+
+/// Validate expires_at format only (no past-date check). Used by update path.
+pub fn validate_expires_at_format(ts: &str) -> Result<()> {
+    if !is_valid_rfc3339(ts) {
+        bail!("expires_at is not valid RFC3339: '{}'", ts);
     }
     Ok(())
 }

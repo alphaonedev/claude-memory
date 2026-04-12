@@ -310,13 +310,29 @@ impl ResolvedTtl {
             return defaults;
         };
         let clamp_ttl = |v: i64| -> Option<i64> {
-            if v <= 0 { None } else { Some(v.min(MAX_TTL_SECS)) }
+            if v <= 0 {
+                None
+            } else {
+                Some(v.min(MAX_TTL_SECS))
+            }
         };
         Self {
-            short_ttl_secs: c.short_ttl_secs.map(clamp_ttl).unwrap_or(defaults.short_ttl_secs),
-            mid_ttl_secs: c.mid_ttl_secs.map(clamp_ttl).unwrap_or(defaults.mid_ttl_secs),
-            long_ttl_secs: c.long_ttl_secs.map(clamp_ttl).unwrap_or(defaults.long_ttl_secs),
-            short_extend_secs: c.short_extend_secs.unwrap_or(defaults.short_extend_secs).max(0),
+            short_ttl_secs: c
+                .short_ttl_secs
+                .map(clamp_ttl)
+                .unwrap_or(defaults.short_ttl_secs),
+            mid_ttl_secs: c
+                .mid_ttl_secs
+                .map(clamp_ttl)
+                .unwrap_or(defaults.mid_ttl_secs),
+            long_ttl_secs: c
+                .long_ttl_secs
+                .map(clamp_ttl)
+                .unwrap_or(defaults.long_ttl_secs),
+            short_extend_secs: c
+                .short_extend_secs
+                .unwrap_or(defaults.short_extend_secs)
+                .max(0),
             mid_extend_secs: c.mid_extend_secs.unwrap_or(defaults.mid_extend_secs).max(0),
         }
     }

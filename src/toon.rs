@@ -129,10 +129,13 @@ fn format_value(val: Option<&Value>) -> String {
     }
 }
 
-/// Escape pipe characters in TOON values.
+/// Escape special characters in TOON values.
 fn escape_toon(s: &str) -> String {
-    if s.contains('|') || s.contains('\n') {
-        s.replace('|', "\\|").replace('\n', "\\n")
+    if s.contains('|') || s.contains('\n') || s.contains('\r') || s.contains('\\') {
+        s.replace('\\', "\\\\")
+            .replace('|', "\\|")
+            .replace('\n', "\\n")
+            .replace('\r', "\\r")
     } else {
         s.to_string()
     }

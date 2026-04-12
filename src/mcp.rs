@@ -324,6 +324,28 @@ fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "memory_gc",
+                "description": "Trigger garbage collection on expired memories. Archives them before deletion. Supports dry_run mode.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "dry_run": {"type": "boolean", "default": false, "description": "If true, report what would be collected without deleting"}
+                    }
+                }
+            },
+            {
+                "name": "memory_session_start",
+                "description": "Auto-recall recent memories on session start. Returns the most recently accessed/updated memories. If LLM is available (smart/autonomous tier), returns an AI-generated summary.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Optional namespace to scope recall"},
+                        "limit": {"type": "integer", "default": 10, "maximum": 50},
+                        "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact"}
+                    }
+                }
             }
         ]
     })
@@ -616,8 +638,18 @@ fn handle_recall(
     }
 
     // Fallback to keyword-only recall
-    let results = db::recall(conn, context, namespace, limit.min(50), tags, since, until, resolved_ttl.short_extend_secs, resolved_ttl.mid_extend_secs)
-        .map_err(|e| e.to_string())?;
+    let results = db::recall(
+        conn,
+        context,
+        namespace,
+        limit.min(50),
+        tags,
+        since,
+        until,
+        resolved_ttl.short_extend_secs,
+        resolved_ttl.mid_extend_secs,
+    )
+    .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
     Ok(json!({"memories": memories, "count": memories.len(), "mode": "keyword"}))
 }
@@ -665,8 +697,19 @@ fn handle_auto_tag(
             all_tags.push(t.clone());
         }
     }
-    db::update(conn, id, None, None, None, None, Some(&all_tags), None, None, None)
-        .map_err(|e| e.to_string())?;
+    db::update(
+        conn,
+        id,
+        None,
+        None,
+        None,
+        None,
+        Some(&all_tags),
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
     Ok(json!({"id": id, "new_tags": tags, "all_tags": all_tags}))
 }
 
@@ -755,13 +798,17 @@ fn handle_delete(
 
 fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
-    db::update(conn, id, None, None, Some(&Tier::Long), None, None, None, None, None)
+    // Atomic promote: set tier=long and clear expires_at in a single UPDATE
+    let now = chrono::Utc::now().to_rfc3339();
+    let changed = conn
+        .execute(
+            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1 WHERE id = ?2",
+            rusqlite::params![now, id],
+        )
         .map_err(|e| e.to_string())?;
-    conn.execute(
-        "UPDATE memories SET expires_at = NULL WHERE id = ?1",
-        rusqlite::params![id],
-    )
-    .map_err(|e| e.to_string())?;
+    if changed == 0 {
+        return Err("memory not found".into());
+    }
     Ok(json!({"promoted": true, "id": id, "tier": "long"}))
 }
 
@@ -818,7 +865,8 @@ fn handle_update(
         validate::validate_confidence(c).map_err(|e| e.to_string())?;
     }
     if let Some(ts) = expires_at {
-        validate::validate_expires_at(Some(ts)).map_err(|e| e.to_string())?;
+        // Allow past dates in update for programmatic TTL management and GC testing
+        validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
     }
 
     let (found, content_changed) = db::update(
@@ -969,8 +1017,8 @@ fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Va
     let namespace = params["namespace"].as_str();
     let limit = params["limit"].as_u64().unwrap_or(50) as usize;
     let offset = params["offset"].as_u64().unwrap_or(0) as usize;
-    let items = db::list_archived(conn, namespace, limit.min(1000), offset)
-        .map_err(|e| e.to_string())?;
+    let items =
+        db::list_archived(conn, namespace, limit.min(1000), offset).map_err(|e| e.to_string())?;
     Ok(json!({"archived": items, "count": items.len()}))
 }
 
@@ -992,6 +1040,82 @@ fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Result<V
 
 fn handle_archive_stats(conn: &rusqlite::Connection) -> Result<Value, String> {
     db::archive_stats(conn).map_err(|e| e.to_string())
+}
+
+fn handle_gc(conn: &rusqlite::Connection, params: &Value, archive: bool) -> Result<Value, String> {
+    let dry_run = params["dry_run"].as_bool().unwrap_or(false);
+    if dry_run {
+        // Just count expired without deleting
+        let now = chrono::Utc::now().to_rfc3339();
+        let count: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?1",
+                rusqlite::params![now],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        return Ok(json!({"collected": count, "dry_run": true}));
+    }
+    let count = db::gc(conn, archive).map_err(|e| e.to_string())?;
+    Ok(json!({"collected": count, "dry_run": false}))
+}
+
+fn handle_session_start(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    llm: Option<&OllamaClient>,
+) -> Result<Value, String> {
+    let namespace = params["namespace"].as_str();
+    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
+
+    let results = db::list(
+        conn,
+        namespace,
+        None,
+        limit.min(50),
+        0,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let memories: Vec<Value> = results
+        .iter()
+        .map(|mem| {
+            let mut val = serde_json::to_value(mem).unwrap_or_default();
+            if let Some(obj) = val.as_object_mut() {
+                obj.insert("score".to_string(), json!(0.0));
+            }
+            val
+        })
+        .collect();
+
+    let mut response = json!({
+        "memories": memories,
+        "count": memories.len(),
+        "mode": "session_start",
+    });
+
+    if let Some(llm_client) = llm {
+        if !results.is_empty() {
+            let pairs: Vec<(String, String)> = results
+                .iter()
+                .map(|m| (m.title.clone(), m.content.clone()))
+                .collect();
+            match llm_client.summarize_memories(&pairs) {
+                Ok(summary) => {
+                    response["summary"] = json!(summary);
+                }
+                Err(e) => {
+                    tracing::warn!("session_start LLM summary failed: {}", e);
+                }
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 fn handle_request(
@@ -1055,8 +1179,18 @@ fn handle_request(
             };
 
             let result = match tool_name {
-                "memory_store" => handle_store(conn, arguments, embedder, vector_index, resolved_ttl),
-                "memory_recall" => handle_recall(conn, arguments, embedder, vector_index, reranker, archive_on_gc, resolved_ttl),
+                "memory_store" => {
+                    handle_store(conn, arguments, embedder, vector_index, resolved_ttl)
+                }
+                "memory_recall" => handle_recall(
+                    conn,
+                    arguments,
+                    embedder,
+                    vector_index,
+                    reranker,
+                    archive_on_gc,
+                    resolved_ttl,
+                ),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index),
@@ -1076,6 +1210,8 @@ fn handle_request(
                 "memory_archive_restore" => handle_archive_restore(conn, arguments),
                 "memory_archive_purge" => handle_archive_purge(conn, arguments),
                 "memory_archive_stats" => handle_archive_stats(conn),
+                "memory_gc" => handle_gc(conn, arguments, archive_on_gc),
+                "memory_session_start" => handle_session_start(conn, arguments, llm),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -1087,10 +1223,20 @@ fn handle_request(
                         .and_then(|v| v.as_str())
                         .unwrap_or("toon_compact");
                     let text = match format_str {
-                        "toon" if matches!(tool_name, "memory_recall" | "memory_list") => {
+                        "toon"
+                            if matches!(
+                                tool_name,
+                                "memory_recall" | "memory_list" | "memory_session_start"
+                            ) =>
+                        {
                             crate::toon::memories_to_toon(&val, false)
                         }
-                        "toon_compact" if matches!(tool_name, "memory_recall" | "memory_list") => {
+                        "toon_compact"
+                            if matches!(
+                                tool_name,
+                                "memory_recall" | "memory_list" | "memory_session_start"
+                            ) =>
+                        {
                             crate::toon::memories_to_toon(&val, true)
                         }
                         "toon" if tool_name == "memory_search" => {
@@ -1382,7 +1528,7 @@ mod tests {
     fn tool_definitions_returns_21_tools() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 21);
+        assert_eq!(tools.len(), 23);
     }
 
     #[test]

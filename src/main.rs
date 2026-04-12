@@ -423,7 +423,29 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = app_config.effective_db(&cli.db);
     let j = cli.json;
-    match cli.command {
+    // Track whether command writes to DB (for WAL checkpoint)
+    let is_write_command = matches!(
+        cli.command,
+        Command::Store(_)
+            | Command::Update(_)
+            | Command::Delete(_)
+            | Command::Promote(_)
+            | Command::Forget(_)
+            | Command::Link(_)
+            | Command::Consolidate(_)
+            | Command::Resolve(_)
+            | Command::Sync(_)
+            | Command::AutoConsolidate(_)
+            | Command::Gc
+            | Command::Import
+    );
+    let db_path_for_checkpoint = if is_write_command {
+        Some(db_path.clone())
+    } else {
+        None
+    };
+
+    let result = match cli.command {
         Command::Serve(a) => serve(db_path, a, &app_config).await,
         Command::Mcp { tier } => {
             let feature_tier = app_config.effective_tier(Some(&tier));
@@ -467,7 +489,18 @@ async fn main() -> Result<()> {
         }
         Command::Mine(a) => cmd_mine(db_path, a, j, &app_config),
         Command::Archive(a) => cmd_archive(db_path, a, j),
+    };
+
+    // WAL checkpoint after write commands to prevent unbounded WAL growth
+    if result.is_ok() {
+        if let Some(cp_path) = db_path_for_checkpoint {
+            if let Ok(conn) = db::open(&cp_path) {
+                let _ = db::checkpoint(&conn);
+            }
+        }
     }
+
+    result
 }
 
 async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig) -> Result<()> {
@@ -482,7 +515,12 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
     let resolved_ttl = app_config.effective_ttl();
     let archive_on_gc = app_config.effective_archive_on_gc();
     let conn = db::open(&db_path)?;
-    let state: handlers::Db = Arc::new(Mutex::new((conn, db_path.clone(), resolved_ttl, archive_on_gc)));
+    let state: handlers::Db = Arc::new(Mutex::new((
+        conn,
+        db_path.clone(),
+        resolved_ttl,
+        archive_on_gc,
+    )));
 
     // Automatic GC
     let gc_state = state.clone();
@@ -555,7 +593,12 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 
 // --- CLI ---
 
-fn cmd_store(db_path: PathBuf, args: StoreArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
+fn cmd_store(
+    db_path: PathBuf,
+    args: StoreArgs,
+    json_out: bool,
+    app_config: &config::AppConfig,
+) -> Result<()> {
     let conn = db::open(&db_path)?;
     let resolved_ttl = app_config.effective_ttl();
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
@@ -888,7 +931,12 @@ fn cmd_recall(
     Ok(())
 }
 
-fn cmd_search(db_path: PathBuf, args: SearchArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
+fn cmd_search(
+    db_path: PathBuf,
+    args: SearchArgs,
+    json_out: bool,
+    app_config: &config::AppConfig,
+) -> Result<()> {
     let conn = db::open(&db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
@@ -960,7 +1008,12 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_list(db_path: PathBuf, args: ListArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
+fn cmd_list(
+    db_path: PathBuf,
+    args: ListArgs,
+    json_out: bool,
+    app_config: &config::AppConfig,
+) -> Result<()> {
     let conn = db::open(&db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
@@ -1249,7 +1302,12 @@ fn cmd_resolve(db_path: PathBuf, args: ResolveArgs, json_out: bool) -> Result<()
         Some(0.1),
         None,
     )?;
-    db::touch(&conn, &args.winner_id, models::SHORT_TTL_EXTEND_SECS, models::MID_TTL_EXTEND_SECS)?;
+    db::touch(
+        &conn,
+        &args.winner_id,
+        models::SHORT_TTL_EXTEND_SECS,
+        models::MID_TTL_EXTEND_SECS,
+    )?;
     if json_out {
         println!(
             "{}",
@@ -1300,7 +1358,17 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                     eprintln!("usage: recall <context>");
                     continue;
                 }
-                match db::recall(&conn, &ctx, None, 10, None, None, None, models::SHORT_TTL_EXTEND_SECS, models::MID_TTL_EXTEND_SECS) {
+                match db::recall(
+                    &conn,
+                    &ctx,
+                    None,
+                    10,
+                    None,
+                    None,
+                    None,
+                    models::SHORT_TTL_EXTEND_SECS,
+                    models::MID_TTL_EXTEND_SECS,
+                ) {
                     Ok(results) => {
                         for (mem, score) in &results {
                             println!(
@@ -1674,7 +1742,10 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
         } => {
             let items = db::list_archived(&conn, namespace.as_deref(), limit, offset)?;
             if json_out {
-                println!("{}", serde_json::json!({"archived": items, "count": items.len()}));
+                println!(
+                    "{}",
+                    serde_json::json!({"archived": items, "count": items.len()})
+                );
             } else {
                 if items.is_empty() {
                     println!("no archived memories");
@@ -1716,10 +1787,7 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
             if json_out {
                 println!("{}", stats);
             } else {
-                println!(
-                    "archived: {} total",
-                    stats["archived_total"]
-                );
+                println!("archived: {} total", stats["archived_total"]);
                 if let Some(by_ns) = stats["by_namespace"].as_array() {
                     for ns in by_ns {
                         println!(
@@ -1735,7 +1803,12 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
     Ok(())
 }
 
-fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
+fn cmd_mine(
+    db_path: PathBuf,
+    args: MineArgs,
+    json_out: bool,
+    app_config: &config::AppConfig,
+) -> Result<()> {
     let format = mine::Format::from_str(&args.format).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid format: {} (use claude, chatgpt, slack)",
@@ -1837,7 +1910,8 @@ fn cmd_mine(db_path: PathBuf, args: MineArgs, json_out: bool, app_config: &confi
             }
         };
 
-        let expires_at = app_config.effective_ttl()
+        let expires_at = app_config
+            .effective_ttl()
             .ttl_for_tier(&tier)
             .map(|s| (now + Duration::seconds(s)).to_rfc3339());
 

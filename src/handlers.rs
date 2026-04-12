@@ -713,25 +713,38 @@ pub async fn list_archive(
         Ok(items) => Json(json!({"archived": items, "count": items.len()})).into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal server error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
         }
     }
 }
 
-pub async fn restore_archive(
-    State(state): State<Db>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
+pub async fn restore_archive(State(state): State<Db>, Path(id): Path<String>) -> impl IntoResponse {
     if let Err(e) = validate::validate_id(&id) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
     }
     let lock = state.lock().await;
     match db::restore_archived(&lock.0, &id) {
         Ok(true) => Json(json!({"restored": true, "id": id})).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found in archive"}))).into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "not found in archive"})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal server error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
         }
     }
 }
@@ -750,7 +763,11 @@ pub async fn purge_archive(
         Ok(n) => Json(json!({"purged": n})).into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal server error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
         }
     }
 }
@@ -761,7 +778,11 @@ pub async fn archive_stats(State(state): State<Db>) -> impl IntoResponse {
         Ok(stats) => Json(stats).into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "internal server error"}))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
         }
     }
 }
