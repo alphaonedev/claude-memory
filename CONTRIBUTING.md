@@ -59,6 +59,8 @@ cargo test
 6. Fill out the PR description with what changed and why.
 7. Address any review feedback.
 
+See the 8-step feature checklist in [DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for end-to-end guidance on adding new features.
+
 PRs require at least one approval before merging.
 
 ## Commit Message Conventions

@@ -71,6 +71,18 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now ai-memory
 ```
 
+**Production Hardening:** Add security directives to the `[Service]` section to restrict the daemon's privileges:
+
+```ini
+[Service]
+User=ai-memory
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+NoNewPrivileges=yes
+ReadWritePaths=/var/lib/ai-memory
+```
+
 Check status:
 
 ```bash
@@ -195,6 +207,7 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 |----------|---------|-------------|
 | `AI_MEMORY_DB` | `ai-memory.db` | Database path (overridden by `--db`) |
 | `RUST_LOG` | (none) | Logging filter (e.g., `ai_memory=info,tower_http=debug`) |
+| `AI_MEMORY_NO_CONFIG` | (none) | Set to `1` to skip config file loading (useful for testing) |
 
 ### Configuration File (config.toml)
 
@@ -355,6 +368,8 @@ The HTTP daemon handles SIGINT (Ctrl+C) gracefully:
 
 For systemd, use `KillSignal=SIGINT` and `TimeoutStopSec=10` to ensure the checkpoint completes.
 
+> **Note:** The HTTP daemon handles SIGINT (Ctrl+C) gracefully with WAL checkpoint. Systemd sends SIGTERM by default -- the service file sets `KillSignal=SIGINT` to ensure clean shutdown.
+
 The MCP server exits cleanly when stdin closes (AI client session ends).
 
 ## Database Management
@@ -417,6 +432,15 @@ The schema is auto-migrated on startup. The `schema_version` table tracks the cu
 
 Migration error handling: only expected errors (e.g., "duplicate column" when re-running a migration) are silently ignored. Real failures are propagated and will prevent startup, ensuring data integrity.
 
+### Upgrade Procedure
+
+1. Stop the service: `sudo systemctl stop ai-memory`
+2. Backup the database: `sqlite3 /var/lib/ai-memory/ai-memory.db ".backup /var/lib/ai-memory/ai-memory-backup.db"`
+3. Install the new binary (e.g., `cargo install ai-memory` or replace the binary at `/usr/local/bin/ai-memory`)
+4. Start the service: `sudo systemctl start ai-memory`
+
+Schema migrations run automatically on startup. No manual migration steps are required.
+
 ### Database Maintenance
 
 Manually trigger garbage collection:
@@ -444,6 +468,8 @@ curl -X DELETE http://127.0.0.1:9077/api/v1/archive
 # View archive statistics
 curl http://127.0.0.1:9077/api/v1/archive/stats
 ```
+
+**Disk space guidance:** Approximate database growth: ~2KB per memory (keyword tier), ~3.5KB per memory (semantic tier, 384-dim embeddings), ~5KB per memory (768-dim embeddings). WAL file may grow up to ~50MB during heavy write bursts; checkpoint occurs on graceful shutdown. Archive table grows unboundedly -- use `ai-memory archive purge` periodically.
 
 Compact the database (reduces file size after many deletions):
 
@@ -513,9 +539,37 @@ By default, the HTTP daemon binds to `127.0.0.1` only. It is **not accessible fr
 
 The MCP server communicates over stdio only -- no network exposure.
 
+### CORS
+
+The HTTP server uses `CorsLayer::permissive()` -- any origin can make requests. For production, use a reverse proxy with restrictive CORS headers.
+
 ### No Authentication
 
 There is no authentication mechanism. This is by design -- the daemon is intended for localhost access only by your AI client (Claude AI, ChatGPT, Grok, Llama, or any other). If you expose it to a network, you are responsible for adding a reverse proxy with authentication.
+
+### Multi-User Warning
+
+ai-memory is a single-user tool. Namespaces do not provide access control. If multiple users share a database, any user can read/write any namespace.
+
+### TLS / Reverse Proxy
+
+ai-memory does not support TLS natively. For HTTPS, terminate TLS at a reverse proxy. Minimal nginx example:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name memory.example.com;
+
+    ssl_certificate     /etc/ssl/certs/memory.pem;
+    ssl_certificate_key /etc/ssl/private/memory.key;
+
+    location / {
+        proxy_pass http://127.0.0.1:9077;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+```
 
 ### Data at Rest
 
@@ -534,6 +588,8 @@ SQLite WAL mode creates two additional files alongside the database:
 Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint(TRUNCATE)` on SIGINT). If the daemon crashes, these files persist but are automatically recovered on next open.
 
 ## HTTP API Endpoints
+
+Maximum request body size: 50 MB.
 
 The HTTP daemon exposes **24 endpoints** under `/api/v1`:
 

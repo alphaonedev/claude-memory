@@ -686,6 +686,8 @@ These 21 tools are available to any MCP-compatible AI when configured as an MCP 
 
 24 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
+> **Security:** The HTTP server binds to 127.0.0.1 with no authentication and permissive CORS. Do not expose to the network without a reverse proxy with authentication.
+
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/v1/health` | Health check (verifies DB + FTS5 integrity) |

@@ -26,6 +26,7 @@ embeddings.rs    -- Embedding pipeline: HuggingFace model loading, vector genera
 llm.rs           -- LLM integration via Ollama for query expansion, auto-tagging, contradiction detection
 mine.rs          -- Retroactive conversation import from Claude, ChatGPT, and Slack exports
 reranker.rs      -- Hybrid recall algorithm: blends semantic (embedding) and keyword (FTS5) scores
+hnsw.rs          -- In-memory HNSW vector index for approximate nearest-neighbor search
 ```
 
 ### Embedding Pipeline (semantic tier and above)
@@ -36,6 +37,10 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 2. **Embedding generation** -- new memories are embedded at insert time; existing memories are backfilled on first startup with embeddings enabled
 3. **Storage** -- embeddings are stored as BLOB columns in the `memories` table (schema migration v3)
 4. **Hybrid recall** (`reranker.rs`) -- at recall time, the query is embedded and compared against stored embeddings via cosine similarity, then blended with FTS5 keyword scores to produce a final ranking
+
+**Embedding models:**
+- `all-MiniLM-L6-v2` (384 dimensions, ~90 MB) -- used at the `semantic` tier
+- `nomic-embed-text-v1.5` (768 dimensions, ~270 MB) -- used at the `smart` and `autonomous` tiers
 
 ## Code Structure
 
@@ -79,6 +84,17 @@ The MCP (Model Context Protocol) server implementation. MCP is an open standard 
 - `run_mcp_server()` -- main loop: reads lines from stdin, parses JSON-RPC, dispatches, writes responses to stdout
 
 Protocol version: `2024-11-05`. All tool responses are wrapped in MCP content blocks (`{"content": [{"type": "text", "text": "..."}]}`). The protocol is AI-agnostic -- any MCP client can connect.
+
+**MCP Prompts:** The server exposes 2 prompts via `prompts/list`:
+- **recall-first** -- System prompt with 8 behavioral rules for proactive memory use. Supports an optional `namespace` argument for scoped recall.
+- **memory-workflow** -- Quick reference card for all 21 tool usage patterns.
+
+**MCP Error Codes:** The server uses standard JSON-RPC 2.0 error codes:
+- `-32700` -- Parse error (malformed JSON)
+- `-32600` -- Invalid request (missing required fields)
+- `-32601` -- Method not found (unknown JSON-RPC method)
+- `-32602` -- Invalid params (bad tool arguments)
+- Application-level errors are returned as text in the MCP content block with `"isError": true`, not as JSON-RPC error codes.
 
 ### `src/validate.rs`
 
@@ -139,6 +155,8 @@ Key handlers:
 - `archive_list` / `archive_restore` / `archive_purge` / `archive_stats` -- archive management endpoints
 - All ID path parameters are validated before database access
 
+> **Note:** HTTP handlers are tested via integration tests (`tests/integration.rs`), not unit tests.
+
 ### `src/db.rs`
 
 The database layer. Key functions:
@@ -176,6 +194,14 @@ The database layer. Key functions:
 **FTS query sanitization**: The `sanitize_fts_query()` function strips all FTS5 special characters (`*`, `"`, `(`, `)`, `:`, `+`, `-`, `~`, `^`, `{`, `}`, `[`, `]`, `|`, `\`) from user input and wraps each remaining token in double quotes. This prevents injection of FTS query syntax that could cause unexpected results or errors.
 
 **Migration error handling**: The migration logic only ignores "duplicate column" errors (indicating the migration already ran). All other errors are propagated, ensuring real failures are caught early.
+
+### `src/hnsw.rs`
+
+In-memory HNSW (Hierarchical Navigable Small World) vector index for approximate nearest-neighbor search. The `VectorIndex` struct provides `insert`, `search`, and `remove` operations on dense embeddings. When the index is small (below the HNSW threshold), it falls back to linear scan. The index has no persistence -- it is rebuilt from the database on startup. This keeps the on-disk format simple (embeddings stored as BLOBs in SQLite) while providing fast in-memory ANN search during runtime.
+
+### `src/toon.rs`
+
+TOON (Token-Oriented Object Notation) serializer. Converts JSON recall/search/list responses into the compact TOON wire format. The format spec is documented in the [TOON Format Specification](#toon-format-specification) section below.
 
 ## Database Schema
 
@@ -1022,7 +1048,7 @@ cargo build --release
 - `tokenizers` -- HuggingFace tokenizers for text preprocessing
 - `reqwest` -- HTTP client for Ollama API communication (LLM inference)
 
-These dependencies are compiled conditionally based on feature flags. The `keyword` tier build excludes embedding and LLM dependencies entirely.
+All dependencies are always compiled; tier selection controls which features are activated at runtime.
 
 Release profile settings (from `Cargo.toml`):
 - `opt-level = 3`

@@ -667,6 +667,7 @@ ai-memory completions bash > ~/.local/share/bash-completion/completions/ai-memor
 
 # Zsh
 ai-memory completions zsh > ~/.zfunc/_ai-memory
+# Then add to ~/.zshrc: fpath+=~/.zfunc && autoload -Uz compinit && compinit
 
 # Fish
 ai-memory completions fish > ~/.config/fish/completions/ai-memory.fish

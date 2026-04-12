@@ -997,6 +997,8 @@ ai-memory supports 4 feature tiers, controlled by the `--tier` flag when startin
 | **smart** | Hybrid | Query expansion, auto-tagging, contradiction detection | Ollama + LLM (~1 GB RAM) |
 | **autonomous** | Hybrid | Full autonomous memory management | Ollama + LLM (~4 GB RAM) |
 
+> **Semantic tier first-run note:** The first run at the semantic tier (or above) downloads a ~100 MB embedding model from HuggingFace, which takes 30-60 seconds. Subsequent starts load from cache (~2 seconds). If the download fails, retry or use `--tier keyword` temporarily.
+
 ### Hybrid Recall (semantic tier and above)
 
 At the `semantic` tier and above, recall uses **hybrid scoring** that blends two signals:
@@ -1078,6 +1080,12 @@ ai-memory search "PostgreSQL"
 
 Search uses AND semantics -- all terms must match. Use this when you know exactly what you're looking for. Search uses the same 6-factor ranking but without the tier boost.
 
+### Search vs Recall
+
+Use **recall** when you vaguely remember something -- it uses fuzzy OR matching and returns ranked results. Any term can match, so it casts a wide net.
+
+Use **search** when you know exact keywords -- it requires all terms to match (AND semantics), so results are precise but narrower.
+
 ## CLI Command Reference
 
 All commands accept the following **global flags** (before the subcommand):
@@ -1139,6 +1147,8 @@ Recall memories relevant to a context. Fuzzy OR search with ranked results; auto
 | `--since` | | string | | Only memories created after this timestamp (RFC 3339) |
 | `--until` | | string | | Only memories created before this timestamp (RFC 3339) |
 | `--tier` | `-T` | string | | Feature tier for recall: `keyword`, `semantic`, `smart`, `autonomous` |
+
+> **Note:** Default limit is 10 for CLI, 10 for MCP, capped at 50.
 
 ---
 
@@ -1333,6 +1343,8 @@ List all namespaces with memory counts.
 
 Export all memories and links as JSON to stdout.
 
+Export format: `{"memories": [...], "links": [...], "count": N, "exported_at": "RFC3339"}`. Import expects the same structure (`count` and `exported_at` are optional).
+
 *(No command-specific flags)*
 
 ---
@@ -1462,7 +1474,8 @@ Connect related memories with typed relations:
 ai-memory link <source-id> <target-id> --relation supersedes
 ```
 
-Relation types:
+Valid relation types: `related_to` (default), `supersedes`, `contradicts`, `derived_from`.
+
 - `related_to` (default) -- general association
 - `supersedes` -- this memory replaces the other
 - `contradicts` -- these memories conflict
@@ -1600,10 +1613,17 @@ ai-memory search "migration" --since 2026-01-01T00:00:00Z --until 2026-03-01T00:
 Use the `mine` command to import memories from past conversations across platforms:
 
 ```bash
-ai-memory mine              # import from Claude conversation history
-ai-memory mine --chatgpt    # import from ChatGPT exports
-ai-memory mine --slack       # import from Slack exports
+ai-memory mine /path/to/export --format claude     # Claude JSONL export
+ai-memory mine /path/to/export.json --format chatgpt  # ChatGPT JSON export
+ai-memory mine /path/to/slack-export/ --format slack   # Slack export directory
 ```
+
+Supported formats (`--format` / `-f` flag values):
+- `claude` -- Claude JSONL conversation export
+- `chatgpt` -- ChatGPT JSON conversation export
+- `slack` -- Slack workspace export directory (contains channel subdirectories with JSON files)
+
+Additional flags: `--namespace` (override auto-detection), `--tier` (default: `mid`), `--min-messages` (minimum message count, default: 3), `--dry-run` (preview without writing).
 
 This extracts key knowledge from historical conversations and stores them as memories, giving your AI assistant a head start with context it would otherwise have lost.
 
@@ -1665,6 +1685,8 @@ ai-memory store -T "Deploy process" -c "..." --tags "devops,ci,deploy"
 ai-memory recall "deployment" --tags "devops"
 ```
 
+> **Tags format:** Tags are comma-separated strings in quotes: `--tags "devops,ci,deploy"`. Max 50 tags, 128 bytes each. Tags may contain hyphens and underscores but not spaces or commas.
+
 ## Interactive Shell
 
 The `shell` command opens a REPL (read-eval-print loop) for browsing and managing memories interactively. Output uses color-coded tier labels and priority bars.
@@ -1686,6 +1708,8 @@ Available REPL commands:
 | `delete <id>` (or `del`, `rm`) | Delete a memory |
 | `help` (or `h`) | Show command help |
 | `quit` (or `exit`, `q`) | Exit the shell |
+
+Type commands without the `ai-memory` prefix. Use up/down arrows for history. Exit with `quit`, `exit`, `Ctrl+C`, or `Ctrl+D`. The prompt shows `ai-memory>`.
 
 In the shell, tier labels are color-coded: red for short, yellow for mid, green for long. Priority is shown as a visual bar (`████░░░░░░`).
 
