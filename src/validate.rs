@@ -3,7 +3,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::models::*;
+use crate::models::{MAX_CONTENT_SIZE, CreateMemory, Memory, UpdateMemory};
 
 const MAX_TITLE_LEN: usize = 512;
 const MAX_NAMESPACE_LEN: usize = 128;
@@ -39,7 +39,7 @@ pub fn validate_title(title: &str) -> Result<()> {
         bail!("title cannot be empty");
     }
     if trimmed.chars().count() > MAX_TITLE_LEN {
-        bail!("title exceeds max length of {} characters", MAX_TITLE_LEN);
+        bail!("title exceeds max length of {MAX_TITLE_LEN} characters");
     }
     if !is_clean_string(trimmed) {
         bail!("title contains invalid characters");
@@ -52,7 +52,7 @@ pub fn validate_content(content: &str) -> Result<()> {
         bail!("content cannot be empty");
     }
     if content.len() > MAX_CONTENT_SIZE {
-        bail!("content exceeds max size of {} bytes", MAX_CONTENT_SIZE);
+        bail!("content exceeds max size of {MAX_CONTENT_SIZE} bytes");
     }
     if !is_clean_string(content) {
         bail!("content contains invalid characters");
@@ -67,8 +67,7 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
     }
     if trimmed.chars().count() > MAX_NAMESPACE_LEN {
         bail!(
-            "namespace exceeds max length of {} characters",
-            MAX_NAMESPACE_LEN
+            "namespace exceeds max length of {MAX_NAMESPACE_LEN} characters"
         );
     }
     if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
@@ -85,7 +84,7 @@ pub fn validate_source(source: &str) -> Result<()> {
         bail!("source cannot be empty");
     }
     if source.len() > MAX_SOURCE_LEN {
-        bail!("source exceeds max length of {} bytes", MAX_SOURCE_LEN);
+        bail!("source exceeds max length of {MAX_SOURCE_LEN} bytes");
     }
     if !VALID_SOURCES.contains(&source) {
         bail!(
@@ -99,7 +98,7 @@ pub fn validate_source(source: &str) -> Result<()> {
 
 pub fn validate_tags(tags: &[String]) -> Result<()> {
     if tags.len() > MAX_TAGS_COUNT {
-        bail!("too many tags (max {})", MAX_TAGS_COUNT);
+        bail!("too many tags (max {MAX_TAGS_COUNT})");
     }
     for tag in tags {
         let trimmed = tag.trim();
@@ -109,9 +108,7 @@ pub fn validate_tags(tags: &[String]) -> Result<()> {
         if trimmed.len() > MAX_TAG_LEN {
             let preview: String = trimmed.chars().take(20).collect();
             bail!(
-                "tag '{}...' exceeds max length of {} bytes",
-                preview,
-                MAX_TAG_LEN
+                "tag '{preview}...' exceeds max length of {MAX_TAG_LEN} bytes"
             );
         }
         if !is_clean_string(trimmed) {
@@ -126,7 +123,7 @@ pub fn validate_id(id: &str) -> Result<()> {
         bail!("id cannot be empty");
     }
     if id.len() > MAX_ID_LEN {
-        bail!("id exceeds max length of {} bytes", MAX_ID_LEN);
+        bail!("id exceeds max length of {MAX_ID_LEN} bytes");
     }
     if !is_clean_string(id) {
         bail!("id contains invalid characters");
@@ -137,7 +134,7 @@ pub fn validate_id(id: &str) -> Result<()> {
 pub fn validate_expires_at(expires_at: Option<&str>) -> Result<()> {
     if let Some(ts) = expires_at {
         if !is_valid_rfc3339(ts) {
-            bail!("expires_at is not valid RFC3339: '{}'", ts);
+            bail!("expires_at is not valid RFC3339: '{ts}'");
         }
         if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
             if dt < chrono::Utc::now() {
@@ -151,7 +148,7 @@ pub fn validate_expires_at(expires_at: Option<&str>) -> Result<()> {
 pub fn validate_ttl_secs(ttl: Option<i64>) -> Result<()> {
     if let Some(secs) = ttl {
         if secs <= 0 {
-            bail!("ttl_secs must be positive (got {})", secs);
+            bail!("ttl_secs must be positive (got {secs})");
         }
         if secs > 365 * 24 * 3600 {
             bail!("ttl_secs exceeds maximum of 1 year");
@@ -165,7 +162,7 @@ pub fn validate_relation(relation: &str) -> Result<()> {
         bail!("relation cannot be empty");
     }
     if relation.len() > MAX_RELATION_LEN {
-        bail!("relation exceeds max length of {} bytes", MAX_RELATION_LEN);
+        bail!("relation exceeds max length of {MAX_RELATION_LEN} bytes");
     }
     if !VALID_RELATIONS.contains(&relation) {
         bail!(
@@ -183,8 +180,7 @@ pub fn validate_confidence(confidence: f64) -> Result<()> {
     }
     if !(0.0..=1.0).contains(&confidence) {
         bail!(
-            "confidence must be between 0.0 and 1.0 (got {})",
-            confidence
+            "confidence must be between 0.0 and 1.0 (got {confidence})"
         );
     }
     Ok(())
@@ -192,12 +188,12 @@ pub fn validate_confidence(confidence: f64) -> Result<()> {
 
 pub fn validate_priority(priority: i32) -> Result<()> {
     if !(1..=10).contains(&priority) {
-        bail!("priority must be between 1 and 10 (got {})", priority);
+        bail!("priority must be between 1 and 10 (got {priority})");
     }
     Ok(())
 }
 
-/// Validate a full CreateMemory before insert.
+/// Validate a full `CreateMemory` before insert.
 pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_title(&mem.title)?;
     validate_content(&mem.content)?;
@@ -245,7 +241,7 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
 }
 
 /// Validate update fields (only validates present fields).
-/// Note: expires_at allows past dates in updates for programmatic TTL management
+/// Note: `expires_at` allows past dates in updates for programmatic TTL management
 /// and GC testing — only format is validated, not chronological ordering.
 pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     if let Some(ref t) = update.title {
@@ -272,10 +268,10 @@ pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     Ok(())
 }
 
-/// Validate expires_at format only (no past-date check). Used by update path.
+/// Validate `expires_at` format only (no past-date check). Used by update path.
 pub fn validate_expires_at_format(ts: &str) -> Result<()> {
     if !is_valid_rfc3339(ts) {
-        bail!("expires_at is not valid RFC3339: '{}'", ts);
+        bail!("expires_at is not valid RFC3339: '{ts}'");
     }
     Ok(())
 }
@@ -308,7 +304,7 @@ pub fn validate_consolidate(
     for id in ids {
         validate_id(id)?;
         if !seen.insert(id) {
-            bail!("duplicate memory ID: {}", id);
+            bail!("duplicate memory ID: {id}");
         }
     }
     validate_title(title)?;

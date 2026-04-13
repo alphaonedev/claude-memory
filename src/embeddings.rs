@@ -14,7 +14,7 @@ const MINILM_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
 #[allow(dead_code)]
 const MINILM_DIM: usize = 384;
 const MAX_SEQ_LEN: usize = 256;
-/// Fallback subdirectory under $HOME for pre-downloaded MiniLM model files
+/// Fallback subdirectory under $HOME for pre-downloaded `MiniLM` model files
 const FALLBACK_MODEL_SUBDIR: &str =
     ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/main";
 
@@ -63,8 +63,7 @@ impl Embedder {
             Ok(paths) => paths,
             Err(e) => {
                 eprintln!(
-                    "ai-memory: hf-hub download failed ({}), trying fallback dir",
-                    e
+                    "ai-memory: hf-hub download failed ({e}), trying fallback dir"
                 );
                 Self::load_from_fallback()?
             }
@@ -264,7 +263,7 @@ impl Embedder {
     }
 }
 
-/// Constant for backward compatibility — dimension of the default (MiniLM) embedding.
+/// Constant for backward compatibility — dimension of the default (`MiniLM`) embedding.
 #[allow(dead_code)]
 pub const EMBEDDING_DIM: usize = MINILM_DIM;
 

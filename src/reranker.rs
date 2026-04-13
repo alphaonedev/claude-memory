@@ -64,8 +64,7 @@ impl CrossEncoder {
             Ok(ce) => ce,
             Err(e) => {
                 eprintln!(
-                    "ai-memory: neural cross-encoder failed ({}), using lexical fallback",
-                    e
+                    "ai-memory: neural cross-encoder failed ({e}), using lexical fallback"
                 );
                 Self::Lexical
             }
@@ -182,7 +181,7 @@ impl CrossEncoder {
         content: &str,
     ) -> Result<f32> {
         // Cross-encoder input: "[CLS] query [SEP] title content [SEP]"
-        let document = format!("{} {}", title, content);
+        let document = format!("{title} {content}");
 
         let encoding = tokenizer
             .encode((query, document.as_str()), true)
@@ -230,7 +229,7 @@ impl CrossEncoder {
         let mut scored: Vec<(Memory, f64)> = candidates
             .drain(..)
             .map(|(mem, original_score)| {
-                let ce_score = self.score(query, &mem.title, &mem.content) as f64;
+                let ce_score = f64::from(self.score(query, &mem.title, &mem.content));
                 let final_score =
                     ORIGINAL_WEIGHT * original_score + CROSS_ENCODER_WEIGHT * ce_score;
                 (mem, final_score)

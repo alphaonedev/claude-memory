@@ -29,7 +29,7 @@ impl EmbeddingModel {
         }
     }
 
-    /// HuggingFace model identifier.
+    /// `HuggingFace` model identifier.
     pub fn hf_model_id(&self) -> &str {
         match self {
             Self::MiniLmL6V2 => "sentence-transformers/all-MiniLM-L6-v2",
@@ -81,7 +81,7 @@ impl LlmModel {
 pub enum FeatureTier {
     /// FTS5 keyword search only — 0 MB extra.
     Keyword,
-    /// MiniLM embeddings + HNSW index — ~256 MB.
+    /// `MiniLM` embeddings + HNSW index — ~256 MB.
     Semantic,
     /// nomic-embed + Gemma 4 E2B via Ollama — ~1 GB.
     Smart,
@@ -202,14 +202,10 @@ impl TierConfig {
             },
             models: CapabilityModels {
                 embedding: self
-                    .embedding_model
-                    .map(|m| m.hf_model_id().to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                embedding_dim: self.embedding_model.map(|m| m.dim()).unwrap_or(0),
+                    .embedding_model.map_or_else(|| "none".to_string(), |m| m.hf_model_id().to_string()),
+                embedding_dim: self.embedding_model.map_or(0, |m| m.dim()),
                 llm: self
-                    .llm_model
-                    .map(|m| m.ollama_model_id().to_string())
-                    .unwrap_or_else(|| "none".to_string()),
+                    .llm_model.map_or_else(|| "none".to_string(), |m| m.ollama_model_id().to_string()),
                 cross_encoder: if self.cross_encoder {
                     "cross-encoder/ms-marco-MiniLM-L-6-v2".to_string()
                 } else {
@@ -298,13 +294,13 @@ impl Default for ResolvedTtl {
 }
 
 /// Maximum configurable TTL: 10 years in seconds. Prevents integer overflow
-/// when adding Duration to Utc::now().
+/// when adding Duration to `Utc::now()`.
 const MAX_TTL_SECS: i64 = 315_360_000;
 
 #[allow(dead_code)]
 impl ResolvedTtl {
     /// Build from optional config overrides, falling back to compiled defaults.
-    /// TTL values are clamped to MAX_TTL_SECS (10 years) to prevent overflow.
+    /// TTL values are clamped to `MAX_TTL_SECS` (10 years) to prevent overflow.
     /// Extension values are clamped to non-negative.
     pub fn from_config(cfg: Option<&TtlConfig>) -> Self {
         let defaults = Self::default();
@@ -321,16 +317,13 @@ impl ResolvedTtl {
         Self {
             short_ttl_secs: c
                 .short_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.short_ttl_secs),
+                .map_or(defaults.short_ttl_secs, clamp_ttl),
             mid_ttl_secs: c
                 .mid_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.mid_ttl_secs),
+                .map_or(defaults.mid_ttl_secs, clamp_ttl),
             long_ttl_secs: c
                 .long_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.long_ttl_secs),
+                .map_or(defaults.long_ttl_secs, clamp_ttl),
             short_extend_secs: c
                 .short_extend_secs
                 .unwrap_or(defaults.short_extend_secs)
@@ -373,13 +366,13 @@ const CONFIG_FILE: &str = "config.toml";
 pub struct AppConfig {
     /// Feature tier: keyword, semantic, smart, autonomous
     pub tier: Option<String>,
-    /// Path to the SQLite database file
+    /// Path to the `SQLite` database file
     pub db: Option<String>,
-    /// Ollama base URL for LLM generation (default: http://localhost:11434)
+    /// Ollama base URL for LLM generation (default: <http://localhost:11434>)
     pub ollama_url: Option<String>,
-    /// Separate URL for embedding model (defaults to ollama_url if unset)
+    /// Separate URL for embedding model (defaults to `ollama_url` if unset)
     pub embed_url: Option<String>,
-    /// Embedding model override: mini_lm_l6_v2 or nomic_embed_v15
+    /// Embedding model override: `mini_lm_l6_v2` or `nomic_embed_v15`
     pub embedding_model: Option<String>,
     /// LLM model override (Ollama tag, e.g. "gemma4:e2b")
     pub llm_model: Option<String>,
@@ -446,9 +439,7 @@ impl AppConfig {
         }
         // Otherwise check config
         self.db
-            .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| cli_db.to_path_buf())
+            .as_ref().map_or_else(|| cli_db.to_path_buf(), PathBuf::from)
     }
 
     /// Resolve Ollama URL for LLM generation (config or default).
@@ -468,7 +459,7 @@ impl AppConfig {
         self.archive_on_gc.unwrap_or(true)
     }
 
-    /// Resolve URL for embedding model (falls back to ollama_url).
+    /// Resolve URL for embedding model (falls back to `ollama_url`).
     pub fn effective_embed_url(&self) -> &str {
         self.embed_url
             .as_deref()

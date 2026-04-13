@@ -118,7 +118,7 @@ enum Command {
     Completions(CompletionsArgs),
     /// Generate man page
     Man,
-    /// Import memories from historical conversations (Claude, ChatGPT, Slack exports)
+    /// Import memories from historical conversations (Claude, `ChatGPT`, Slack exports)
     Mine(MineArgs),
     /// Manage the memory archive (list, restore, purge, stats)
     Archive(ArchiveArgs),
@@ -778,13 +778,13 @@ fn cmd_recall(
         let embed_client = {
             let embed_url = app_config.effective_embed_url();
             let ollama_url = app_config.effective_ollama_url();
-            if embed_url != ollama_url {
+            if embed_url == ollama_url {
+                ollama_client.clone()
+            } else {
                 llm::OllamaClient::new_with_url(embed_url, "nomic-embed-text")
                     .ok()
                     .map(Arc::new)
                     .or(ollama_client.clone())
-            } else {
-                ollama_client.clone()
             }
         };
         match embeddings::Embedder::for_model(*emb_model, embed_client) {
@@ -796,7 +796,7 @@ fn cmd_recall(
                         eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
                         let mut ok = 0usize;
                         for (id, title, content) in &unembedded {
-                            let text = format!("{} {}", title, content);
+                            let text = format!("{title} {content}");
                             if let Ok(embedding) = emb.embed(&text) {
                                 if db::set_embedding(&conn, id, &embedding).is_ok() {
                                     ok += 1;
@@ -997,28 +997,25 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
     let conn = db::open(&db_path)?;
     validate::validate_id(&args.id)?;
-    match db::get(&conn, &args.id)? {
-        Some(mem) => {
-            let links = db::get_links(&conn, &args.id).unwrap_or_default();
-            if json_out {
-                println!(
-                    "{}",
-                    serde_json::to_string(&serde_json::json!({"memory": mem, "links": links}))?
-                );
-            } else {
-                println!("{}", serde_json::to_string_pretty(&mem)?);
-                if !links.is_empty() {
-                    println!("\nlinks:");
-                    for l in &links {
-                        println!("  {} --[{}]--> {}", l.source_id, l.relation, l.target_id);
-                    }
+    if let Some(mem) = db::get(&conn, &args.id)? {
+        let links = db::get_links(&conn, &args.id).unwrap_or_default();
+        if json_out {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({"memory": mem, "links": links}))?
+            );
+        } else {
+            println!("{}", serde_json::to_string_pretty(&mem)?);
+            if !links.is_empty() {
+                println!("\nlinks:");
+                for l in &links {
+                    println!("  {} --[{}]--> {}", l.source_id, l.relation, l.target_id);
                 }
             }
         }
-        None => {
-            eprintln!("not found: {}", args.id);
-            std::process::exit(1);
-        }
+    } else {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
     }
     Ok(())
 }
@@ -1133,11 +1130,11 @@ fn cmd_forget(db_path: PathBuf, args: ForgetArgs, json_out: bool) -> Result<()> 
             if json_out {
                 println!("{}", serde_json::json!({"deleted": n}));
             } else {
-                println!("forgot {} memories", n);
+                println!("forgot {n} memories");
             }
         }
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("error: {e}");
             std::process::exit(1);
         }
     }
@@ -1195,7 +1192,7 @@ fn cmd_gc(db_path: PathBuf, json_out: bool, app_config: &config::AppConfig) -> R
     if json_out {
         println!("{}", serde_json::json!({"expired_deleted": count}));
     } else {
-        println!("expired memories deleted: {}", count);
+        println!("expired memories deleted: {count}");
     }
     Ok(())
 }
@@ -1290,10 +1287,10 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
             serde_json::json!({"imported": imported, "errors": errors})
         );
     } else {
-        println!("imported: {}", imported);
+        println!("imported: {imported}");
         if !errors.is_empty() {
             for e in &errors {
-                eprintln!("  {}", e);
+                eprintln!("  {e}");
             }
         }
     }
@@ -1452,7 +1449,7 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                 }
                 match db::get(&conn, id) {
                     Ok(Some(mem)) => {
-                        println!("{}", serde_json::to_string_pretty(&mem).unwrap_or_default())
+                        println!("{}", serde_json::to_string_pretty(&mem).unwrap_or_default());
                     }
                     Ok(None) => eprintln!("not found"),
                     Err(e) => eprintln!("error: {e}"),
@@ -1534,7 +1531,7 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                     serde_json::json!({"direction": "pull", "imported": n})
                 );
             } else {
-                println!("pulled {} memories from remote", n);
+                println!("pulled {n} memories from remote");
             }
         }
         "push" => {
@@ -1569,7 +1566,7 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                     serde_json::json!({"direction": "push", "exported": n})
                 );
             } else {
-                println!("pushed {} memories to remote", n);
+                println!("pushed {n} memories to remote");
             }
         }
         "merge" => {
@@ -1627,7 +1624,7 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
                     serde_json::json!({"direction": "merge", "pulled": pulled, "pushed": pushed})
                 );
             } else {
-                println!("merged: pulled {}, pushed {}", pulled, pushed);
+                println!("merged: pulled {pulled}, pushed {pushed}");
             }
         }
         _ => anyhow::bail!(
@@ -1749,7 +1746,7 @@ fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: b
             );
         }
     } else {
-        println!("auto-consolidated {} memories", total);
+        println!("auto-consolidated {total} memories");
     }
     Ok(())
 }
@@ -1768,20 +1765,18 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
                     "{}",
                     serde_json::json!({"archived": items, "count": items.len()})
                 );
+            } else if items.is_empty() {
+                println!("no archived memories");
             } else {
-                if items.is_empty() {
-                    println!("no archived memories");
-                } else {
-                    for item in &items {
-                        println!(
-                            "[{}] {} (archived: {})",
-                            id_short(item["id"].as_str().unwrap_or("")),
-                            item["title"].as_str().unwrap_or(""),
-                            item["archived_at"].as_str().unwrap_or("")
-                        );
-                    }
-                    println!("{} archived memories", items.len());
+                for item in &items {
+                    println!(
+                        "[{}] {} (archived: {})",
+                        id_short(item["id"].as_str().unwrap_or("")),
+                        item["title"].as_str().unwrap_or(""),
+                        item["archived_at"].as_str().unwrap_or("")
+                    );
                 }
+                println!("{} archived memories", items.len());
             }
         }
         ArchiveAction::Restore { id } => {
@@ -1792,7 +1787,7 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
             } else if restored {
                 println!("restored: {}", id_short(&id));
             } else {
-                eprintln!("not found in archive: {}", id);
+                eprintln!("not found in archive: {id}");
                 std::process::exit(1);
             }
         }
@@ -1801,13 +1796,13 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
             if json_out {
                 println!("{}", serde_json::json!({"purged": purged}));
             } else {
-                println!("purged {} archived memories", purged);
+                println!("purged {purged} archived memories");
             }
         }
         ArchiveAction::Stats => {
             let stats = db::archive_stats(&conn)?;
             if json_out {
-                println!("{}", stats);
+                println!("{stats}");
             } else {
                 println!("archived: {} total", stats["archived_total"]);
                 if let Some(by_ns) = stats["by_namespace"].as_array() {
@@ -1895,8 +1890,8 @@ fn cmd_mine(
                 args.min_messages,
                 filtered.len()
             );
-            println!("Namespace: {}", namespace);
-            println!("Tier: {}\n", tier);
+            println!("Namespace: {namespace}");
+            println!("Tier: {tier}\n");
             for c in &filtered {
                 if let Some(m) = mine::conversation_to_memory(c, format) {
                     println!(
@@ -1924,12 +1919,9 @@ fn cmd_mine(
     conn.execute_batch("BEGIN")?;
 
     for conv in &filtered {
-        let mined = match mine::conversation_to_memory(conv, format) {
-            Some(m) => m,
-            None => {
-                skipped += 1;
-                continue;
-            }
+        let mined = if let Some(m) = mine::conversation_to_memory(conv, format) { m } else {
+            skipped += 1;
+            continue;
         };
 
         let expires_at = app_config
@@ -1991,7 +1983,7 @@ fn cmd_mine(
             skipped,
             errors
         );
-        println!("Namespace: {}, Tier: {}", namespace, tier);
+        println!("Namespace: {namespace}, Tier: {tier}");
     }
 
     Ok(())

@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use crate::config::ResolvedTtl;
 use crate::db;
-use crate::models::*;
+use crate::models::{CreateMemory, Memory, UpdateMemory, Tier, ListQuery, SearchQuery, RecallQuery, RecallBody, ForgetQuery, LinkBody, MemoryLink};
 use crate::validate;
 
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;

@@ -9,18 +9,18 @@ const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(30);
 const PULL_TIMEOUT: Duration = Duration::from_secs(120);
 
-const QUERY_EXPANSION_PROMPT: &str = r#"You are a search query expander. Given a search query, generate 5-8 additional search terms that are semantically related. Return ONLY the terms, one per line, no numbering or explanation.
+const QUERY_EXPANSION_PROMPT: &str = r"You are a search query expander. Given a search query, generate 5-8 additional search terms that are semantically related. Return ONLY the terms, one per line, no numbering or explanation.
 
-Query: {query}"#;
+Query: {query}";
 
-const SUMMARIZE_PROMPT: &str = r#"Summarize the following memories into a single concise paragraph. Preserve all key facts, decisions, and technical details.
+const SUMMARIZE_PROMPT: &str = r"Summarize the following memories into a single concise paragraph. Preserve all key facts, decisions, and technical details.
 
-{memories}"#;
+{memories}";
 
-const AUTO_TAG_PROMPT: &str = r#"Generate 3-5 short tags for categorizing this memory. Return ONLY the tags, one per line, lowercase, no symbols.
+const AUTO_TAG_PROMPT: &str = r"Generate 3-5 short tags for categorizing this memory. Return ONLY the tags, one per line, lowercase, no symbols.
 
 Title: {title}
-Content: {content}"#;
+Content: {content}";
 
 const CONTRADICTION_PROMPT: &str = r#"Do these two statements contradict each other? Answer ONLY "yes" or "no".
 
@@ -34,14 +34,14 @@ pub struct OllamaClient {
 }
 
 impl OllamaClient {
-    /// Creates a new OllamaClient with the default Ollama URL (http://localhost:11434).
+    /// Creates a new `OllamaClient` with the default Ollama URL (<http://localhost:11434>).
     /// Checks that Ollama is reachable before returning.
     #[allow(dead_code)]
     pub fn new(model: &str) -> Result<Self> {
         Self::new_with_url(DEFAULT_OLLAMA_URL, model)
     }
 
-    /// Creates a new OllamaClient with a custom base URL.
+    /// Creates a new `OllamaClient` with a custom base URL.
     /// Checks that Ollama is reachable before returning.
     pub fn new_with_url(base_url: &str, model: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
@@ -92,7 +92,7 @@ impl OllamaClient {
 
         let model_exists = body["models"]
             .as_array()
-            .map(|models| {
+            .is_some_and(|models| {
                 models.iter().any(|m| {
                     let name = m["name"].as_str().unwrap_or("");
                     // Match "model" or "model:tag" against our model string
@@ -103,8 +103,7 @@ impl OllamaClient {
                         || self.model == name.split(':').next().unwrap_or("")
                         || name == our_base
                 })
-            })
-            .unwrap_or(false);
+            });
 
         if model_exists {
             return Ok(());
@@ -131,7 +130,7 @@ impl OllamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            return Err(anyhow!("Ollama pull failed ({}): {}", status, text));
+            return Err(anyhow!("Ollama pull failed ({status}): {text}"));
         }
 
         tracing::info!("Model '{}' pulled successfully", self.model);
@@ -167,7 +166,7 @@ impl OllamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            return Err(anyhow!("Chat generate failed ({}): {}", status, text));
+            return Err(anyhow!("Chat generate failed ({status}): {text}"));
         }
 
         let body: Value = resp.json().context("Failed to parse chat response")?;
@@ -250,7 +249,7 @@ impl OllamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            return Err(anyhow!("Ollama embed failed ({}): {}", status, text));
+            return Err(anyhow!("Ollama embed failed ({status}): {text}"));
         }
 
         let body: Value = resp
@@ -289,15 +288,14 @@ impl OllamaClient {
         let body: Value = resp.json().context("Failed to parse /api/tags response")?;
         let model_exists = body["models"]
             .as_array()
-            .map(|models| {
+            .is_some_and(|models| {
                 models.iter().any(|m| {
                     let name = m["name"].as_str().unwrap_or("");
                     name == model
-                        || name.starts_with(&format!("{}:", model))
+                        || name.starts_with(&format!("{model}:"))
                         || model == name.split(':').next().unwrap_or("")
                 })
-            })
-            .unwrap_or(false);
+            });
 
         if model_exists {
             return Ok(());
@@ -319,9 +317,7 @@ impl OllamaClient {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
             return Err(anyhow!(
-                "Ollama embed model pull failed ({}): {}",
-                status,
-                text
+                "Ollama embed model pull failed ({status}): {text}"
             ));
         }
 

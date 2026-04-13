@@ -15,7 +15,7 @@ use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::*;
+use crate::models::{Tier, Memory};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -419,7 +419,7 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
                 .get("arguments")
                 .and_then(|a| a.get("namespace"))
                 .and_then(|v| v.as_str())
-                .map(|ns| format!(" Scope recall to namespace \"{}\" when relevant.", ns))
+                .map(|ns| format!(" Scope recall to namespace \"{ns}\" when relevant."))
                 .unwrap_or_default();
 
             Ok(json!({
@@ -601,8 +601,8 @@ fn handle_store(
     Ok(response)
 }
 
-/// Inject namespace standard into a recall/session_start response.
-/// Inject namespace standards into a recall/session_start response.
+/// Inject namespace standard into a `recall/session_start` response.
+/// Inject namespace standards into a `recall/session_start` response.
 /// Three-level rule layering: global ("*") + parent chain + namespace-specific.
 /// Max depth 5 to prevent cycles.
 fn inject_namespace_standard(
@@ -1088,7 +1088,7 @@ fn handle_consolidate(
                 validate::validate_id(s).map_err(|e| e.to_string())?;
                 ids.push(s.to_string());
             }
-            None => return Err(format!("ids[{}] must be a string", i)),
+            None => return Err(format!("ids[{i}] must be a string")),
         }
     }
     let title = params["title"].as_str().ok_or("title is required")?;
@@ -1103,7 +1103,7 @@ fn handle_consolidate(
         for id in &ids {
             match db::get(conn, id) {
                 Ok(Some(mem)) => memory_pairs.push((mem.title, mem.content)),
-                Ok(None) => return Err(format!("memory not found: {}", id)),
+                Ok(None) => return Err(format!("memory not found: {id}")),
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -1140,7 +1140,7 @@ fn handle_consolidate(
 
     // Generate embedding for the consolidated memory (#52)
     if let Some(emb) = embedder {
-        let text = format!("{} {}", title, summary);
+        let text = format!("{title} {summary}");
         match emb.embed(&text) {
             Ok(embedding) => {
                 if let Err(e) = db::set_embedding(conn, &new_id, &embedding) {
@@ -1177,7 +1177,7 @@ fn handle_consolidate(
     let standard_ids: Vec<&str> = ids
         .iter()
         .filter(|id| db::is_namespace_standard(conn, id))
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect();
     if !standard_ids.is_empty() {
         result["warning"] = json!(format!(
@@ -1269,7 +1269,7 @@ fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Op
 ///
 /// Example: cwd = /home/user/monorepo/frontend
 ///   → checks "frontend" (cwd), "monorepo" (parent), stops at home dir
-///   → if "monorepo" has a standard, sets parent_namespace of "frontend" to "monorepo"
+///   → if "monorepo" has a standard, sets `parent_namespace` of "frontend" to "monorepo"
 fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
     // Only run if this namespace doesn't already have an explicit parent
     if db::get_namespace_parent(conn, namespace).is_some() {
@@ -1281,7 +1281,7 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
     };
     let home = dirs::home_dir().unwrap_or_default();
     // Walk up from parent of cwd (cwd itself IS the namespace)
-    let mut current = cwd.parent().map(|p| p.to_path_buf());
+    let mut current = cwd.parent().map(std::path::Path::to_path_buf);
     while let Some(dir) = current {
         // Stop at or above home directory
         if dir == home || !dir.starts_with(&home) {
@@ -1308,7 +1308,7 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
                 break;
             }
         }
-        current = dir.parent().map(|p| p.to_path_buf());
+        current = dir.parent().map(std::path::Path::to_path_buf);
     }
 }
 
@@ -1618,8 +1618,7 @@ pub fn run_mcp_server(
                     eprintln!("ai-memory: llm_model override from config: gemma4:e4b");
                 }
                 other => eprintln!(
-                    "ai-memory: unknown llm_model '{}', using tier default",
-                    other
+                    "ai-memory: unknown llm_model '{other}', using tier default"
                 ),
             }
         }
@@ -1643,8 +1642,7 @@ pub fn run_mcp_server(
                     );
                 }
                 other => eprintln!(
-                    "ai-memory: unknown embedding_model '{}', using tier default",
-                    other
+                    "ai-memory: unknown embedding_model '{other}', using tier default"
                 ),
             }
         }
@@ -1662,8 +1660,7 @@ pub fn run_mcp_server(
         match OllamaClient::new_with_url(ollama_url, model_id) {
             Ok(client) => {
                 eprintln!(
-                    "ai-memory: Ollama connected, ensuring model {} is available...",
-                    model_id
+                    "ai-memory: Ollama connected, ensuring model {model_id} is available..."
                 );
                 if let Err(e) = client.ensure_model() {
                     eprintln!("ai-memory: model pull failed: {e} (LLM features disabled)");
@@ -1687,9 +1684,11 @@ pub fn run_mcp_server(
     let embed_client: Option<Arc<OllamaClient>> = {
         let embed_url = app_config.effective_embed_url();
         let ollama_url = app_config.effective_ollama_url();
-        if embed_url != ollama_url {
+        if embed_url == ollama_url {
+            llm.clone()
+        } else {
             // Separate embed URL configured — create a dedicated client for embeddings
-            eprintln!("ai-memory: using separate embed URL: {}", embed_url);
+            eprintln!("ai-memory: using separate embed URL: {embed_url}");
             match OllamaClient::new_with_url(embed_url, "nomic-embed-text") {
                 Ok(client) => Some(Arc::new(client)),
                 Err(e) => {
@@ -1697,8 +1696,6 @@ pub fn run_mcp_server(
                     llm.clone()
                 }
             }
-        } else {
-            llm.clone()
         }
     };
     let embedder = if let Some(ref emb_model) = tier_config.embedding_model {
@@ -1711,7 +1708,7 @@ pub fn run_mcp_server(
                         eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
                         let mut ok = 0usize;
                         for (id, title, content) in &unembedded {
-                            let text = format!("{} {}", title, content);
+                            let text = format!("{title} {content}");
                             match emb.embed(&text) {
                                 Ok(embedding) => {
                                     if db::set_embedding(&conn, id, &embedding).is_ok() {
@@ -1788,8 +1785,7 @@ pub fn run_mcp_server(
         "keyword"
     };
     eprintln!(
-        "ai-memory MCP server started (stdio, tier={})",
-        effective_tier
+        "ai-memory MCP server started (stdio, tier={effective_tier})"
     );
 
     for line in stdin.lock().lines() {

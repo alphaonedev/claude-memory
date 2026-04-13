@@ -1,7 +1,7 @@
 // Copyright (c) 2026 AlphaOne LLC. All rights reserved.
 // Licensed under the MIT License. See LICENSE file in the project root.
 
-//! Retroactive conversation import from Claude, ChatGPT, and Slack exports.
+//! Retroactive conversation import from Claude, `ChatGPT`, and Slack exports.
 
 use anyhow::{bail, Context, Result};
 use std::fs;
@@ -102,10 +102,10 @@ fn parse_claude_conversation(
 ) -> Result<Option<Conversation>> {
     let id = val["uuid"]
         .as_str()
-        .unwrap_or(&format!("claude-{}", line_num))
+        .unwrap_or(&format!("claude-{line_num}"))
         .to_string();
-    let title = val["name"].as_str().map(|s| s.to_string());
-    let created_at = val["created_at"].as_str().map(|s| s.to_string());
+    let title = val["name"].as_str().map(std::string::ToString::to_string);
+    let created_at = val["created_at"].as_str().map(std::string::ToString::to_string);
 
     let mut messages = Vec::new();
 
@@ -131,7 +131,7 @@ fn parse_claude_conversation(
                 let timestamp = msg["created_at"]
                     .as_str()
                     .or_else(|| msg["timestamp"].as_str())
-                    .map(|s| s.to_string());
+                    .map(std::string::ToString::to_string);
                 messages.push(Message {
                     role,
                     content,
@@ -161,14 +161,14 @@ fn parse_claude_conversation(
 
                 let content = extract_message_content(msg);
                 if !content.is_empty() {
-                    let ts = msg.get("create_time").and_then(|t| t.as_f64()).map(|t| {
+                    let ts = msg.get("create_time").and_then(serde_json::Value::as_f64).map(|t| {
                         chrono::DateTime::from_timestamp(t as i64, 0)
                             .map(|dt| dt.to_rfc3339())
                             .unwrap_or_default()
                     });
                     let sort_key = msg
                         .get("create_time")
-                        .and_then(|t| t.as_f64())
+                        .and_then(serde_json::Value::as_f64)
                         .unwrap_or(0.0)
                         .to_string();
                     node_messages.push((
@@ -202,7 +202,7 @@ fn parse_claude_conversation(
 // Parse: ChatGPT (JSON)
 // ---------------------------------------------------------------------------
 
-/// Parse ChatGPT's conversations.json export.
+/// Parse `ChatGPT`'s conversations.json export.
 pub fn parse_chatgpt(path: &Path) -> Result<Vec<Conversation>> {
     let data = fs::read_to_string(path)
         .with_context(|| format!("failed to read ChatGPT export: {}", path.display()))?;
@@ -219,9 +219,9 @@ pub fn parse_chatgpt(path: &Path) -> Result<Vec<Conversation>> {
     for (idx, conv_val) in arr.iter().enumerate() {
         let id = conv_val["id"]
             .as_str()
-            .unwrap_or(&format!("chatgpt-{}", idx))
+            .unwrap_or(&format!("chatgpt-{idx}"))
             .to_string();
-        let title = conv_val["title"].as_str().map(|s| s.to_string());
+        let title = conv_val["title"].as_str().map(std::string::ToString::to_string);
         let created_at = conv_val["create_time"]
             .as_f64()
             .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
@@ -294,9 +294,9 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
     // Each subdirectory is a channel
     let mut entries: Vec<_> = fs::read_dir(path)
         .with_context(|| format!("failed to read Slack export dir: {}", path.display()))?
-        .filter_map(|e| e.ok())
+        .filter_map(std::result::Result::ok)
         .collect();
-    entries.sort_by_key(|e| e.file_name());
+    entries.sort_by_key(std::fs::DirEntry::file_name);
 
     for entry in entries {
         let channel_path = entry.path();
@@ -307,15 +307,14 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
 
         // Collect all JSON files in the channel, sorted by date
         let mut json_files: Vec<_> = fs::read_dir(&channel_path)?
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .filter(|e| {
                 e.path()
                     .extension()
-                    .map(|ext| ext == "json")
-                    .unwrap_or(false)
+                    .is_some_and(|ext| ext == "json")
             })
             .collect();
-        json_files.sort_by_key(|e| e.file_name());
+        json_files.sort_by_key(std::fs::DirEntry::file_name);
 
         let mut all_messages = Vec::new();
 
@@ -358,8 +357,8 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
         let created_at = all_messages.first().and_then(|m| m.timestamp.clone());
 
         conversations.push(Conversation {
-            id: format!("slack-{}", channel_name),
-            title: Some(format!("#{}", channel_name)),
+            id: format!("slack-{channel_name}"),
+            title: Some(format!("#{channel_name}")),
             messages: all_messages,
             created_at,
         });
@@ -372,7 +371,7 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
 // Content extraction
 // ---------------------------------------------------------------------------
 
-/// Extract text from a serde_json::Value that may be a string or array of parts.
+/// Extract text from a `serde_json::Value` that may be a string or array of parts.
 fn extract_text_content(val: &serde_json::Value) -> Option<String> {
     if let Some(s) = val.as_str() {
         return Some(s.to_string());
@@ -383,7 +382,7 @@ fn extract_text_content(val: &serde_json::Value) -> Option<String> {
             .filter_map(|p| {
                 if let Some(s) = p.as_str() {
                     Some(s.to_string())
-                } else { p["text"].as_str().map(|s| s.to_string()) }
+                } else { p["text"].as_str().map(std::string::ToString::to_string) }
             })
             .collect();
         if !parts.is_empty() {
@@ -426,7 +425,7 @@ fn extract_message_content(msg: &serde_json::Map<String, serde_json::Value>) -> 
 // Conversion to memories
 // ---------------------------------------------------------------------------
 
-/// Convert a parsed conversation into a MinedMemory ready for storage.
+/// Convert a parsed conversation into a `MinedMemory` ready for storage.
 pub fn conversation_to_memory(conv: &Conversation, format: Format) -> Option<MinedMemory> {
     if conv.messages.is_empty() {
         return None;
@@ -436,9 +435,7 @@ pub fn conversation_to_memory(conv: &Conversation, format: Format) -> Option<Min
     let title = conv
         .title
         .as_deref()
-        .filter(|t| !t.is_empty())
-        .map(|t| truncate(t, 100).to_string())
-        .unwrap_or_else(|| {
+        .filter(|t| !t.is_empty()).map_or_else(|| {
             let first_user = conv
                 .messages
                 .iter()
@@ -448,7 +445,7 @@ pub fn conversation_to_memory(conv: &Conversation, format: Format) -> Option<Min
                 Some(m) => truncate(&m.content, 100).to_string(),
                 None => format!("Conversation {}", &conv.id),
             }
-        });
+        }, |t| truncate(t, 100).to_string());
 
     // Content: formatted message concatenation
     let mut content = String::new();

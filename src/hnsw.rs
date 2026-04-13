@@ -50,7 +50,7 @@ pub struct VectorHit {
 }
 
 impl VectorIndex {
-    /// Build a new index from a list of (memory_id, embedding) pairs.
+    /// Build a new index from a list of (`memory_id`, embedding) pairs.
     pub fn build(entries: Vec<(String, Vec<f32>)>) -> Self {
         let hnsw = Self::build_hnsw(&entries);
         VectorIndex {
