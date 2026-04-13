@@ -71,13 +71,22 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
         out.push('\n');
     }
 
-    // Namespace standard — separate section if present
+    // Namespace standards — separate section if present
+    let mut std_list: Vec<&Value> = Vec::new();
     if let Some(standard) = response.get("standard") {
-        out.push_str("standard[id|title|content]:\n");
-        let id = format_value(standard.get("id"));
-        let title = format_value(standard.get("title"));
-        let content = format_value(standard.get("content"));
-        out.push_str(&format!("{}|{}|{}\n", id, title, content));
+        std_list.push(standard);
+    }
+    if let Some(standards) = response.get("standards").and_then(|v| v.as_array()) {
+        std_list.extend(standards.iter());
+    }
+    if !std_list.is_empty() {
+        out.push_str("standards[id|title|content]:\n");
+        for standard in &std_list {
+            let id = format_value(standard.get("id"));
+            let title = format_value(standard.get("title"));
+            let content = format_value(standard.get("content"));
+            out.push_str(&format!("{}|{}|{}\n", id, title, content));
+        }
     }
 
     // Header line — field names declared once

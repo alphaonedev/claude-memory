@@ -2397,16 +2397,138 @@ fn test_promote_clears_expires_at() {
 }
 
 #[test]
-fn test_version_flag_patch3() {
+fn test_version_flag_patch4() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let output = cmd(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.5.4-patch.3"),
-        "version should be 0.5.4-patch.3, got: {}",
+        stdout.contains("0.5.4-patch.4"),
+        "version should be 0.5.4-patch.4, got: {}",
         stdout
     );
+}
+
+// --- Patch 4: auto-detect parent by prefix ---
+
+#[test]
+fn test_namespace_auto_detect_parent() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-ns-autoparent-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Store parent namespace standard
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "myproject",
+            "-T",
+            "Project Standard",
+            "--content",
+            "Project-level rules",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let parent_stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let parent_id = parent_stored["id"].as_str().unwrap().to_string();
+
+    // Store child namespace standard
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "myproject-tests",
+            "-T",
+            "Test Standard",
+            "--content",
+            "Test-level rules",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let child_stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let child_id = child_stored["id"].as_str().unwrap().to_string();
+
+    // Set parent standard first, then child (no explicit parent — should auto-detect)
+    let mcp_input = format!(
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject","id":"{}"}}}}}}"#,
+            parent_id
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject-tests","id":"{}"}}}}}}"#,
+            child_id
+        ),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_recall","arguments":{"context":"rules","namespace":"myproject-tests","format":"json"}}}"#,
+    );
+
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(mcp_input.as_bytes()).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.len() >= 4,
+        "expected 4 MCP responses, got {}",
+        lines.len()
+    );
+
+    // Parse recall response — should have "standards" array with both parent and child
+    let recall_resp: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    let recall_text = recall_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let recall_data: serde_json::Value = serde_json::from_str(recall_text).unwrap();
+
+    // Should have standards array (parent + child = 2 levels)
+    assert!(
+        recall_data.get("standards").is_some(),
+        "recall should include 'standards' array for multi-level layering, got: {}",
+        recall_data
+    );
+    let standards = recall_data["standards"].as_array().unwrap();
+    assert_eq!(
+        standards.len(),
+        2,
+        "should have 2 standards (parent + child)"
+    );
+
+    // First should be parent (broader scope first)
+    assert_eq!(standards[0]["title"], "Project Standard");
+    // Second should be child (more specific)
+    assert_eq!(standards[1]["title"], "Test Standard");
+
+    let _ = std::fs::remove_file(&db_path);
 }
 
 // --- Patch 3: namespace standard auto-prepend via MCP ---

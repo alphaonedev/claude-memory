@@ -1,6 +1,6 @@
 [package]
 name = "ai-memory"
-version = "0.5.4-patch.3"
+version = "0.5.4-patch.4"
 edition = "2021"
 authors = ["AlphaOne LLC"]
 description = "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI for any AI platform"
@@ -14,6 +14,7 @@ categories = ["artificial-intelligence", "command-line-utilities", "database"]
 anyhow = "1"
 axum = { version = "0.8", features = ["json"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
+dirs = "6"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 clap_mangen = "0.2"

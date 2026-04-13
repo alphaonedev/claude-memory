@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 "#;
 
-const CURRENT_SCHEMA_VERSION: i64 = 5;
+const CURRENT_SCHEMA_VERSION: i64 = 6;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -173,6 +173,15 @@ fn migrate(conn: &Connection) -> Result<()> {
                     updated_at   TEXT NOT NULL
                 );",
             )?;
+        }
+        if version < 6 {
+            // Add parent_namespace column for rule layering
+            let has_parent: bool = conn
+                .prepare("SELECT parent_namespace FROM namespace_meta LIMIT 0")
+                .is_ok();
+            if !has_parent {
+                conn.execute_batch("ALTER TABLE namespace_meta ADD COLUMN parent_namespace TEXT;")?;
+            }
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -1444,26 +1453,55 @@ pub fn health_check(conn: &Connection) -> Result<bool> {
 // Namespace standards
 // ---------------------------------------------------------------------------
 
-/// Set the standard memory for a namespace.
-pub fn set_namespace_standard(conn: &Connection, namespace: &str, standard_id: &str) -> Result<()> {
-    let mem = get(conn, standard_id)?
+/// Set the standard memory for a namespace, with optional parent for rule layering.
+pub fn set_namespace_standard(
+    conn: &Connection,
+    namespace: &str,
+    standard_id: &str,
+    parent: Option<&str>,
+) -> Result<()> {
+    // Verify the memory exists (but allow cross-namespace — shared policy)
+    let _mem = get(conn, standard_id)?
         .ok_or_else(|| anyhow::anyhow!("memory not found: {}", standard_id))?;
-    if mem.namespace != namespace {
-        anyhow::bail!(
-            "memory {} belongs to namespace '{}', not '{}'",
-            standard_id,
-            mem.namespace,
-            namespace
-        );
-    }
+    // Resolve parent: explicit > auto-detect by `-` prefix > none
+    let resolved_parent = match parent {
+        Some(p) => {
+            if p == namespace {
+                anyhow::bail!("namespace cannot be its own parent");
+            }
+            Some(p.to_string())
+        }
+        None => auto_detect_parent(conn, namespace),
+    };
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO namespace_meta (namespace, standard_id, updated_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(namespace) DO UPDATE SET standard_id = ?2, updated_at = ?3",
-        params![namespace, standard_id, now],
+        "INSERT INTO namespace_meta (namespace, standard_id, updated_at, parent_namespace)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(namespace) DO UPDATE SET standard_id = ?2, updated_at = ?3, parent_namespace = ?4",
+        params![namespace, standard_id, now, resolved_parent],
     )?;
     Ok(())
+}
+
+/// Auto-detect parent namespace by `-` prefix.
+/// "ai-memory-tests" → checks "ai-memory" → checks "ai" → first match wins.
+fn auto_detect_parent(conn: &Connection, namespace: &str) -> Option<String> {
+    let mut candidate = namespace.to_string();
+    while let Some(pos) = candidate.rfind('-') {
+        candidate.truncate(pos);
+        if candidate.is_empty() {
+            break;
+        }
+        // Check if this candidate has a standard set
+        if get_namespace_standard(conn, &candidate)
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Get the standard memory ID for a namespace.
@@ -1476,6 +1514,16 @@ pub fn get_namespace_standard(conn: &Connection, namespace: &str) -> Result<Opti
         )
         .ok();
     Ok(result)
+}
+
+/// Get the parent namespace for a given namespace.
+pub fn get_namespace_parent(conn: &Connection, namespace: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT parent_namespace FROM namespace_meta WHERE namespace = ?1 AND parent_namespace IS NOT NULL",
+        params![namespace],
+        |r| r.get(0),
+    )
+    .ok()
 }
 
 /// Clear the standard for a namespace.
