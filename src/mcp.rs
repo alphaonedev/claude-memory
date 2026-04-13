@@ -349,12 +349,13 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_namespace_set_standard",
-                "description": "Set a memory as the standard/policy for a namespace. This memory will be automatically prepended to recall and session_start results scoped to that namespace.",
+                "description": "Set a memory as the standard/policy for a namespace. Auto-prepended to recall and session_start. Supports rule layering: set a parent namespace to inherit its standard too (global '*' + parent + namespace).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "namespace": {"type": "string", "description": "Namespace to set the standard for"},
-                        "id": {"type": "string", "description": "Memory ID to use as the standard"}
+                        "id": {"type": "string", "description": "Memory ID to use as the standard"},
+                        "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"}
                     },
                     "required": ["namespace", "id"]
                 }
@@ -601,25 +602,80 @@ fn handle_store(
 }
 
 /// Inject namespace standard into a recall/session_start response.
-/// Only runs when namespace is explicitly provided. Deduplicates from results.
+/// Inject namespace standards into a recall/session_start response.
+/// Three-level rule layering: global ("*") + parent chain + namespace-specific.
+/// Max depth 5 to prevent cycles.
 fn inject_namespace_standard(
     conn: &rusqlite::Connection,
     namespace: Option<&str>,
     response: &mut Value,
 ) {
-    let ns = match namespace {
-        Some(ns) => ns,
-        None => return, // unscoped — no standard
-    };
-    if let Some(standard) = lookup_namespace_standard(conn, ns) {
-        let standard_id = standard["id"].as_str().unwrap_or_default().to_string();
-        // Deduplicate: remove standard from results array if present
-        if let Some(memories) = response["memories"].as_array_mut() {
-            memories.retain(|m| m["id"].as_str().unwrap_or_default() != standard_id);
-            // Update count to reflect deduplication
-            response["count"] = json!(memories.len());
+    let mut standards: Vec<Value> = Vec::new();
+    let mut standard_ids: Vec<String> = Vec::new();
+
+    // Helper: add a standard if not already present (dedup by memory ID)
+    let add_standard = |std: Value, ids: &mut Vec<String>, stds: &mut Vec<Value>| {
+        let id = std["id"].as_str().unwrap_or_default().to_string();
+        if !ids.contains(&id) {
+            ids.push(id);
+            stds.push(std);
         }
-        response["standard"] = standard;
+    };
+
+    // Level 1: global standard ("*") — always applies
+    if let Some(global) = lookup_namespace_standard(conn, "*") {
+        add_standard(global, &mut standard_ids, &mut standards);
+    }
+
+    // Level 2+: walk parent chain from namespace, then add namespace itself
+    if let Some(ns) = namespace {
+        if ns != "*" {
+            // Collect the parent chain (bottom-up), then reverse to get top-down order
+            let mut chain: Vec<String> = Vec::new();
+            let mut current = ns.to_string();
+            for _ in 0..5 {
+                // max depth 5
+                if let Some(parent) = db::get_namespace_parent(conn, &current) {
+                    if parent == "*" || chain.contains(&parent) {
+                        break; // don't re-add global or cycle
+                    }
+                    chain.push(parent.clone());
+                    current = parent;
+                } else {
+                    break;
+                }
+            }
+            // Add parents top-down (grandparent first, then parent)
+            for ancestor in chain.into_iter().rev() {
+                if let Some(std) = lookup_namespace_standard(conn, &ancestor) {
+                    add_standard(std, &mut standard_ids, &mut standards);
+                }
+            }
+            // Add the namespace's own standard last (most specific)
+            if let Some(ns_std) = lookup_namespace_standard(conn, ns) {
+                add_standard(ns_std, &mut standard_ids, &mut standards);
+            }
+        }
+    }
+
+    if standards.is_empty() {
+        return;
+    }
+
+    // Deduplicate: remove standard memories from results array
+    if let Some(memories) = response["memories"].as_array_mut() {
+        memories.retain(|m| {
+            let mid = m["id"].as_str().unwrap_or_default();
+            !standard_ids.iter().any(|sid| sid == mid)
+        });
+        response["count"] = json!(memories.len());
+    }
+
+    // Return as single object if one standard, array if multiple
+    if standards.len() == 1 {
+        response["standard"] = standards.into_iter().next().unwrap();
+    } else {
+        response["standards"] = json!(standards);
     }
 }
 
@@ -1133,8 +1189,6 @@ fn handle_consolidate(
     Ok(result)
 }
 
-// --- MCP protocol handler ---
-
 // ---------------------------------------------------------------------------
 // Namespace standard handlers
 // ---------------------------------------------------------------------------
@@ -1149,8 +1203,16 @@ fn handle_namespace_set_standard(
     validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
-    db::set_namespace_standard(conn, namespace, id).map_err(|e| e.to_string())?;
-    Ok(json!({"set": true, "namespace": namespace, "standard_id": id}))
+    let parent = params["parent"].as_str();
+    if let Some(p) = parent {
+        validate::validate_namespace(p).map_err(|e| e.to_string())?;
+    }
+    db::set_namespace_standard(conn, namespace, id, parent).map_err(|e| e.to_string())?;
+    let mut resp = json!({"set": true, "namespace": namespace, "standard_id": id});
+    if let Some(p) = parent {
+        resp["parent"] = json!(p);
+    }
+    Ok(resp)
 }
 
 fn handle_namespace_get_standard(
@@ -1199,6 +1261,55 @@ fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Op
     let standard_id = db::get_namespace_standard(conn, namespace).ok()??;
     let mem = db::get(conn, &standard_id).ok()??;
     serde_json::to_value(&mem).ok()
+}
+
+/// Auto-register namespace parent chain from the filesystem path.
+/// Walks from cwd up to home dir, checks if each directory name has a namespace
+/// standard set, and registers the parent chain.
+///
+/// Example: cwd = /home/user/monorepo/frontend
+///   → checks "frontend" (cwd), "monorepo" (parent), stops at home dir
+///   → if "monorepo" has a standard, sets parent_namespace of "frontend" to "monorepo"
+fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
+    // Only run if this namespace doesn't already have an explicit parent
+    if db::get_namespace_parent(conn, namespace).is_some() {
+        return;
+    }
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(_) => return,
+    };
+    let home = dirs::home_dir().unwrap_or_default();
+    // Walk up from parent of cwd (cwd itself IS the namespace)
+    let mut current = cwd.parent().map(|p| p.to_path_buf());
+    while let Some(dir) = current {
+        // Stop at or above home directory
+        if dir == home || !dir.starts_with(&home) {
+            break;
+        }
+        if let Some(dir_name) = dir.file_name().and_then(|n| n.to_str()) {
+            // Check if this directory name has a namespace standard
+            if db::get_namespace_standard(conn, dir_name)
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                // Found a parent with a standard — register it
+                let now = chrono::Utc::now().to_rfc3339();
+                let _ = conn.execute(
+                    "UPDATE namespace_meta SET parent_namespace = ?1, updated_at = ?2 WHERE namespace = ?3 AND parent_namespace IS NULL",
+                    rusqlite::params![dir_name, now, namespace],
+                );
+                tracing::info!(
+                    "auto-registered parent namespace: {} -> {}",
+                    namespace,
+                    dir_name
+                );
+                break;
+            }
+        }
+        current = dir.parent().map(|p| p.to_path_buf());
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1305,6 +1416,11 @@ fn handle_session_start(
                 }
             }
         }
+    }
+
+    // Auto-register parent chain from filesystem path (runs once, skips if parent already set)
+    if let Some(ns) = namespace {
+        auto_register_path_hierarchy(conn, ns);
     }
 
     // Auto-prepend namespace standard (after LLM summary, separate field)

@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4-patch.4] — 2026-04-13
+
+### Added
+
+- **Three-level rule layering**: global (`*`) + parent + namespace standards, auto-prepended to recall and session_start. Max depth 5, cycle-safe.
+- **Cross-namespace standards**: A standard memory from any namespace can be set as the standard for any other namespace. One policy, many projects.
+- **Auto-detect parent by `-` prefix**: `set_standard("ai-memory-tests", id)` auto-discovers `ai-memory` as parent if it has a standard set. No explicit `parent` parameter needed.
+- **Filesystem path awareness**: On `session_start`, walks from cwd up to home directory, checks if parent directory names have namespace standards, auto-registers parent chain. OS-agnostic via `PathBuf` and `dirs` crate.
+- **`parent` parameter on `memory_namespace_set_standard`**: Explicit parent declaration for rule layering.
+- Schema migration v6: `parent_namespace` column on `namespace_meta`
+
+### Changed
+
+- `inject_namespace_standard` resolves full parent chain: global → grandparent → parent → namespace
+- Response returns `"standard"` (1 level) or `"standards"` array (multiple levels)
+- TOON format: `standards[id|title|content]:` section renders all levels
+
 ## [0.5.4-patch.3] — 2026-04-12
 
 ### Added
