@@ -2,7 +2,7 @@
   <img src="docs/ai-memory-logo.jpg" alt="ai-memory logo" width="200">
 </p>
 
-<h1 align="center">ai-memory</h1>
+<h1 align="center">ai-memory&trade;</h1>
 <p align="center"><em>universal AI memory</em></p>
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
