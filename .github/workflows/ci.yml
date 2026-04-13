@@ -240,19 +240,28 @@ jobs:
           mkdir -p ~/.config
           echo "${{ secrets.COPR_CONFIG }}" > ~/.config/copr
 
-      - name: Download release RPMs
+      - name: Install RPM build tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Build source RPM
         run: |
           VERSION=${{ steps.version.outputs.version }}
-          mkdir -p rpms
-          # Download x86_64 RPM from GitHub Release
-          curl -sL -o rpms/ai-memory-${VERSION}-1.x86_64.rpm \
-            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-${VERSION}-1.x86_64.rpm"
-          # Download aarch64 RPM from GitHub Release
-          curl -sL -o rpms/ai-memory-${VERSION}-1.aarch64.rpm \
-            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-${VERSION}-1.aarch64.rpm"
-          ls -la rpms/
+          mkdir -p ~/rpmbuild/{SOURCES,SPECS,SRPMS}
+
+          # Download the pre-built binary tarball as the source
+          curl -sL -o ~/rpmbuild/SOURCES/ai-memory-x86_64-unknown-linux-gnu.tar.gz \
+            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
+
+          # Update spec version and copy
+          sed "s/^Version:.*/Version:        ${VERSION}/" ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
+
+          # Build source RPM
+          rpmbuild -bs ~/rpmbuild/SPECS/ai-memory.spec \
+            --define "_sourcedir $HOME/rpmbuild/SOURCES" \
+            --define "_srcrpmdir $HOME/rpmbuild/SRPMS"
+
+          ls -la ~/rpmbuild/SRPMS/
 
       - name: Upload to COPR
         run: |
-          copr-cli build alpha-one-ai/ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.x86_64.rpm
-          copr-cli build alpha-one-ai/ai-memory rpms/ai-memory-${{ steps.version.outputs.version }}-1.aarch64.rpm
+          copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
