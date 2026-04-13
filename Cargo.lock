@@ -33,7 +33,7 @@ dependencies = [
 
 [[package]]
 name = "ai-memory"
-version = "0.5.4-patch.2"
+version = "0.5.4-patch.3"
 dependencies = [
  "anyhow",
  "axum",

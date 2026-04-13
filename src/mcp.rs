@@ -346,6 +346,29 @@ fn tool_definitions() -> Value {
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact"}
                     }
                 }
+            },
+            {
+                "name": "memory_namespace_set_standard",
+                "description": "Set a memory as the standard/policy for a namespace. This memory will be automatically prepended to recall and session_start results scoped to that namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Namespace to set the standard for"},
+                        "id": {"type": "string", "description": "Memory ID to use as the standard"}
+                    },
+                    "required": ["namespace", "id"]
+                }
+            },
+            {
+                "name": "memory_namespace_get_standard",
+                "description": "Get the standard/policy memory for a namespace, if one is set.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Namespace to get the standard for"}
+                    },
+                    "required": ["namespace"]
+                }
             }
         ]
     })
@@ -514,6 +537,7 @@ fn handle_store(
                 if let Ok(embedding) = emb.embed(&text) {
                     let _ = db::set_embedding(conn, &dup.id, &embedding);
                     if let Some(idx) = vector_index {
+                        idx.remove(&dup.id);
                         idx.insert(dup.id.clone(), embedding);
                     }
                 }
@@ -1058,6 +1082,51 @@ fn handle_consolidate(
     Ok(result)
 }
 
+// ---------------------------------------------------------------------------
+// Namespace standard handlers
+// ---------------------------------------------------------------------------
+
+fn handle_namespace_set_standard(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
+    db::set_namespace_standard(conn, namespace, id).map_err(|e| e.to_string())?;
+    Ok(json!({"set": true, "namespace": namespace, "standard_id": id}))
+}
+
+fn handle_namespace_get_standard(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    let standard_id = db::get_namespace_standard(conn, namespace).map_err(|e| e.to_string())?;
+    match standard_id {
+        Some(id) => {
+            let mem = db::get(conn, &id).map_err(|e| e.to_string())?;
+            match mem {
+                Some(m) => Ok(json!({
+                    "namespace": namespace,
+                    "standard_id": id,
+                    "title": m.title,
+                    "content": m.content,
+                    "priority": m.priority
+                })),
+                None => Ok(
+                    json!({"namespace": namespace, "standard_id": id, "warning": "standard memory not found — may have been deleted"}),
+                ),
+            }
+        }
+        None => Ok(json!({"namespace": namespace, "standard_id": null})),
+    }
+}
+
 // --- MCP protocol handler ---
 
 // ---------------------------------------------------------------------------
@@ -1265,6 +1334,8 @@ fn handle_request(
                 "memory_archive_stats" => handle_archive_stats(conn),
                 "memory_gc" => handle_gc(conn, arguments, archive_on_gc),
                 "memory_session_start" => handle_session_start(conn, arguments, llm),
+                "memory_namespace_set_standard" => handle_namespace_set_standard(conn, arguments),
+                "memory_namespace_get_standard" => handle_namespace_get_standard(conn, arguments),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -1578,10 +1649,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_21_tools() {
+    fn tool_definitions_returns_25_tools() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 23);
+        assert_eq!(tools.len(), 25);
     }
 
     #[test]

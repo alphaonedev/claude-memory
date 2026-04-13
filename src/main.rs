@@ -1446,6 +1446,10 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                     eprintln!("usage: get <id>");
                     continue;
                 }
+                if let Err(e) = validate::validate_id(id) {
+                    eprintln!("invalid id: {e}");
+                    continue;
+                }
                 match db::get(&conn, id) {
                     Ok(Some(mem)) => {
                         println!("{}", serde_json::to_string_pretty(&mem).unwrap_or_default())
@@ -1475,6 +1479,10 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                 let id = parts.get(1).unwrap_or(&"");
                 if id.is_empty() {
                     eprintln!("usage: delete <id>");
+                    continue;
+                }
+                if let Err(e) = validate::validate_id(id) {
+                    eprintln!("invalid id: {e}");
                     continue;
                 }
                 match db::delete(&conn, id) {

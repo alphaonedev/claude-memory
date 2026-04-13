@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 "#;
 
-const CURRENT_SCHEMA_VERSION: i64 = 4;
+const CURRENT_SCHEMA_VERSION: i64 = 5;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -163,6 +163,15 @@ fn migrate(conn: &Connection) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_archived_namespace ON archived_memories(namespace);
                 CREATE INDEX IF NOT EXISTS idx_archived_at ON archived_memories(archived_at);",
+            )?;
+        }
+        if version < 5 {
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS namespace_meta (
+                    namespace    TEXT PRIMARY KEY,
+                    standard_id  TEXT,
+                    updated_at   TEXT NOT NULL
+                );",
             )?;
         }
 
@@ -1419,6 +1428,50 @@ pub fn health_check(conn: &Connection) -> Result<bool> {
         [],
     )?;
     Ok(true)
+}
+
+/// Set the standard memory for a namespace.
+pub fn set_namespace_standard(conn: &Connection, namespace: &str, standard_id: &str) -> Result<()> {
+    // Verify the memory exists and belongs to this namespace
+    let mem = get(conn, standard_id)?
+        .ok_or_else(|| anyhow::anyhow!("memory not found: {}", standard_id))?;
+    if mem.namespace != namespace {
+        anyhow::bail!(
+            "memory {} belongs to namespace '{}', not '{}'",
+            standard_id,
+            mem.namespace,
+            namespace
+        );
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO namespace_meta (namespace, standard_id, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(namespace) DO UPDATE SET standard_id = ?2, updated_at = ?3",
+        params![namespace, standard_id, now],
+    )?;
+    Ok(())
+}
+
+/// Get the standard memory ID for a namespace.
+pub fn get_namespace_standard(conn: &Connection, namespace: &str) -> Result<Option<String>> {
+    let result = conn
+        .query_row(
+            "SELECT standard_id FROM namespace_meta WHERE namespace = ?1",
+            params![namespace],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(result)
+}
+
+/// Clear the standard for a namespace.
+pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bool> {
+    let changed = conn.execute(
+        "DELETE FROM namespace_meta WHERE namespace = ?1",
+        params![namespace],
+    )?;
+    Ok(changed > 0)
 }
 
 #[cfg(test)]

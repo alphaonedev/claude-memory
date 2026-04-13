@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4-patch.3] — 2026-04-12
+
+### Added
+
+- **Namespace standards**: New MCP tools `memory_namespace_set_standard` and `memory_namespace_get_standard`. Set a memory as the enforced standard/policy for a namespace — automatically surfaced on recall. Schema migration v5: `namespace_meta` table.
+- 1 new integration test: `test_mcp_namespace_set_and_get_standard`
+
+### Fixed
+
+- **Shell `validate_id()` gap**: Interactive REPL `get` and `delete` commands now call `validate_id()` before DB access, matching all other ID-accepting handlers.
+- **HNSW stale entry on dedup update**: `handle_store` dedup path now calls `idx.remove()` before `idx.insert()`, preventing stale entries in the HNSW index.
+
+### Documentation
+
+- Synced test counts to 190 (140 unit + 50 integration)
+- MCP tool count updated to 25
+
 ## [0.5.4-patch.2] — 2026-04-12
 
 ### Fixed

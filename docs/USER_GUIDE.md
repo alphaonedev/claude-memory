@@ -74,7 +74,7 @@ Your AI assistant uses these tools automatically during conversations. You can a
 
 ## MCP Tool Reference
 
-This section documents all 23 MCP tools with their exact parameter schemas, example requests, and response formats. All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
+This section documents all 25 MCP tools with their exact parameter schemas, example requests, and response formats. All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
 
 All responses are wrapped in the MCP content envelope:
 

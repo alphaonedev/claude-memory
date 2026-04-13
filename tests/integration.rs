@@ -1805,7 +1805,7 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 23, "expected 23 MCP tools");
+    assert_eq!(tools.len(), 25, "expected 25 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
@@ -2397,14 +2397,99 @@ fn test_promote_clears_expires_at() {
 }
 
 #[test]
-fn test_version_flag_patch2() {
+fn test_version_flag_patch3() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let output = cmd(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.5.4-patch.2"),
-        "version should be 0.5.4-patch.2, got: {}",
+        stdout.contains("0.5.4-patch.3"),
+        "version should be 0.5.4-patch.3, got: {}",
         stdout
     );
+}
+
+// --- Patch 3: namespace standards via MCP ---
+
+#[test]
+fn test_mcp_namespace_set_and_get_standard() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-ns-std-{}.db", uuid::Uuid::new_v4()));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Store a memory first
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "test-ns",
+            "-T",
+            "NS Standard Policy",
+            "--content",
+            "This is the standard",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let mem_id = stored["id"].as_str().unwrap().to_string();
+
+    // Set + get standard via MCP
+    let line1 = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    let line2 = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"test-ns","id":"{}"}}}}}}"#,
+        mem_id
+    );
+    let line3 = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_namespace_get_standard","arguments":{"namespace":"test-ns"}}}"#;
+    let mcp_input = format!("{}\n{}\n{}\n", line1, line2, line3);
+
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(mcp_input.as_bytes()).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.len() >= 3,
+        "expected 3 MCP responses, got {}",
+        lines.len()
+    );
+
+    // Check set response (line 2)
+    let set_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let set_text = set_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let set_data: serde_json::Value = serde_json::from_str(set_text).unwrap();
+    assert_eq!(set_data["set"], true);
+    assert_eq!(set_data["namespace"], "test-ns");
+
+    // Check get response (line 3)
+    let get_resp: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let get_text = get_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let get_data: serde_json::Value = serde_json::from_str(get_text).unwrap();
+    assert_eq!(get_data["namespace"], "test-ns");
+    assert_eq!(get_data["standard_id"], mem_id);
+    assert_eq!(get_data["title"], "NS Standard Policy");
+
+    let _ = std::fs::remove_file(&db_path);
 }
