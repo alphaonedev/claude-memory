@@ -1446,16 +1446,9 @@ pub fn health_check(conn: &Connection) -> Result<bool> {
 
 /// Set the standard memory for a namespace.
 pub fn set_namespace_standard(conn: &Connection, namespace: &str, standard_id: &str) -> Result<()> {
-    let mem = get(conn, standard_id)?
+    // Verify the memory exists (but allow cross-namespace — shared policy)
+    let _mem = get(conn, standard_id)?
         .ok_or_else(|| anyhow::anyhow!("memory not found: {}", standard_id))?;
-    if mem.namespace != namespace {
-        anyhow::bail!(
-            "memory {} belongs to namespace '{}', not '{}'",
-            standard_id,
-            mem.namespace,
-            namespace
-        );
-    }
     let now = chrono::Utc::now().to_rfc3339();
     conn.execute(
         "INSERT INTO namespace_meta (namespace, standard_id, updated_at)
