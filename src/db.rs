@@ -394,6 +394,11 @@ pub fn update(
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
+    // Clean up namespace_meta if this memory was a namespace standard
+    conn.execute(
+        "DELETE FROM namespace_meta WHERE standard_id = ?1",
+        params![id],
+    )?;
     let changed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
     Ok(changed > 0)
 }
@@ -910,6 +915,11 @@ pub fn gc(conn: &Connection, archive: bool) -> Result<usize> {
     match result {
         Ok(n) => {
             conn.execute_batch("COMMIT")?;
+            // Clean up namespace_meta rows pointing to deleted memories
+            let _ = conn.execute(
+                "DELETE FROM namespace_meta WHERE standard_id NOT IN (SELECT id FROM memories)",
+                [],
+            );
             Ok(n)
         }
         Err(e) => {
@@ -1430,9 +1440,12 @@ pub fn health_check(conn: &Connection) -> Result<bool> {
     Ok(true)
 }
 
+// ---------------------------------------------------------------------------
+// Namespace standards
+// ---------------------------------------------------------------------------
+
 /// Set the standard memory for a namespace.
 pub fn set_namespace_standard(conn: &Connection, namespace: &str, standard_id: &str) -> Result<()> {
-    // Verify the memory exists and belongs to this namespace
     let mem = get(conn, standard_id)?
         .ok_or_else(|| anyhow::anyhow!("memory not found: {}", standard_id))?;
     if mem.namespace != namespace {
@@ -1472,6 +1485,17 @@ pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bo
         params![namespace],
     )?;
     Ok(changed > 0)
+}
+
+/// Check if a memory ID is a namespace standard (used by consolidate to warn).
+pub fn is_namespace_standard(conn: &Connection, id: &str) -> bool {
+    conn.query_row(
+        "SELECT COUNT(*) FROM namespace_meta WHERE standard_id = ?1",
+        params![id],
+        |r| r.get::<_, i64>(0),
+    )
+    .unwrap_or(0)
+        > 0
 }
 
 #[cfg(test)]

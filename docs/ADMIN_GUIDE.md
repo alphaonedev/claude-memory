@@ -2,7 +2,7 @@
 
 `ai-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
 
-**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 190 tests with 95%+ coverage across 15/15 modules.
+**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 191 tests with 95%+ coverage across 15/15 modules.
 
 ## Deployment Options
 
@@ -996,7 +996,7 @@ Runs on `ubuntu-latest` and `macos-latest`:
 
 1. **Formatting** -- `cargo fmt --check`
 2. **Linting** -- `cargo clippy -- -D warnings`
-3. **Tests** -- `cargo test` (190 tests: 140 unit + 50 integration, 15/15 modules)
+3. **Tests** -- `cargo test` (191 tests: 140 unit + 51 integration, 15/15 modules)
 4. **Build** -- `cargo build --release`
 
 Uses `Swatinem/rust-cache@v2` for build caching.

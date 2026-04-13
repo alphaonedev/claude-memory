@@ -369,6 +369,17 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["namespace"]
                 }
+            },
+            {
+                "name": "memory_namespace_clear_standard",
+                "description": "Clear the standard/policy for a namespace.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Namespace to clear the standard for"}
+                    },
+                    "required": ["namespace"]
+                }
             }
         ]
     })
@@ -589,6 +600,29 @@ fn handle_store(
     Ok(response)
 }
 
+/// Inject namespace standard into a recall/session_start response.
+/// Only runs when namespace is explicitly provided. Deduplicates from results.
+fn inject_namespace_standard(
+    conn: &rusqlite::Connection,
+    namespace: Option<&str>,
+    response: &mut Value,
+) {
+    let ns = match namespace {
+        Some(ns) => ns,
+        None => return, // unscoped — no standard
+    };
+    if let Some(standard) = lookup_namespace_standard(conn, ns) {
+        let standard_id = standard["id"].as_str().unwrap_or_default().to_string();
+        // Deduplicate: remove standard from results array if present
+        if let Some(memories) = response["memories"].as_array_mut() {
+            memories.retain(|m| m["id"].as_str().unwrap_or_default() != standard_id);
+            // Update count to reflect deduplication
+            response["count"] = json!(memories.len());
+        }
+        response["standard"] = standard;
+    }
+}
+
 fn handle_recall(
     conn: &rusqlite::Connection,
     params: &Value,
@@ -646,15 +680,16 @@ fn handle_recall(
                 if let Some(ce) = reranker {
                     let reranked = ce.rerank(context, results);
                     let memories = scored_memories(reranked);
-                    return Ok(
-                        json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"}),
-                    );
+                    let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
+                    inject_namespace_standard(conn, namespace, &mut resp);
+                    return Ok(resp);
                 }
 
                 let memories = scored_memories(results);
-                return Ok(
-                    json!({"memories": memories, "count": memories.len(), "mode": "hybrid"}),
-                );
+                let mut resp =
+                    json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
+                inject_namespace_standard(conn, namespace, &mut resp);
+                return Ok(resp);
             }
             Err(e) => {
                 tracing::warn!("embedding failed, falling back to FTS: {}", e);
@@ -676,7 +711,9 @@ fn handle_recall(
     )
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
-    Ok(json!({"memories": memories, "count": memories.len(), "mode": "keyword"}))
+    let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
+    inject_namespace_standard(conn, namespace, &mut resp);
+    Ok(resp)
 }
 
 fn handle_capabilities(
@@ -926,6 +963,7 @@ fn handle_update(
                 if let Ok(embedding) = emb.embed(&text) {
                     let _ = db::set_embedding(conn, id, &embedding);
                     if let Some(idx) = vector_index {
+                        idx.remove(id);
                         idx.insert(id.to_string(), embedding);
                     }
                 }
@@ -1079,6 +1117,19 @@ fn handle_consolidate(
         result["auto_summary"] = json!(true);
         result["summary_preview"] = json!(summary.chars().take(200).collect::<String>());
     }
+    // Warn if any source memory was a namespace standard
+    let standard_ids: Vec<&str> = ids
+        .iter()
+        .filter(|id| db::is_namespace_standard(conn, id))
+        .map(|s| s.as_str())
+        .collect();
+    if !standard_ids.is_empty() {
+        result["warning"] = json!(format!(
+            "consolidated memories included namespace standard(s): {}. Re-set the standard to the new memory ID: {}",
+            standard_ids.join(", "),
+            new_id
+        ));
+    }
     Ok(result)
 }
 
@@ -1128,6 +1179,72 @@ fn handle_namespace_get_standard(
 }
 
 // --- MCP protocol handler ---
+
+// ---------------------------------------------------------------------------
+// Namespace standard handlers
+// ---------------------------------------------------------------------------
+
+fn handle_namespace_set_standard(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
+    let id = params["id"].as_str().ok_or("id is required")?;
+    validate::validate_id(id).map_err(|e| e.to_string())?;
+    db::set_namespace_standard(conn, namespace, id).map_err(|e| e.to_string())?;
+    Ok(json!({"set": true, "namespace": namespace, "standard_id": id}))
+}
+
+fn handle_namespace_get_standard(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
+    let standard_id = db::get_namespace_standard(conn, namespace).map_err(|e| e.to_string())?;
+    match standard_id {
+        Some(id) => {
+            let mem = db::get(conn, &id).map_err(|e| e.to_string())?;
+            match mem {
+                Some(m) => Ok(json!({
+                    "namespace": namespace,
+                    "standard_id": id,
+                    "title": m.title,
+                    "content": m.content,
+                    "priority": m.priority
+                })),
+                None => Ok(
+                    json!({"namespace": namespace, "standard_id": id, "warning": "standard memory not found — may have been deleted"}),
+                ),
+            }
+        }
+        None => Ok(json!({"namespace": namespace, "standard_id": null})),
+    }
+}
+
+fn handle_namespace_clear_standard(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
+    let cleared = db::clear_namespace_standard(conn, namespace).map_err(|e| e.to_string())?;
+    Ok(json!({"cleared": cleared, "namespace": namespace}))
+}
+
+/// Look up the namespace standard and return it as a serialized Memory, or None.
+fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Option<Value> {
+    let standard_id = db::get_namespace_standard(conn, namespace).ok()??;
+    let mem = db::get(conn, &standard_id).ok()??;
+    serde_json::to_value(&mem).ok()
+}
 
 // ---------------------------------------------------------------------------
 // Archive tool handlers
@@ -1235,6 +1352,9 @@ fn handle_session_start(
         }
     }
 
+    // Auto-prepend namespace standard (after LLM summary, separate field)
+    inject_namespace_standard(conn, namespace, &mut response);
+
     Ok(response)
 }
 
@@ -1336,6 +1456,9 @@ fn handle_request(
                 "memory_session_start" => handle_session_start(conn, arguments, llm),
                 "memory_namespace_set_standard" => handle_namespace_set_standard(conn, arguments),
                 "memory_namespace_get_standard" => handle_namespace_get_standard(conn, arguments),
+                "memory_namespace_clear_standard" => {
+                    handle_namespace_clear_standard(conn, arguments)
+                }
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -1649,10 +1772,10 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_25_tools() {
+    fn tool_definitions_returns_26_tools() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 25);
+        assert_eq!(tools.len(), 26);
     }
 
     #[test]

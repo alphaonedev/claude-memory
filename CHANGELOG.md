@@ -9,18 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Namespace standards**: New MCP tools `memory_namespace_set_standard` and `memory_namespace_get_standard`. Set a memory as the enforced standard/policy for a namespace — automatically surfaced on recall. Schema migration v5: `namespace_meta` table.
-- 1 new integration test: `test_mcp_namespace_set_and_get_standard`
+- **Namespace standards**: 3 new MCP tools (`memory_namespace_set_standard`, `memory_namespace_get_standard`, `memory_namespace_clear_standard`) — 26 MCP tools total. Set a memory as the enforced standard/policy for a namespace; auto-prepended to recall and session_start results when scoped to that namespace.
+- **Auto-prepend**: `handle_recall` and `handle_session_start` automatically prepend the namespace standard as a separate `"standard"` field when namespace is specified. Deduplicated from results. Count excludes standard.
+- **TOON standard section**: TOON format renders namespace standard as a separate `standard[id|title|content]` section before memories.
+- Schema migration v5: `namespace_meta` table
+- 2 new integration tests: `test_mcp_namespace_standard_auto_prepend`, `test_namespace_standard_cascade_on_delete`
 
 ### Fixed
 
-- **Shell `validate_id()` gap**: Interactive REPL `get` and `delete` commands now call `validate_id()` before DB access, matching all other ID-accepting handlers.
-- **HNSW stale entry on dedup update**: `handle_store` dedup path now calls `idx.remove()` before `idx.insert()`, preventing stale entries in the HNSW index.
-
-### Documentation
-
-- Synced test counts to 190 (140 unit + 50 integration)
-- MCP tool count updated to 25
+- **Shell `validate_id()` gap**: Interactive REPL `get` and `delete` commands now call `validate_id()`.
+- **HNSW stale entry on dedup update**: `handle_store` dedup path now calls `idx.remove()` before `idx.insert()`.
+- **Cascade cleanup**: `db::delete` removes `namespace_meta` rows referencing the deleted memory. `db::gc` cleans orphaned `namespace_meta` rows after expiring memories.
+- **Consolidate warning**: `handle_consolidate` warns if any source memory is a namespace standard, prompting re-set to the new consolidated memory ID.
 
 ## [0.5.4-patch.2] — 2026-04-12
 
