@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 """99%+ R@5 LongMemEval — parallel LLM expansion + parallel FTS5 recall.
 
 Phase 1: Expand all 500 queries via Ollama (threaded, 16 workers)

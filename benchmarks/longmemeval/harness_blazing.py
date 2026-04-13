@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 """Blazing LongMemEval benchmark — multi-strategy FTS5 recall for maximum accuracy.
 
 Runs multiple FTS query strategies per question and merges results.

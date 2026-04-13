@@ -1,4 +1,6 @@
 #!/bin/sh
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 set -e
 
 REPO="alphaonedev/ai-memory-mcp"

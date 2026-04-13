@@ -1,3 +1,5 @@
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 #Requires -Version 5.1
 <#
 .SYNOPSIS

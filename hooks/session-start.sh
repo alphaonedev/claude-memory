@@ -1,4 +1,7 @@
 #!/bin/bash
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
+#
 # AI Memory hook: auto-recall relevant memories on session start
 # Works with any MCP-compatible AI client
 set -euo pipefail

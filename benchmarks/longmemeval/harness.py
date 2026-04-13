@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 """LongMemEval benchmark harness for ai-memory.
 
 Evaluates ai-memory's recall engine against the LongMemEval dataset,

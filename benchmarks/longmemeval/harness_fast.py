@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
 """Blazing fast LongMemEval benchmark — native Python + SQLite, zero subprocesses.
 
 Replicates ai-memory's FTS5 scoring formula directly in Python/SQLite,
