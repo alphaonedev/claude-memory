@@ -36,6 +36,7 @@ pub struct OllamaClient {
 impl OllamaClient {
     /// Creates a new OllamaClient with the default Ollama URL (http://localhost:11434).
     /// Checks that Ollama is reachable before returning.
+    #[allow(dead_code)]
     pub fn new(model: &str) -> Result<Self> {
         Self::new_with_url(DEFAULT_OLLAMA_URL, model)
     }

@@ -146,6 +146,7 @@ impl FeatureTier {
     }
 
     /// Automatically select the best tier that fits within `mb` megabytes.
+    #[allow(dead_code)]
     pub fn from_memory_budget(mb: usize) -> Self {
         if mb >= 4096 {
             Self::Autonomous
@@ -300,6 +301,7 @@ impl Default for ResolvedTtl {
 /// when adding Duration to Utc::now().
 const MAX_TTL_SECS: i64 = 315_360_000;
 
+#[allow(dead_code)]
 impl ResolvedTtl {
     /// Build from optional config overrides, falling back to compiled defaults.
     /// TTL values are clamped to MAX_TTL_SECS (10 years) to prevent overflow.

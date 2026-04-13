@@ -1429,6 +1429,7 @@ fn handle_session_start(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,

@@ -170,6 +170,7 @@ impl CrossEncoder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn neural_score(
         model: &BertModel,
         tokenizer: &Tokenizer,
