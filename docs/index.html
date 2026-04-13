@@ -1209,70 +1209,70 @@ ai-memory list -n my-project                                         <span class
         <div class="diagram-wrap">
             <svg viewBox="0 0 800 280" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="MCP integration flow with multiple AI clients and feature tiers">
                 <!-- AI Client 1: Claude -->
-                <rect x="10" y="10" width="130" height="40" rx="6" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-                <text x="75" y="28" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="700">Claude</text>
-                <text x="75" y="42" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">MCP native</text>
+                <rect x="10" y="10" width="130" height="40" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
+                <text x="75" y="28" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="700">Claude</text>
+                <text x="75" y="42" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">MCP native</text>
 
                 <!-- AI Client 2: ChatGPT -->
-                <rect x="10" y="60" width="130" height="40" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-                <text x="75" y="78" text-anchor="middle" fill="#3fb950" font-family="system-ui" font-size="11" font-weight="700">ChatGPT</text>
-                <text x="75" y="92" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">MCP / HTTP</text>
+                <rect x="10" y="60" width="130" height="40" rx="6" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
+                <text x="75" y="78" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="11" font-weight="700">ChatGPT</text>
+                <text x="75" y="92" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">MCP / HTTP</text>
 
                 <!-- AI Client 3: Grok -->
-                <rect x="10" y="110" width="130" height="40" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="75" y="128" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="11" font-weight="700">Grok</text>
-                <text x="75" y="142" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">MCP / HTTP</text>
+                <rect x="10" y="110" width="130" height="40" rx="6" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="75" y="128" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="11" font-weight="700">Grok</text>
+                <text x="75" y="142" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">MCP / HTTP</text>
 
                 <!-- AI Client 4: Llama -->
-                <rect x="10" y="160" width="130" height="40" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
-                <text x="75" y="178" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="11" font-weight="700">Llama</text>
-                <text x="75" y="192" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">MCP / HTTP</text>
+                <rect x="10" y="160" width="130" height="40" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
+                <text x="75" y="178" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="11" font-weight="700">Llama</text>
+                <text x="75" y="192" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">MCP / HTTP</text>
 
                 <!-- Converging arrows -->
-                <line x1="140" y1="30" x2="270" y2="100" stroke="#58a6ff" stroke-width="1.5" class="animate-flow"/>
-                <line x1="140" y1="80" x2="270" y2="100" stroke="#3fb950" stroke-width="1.5" class="animate-flow"/>
-                <line x1="140" y1="130" x2="270" y2="110" stroke="#d29922" stroke-width="1.5" class="animate-flow"/>
-                <line x1="140" y1="180" x2="270" y2="115" stroke="#bc8cff" stroke-width="1.5" class="animate-flow"/>
+                <line x1="140" y1="30" x2="270" y2="100" stroke="#ffffff" stroke-width="1.5" class="animate-flow"/>
+                <line x1="140" y1="80" x2="270" y2="100" stroke="#cccccc" stroke-width="1.5" class="animate-flow"/>
+                <line x1="140" y1="130" x2="270" y2="110" stroke="#999999" stroke-width="1.5" class="animate-flow"/>
+                <line x1="140" y1="180" x2="270" y2="115" stroke="#bbbbbb" stroke-width="1.5" class="animate-flow"/>
 
-                <text x="210" y="75" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">stdio /</text>
-                <text x="210" y="86" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">HTTP</text>
+                <text x="210" y="75" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">stdio /</text>
+                <text x="210" y="86" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">HTTP</text>
 
                 <!-- MCP Server -->
-                <rect x="275" y="80" width="190" height="60" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="2"/>
-                <text x="370" y="100" text-anchor="middle" fill="#e6edf3" font-family="system-ui" font-size="13" font-weight="700">MCP Server</text>
-                <text x="370" y="116" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">JSON-RPC / up to 26 tools</text>
-                <text x="370" y="131" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="8">--tier keyword|semantic|smart|autonomous</text>
+                <rect x="275" y="80" width="190" height="60" rx="8" fill="#111111" stroke="#bbbbbb" stroke-width="2"/>
+                <text x="370" y="100" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="13" font-weight="700">MCP Server</text>
+                <text x="370" y="116" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">JSON-RPC / up to 26 tools</text>
+                <text x="370" y="131" text-anchor="middle" fill="#999999" font-family="monospace" font-size="8">--tier keyword|semantic|smart|autonomous</text>
 
                 <!-- Arrow to SQLite -->
-                <line x1="465" y1="100" x2="530" y2="100" stroke="#bc8cff" stroke-width="2" class="animate-flow"/>
-                <polygon points="530,95 540,100 530,105" fill="#bc8cff"/>
-                <text x="497" y="90" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">rusqlite</text>
+                <line x1="465" y1="100" x2="530" y2="100" stroke="#bbbbbb" stroke-width="2" class="animate-flow"/>
+                <polygon points="530,95 540,100 530,105" fill="#bbbbbb"/>
+                <text x="497" y="90" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">rusqlite</text>
 
                 <!-- SQLite + HNSW -->
-                <rect x="545" y="75" width="190" height="55" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="2"/>
-                <text x="640" y="97" text-anchor="middle" fill="#e6edf3" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5</text>
-                <text x="640" y="117" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | HNSW index</text>
+                <rect x="545" y="75" width="190" height="55" rx="8" fill="#111111" stroke="#cccccc" stroke-width="2"/>
+                <text x="640" y="97" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5</text>
+                <text x="640" y="117" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">WAL mode | HNSW index</text>
 
                 <!-- Arrow from MCP down to Ollama -->
-                <line x1="370" y1="140" x2="370" y2="175" stroke="#d29922" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="366,175 370,182 374,175" fill="#d29922"/>
-                <text x="395" y="165" text-anchor="start" fill="#d29922" font-family="monospace" font-size="8" opacity=".7">smart+ tiers</text>
+                <line x1="370" y1="140" x2="370" y2="175" stroke="#999999" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="366,175 370,182 374,175" fill="#999999"/>
+                <text x="395" y="165" text-anchor="start" fill="#999999" font-family="monospace" font-size="8" opacity=".7">smart+ tiers</text>
 
                 <!-- Ollama box -->
-                <rect x="275" y="185" width="190" height="55" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="370" y="207" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="12" font-weight="700">Ollama (local LLM)</text>
-                <text x="370" y="224" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">nomic-embed | Gemma 4 E2B/E4B</text>
+                <rect x="275" y="185" width="190" height="55" rx="8" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="370" y="207" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="12" font-weight="700">Ollama (local LLM)</text>
+                <text x="370" y="224" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">nomic-embed | Gemma 4 E2B/E4B</text>
 
                 <!-- Smart tier capabilities -->
-                <rect x="510" y="185" width="230" height="55" rx="6" fill="#161b22" stroke="#484f58" stroke-width="1"/>
-                <text x="625" y="202" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="9" font-weight="600">Smart: query expansion, auto-tag</text>
-                <text x="625" y="216" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="9" font-weight="600">Autonomous: + cross-encoder reranker</text>
-                <text x="625" y="230" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">contradiction detection, neural reranking</text>
+                <rect x="510" y="185" width="230" height="55" rx="6" fill="#111111" stroke="#555555" stroke-width="1"/>
+                <text x="625" y="202" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9" font-weight="600">Smart: query expansion, auto-tag</text>
+                <text x="625" y="216" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="9" font-weight="600">Autonomous: + cross-encoder reranker</text>
+                <text x="625" y="230" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">contradiction detection, neural reranking</text>
 
                 <!-- Arrow from Ollama to capabilities -->
-                <line x1="465" y1="212" x2="510" y2="212" stroke="#d29922" stroke-width="1" class="animate-flow" opacity=".6"/>
+                <line x1="465" y1="212" x2="510" y2="212" stroke="#999999" stroke-width="1" class="animate-flow" opacity=".6"/>
 
-                <text x="400" y="265" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="600">ai-memory --db path/to/memory.db mcp --tier smart</text>
+                <text x="400" y="265" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="600">ai-memory --db path/to/memory.db mcp --tier smart</text>
             </svg>
         </div>
 
@@ -1495,54 +1495,54 @@ ai-memory list -n my-project                                         <span class
         <div class="diagram-wrap">
             <svg viewBox="0 0 800 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Memory lifecycle flow">
                 <!-- Create -->
-                <rect x="10" y="70" width="100" height="50" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-                <text x="60" y="93" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="12" font-weight="700">Store</text>
-                <text x="60" y="108" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">create</text>
+                <rect x="10" y="70" width="100" height="50" rx="8" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
+                <text x="60" y="93" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="12" font-weight="700">Store</text>
+                <text x="60" y="108" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">create</text>
 
-                <line x1="110" y1="95" x2="145" y2="95" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="145,91 152,95 145,99" fill="#30363d"/>
+                <line x1="110" y1="95" x2="145" y2="95" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="145,91 152,95 145,99" fill="#333333"/>
 
                 <!-- Recall -->
-                <rect x="155" y="70" width="100" height="50" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-                <text x="205" y="93" text-anchor="middle" fill="#3fb950" font-family="system-ui" font-size="12" font-weight="700">Recall</text>
-                <text x="205" y="108" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">touch + rank</text>
+                <rect x="155" y="70" width="100" height="50" rx="8" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
+                <text x="205" y="93" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="12" font-weight="700">Recall</text>
+                <text x="205" y="108" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">touch + rank</text>
 
-                <line x1="255" y1="95" x2="290" y2="95" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="290,91 297,95 290,99" fill="#30363d"/>
+                <line x1="255" y1="95" x2="290" y2="95" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="290,91 297,95 290,99" fill="#333333"/>
 
                 <!-- TTL Extend -->
-                <rect x="300" y="70" width="110" height="50" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="355" y="93" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="12" font-weight="700">TTL Extend</text>
-                <text x="355" y="108" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">+1h / +1d</text>
+                <rect x="300" y="70" width="110" height="50" rx="8" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="355" y="93" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="12" font-weight="700">TTL Extend</text>
+                <text x="355" y="108" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">+1h / +1d</text>
 
-                <line x1="410" y1="95" x2="445" y2="95" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="445,91 452,95 445,99" fill="#30363d"/>
+                <line x1="410" y1="95" x2="445" y2="95" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="445,91 452,95 445,99" fill="#333333"/>
 
                 <!-- Auto-Promote -->
-                <rect x="455" y="70" width="120" height="50" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
-                <text x="515" y="93" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="12" font-weight="700">Auto-Promote</text>
-                <text x="515" y="108" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">at 5 accesses</text>
+                <rect x="455" y="70" width="120" height="50" rx="8" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
+                <text x="515" y="93" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="12" font-weight="700">Auto-Promote</text>
+                <text x="515" y="108" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">at 5 accesses</text>
 
-                <line x1="575" y1="95" x2="610" y2="95" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="610,91 617,95 610,99" fill="#30363d"/>
+                <line x1="575" y1="95" x2="610" y2="95" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="610,91 617,95 610,99" fill="#333333"/>
 
                 <!-- Consolidate -->
-                <rect x="620" y="70" width="120" height="50" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="1.5"/>
-                <text x="680" y="93" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="12" font-weight="700">Consolidate</text>
-                <text x="680" y="108" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">merge N to 1</text>
+                <rect x="620" y="70" width="120" height="50" rx="8" fill="#111111" stroke="#dddddd" stroke-width="1.5"/>
+                <text x="680" y="93" text-anchor="middle" fill="#dddddd" font-family="system-ui" font-size="12" font-weight="700">Consolidate</text>
+                <text x="680" y="108" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">merge N to 1</text>
 
                 <!-- Annotations -->
-                <text x="60" y="56" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">dedup on title+ns</text>
-                <text x="205" y="150" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">+1 priority every 10 accesses</text>
-                <text x="355" y="150" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">short: +1h, mid: +1d</text>
-                <text x="515" y="150" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">mid to long, clears expiry</text>
-                <text x="680" y="150" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">auto-consolidate groups</text>
+                <text x="60" y="56" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">dedup on title+ns</text>
+                <text x="205" y="150" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">+1 priority every 10 accesses</text>
+                <text x="355" y="150" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">short: +1h, mid: +1d</text>
+                <text x="515" y="150" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">mid to long, clears expiry</text>
+                <text x="680" y="150" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">auto-consolidate groups</text>
 
                 <!-- Contradiction branch -->
-                <line x1="60" y1="120" x2="60" y2="160" stroke="#30363d" stroke-width="1"/>
-                <polygon points="56,160 60,167 64,160" fill="#30363d"/>
-                <rect x="5" y="167" width="110" height="30" rx="6" fill="#161b22" stroke="#f85149" stroke-width="1"/>
-                <text x="60" y="186" text-anchor="middle" fill="#f85149" font-family="system-ui" font-size="10" font-weight="600">Contradiction detect</text>
+                <line x1="60" y1="120" x2="60" y2="160" stroke="#333333" stroke-width="1"/>
+                <polygon points="56,160 60,167 64,160" fill="#333333"/>
+                <rect x="5" y="167" width="110" height="30" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1"/>
+                <text x="60" y="186" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="10" font-weight="600">Contradiction detect</text>
             </svg>
         </div>
     </div>
@@ -1577,40 +1577,40 @@ ai-memory list -n my-project                                         <span class
         <h3>Recency Decay Curve</h3>
         <div class="diagram-wrap">
             <svg viewBox="0 0 600 220" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Recency decay curve">
-                <line x1="60" y1="180" x2="570" y2="180" stroke="#30363d" stroke-width="1"/>
-                <line x1="60" y1="20" x2="60" y2="180" stroke="#30363d" stroke-width="1"/>
+                <line x1="60" y1="180" x2="570" y2="180" stroke="#333333" stroke-width="1"/>
+                <line x1="60" y1="20" x2="60" y2="180" stroke="#333333" stroke-width="1"/>
 
-                <text x="52" y="35" text-anchor="end" fill="#8b949e" font-family="monospace" font-size="10">1.0</text>
-                <text x="52" y="102" text-anchor="end" fill="#8b949e" font-family="monospace" font-size="10">0.5</text>
-                <text x="52" y="185" text-anchor="end" fill="#8b949e" font-family="monospace" font-size="10">0.0</text>
+                <text x="52" y="35" text-anchor="end" fill="#999999" font-family="monospace" font-size="10">1.0</text>
+                <text x="52" y="102" text-anchor="end" fill="#999999" font-family="monospace" font-size="10">0.5</text>
+                <text x="52" y="185" text-anchor="end" fill="#999999" font-family="monospace" font-size="10">0.0</text>
 
-                <text x="60" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">0</text>
-                <text x="162" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">10d</text>
-                <text x="264" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">20d</text>
-                <text x="366" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">30d</text>
-                <text x="468" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">40d</text>
-                <text x="570" y="198" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="10">50d</text>
+                <text x="60" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">0</text>
+                <text x="162" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">10d</text>
+                <text x="264" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">20d</text>
+                <text x="366" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">30d</text>
+                <text x="468" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">40d</text>
+                <text x="570" y="198" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">50d</text>
 
-                <text x="315" y="215" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="11">Days since last update</text>
-                <text x="18" y="100" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="11" transform="rotate(-90,18,100)">Decay factor</text>
+                <text x="315" y="215" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="11">Days since last update</text>
+                <text x="18" y="100" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="11" transform="rotate(-90,18,100)">Decay factor</text>
 
-                <line x1="60" y1="100" x2="570" y2="100" stroke="#30363d" stroke-width="0.5" stroke-dasharray="4"/>
+                <line x1="60" y1="100" x2="570" y2="100" stroke="#333333" stroke-width="0.5" stroke-dasharray="4"/>
 
                 <path d="M60,20 C70,52 80,75 90,88 C110,108 140,128 170,140 C200,148 240,156 280,160 C320,163 370,166 420,168 C470,169 520,170 570,171"
-                      fill="none" stroke="#f85149" stroke-width="2.5" stroke-linecap="round">
+                      fill="none" stroke="#ffffff" stroke-width="2.5" stroke-linecap="round">
                     <animate attributeName="stroke-dashoffset" from="600" to="0" dur="2s" fill="freeze"/>
                     <animate attributeName="stroke-dasharray" from="600" to="600" dur="0.01s" fill="freeze"/>
                 </path>
 
-                <circle cx="60" cy="20" r="4" fill="#f85149"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="0.5s" fill="freeze"/></circle>
-                <circle cx="162" cy="100" r="4" fill="#f85149"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1s" fill="freeze"/></circle>
-                <circle cx="264" cy="127" r="4" fill="#f85149"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.3s" fill="freeze"/></circle>
-                <circle cx="366" cy="140" r="4" fill="#f85149"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.5s" fill="freeze"/></circle>
-                <circle cx="468" cy="148" r="4" fill="#f85149"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.7s" fill="freeze"/></circle>
+                <circle cx="60" cy="20" r="4" fill="#ffffff"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="0.5s" fill="freeze"/></circle>
+                <circle cx="162" cy="100" r="4" fill="#ffffff"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1s" fill="freeze"/></circle>
+                <circle cx="264" cy="127" r="4" fill="#ffffff"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.3s" fill="freeze"/></circle>
+                <circle cx="366" cy="140" r="4" fill="#ffffff"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.5s" fill="freeze"/></circle>
+                <circle cx="468" cy="148" r="4" fill="#ffffff"><animate attributeName="opacity" from="0" to="1" dur="0.5s" begin="1.7s" fill="freeze"/></circle>
 
-                <text x="75" y="16" fill="#f85149" font-family="monospace" font-size="10">today: 1.00</text>
-                <text x="170" y="96" fill="#f85149" font-family="monospace" font-size="10">10d: 0.50</text>
-                <text x="280" y="124" fill="#f85149" font-family="monospace" font-size="10">20d: 0.33</text>
+                <text x="75" y="16" fill="#ffffff" font-family="monospace" font-size="10">today: 1.00</text>
+                <text x="170" y="96" fill="#ffffff" font-family="monospace" font-size="10">10d: 0.50</text>
+                <text x="280" y="124" fill="#ffffff" font-family="monospace" font-size="10">20d: 0.33</text>
             </svg>
         </div>
     </div>
@@ -1688,138 +1688,138 @@ ai-memory list -n my-project                                         <span class
         <div class="diagram-wrap">
             <svg viewBox="0 0 760 480" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture diagram showing multiple AI clients, feature tiers, and Ollama integration">
                 <!-- Multiple AI Clients -->
-                <rect x="40" y="10" width="100" height="35" rx="6" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-                <text x="90" y="32" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="10" font-weight="700">Claude</text>
+                <rect x="40" y="10" width="100" height="35" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
+                <text x="90" y="32" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="10" font-weight="700">Claude</text>
 
-                <rect x="160" y="10" width="100" height="35" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-                <text x="210" y="32" text-anchor="middle" fill="#3fb950" font-family="system-ui" font-size="10" font-weight="700">ChatGPT</text>
+                <rect x="160" y="10" width="100" height="35" rx="6" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
+                <text x="210" y="32" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="10" font-weight="700">ChatGPT</text>
 
-                <rect x="280" y="10" width="100" height="35" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="330" y="32" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="10" font-weight="700">Grok</text>
+                <rect x="280" y="10" width="100" height="35" rx="6" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="330" y="32" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10" font-weight="700">Grok</text>
 
-                <rect x="400" y="10" width="100" height="35" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
-                <text x="450" y="32" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="10" font-weight="700">Llama</text>
+                <rect x="400" y="10" width="100" height="35" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
+                <text x="450" y="32" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="10" font-weight="700">Llama</text>
 
-                <rect x="520" y="10" width="130" height="35" rx="6" fill="#161b22" stroke="#39d2c0" stroke-width="1.5"/>
-                <text x="585" y="32" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="10" font-weight="700">Any MCP Client</text>
+                <rect x="520" y="10" width="130" height="35" rx="6" fill="#111111" stroke="#dddddd" stroke-width="1.5"/>
+                <text x="585" y="32" text-anchor="middle" fill="#dddddd" font-family="system-ui" font-size="10" font-weight="700">Any MCP Client</text>
 
                 <!-- Connecting lines down to interfaces -->
-                <line x1="90" y1="45" x2="90" y2="80" stroke="#58a6ff" stroke-width="1" opacity=".5"/>
-                <line x1="210" y1="45" x2="350" y2="80" stroke="#3fb950" stroke-width="1" opacity=".5"/>
-                <line x1="330" y1="45" x2="350" y2="80" stroke="#d29922" stroke-width="1" opacity=".5"/>
-                <line x1="450" y1="45" x2="350" y2="80" stroke="#bc8cff" stroke-width="1" opacity=".5"/>
-                <line x1="585" y1="45" x2="350" y2="80" stroke="#39d2c0" stroke-width="1" opacity=".5"/>
-                <line x1="90" y1="45" x2="350" y2="80" stroke="#58a6ff" stroke-width="1" opacity=".3"/>
-                <line x1="210" y1="45" x2="600" y2="80" stroke="#3fb950" stroke-width="1" opacity=".3"/>
+                <line x1="90" y1="45" x2="90" y2="80" stroke="#ffffff" stroke-width="1" opacity=".5"/>
+                <line x1="210" y1="45" x2="350" y2="80" stroke="#cccccc" stroke-width="1" opacity=".5"/>
+                <line x1="330" y1="45" x2="350" y2="80" stroke="#999999" stroke-width="1" opacity=".5"/>
+                <line x1="450" y1="45" x2="350" y2="80" stroke="#bbbbbb" stroke-width="1" opacity=".5"/>
+                <line x1="585" y1="45" x2="350" y2="80" stroke="#dddddd" stroke-width="1" opacity=".5"/>
+                <line x1="90" y1="45" x2="350" y2="80" stroke="#ffffff" stroke-width="1" opacity=".3"/>
+                <line x1="210" y1="45" x2="600" y2="80" stroke="#cccccc" stroke-width="1" opacity=".3"/>
 
                 <!-- Three interfaces -->
-                <rect x="30" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-                <text x="100" y="102" text-anchor="middle" fill="#3fb950" font-family="system-ui" font-size="12" font-weight="700">CLI</text>
-                <text x="100" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">25 commands</text>
+                <rect x="30" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
+                <text x="100" y="102" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="12" font-weight="700">CLI</text>
+                <text x="100" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">25 commands</text>
 
-                <rect x="280" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
-                <text x="350" y="102" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="12" font-weight="700">MCP Server</text>
-                <text x="350" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">26 tools / stdio</text>
+                <rect x="280" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
+                <text x="350" y="102" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="12" font-weight="700">MCP Server</text>
+                <text x="350" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">26 tools / stdio</text>
 
-                <rect x="530" y="80" width="140" height="48" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="600" y="102" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="12" font-weight="700">HTTP API</text>
-                <text x="600" y="118" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">24 endpoints / Axum</text>
+                <rect x="530" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="600" y="102" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="12" font-weight="700">HTTP API</text>
+                <text x="600" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">24 endpoints / Axum</text>
 
                 <!-- Labels under interfaces -->
-                <text x="100" y="146" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">Universal</text>
-                <text x="350" y="146" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">Universal</text>
-                <text x="600" y="146" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">Universal</text>
+                <text x="100" y="146" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">Universal</text>
+                <text x="350" y="146" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">Universal</text>
+                <text x="600" y="146" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">Universal</text>
 
                 <!-- Down to validation -->
-                <line x1="100" y1="150" x2="100" y2="175" stroke="#30363d" stroke-width="1"/>
-                <line x1="350" y1="150" x2="350" y2="175" stroke="#30363d" stroke-width="1"/>
-                <line x1="600" y1="150" x2="600" y2="175" stroke="#30363d" stroke-width="1"/>
+                <line x1="100" y1="150" x2="100" y2="175" stroke="#333333" stroke-width="1"/>
+                <line x1="350" y1="150" x2="350" y2="175" stroke="#333333" stroke-width="1"/>
+                <line x1="600" y1="150" x2="600" y2="175" stroke="#333333" stroke-width="1"/>
 
                 <!-- Validation layer -->
-                <rect x="50" y="175" width="600" height="30" rx="6" fill="#161b22" stroke="#f85149" stroke-width="1"/>
-                <text x="350" y="195" text-anchor="middle" fill="#f85149" font-family="system-ui" font-size="11" font-weight="600">Validation Layer (validate.rs) + Structured Errors (errors.rs)</text>
+                <rect x="50" y="175" width="600" height="30" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1"/>
+                <text x="350" y="195" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="600">Validation Layer (validate.rs) + Structured Errors (errors.rs)</text>
 
                 <!-- Down from validation to feature tier bar -->
-                <line x1="350" y1="205" x2="350" y2="225" stroke="#30363d" stroke-width="1.5"/>
+                <line x1="350" y1="205" x2="350" y2="225" stroke="#333333" stroke-width="1.5"/>
 
                 <!-- ================================================ -->
                 <!-- FEATURE TIERS — the new visualization            -->
                 <!-- ================================================ -->
-                <rect x="30" y="225" width="700" height="95" rx="8" fill="#0d1117" stroke="#484f58" stroke-width="1" stroke-dasharray="4 2"/>
-                <text x="380" y="242" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9" font-weight="600" letter-spacing=".06em" text-transform="uppercase">FEATURE TIERS</text>
+                <rect x="30" y="225" width="700" height="95" rx="8" fill="#000000" stroke="#555555" stroke-width="1" stroke-dasharray="4 2"/>
+                <text x="380" y="242" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9" font-weight="600" letter-spacing=".06em" text-transform="uppercase">FEATURE TIERS</text>
 
                 <!-- Keyword tier -->
-                <rect x="45" y="252" width="140" height="55" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1.5"/>
-                <text x="115" y="271" text-anchor="middle" fill="#3fb950" font-family="system-ui" font-size="11" font-weight="700">Keyword</text>
-                <text x="115" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">FTS5 only</text>
-                <text x="115" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">0 MB | 13 tools</text>
+                <rect x="45" y="252" width="140" height="55" rx="6" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
+                <text x="115" y="271" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="11" font-weight="700">Keyword</text>
+                <text x="115" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">FTS5 only</text>
+                <text x="115" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">0 MB | 13 tools</text>
 
                 <!-- Semantic tier -->
-                <rect x="200" y="252" width="140" height="55" rx="6" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-                <text x="270" y="271" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="700">Semantic</text>
-                <text x="270" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">MiniLM-L6 384d</text>
-                <text x="270" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">256 MB | 14 tools</text>
+                <rect x="200" y="252" width="140" height="55" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
+                <text x="270" y="271" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="700">Semantic</text>
+                <text x="270" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">MiniLM-L6 384d</text>
+                <text x="270" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">256 MB | 14 tools</text>
                 <!-- Candle label -->
-                <text x="270" y="250" text-anchor="middle" fill="#58a6ff" font-family="monospace" font-size="7" opacity=".6">candle (local)</text>
+                <text x="270" y="250" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="7" opacity=".6">candle (local)</text>
 
                 <!-- Arrow from keyword to semantic -->
-                <line x1="185" y1="280" x2="200" y2="280" stroke="#30363d" stroke-width="1" class="animate-flow"/>
-                <polygon points="197,277 203,280 197,283" fill="#30363d"/>
+                <line x1="185" y1="280" x2="200" y2="280" stroke="#333333" stroke-width="1" class="animate-flow"/>
+                <polygon points="197,277 203,280 197,283" fill="#333333"/>
 
                 <!-- Smart tier -->
-                <rect x="355" y="252" width="155" height="55" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="432" y="271" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="11" font-weight="700">Smart</text>
-                <text x="432" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E2B</text>
-                <text x="432" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">1 GB | 26 tools</text>
+                <rect x="355" y="252" width="155" height="55" rx="6" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="432" y="271" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="11" font-weight="700">Smart</text>
+                <text x="432" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E2B</text>
+                <text x="432" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">1 GB | 26 tools</text>
 
                 <!-- Arrow from semantic to smart -->
-                <line x1="340" y1="280" x2="355" y2="280" stroke="#30363d" stroke-width="1" class="animate-flow"/>
-                <polygon points="352,277 358,280 352,283" fill="#30363d"/>
+                <line x1="340" y1="280" x2="355" y2="280" stroke="#333333" stroke-width="1" class="animate-flow"/>
+                <polygon points="352,277 358,280 352,283" fill="#333333"/>
 
                 <!-- Autonomous tier -->
-                <rect x="525" y="252" width="190" height="55" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1.5"/>
-                <text x="620" y="271" text-anchor="middle" fill="#bc8cff" font-family="system-ui" font-size="11" font-weight="700">Autonomous</text>
-                <text x="620" y="284" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E4B + reranker</text>
-                <text x="620" y="298" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="8">4 GB | 26 tools + cross-encoder</text>
+                <rect x="525" y="252" width="190" height="55" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
+                <text x="620" y="271" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="11" font-weight="700">Autonomous</text>
+                <text x="620" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E4B + reranker</text>
+                <text x="620" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">4 GB | 26 tools + cross-encoder</text>
 
                 <!-- Arrow from smart to autonomous -->
-                <line x1="510" y1="280" x2="525" y2="280" stroke="#30363d" stroke-width="1" class="animate-flow"/>
-                <polygon points="522,277 528,280 522,283" fill="#30363d"/>
+                <line x1="510" y1="280" x2="525" y2="280" stroke="#333333" stroke-width="1" class="animate-flow"/>
+                <polygon points="522,277 528,280 522,283" fill="#333333"/>
 
                 <!-- ================================================ -->
                 <!-- Ollama box (right side, connected to smart/auto) -->
                 <!-- ================================================ -->
-                <rect x="600" y="335" width="140" height="50" rx="8" fill="#161b22" stroke="#d29922" stroke-width="1.5"/>
-                <text x="670" y="357" text-anchor="middle" fill="#d29922" font-family="system-ui" font-size="12" font-weight="700">Ollama</text>
-                <text x="670" y="373" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="9">localhost:11434</text>
+                <rect x="600" y="335" width="140" height="50" rx="8" fill="#111111" stroke="#999999" stroke-width="1.5"/>
+                <text x="670" y="357" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="12" font-weight="700">Ollama</text>
+                <text x="670" y="373" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="9">localhost:11434</text>
 
                 <!-- Animated lines from Ollama up to smart and autonomous -->
-                <line x1="670" y1="335" x2="620" y2="307" stroke="#d29922" stroke-width="1.2" class="animate-flow" opacity=".7"/>
-                <line x1="650" y1="335" x2="432" y2="307" stroke="#d29922" stroke-width="1.2" class="animate-flow" opacity=".5"/>
+                <line x1="670" y1="335" x2="620" y2="307" stroke="#999999" stroke-width="1.2" class="animate-flow" opacity=".7"/>
+                <line x1="650" y1="335" x2="432" y2="307" stroke="#999999" stroke-width="1.2" class="animate-flow" opacity=".5"/>
 
                 <!-- Ollama model labels -->
-                <text x="540" y="330" text-anchor="middle" fill="#d29922" font-family="monospace" font-size="7" opacity=".7">gemma4:e2b / e4b</text>
-                <text x="680" y="330" text-anchor="middle" fill="#d29922" font-family="monospace" font-size="7" opacity=".7">nomic-embed-text</text>
+                <text x="540" y="330" text-anchor="middle" fill="#999999" font-family="monospace" font-size="7" opacity=".7">gemma4:e2b / e4b</text>
+                <text x="680" y="330" text-anchor="middle" fill="#999999" font-family="monospace" font-size="7" opacity=".7">nomic-embed-text</text>
 
                 <!-- Down from tier bar to DB -->
-                <line x1="350" y1="320" x2="350" y2="345" stroke="#30363d" stroke-width="1.5"/>
-                <polygon points="346,345 350,352 354,345" fill="#30363d"/>
+                <line x1="350" y1="320" x2="350" y2="345" stroke="#333333" stroke-width="1.5"/>
+                <polygon points="346,345 350,352 354,345" fill="#333333"/>
 
                 <!-- DB layer -->
-                <rect x="120" y="352" width="360" height="55" rx="8" fill="#161b22" stroke="#39d2c0" stroke-width="2"/>
-                <text x="300" y="375" text-anchor="middle" fill="#39d2c0" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 + HNSW (db.rs)</text>
-                <text x="300" y="395" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">WAL mode | schema v5 | embeddings | 191 tests</text>
+                <rect x="120" y="352" width="360" height="55" rx="8" fill="#111111" stroke="#dddddd" stroke-width="2"/>
+                <text x="300" y="375" text-anchor="middle" fill="#dddddd" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 + HNSW (db.rs)</text>
+                <text x="300" y="395" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">WAL mode | schema v5 | embeddings | 191 tests</text>
 
                 <!-- Memory tiers -->
-                <rect x="145" y="420" width="70" height="22" rx="4" fill="rgba(255,255,255,.15)" stroke="#f85149" stroke-width="1"/>
-                <text x="180" y="435" text-anchor="middle" fill="#f85149" font-family="monospace" font-size="10">short 6h</text>
-                <rect x="250" y="420" width="70" height="22" rx="4" fill="rgba(210,153,34,.15)" stroke="#d29922" stroke-width="1"/>
-                <text x="285" y="435" text-anchor="middle" fill="#d29922" font-family="monospace" font-size="10">mid 7d</text>
-                <rect x="355" y="420" width="90" height="22" rx="4" fill="rgba(63,185,80,.15)" stroke="#3fb950" stroke-width="1"/>
-                <text x="400" y="435" text-anchor="middle" fill="#3fb950" font-family="monospace" font-size="10">long forever</text>
+                <rect x="145" y="420" width="70" height="22" rx="4" fill="rgba(255,255,255,.15)" stroke="#ffffff" stroke-width="1"/>
+                <text x="180" y="435" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="10">short 6h</text>
+                <rect x="250" y="420" width="70" height="22" rx="4" fill="rgba(210,153,34,.15)" stroke="#999999" stroke-width="1"/>
+                <text x="285" y="435" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">mid 7d</text>
+                <rect x="355" y="420" width="90" height="22" rx="4" fill="rgba(63,185,80,.15)" stroke="#cccccc" stroke-width="1"/>
+                <text x="400" y="435" text-anchor="middle" fill="#cccccc" font-family="monospace" font-size="10">long forever</text>
 
                 <!-- HNSW label near DB -->
-                <text x="300" y="460" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="8">instant-distance HNSW | cosine similarity | 6-factor ranking</text>
+                <text x="300" y="460" text-anchor="middle" fill="#999999" font-family="monospace" font-size="8">instant-distance HNSW | cosine similarity | 6-factor ranking</text>
             </svg>
         </div>
     </div>
@@ -1879,42 +1879,42 @@ ai-memory list -n my-project                                         <span class
         <div class="diagram-wrap">
             <svg viewBox="0 0 700 310" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Interactive shell mockup">
                 <!-- Terminal frame -->
-                <rect x="20" y="10" width="660" height="290" rx="10" fill="#0d1117" stroke="#30363d" stroke-width="2"/>
-                <rect x="20" y="10" width="660" height="30" rx="10" fill="#161b22"/>
-                <rect x="20" y="30" width="660" height="10" fill="#161b22"/>
-                <circle cx="42" cy="25" r="6" fill="#f85149"/>
-                <circle cx="62" cy="25" r="6" fill="#d29922"/>
-                <circle cx="82" cy="25" r="6" fill="#3fb950"/>
-                <text x="350" y="28" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="11">ai-memory shell</text>
+                <rect x="20" y="10" width="660" height="290" rx="10" fill="#000000" stroke="#333333" stroke-width="2"/>
+                <rect x="20" y="10" width="660" height="30" rx="10" fill="#111111"/>
+                <rect x="20" y="30" width="660" height="10" fill="#111111"/>
+                <circle cx="42" cy="25" r="6" fill="#ffffff"/>
+                <circle cx="62" cy="25" r="6" fill="#999999"/>
+                <circle cx="82" cy="25" r="6" fill="#cccccc"/>
+                <text x="350" y="28" text-anchor="middle" fill="#999999" font-family="monospace" font-size="11">ai-memory shell</text>
 
-                <text x="35" y="60" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">ai-memory shell -- type 'help' for commands, 'quit' to exit</text>
+                <text x="35" y="60" fill="#ffffff" font-family="monospace" font-size="11" font-weight="700">ai-memory shell -- type 'help' for commands, 'quit' to exit</text>
 
-                <text x="35" y="85" fill="#39d2c0" font-family="monospace" font-size="11">memory&gt;</text>
-                <text x="100" y="85" fill="#e6edf3" font-family="monospace" font-size="11">recall database setup</text>
+                <text x="35" y="85" fill="#dddddd" font-family="monospace" font-size="11">memory&gt;</text>
+                <text x="100" y="85" fill="#ffffff" font-family="monospace" font-size="11">recall database setup</text>
 
-                <text x="45" y="110" fill="#3fb950" font-family="monospace" font-size="11">[long]</text>
-                <text x="100" y="110" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">Project uses PostgreSQL 15</text>
-                <text x="360" y="110" fill="#3fb950" font-family="monospace" font-size="11">score: 8.42</text>
-                <text x="55" y="128" fill="#8b949e" font-family="monospace" font-size="10">Main database is PostgreSQL 15 with pgvector for embeddings...</text>
+                <text x="45" y="110" fill="#cccccc" font-family="monospace" font-size="11">[long]</text>
+                <text x="100" y="110" fill="#ffffff" font-family="monospace" font-size="11" font-weight="700">Project uses PostgreSQL 15</text>
+                <text x="360" y="110" fill="#cccccc" font-family="monospace" font-size="11">score: 8.42</text>
+                <text x="55" y="128" fill="#999999" font-family="monospace" font-size="10">Main database is PostgreSQL 15 with pgvector for embeddings...</text>
 
-                <text x="45" y="153" fill="#d29922" font-family="monospace" font-size="11">[mid]</text>
-                <text x="95" y="153" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">Database migration to v3</text>
-                <text x="340" y="153" fill="#d29922" font-family="monospace" font-size="11">score: 5.71</text>
-                <text x="55" y="171" fill="#8b949e" font-family="monospace" font-size="10">Sprint goal: migrate schema from v2 to v3 by end of week...</text>
+                <text x="45" y="153" fill="#999999" font-family="monospace" font-size="11">[mid]</text>
+                <text x="95" y="153" fill="#ffffff" font-family="monospace" font-size="11" font-weight="700">Database migration to v3</text>
+                <text x="340" y="153" fill="#999999" font-family="monospace" font-size="11">score: 5.71</text>
+                <text x="55" y="171" fill="#999999" font-family="monospace" font-size="10">Sprint goal: migrate schema from v2 to v3 by end of week...</text>
 
-                <text x="45" y="196" fill="#f85149" font-family="monospace" font-size="11">[short]</text>
-                <text x="108" y="196" fill="#e6edf3" font-family="monospace" font-size="11" font-weight="700">Debug: connection pool exhausted</text>
-                <text x="415" y="196" fill="#f85149" font-family="monospace" font-size="11">score: 2.38</text>
-                <text x="55" y="214" fill="#8b949e" font-family="monospace" font-size="10">Seeing connection pool exhaustion under load in staging...</text>
+                <text x="45" y="196" fill="#ffffff" font-family="monospace" font-size="11">[short]</text>
+                <text x="108" y="196" fill="#ffffff" font-family="monospace" font-size="11" font-weight="700">Debug: connection pool exhausted</text>
+                <text x="415" y="196" fill="#ffffff" font-family="monospace" font-size="11">score: 2.38</text>
+                <text x="55" y="214" fill="#999999" font-family="monospace" font-size="10">Seeing connection pool exhaustion under load in staging...</text>
 
-                <text x="45" y="239" fill="#e6edf3" font-family="monospace" font-size="11">3 memory(ies) recalled</text>
+                <text x="45" y="239" fill="#ffffff" font-family="monospace" font-size="11">3 memory(ies) recalled</text>
 
-                <text x="35" y="264" fill="#39d2c0" font-family="monospace" font-size="11">memory&gt;</text>
-                <text x="100" y="264" fill="#e6edf3" font-family="monospace" font-size="11">stats</text>
-                <text x="45" y="284" fill="#e6edf3" font-family="monospace" font-size="11">total: 47, links: 12, db: 284 KB</text>
-                <text x="55" y="298" fill="#3fb950" font-family="monospace" font-size="10">long: 18</text>
-                <text x="140" y="298" fill="#d29922" font-family="monospace" font-size="10">mid: 21</text>
-                <text x="220" y="298" fill="#f85149" font-family="monospace" font-size="10">short: 8</text>
+                <text x="35" y="264" fill="#dddddd" font-family="monospace" font-size="11">memory&gt;</text>
+                <text x="100" y="264" fill="#ffffff" font-family="monospace" font-size="11">stats</text>
+                <text x="45" y="284" fill="#ffffff" font-family="monospace" font-size="11">total: 47, links: 12, db: 284 KB</text>
+                <text x="55" y="298" fill="#cccccc" font-family="monospace" font-size="10">long: 18</text>
+                <text x="140" y="298" fill="#999999" font-family="monospace" font-size="10">mid: 21</text>
+                <text x="220" y="298" fill="#ffffff" font-family="monospace" font-size="10">short: 8</text>
             </svg>
         </div>
     </div>
@@ -1967,42 +1967,42 @@ ai-memory list -n my-project                                         <span class
 
         <div class="diagram-wrap">
             <svg viewBox="0 0 700 110" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="CI/CD pipeline">
-                <rect x="10" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#58a6ff" stroke-width="1.5"/>
-                <text x="50" y="54" text-anchor="middle" fill="#58a6ff" font-family="system-ui" font-size="11" font-weight="700">Push</text>
+                <rect x="10" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
+                <text x="50" y="54" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="700">Push</text>
 
-                <line x1="90" y1="50" x2="120" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
-                <polygon points="120,46 127,50 120,54" fill="#30363d"/>
+                <line x1="90" y1="50" x2="120" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
+                <polygon points="120,46 127,50 120,54" fill="#333333"/>
 
-                <rect x="127" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#3fb950" stroke-width="1"/>
-                <text x="167" y="48" text-anchor="middle" fill="#3fb950" font-family="monospace" font-size="10">fmt</text>
-                <text x="167" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">check</text>
+                <rect x="127" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#cccccc" stroke-width="1"/>
+                <text x="167" y="48" text-anchor="middle" fill="#cccccc" font-family="monospace" font-size="10">fmt</text>
+                <text x="167" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">check</text>
 
-                <line x1="207" y1="50" x2="227" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
+                <line x1="207" y1="50" x2="227" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
 
-                <rect x="227" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#d29922" stroke-width="1"/>
-                <text x="267" y="48" text-anchor="middle" fill="#d29922" font-family="monospace" font-size="10">clippy</text>
-                <text x="267" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">-D warnings</text>
+                <rect x="227" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#999999" stroke-width="1"/>
+                <text x="267" y="48" text-anchor="middle" fill="#999999" font-family="monospace" font-size="10">clippy</text>
+                <text x="267" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">-D warnings</text>
 
-                <line x1="307" y1="50" x2="327" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
+                <line x1="307" y1="50" x2="327" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
 
-                <rect x="327" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#bc8cff" stroke-width="1"/>
-                <text x="367" y="48" text-anchor="middle" fill="#bc8cff" font-family="monospace" font-size="10">test</text>
-                <text x="367" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">191 tests</text>
+                <rect x="327" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1"/>
+                <text x="367" y="48" text-anchor="middle" fill="#bbbbbb" font-family="monospace" font-size="10">test</text>
+                <text x="367" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">191 tests</text>
 
-                <line x1="407" y1="50" x2="427" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
+                <line x1="407" y1="50" x2="427" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
 
-                <rect x="427" y="30" width="80" height="40" rx="6" fill="#161b22" stroke="#39d2c0" stroke-width="1"/>
-                <text x="467" y="48" text-anchor="middle" fill="#39d2c0" font-family="monospace" font-size="10">build</text>
-                <text x="467" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">release</text>
+                <rect x="427" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#dddddd" stroke-width="1"/>
+                <text x="467" y="48" text-anchor="middle" fill="#dddddd" font-family="monospace" font-size="10">build</text>
+                <text x="467" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">release</text>
 
-                <line x1="507" y1="50" x2="527" y2="50" stroke="#30363d" stroke-width="1.5" class="animate-flow"/>
+                <line x1="507" y1="50" x2="527" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
 
-                <rect x="527" y="30" width="120" height="40" rx="6" fill="#161b22" stroke="#f85149" stroke-width="1"/>
-                <text x="587" y="48" text-anchor="middle" fill="#f85149" font-family="monospace" font-size="10">release</text>
-                <text x="587" y="62" text-anchor="middle" fill="#8b949e" font-family="monospace" font-size="9">linux + macOS</text>
+                <rect x="527" y="30" width="120" height="40" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1"/>
+                <text x="587" y="48" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="10">release</text>
+                <text x="587" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">linux + macOS</text>
 
-                <text x="350" y="95" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">ubuntu-latest + macos-latest | x86_64-linux + aarch64-darwin</text>
-                <text x="587" y="18" text-anchor="middle" fill="#8b949e" font-family="system-ui" font-size="10">on tag: v*</text>
+                <text x="350" y="95" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">ubuntu-latest + macos-latest | x86_64-linux + aarch64-darwin</text>
+                <text x="587" y="18" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">on tag: v*</text>
             </svg>
         </div>
     </div>
