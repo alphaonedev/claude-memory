@@ -3,7 +3,7 @@ Version:        0.5.1
 Release:        1%{?dist}
 Summary:        AI-agnostic persistent memory system — MCP server, HTTP API, and CLI
 
-License:        MIT
+License:        Apache-2.0
 URL:            https://github.com/alphaonedev/ai-memory-mcp
 Source0:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v%{version}/ai-memory-%{_target_platform}.tar.gz
 

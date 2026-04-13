@@ -1,15 +1,13 @@
-```
-        _
-   __ _(_)      _ __ ___   ___ _ __ ___   ___  _ __ _   _
-  / _` | |___  | '_ ` _ \ / _ \ '_ ` _ \ / _ \| '__| | | |
- | (_| | |___| | | | | | |  __/ | | | | | (_) | |  | |_| |
-  \__,_|_|     |_| |_| |_|\___|_| |_| |_|\___/|_|   \__, |
-                universal AI memory                   |___/
-```
+<p align="center">
+  <img src="docs/ai-memory-logo.jpg" alt="ai-memory logo" width="200">
+</p>
+
+<h1 align="center">ai-memory</h1>
+<p align="center"><em>universal AI memory</em></p>
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?logo=rust)](https://www.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
 [![Tests](https://img.shields.io/badge/tests-188_(139_unit_+_49_integration)-brightgreen)]()
 [![MCP](https://img.shields.io/badge/MCP-23_tools-blueviolet)]()
@@ -914,8 +912,16 @@ ai-memory includes hardening across all input paths:
 
 ## License
 
-Copyright (c) 2026 **AlphaOne LLC**. All rights reserved.
+Copyright 2026 **AlphaOne LLC**.
 
-Licensed under the [MIT License](LICENSE).
+Licensed under the [Apache License, Version 2.0](LICENSE) (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
 
-THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+> <http://www.apache.org/licenses/LICENSE-2.0>
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.

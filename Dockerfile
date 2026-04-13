@@ -23,7 +23,7 @@ LABEL org.opencontainers.image.title="ai-memory" \
       org.opencontainers.image.description="AI-agnostic persistent memory system — MCP server, HTTP API, and CLI" \
       org.opencontainers.image.version="0.5.2" \
       org.opencontainers.image.source="https://github.com/alphaonedev/ai-memory-mcp" \
-      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="AlphaOne LLC" \
       io.modelcontextprotocol.server.name="io.github.alphaonedev/ai-memory"
 

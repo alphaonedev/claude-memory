@@ -6,7 +6,7 @@ maintainer: "AlphaOne LLC <alphaonedev@users.noreply.github.com>"
 description: "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI"
 vendor: "AlphaOne LLC"
 homepage: "https://alphaonedev.github.io/ai-memory-mcp/"
-license: MIT
+license: Apache-2.0
 section: utils
 priority: optional
 

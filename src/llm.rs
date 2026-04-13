@@ -1,4 +1,5 @@
-// Copyright (c) 2026 AlphaOne LLC. All rights reserved.
+// Copyright 2026 AlphaOne LLC
+// SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};

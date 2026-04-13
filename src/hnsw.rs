@@ -1,5 +1,5 @@
-// Copyright (c) 2026 AlphaOne LLC. All rights reserved.
-// Licensed under the MIT License. See LICENSE file in the project root.
+// Copyright 2026 AlphaOne LLC
+// SPDX-License-Identifier: Apache-2.0
 
 //! HNSW (Hierarchical Navigable Small World) vector index for fast approximate
 //! nearest-neighbor search over memory embeddings.

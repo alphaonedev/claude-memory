@@ -88,6 +88,15 @@ Examples:
 3. Releases are tagged as `vX.Y.Z` and published from the `main` branch.
 4. Crate publishing and binary builds are handled by CI.
 
+## Contributor License Agreement (CLA)
+
+All contributors must agree to the project's [Contributor License Agreement](CLA.md) before their contributions can be accepted. The CLA ensures that you grant AlphaOne LLC the necessary rights to use your contributions under the Apache License, Version 2.0, while you retain ownership of your work.
+
+- **Individual contributors:** Include your signed CLA information (as described in [CLA.md](CLA.md)) in your first pull request.
+- **Corporate contributors:** Have your authorized representative submit the Entity CLA before any employees or contractors submit pull requests.
+
+If you have questions about the CLA, open an issue or contact the project maintainers.
+
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+By contributing, you agree that your contributions will be licensed under the [Apache License, Version 2.0](LICENSE).

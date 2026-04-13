@@ -1,5 +1,5 @@
-// Copyright (c) 2026 AlphaOne LLC. All rights reserved.
-// Licensed under the MIT License. See LICENSE file in the project root.
+// Copyright 2026 AlphaOne LLC
+// SPDX-License-Identifier: Apache-2.0
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use std::process::Command;
