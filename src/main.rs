@@ -1963,7 +1963,7 @@ fn cmd_mine(
         }
 
         // Commit in batches of 100
-        if imported % 100 == 0 && imported > 0 {
+        if imported.is_multiple_of(100) && imported > 0 {
             conn.execute_batch("COMMIT")?;
             conn.execute_batch("BEGIN")?;
         }

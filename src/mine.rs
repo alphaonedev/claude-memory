@@ -383,11 +383,7 @@ fn extract_text_content(val: &serde_json::Value) -> Option<String> {
             .filter_map(|p| {
                 if let Some(s) = p.as_str() {
                     Some(s.to_string())
-                } else if let Some(s) = p["text"].as_str() {
-                    Some(s.to_string())
-                } else {
-                    None
-                }
+                } else { p["text"].as_str().map(|s| s.to_string()) }
             })
             .collect();
         if !parts.is_empty() {
