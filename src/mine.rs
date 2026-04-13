@@ -58,7 +58,7 @@ impl Format {
         }
     }
 
-    pub fn source_tag(&self) -> &'static str {
+    pub fn source_tag(self) -> &'static str {
         match self {
             Self::Claude => "mine-claude",
             Self::ChatGpt => "mine-chatgpt",
@@ -96,6 +96,7 @@ pub fn parse_claude(path: &Path) -> Result<Vec<Conversation>> {
     Ok(conversations)
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn parse_claude_conversation(
     val: &serde_json::Value,
     line_num: usize,
@@ -105,7 +106,9 @@ fn parse_claude_conversation(
         .unwrap_or(&format!("claude-{line_num}"))
         .to_string();
     let title = val["name"].as_str().map(std::string::ToString::to_string);
-    let created_at = val["created_at"].as_str().map(std::string::ToString::to_string);
+    let created_at = val["created_at"]
+        .as_str()
+        .map(std::string::ToString::to_string);
 
     let mut messages = Vec::new();
 
@@ -161,11 +164,14 @@ fn parse_claude_conversation(
 
                 let content = extract_message_content(msg);
                 if !content.is_empty() {
-                    let ts = msg.get("create_time").and_then(serde_json::Value::as_f64).map(|t| {
-                        chrono::DateTime::from_timestamp(t as i64, 0)
-                            .map(|dt| dt.to_rfc3339())
-                            .unwrap_or_default()
-                    });
+                    let ts = msg
+                        .get("create_time")
+                        .and_then(serde_json::Value::as_i64)
+                        .map(|t| {
+                            chrono::DateTime::from_timestamp(t, 0)
+                                .map(|dt| dt.to_rfc3339())
+                                .unwrap_or_default()
+                        });
                     let sort_key = msg
                         .get("create_time")
                         .and_then(serde_json::Value::as_f64)
@@ -221,10 +227,12 @@ pub fn parse_chatgpt(path: &Path) -> Result<Vec<Conversation>> {
             .as_str()
             .unwrap_or(&format!("chatgpt-{idx}"))
             .to_string();
-        let title = conv_val["title"].as_str().map(std::string::ToString::to_string);
+        let title = conv_val["title"]
+            .as_str()
+            .map(std::string::ToString::to_string);
         let created_at = conv_val["create_time"]
-            .as_f64()
-            .and_then(|t| chrono::DateTime::from_timestamp(t as i64, 0))
+            .as_i64()
+            .and_then(|t| chrono::DateTime::from_timestamp(t, 0))
             .map(|dt| dt.to_rfc3339());
 
         let mut messages = Vec::new();
@@ -247,6 +255,7 @@ pub fn parse_chatgpt(path: &Path) -> Result<Vec<Conversation>> {
                     }
 
                     let ts = msg["create_time"].as_f64().unwrap_or(0.0);
+                    #[allow(clippy::cast_possible_truncation)]
                     node_msgs.push((
                         ts,
                         Message {
@@ -308,11 +317,7 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
         // Collect all JSON files in the channel, sorted by date
         let mut json_files: Vec<_> = fs::read_dir(&channel_path)?
             .filter_map(std::result::Result::ok)
-            .filter(|e| {
-                e.path()
-                    .extension()
-                    .is_some_and(|ext| ext == "json")
-            })
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "json"))
             .collect();
         json_files.sort_by_key(std::fs::DirEntry::file_name);
 
@@ -335,6 +340,7 @@ pub fn parse_slack(path: &Path) -> Result<Vec<Conversation>> {
                         continue;
                     }
 
+                    #[allow(clippy::cast_possible_truncation)]
                     let ts = msg["ts"]
                         .as_str()
                         .and_then(|s| s.parse::<f64>().ok())
@@ -382,7 +388,9 @@ fn extract_text_content(val: &serde_json::Value) -> Option<String> {
             .filter_map(|p| {
                 if let Some(s) = p.as_str() {
                     Some(s.to_string())
-                } else { p["text"].as_str().map(std::string::ToString::to_string) }
+                } else {
+                    p["text"].as_str().map(std::string::ToString::to_string)
+                }
             })
             .collect();
         if !parts.is_empty() {
@@ -432,10 +440,8 @@ pub fn conversation_to_memory(conv: &Conversation, format: Format) -> Option<Min
     }
 
     // Title: use conversation title or first user message
-    let title = conv
-        .title
-        .as_deref()
-        .filter(|t| !t.is_empty()).map_or_else(|| {
+    let title = conv.title.as_deref().filter(|t| !t.is_empty()).map_or_else(
+        || {
             let first_user = conv
                 .messages
                 .iter()
@@ -445,7 +451,9 @@ pub fn conversation_to_memory(conv: &Conversation, format: Format) -> Option<Min
                 Some(m) => truncate(&m.content, 100).to_string(),
                 None => format!("Conversation {}", &conv.id),
             }
-        }, |t| truncate(t, 100).to_string());
+        },
+        |t| truncate(t, 100).to_string(),
+    );
 
     // Content: formatted message concatenation
     let mut content = String::new();

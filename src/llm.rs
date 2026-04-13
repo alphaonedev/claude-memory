@@ -90,20 +90,18 @@ impl OllamaClient {
 
         let body: Value = resp.json().context("Failed to parse /api/tags response")?;
 
-        let model_exists = body["models"]
-            .as_array()
-            .is_some_and(|models| {
-                models.iter().any(|m| {
-                    let name = m["name"].as_str().unwrap_or("");
-                    // Match "model" or "model:tag" against our model string
-                    // Also match when our model base (before ':') matches the served name
-                    let our_base = self.model.split(':').next().unwrap_or(&self.model);
-                    name == self.model
-                        || name.starts_with(&format!("{}:", self.model))
-                        || self.model == name.split(':').next().unwrap_or("")
-                        || name == our_base
-                })
-            });
+        let model_exists = body["models"].as_array().is_some_and(|models| {
+            models.iter().any(|m| {
+                let name = m["name"].as_str().unwrap_or("");
+                // Match "model" or "model:tag" against our model string
+                // Also match when our model base (before ':') matches the served name
+                let our_base = self.model.split(':').next().unwrap_or(&self.model);
+                name == self.model
+                    || name.starts_with(&format!("{}:", self.model))
+                    || self.model == name.split(':').next().unwrap_or("")
+                    || name == our_base
+            })
+        });
 
         if model_exists {
             return Ok(());
@@ -263,6 +261,7 @@ impl OllamaClient {
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow!("Missing embeddings in Ollama response"))?;
 
+        #[allow(clippy::cast_possible_truncation)]
         let floats: Vec<f32> = embedding
             .iter()
             .filter_map(|v| v.as_f64().map(|f| f as f32))
@@ -286,16 +285,14 @@ impl OllamaClient {
             .context("Failed to list Ollama models")?;
 
         let body: Value = resp.json().context("Failed to parse /api/tags response")?;
-        let model_exists = body["models"]
-            .as_array()
-            .is_some_and(|models| {
-                models.iter().any(|m| {
-                    let name = m["name"].as_str().unwrap_or("");
-                    name == model
-                        || name.starts_with(&format!("{model}:"))
-                        || model == name.split(':').next().unwrap_or("")
-                })
-            });
+        let model_exists = body["models"].as_array().is_some_and(|models| {
+            models.iter().any(|m| {
+                let name = m["name"].as_str().unwrap_or("");
+                name == model
+                    || name.starts_with(&format!("{model}:"))
+                    || model == name.split(':').next().unwrap_or("")
+            })
+        });
 
         if model_exists {
             return Ok(());
@@ -316,9 +313,7 @@ impl OllamaClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().unwrap_or_default();
-            return Err(anyhow!(
-                "Ollama embed model pull failed ({status}): {text}"
-            ));
+            return Err(anyhow!("Ollama embed model pull failed ({status}): {text}"));
         }
 
         tracing::info!("Embedding model '{}' pulled successfully", model);

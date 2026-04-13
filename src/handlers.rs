@@ -16,7 +16,10 @@ use uuid::Uuid;
 
 use crate::config::ResolvedTtl;
 use crate::db;
-use crate::models::{CreateMemory, Memory, UpdateMemory, Tier, ListQuery, SearchQuery, RecallQuery, RecallBody, ForgetQuery, LinkBody, MemoryLink};
+use crate::models::{
+    CreateMemory, ForgetQuery, LinkBody, ListQuery, Memory, MemoryLink, RecallBody, RecallQuery,
+    SearchQuery, Tier, UpdateMemory,
+};
 use crate::validate;
 
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;
@@ -698,6 +701,7 @@ pub struct ArchiveListQuery {
     pub offset: Option<usize>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn default_archive_limit() -> Option<usize> {
     Some(50)
 }
@@ -775,7 +779,7 @@ pub async fn purge_archive(
 pub async fn archive_stats(State(state): State<Db>) -> impl IntoResponse {
     let lock = state.lock().await;
     match db::archive_stats(&lock.0) {
-        Ok(stats) => Json(stats).into_response(),
+        Ok(archive_stats) => Json(archive_stats).into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
             (

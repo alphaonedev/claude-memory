@@ -22,7 +22,7 @@ pub enum EmbeddingModel {
 
 impl EmbeddingModel {
     /// Embedding vector dimensionality.
-    pub fn dim(&self) -> usize {
+    pub fn dim(self) -> usize {
         match self {
             Self::MiniLmL6V2 => 384,
             Self::NomicEmbedV15 => 768,
@@ -112,31 +112,31 @@ impl FeatureTier {
     }
 
     /// Build the full [`TierConfig`] for this tier.
-    pub fn config(&self) -> TierConfig {
+    pub fn config(self) -> TierConfig {
         match self {
             Self::Keyword => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: None,
                 llm_model: None,
                 cross_encoder: false,
                 max_memory_mb: 0,
             },
             Self::Semantic => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::MiniLmL6V2),
                 llm_model: None,
                 cross_encoder: false,
                 max_memory_mb: 256,
             },
             Self::Smart => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::NomicEmbedV15),
                 llm_model: Some(LlmModel::Gemma4E2B),
                 cross_encoder: false,
                 max_memory_mb: 1024,
             },
             Self::Autonomous => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::NomicEmbedV15),
                 llm_model: Some(LlmModel::Gemma4E4B),
                 cross_encoder: true,
@@ -202,10 +202,12 @@ impl TierConfig {
             },
             models: CapabilityModels {
                 embedding: self
-                    .embedding_model.map_or_else(|| "none".to_string(), |m| m.hf_model_id().to_string()),
-                embedding_dim: self.embedding_model.map_or(0, |m| m.dim()),
+                    .embedding_model
+                    .map_or_else(|| "none".to_string(), |m| m.hf_model_id().to_string()),
+                embedding_dim: self.embedding_model.map_or(0, EmbeddingModel::dim),
                 llm: self
-                    .llm_model.map_or_else(|| "none".to_string(), |m| m.ollama_model_id().to_string()),
+                    .llm_model
+                    .map_or_else(|| "none".to_string(), |m| m.ollama_model_id().to_string()),
                 cross_encoder: if self.cross_encoder {
                     "cross-encoder/ms-marco-MiniLM-L-6-v2".to_string()
                 } else {
@@ -230,6 +232,7 @@ pub struct Capabilities {
 }
 
 /// Boolean feature flags exposed in the capabilities report.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityFeatures {
     pub keyword_search: bool,
@@ -257,6 +260,7 @@ pub struct CapabilityModels {
 // ---------------------------------------------------------------------------
 
 /// Per-tier TTL overrides loaded from `[ttl]` section of config.toml.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TtlConfig {
     /// Short-tier default TTL in seconds (default: 21600 = 6 hours)
@@ -273,6 +277,7 @@ pub struct TtlConfig {
 
 /// Resolved TTL values after merging config overrides with compiled defaults.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct ResolvedTtl {
     pub short_ttl_secs: Option<i64>,
     pub mid_ttl_secs: Option<i64>,
@@ -315,15 +320,9 @@ impl ResolvedTtl {
             }
         };
         Self {
-            short_ttl_secs: c
-                .short_ttl_secs
-                .map_or(defaults.short_ttl_secs, clamp_ttl),
-            mid_ttl_secs: c
-                .mid_ttl_secs
-                .map_or(defaults.mid_ttl_secs, clamp_ttl),
-            long_ttl_secs: c
-                .long_ttl_secs
-                .map_or(defaults.long_ttl_secs, clamp_ttl),
+            short_ttl_secs: c.short_ttl_secs.map_or(defaults.short_ttl_secs, clamp_ttl),
+            mid_ttl_secs: c.mid_ttl_secs.map_or(defaults.mid_ttl_secs, clamp_ttl),
+            long_ttl_secs: c.long_ttl_secs.map_or(defaults.long_ttl_secs, clamp_ttl),
             short_extend_secs: c
                 .short_extend_secs
                 .unwrap_or(defaults.short_extend_secs)
@@ -439,7 +438,8 @@ impl AppConfig {
         }
         // Otherwise check config
         self.db
-            .as_ref().map_or_else(|| cli_db.to_path_buf(), PathBuf::from)
+            .as_ref()
+            .map_or_else(|| cli_db.to_path_buf(), PathBuf::from)
     }
 
     /// Resolve Ollama URL for LLM generation (config or default).

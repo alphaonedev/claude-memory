@@ -144,6 +144,7 @@ pub struct SearchQuery {
     pub tags: Option<String>, // comma-separated
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn default_limit() -> Option<usize> {
     Some(20)
 }
@@ -183,6 +184,7 @@ pub struct RecallQuery {
     pub until: Option<String>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn default_recall_limit() -> Option<usize> {
     Some(10)
 }

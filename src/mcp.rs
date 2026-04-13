@@ -15,7 +15,7 @@ use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::{Tier, Memory};
+use crate::models::{Memory, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -72,6 +72,7 @@ fn err_response(id: Value, code: i64, message: String) -> RpcResponse {
 
 // --- Tool definitions ---
 
+#[allow(clippy::too_many_lines)]
 fn tool_definitions() -> Value {
     json!({
         "tools": [
@@ -467,6 +468,7 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
 
 // --- Tool handlers ---
 
+#[allow(clippy::too_many_lines)]
 fn handle_store(
     conn: &rusqlite::Connection,
     params: &Value,
@@ -480,7 +482,7 @@ fn handle_store(
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
     let namespace = params["namespace"].as_str().unwrap_or("global").to_string();
     let source = params["source"].as_str().unwrap_or("claude").to_string();
-    let priority = params["priority"].as_i64().unwrap_or(5) as i32;
+    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).expect("i64 as i32");
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
         .as_array()
@@ -688,14 +690,6 @@ fn handle_recall(
     archive_on_gc: bool,
     resolved_ttl: &crate::config::ResolvedTtl,
 ) -> Result<Value, String> {
-    let _ = db::gc_if_needed(conn, archive_on_gc);
-    let context = params["context"].as_str().ok_or("context is required")?;
-    let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
-    let tags = params["tags"].as_str();
-    let since = params["since"].as_str();
-    let until = params["until"].as_str();
-
     // Helper: serialize scored memories with score field (#95)
     fn scored_memories(results: Vec<(Memory, f64)>) -> Vec<Value> {
         results
@@ -712,6 +706,14 @@ fn handle_recall(
             })
             .collect()
     }
+
+    let _ = db::gc_if_needed(conn, archive_on_gc);
+    let context = params["context"].as_str().ok_or("context is required")?;
+    let namespace = params["namespace"].as_str();
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
+    let tags = params["tags"].as_str();
+    let since = params["since"].as_str();
+    let until = params["until"].as_str();
 
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
@@ -734,8 +736,8 @@ fn handle_recall(
 
                 // Apply cross-encoder reranking if available
                 if let Some(ce) = reranker {
-                    let reranked = ce.rerank(context, results);
-                    let memories = scored_memories(reranked);
+                    let ce_reranked = ce.rerank(context, results);
+                    let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
@@ -863,7 +865,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let query = params["query"].as_str().ok_or("query is required")?;
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
     let results = db::search(
         conn,
@@ -883,7 +885,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
     let results = db::list(
         conn,
@@ -965,7 +967,9 @@ fn handle_update(
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
-    let priority = params["priority"].as_i64().map(|p| p as i32);
+    let priority = params["priority"]
+        .as_i64()
+        .map(|p| i32::try_from(p).expect("i64 as i32"));
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
 
@@ -1275,9 +1279,8 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
     if db::get_namespace_parent(conn, namespace).is_some() {
         return;
     }
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(_) => return,
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
     };
     let home = dirs::home_dir().unwrap_or_default();
     // Walk up from parent of cwd (cwd itself IS the namespace)
@@ -1318,8 +1321,8 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
 
 fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(50) as usize;
-    let offset = params["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).expect("u64 as usize");
+    let offset = usize::try_from(params["offset"].as_u64().unwrap_or(0)).expect("u64 as usize");
     let items =
         db::list_archived(conn, namespace, limit.min(1000), offset).map_err(|e| e.to_string())?;
     Ok(json!({"archived": items, "count": items.len()}))
@@ -1369,7 +1372,7 @@ fn handle_session_start(
     llm: Option<&OllamaClient>,
 ) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
 
     let results = db::list(
         conn,
@@ -1430,6 +1433,7 @@ fn handle_session_start(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -1465,7 +1469,7 @@ fn handle_request(
                 }
             }),
         ),
-        "notifications/initialized" => ok_response(id, json!({})),
+        "notifications/initialized" | "ping" => ok_response(id, json!({})),
         "tools/list" => ok_response(id, tool_definitions()),
         "prompts/list" => ok_response(id, prompt_definitions()),
         "prompts/get" => {
@@ -1585,13 +1589,13 @@ fn handle_request(
                 ),
             }
         }
-        "ping" => ok_response(id, json!({})),
         _ => err_response(id, -32601, format!("method not found: {}", req.method)),
     }
 }
 
 /// Run the MCP server over stdio. Blocks until stdin closes.
 /// Initializes components based on the requested feature tier.
+#[allow(clippy::too_many_lines)]
 pub fn run_mcp_server(
     db_path: &Path,
     tier: FeatureTier,
@@ -1617,9 +1621,7 @@ pub fn run_mcp_server(
                     tier_config.llm_model = Some(crate::config::LlmModel::Gemma4E4B);
                     eprintln!("ai-memory: llm_model override from config: gemma4:e4b");
                 }
-                other => eprintln!(
-                    "ai-memory: unknown llm_model '{other}', using tier default"
-                ),
+                other => eprintln!("ai-memory: unknown llm_model '{other}', using tier default"),
             }
         }
     }
@@ -1641,9 +1643,9 @@ pub fn run_mcp_server(
                         "ai-memory: embedding_model override from config: nomic_embed_v15 (Ollama)"
                     );
                 }
-                other => eprintln!(
-                    "ai-memory: unknown embedding_model '{other}', using tier default"
-                ),
+                other => {
+                    eprintln!("ai-memory: unknown embedding_model '{other}', using tier default");
+                }
             }
         }
     }
@@ -1659,9 +1661,7 @@ pub fn run_mcp_server(
         let ollama_url = app_config.effective_ollama_url();
         match OllamaClient::new_with_url(ollama_url, model_id) {
             Ok(client) => {
-                eprintln!(
-                    "ai-memory: Ollama connected, ensuring model {model_id} is available..."
-                );
+                eprintln!("ai-memory: Ollama connected, ensuring model {model_id} is available...");
                 if let Err(e) = client.ensure_model() {
                     eprintln!("ai-memory: model pull failed: {e} (LLM features disabled)");
                     None
@@ -1784,9 +1784,7 @@ pub fn run_mcp_server(
     } else {
         "keyword"
     };
-    eprintln!(
-        "ai-memory MCP server started (stdio, tier={effective_tier})"
-    );
+    eprintln!("ai-memory MCP server started (stdio, tier={effective_tier})");
 
     for line in stdin.lock().lines() {
         let line = line?;

@@ -4,9 +4,12 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::models::{Memory, Tier, PROMOTION_THRESHOLD, MemoryLink, NamespaceCount, Stats, TierCount};
+use crate::models::{
+    Memory, MemoryLink, NamespaceCount, Stats, Tier, TierCount, PROMOTION_THRESHOLD,
+};
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS memories (
@@ -84,6 +87,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+#[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row(
@@ -341,9 +345,8 @@ pub fn update(
 ) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
-    let existing = match rows.next() {
-        Some(Ok(m)) => m,
-        _ => return Ok((false, false)),
+    let Some(Ok(existing)) = rows.next() else {
+        return Ok((false, false));
     };
     drop(rows);
     drop(stmt);
@@ -480,8 +483,8 @@ pub fn list(
             since,
             until,
             tags_filter,
-            limit as i64,
-            offset as i64
+            limit,
+            offset,
         ],
         row_to_memory,
     )?;
@@ -537,7 +540,7 @@ pub fn search(
             since,
             until,
             tags_filter,
-            limit as i64
+            limit,
         ],
         row_to_memory,
     )?;
@@ -584,15 +587,7 @@ pub fn recall(
          LIMIT ?7",
     )?;
     let rows = stmt.query_map(
-        params![
-            fts_query,
-            namespace,
-            now,
-            tags_filter,
-            since,
-            until,
-            limit as i64
-        ],
+        params![fts_query, namespace, now, tags_filter, since, until, limit],
         |row| {
             let mem = row_to_memory(row)?;
             let score: f64 = row.get(14)?;
@@ -954,11 +949,7 @@ pub fn list_archived(
              FROM archived_memories WHERE namespace = ?1 \
              ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3"
                 .to_string(),
-            vec![
-                Box::new(ns.to_string()),
-                Box::new(limit as i64),
-                Box::new(offset as i64),
-            ],
+            vec![Box::new(ns.to_string()), Box::new(limit), Box::new(offset)],
         ),
         None => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
@@ -967,7 +958,7 @@ pub fn list_archived(
              FROM archived_memories \
              ORDER BY archived_at DESC LIMIT ?1 OFFSET ?2"
                 .to_string(),
-            vec![Box::new(limit as i64), Box::new(offset as i64)],
+            vec![Box::new(limit), Box::new(offset)],
         ),
     };
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
@@ -1165,6 +1156,7 @@ pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<(
 }
 
 /// Load an embedding vector for a memory. Returns None if not set.
+#[allow(clippy::unnecessary_wraps)]
 pub fn get_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
     let result: Option<Vec<u8>> = conn
         .query_row(
@@ -1229,6 +1221,7 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
 /// When an HNSW `vector_index` is provided, uses approximate nearest-neighbor
 /// search instead of scanning all embeddings linearly.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub fn recall_hybrid(
     conn: &Connection,
     context: &str,
@@ -1282,8 +1275,6 @@ pub fn recall_hybrid(
            AND (?5 IS NULL OR created_at <= ?5)",
     )?;
 
-    use std::collections::HashMap;
-
     // Collect FTS results with scores
     let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
 
@@ -1295,7 +1286,7 @@ pub fn recall_hybrid(
             tags_filter,
             since,
             until,
-            fts_limit as i64
+            fts_limit,
         ],
         |row| {
             let mem = row_to_memory(row)?;
@@ -1311,8 +1302,12 @@ pub fn recall_hybrid(
             max_fts_score = fts_score;
         }
         // Compute cosine similarity if embedding exists
-        let cosine = get_embedding(conn, &mem.id)?
-            .map_or(0.0, |emb| f64::from(crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb)));
+        let cosine = get_embedding(conn, &mem.id)?.map_or(0.0, |emb| {
+            f64::from(crate::embeddings::Embedder::cosine_similarity(
+                query_embedding,
+                &emb,
+            ))
+        });
         scored.insert(mem.id.clone(), (mem, fts_score, cosine));
     }
 
@@ -1379,8 +1374,10 @@ pub fn recall_hybrid(
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
-                    let cosine =
-                        f64::from(crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb));
+                    let cosine = f64::from(crate::embeddings::Embedder::cosine_similarity(
+                        query_embedding,
+                        &emb,
+                    ));
                     if cosine > 0.3 {
                         scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                     }
@@ -1401,7 +1398,7 @@ pub fn recall_hybrid(
             } else {
                 0.0
             };
-            let content_len = mem.content.len() as f64;
+            let content_len = f64::from(i32::try_from(mem.content.len()).expect("usize as i64"));
             // Lerp semantic_weight from 0.50 (≤500 chars) to 0.15 (≥5000 chars)
             let semantic_weight = if content_len <= 500.0 {
                 0.50
@@ -1500,6 +1497,7 @@ fn auto_detect_parent(conn: &Connection, namespace: &str) -> Option<String> {
 }
 
 /// Get the standard memory ID for a namespace.
+#[allow(clippy::unnecessary_wraps)]
 pub fn get_namespace_standard(conn: &Connection, namespace: &str) -> Result<Option<String>> {
     let result = conn
         .query_row(

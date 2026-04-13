@@ -25,7 +25,7 @@ use axum::{
 use chrono::{Duration, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{generate, Shell};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -453,26 +453,26 @@ async fn main() -> Result<()> {
             mcp::run_mcp_server(&db_path, feature_tier, &app_config)?;
             Ok(())
         }
-        Command::Store(a) => cmd_store(db_path, a, j, &app_config),
-        Command::Update(a) => cmd_update(db_path, a, j),
-        Command::Recall(a) => cmd_recall(db_path, a, j, &app_config),
-        Command::Search(a) => cmd_search(db_path, a, j, &app_config),
-        Command::Get(a) => cmd_get(db_path, a, j),
-        Command::List(a) => cmd_list(db_path, a, j, &app_config),
-        Command::Delete(a) => cmd_delete(db_path, a, j),
-        Command::Promote(a) => cmd_promote(db_path, a, j),
-        Command::Forget(a) => cmd_forget(db_path, a, j),
-        Command::Link(a) => cmd_link(db_path, a, j),
-        Command::Consolidate(a) => cmd_consolidate(db_path, a, j),
-        Command::Resolve(a) => cmd_resolve(db_path, a, j),
-        Command::Shell => cmd_shell(db_path),
-        Command::Sync(a) => cmd_sync(db_path, a, j),
-        Command::AutoConsolidate(a) => cmd_auto_consolidate(db_path, a, j),
-        Command::Gc => cmd_gc(db_path, j, &app_config),
-        Command::Stats => cmd_stats(db_path, j),
-        Command::Namespaces => cmd_namespaces(db_path, j),
-        Command::Export => cmd_export(db_path),
-        Command::Import => cmd_import(db_path, j),
+        Command::Store(a) => cmd_store(&db_path, a, j, &app_config),
+        Command::Update(a) => cmd_update(&db_path, &a, j),
+        Command::Recall(a) => cmd_recall(&db_path, &a, j, &app_config),
+        Command::Search(a) => cmd_search(&db_path, &a, j, &app_config),
+        Command::Get(a) => cmd_get(&db_path, &a, j),
+        Command::List(a) => cmd_list(&db_path, &a, j, &app_config),
+        Command::Delete(a) => cmd_delete(&db_path, &a, j),
+        Command::Promote(a) => cmd_promote(&db_path, &a, j),
+        Command::Forget(a) => cmd_forget(&db_path, &a, j),
+        Command::Link(a) => cmd_link(&db_path, &a, j),
+        Command::Consolidate(a) => cmd_consolidate(&db_path, a, j),
+        Command::Resolve(a) => cmd_resolve(&db_path, &a, j),
+        Command::Shell => cmd_shell(&db_path),
+        Command::Sync(a) => cmd_sync(&db_path, &a, j),
+        Command::AutoConsolidate(a) => cmd_auto_consolidate(&db_path, &a, j),
+        Command::Gc => cmd_gc(&db_path, j, &app_config),
+        Command::Stats => cmd_stats(&db_path, j),
+        Command::Namespaces => cmd_namespaces(&db_path, j),
+        Command::Export => cmd_export(&db_path),
+        Command::Import => cmd_import(&db_path, j),
         Command::Completions(a) => {
             generate(
                 a.shell,
@@ -488,8 +488,8 @@ async fn main() -> Result<()> {
             man.render(&mut std::io::stdout())?;
             Ok(())
         }
-        Command::Mine(a) => cmd_mine(db_path, a, j, &app_config),
-        Command::Archive(a) => cmd_archive(db_path, a, j),
+        Command::Mine(a) => cmd_mine(&db_path, a, j, &app_config),
+        Command::Archive(a) => cmd_archive(&db_path, a, j),
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -595,12 +595,12 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 // --- CLI ---
 
 fn cmd_store(
-    db_path: PathBuf,
+    db_path: &Path,
     args: StoreArgs,
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let resolved_ttl = app_config.effective_ttl();
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = Tier::from_str(&args.tier)
@@ -691,9 +691,9 @@ fn cmd_store(
     Ok(())
 }
 
-fn cmd_update(db_path: PathBuf, args: UpdateArgs, json_out: bool) -> Result<()> {
+fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     validate::validate_id(&args.id)?;
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let tags: Option<Vec<String>> = args.tags.as_ref().map(|t| {
@@ -752,13 +752,14 @@ fn cmd_update(db_path: PathBuf, args: UpdateArgs, json_out: bool) -> Result<()> 
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_recall(
-    db_path: PathBuf,
-    args: RecallArgs,
+    db_path: &Path,
+    args: &RecallArgs,
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
 
     // Resolve feature tier
@@ -918,7 +919,7 @@ fn cmd_recall(
     }
     for (mem, score) in &results {
         let age = human_age(&mem.updated_at);
-        let conf = if mem.confidence < 1.0 {
+        let config = if mem.confidence < 1.0 {
             format!(" conf={:.0}%", mem.confidence * 100.0)
         } else {
             String::new()
@@ -935,7 +936,7 @@ fn cmd_recall(
             color::cyan(&mem.namespace),
             mem.access_count,
             color::dim(&age),
-            conf
+            config
         );
         let preview: String = mem.content.chars().take(200).collect();
         println!("  {}\n", color::dim(&preview));
@@ -945,12 +946,12 @@ fn cmd_recall(
 }
 
 fn cmd_search(
-    db_path: PathBuf,
-    args: SearchArgs,
+    db_path: &Path,
+    args: &SearchArgs,
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let results = db::search(
@@ -993,9 +994,9 @@ fn cmd_search(
     Ok(())
 }
 
-fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
+fn cmd_get(db_path: &Path, args: &GetArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     validate::validate_id(&args.id)?;
     if let Some(mem) = db::get(&conn, &args.id)? {
         let links = db::get_links(&conn, &args.id).unwrap_or_default();
@@ -1021,12 +1022,12 @@ fn cmd_get(db_path: PathBuf, args: GetArgs, json_out: bool) -> Result<()> {
 }
 
 fn cmd_list(
-    db_path: PathBuf,
-    args: ListArgs,
+    db_path: &Path,
+    args: &ListArgs,
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let results = db::list(
@@ -1069,9 +1070,9 @@ fn cmd_list(
     Ok(())
 }
 
-fn cmd_delete(db_path: PathBuf, args: DeleteArgs, json_out: bool) -> Result<()> {
+fn cmd_delete(db_path: &Path, args: &DeleteArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     validate::validate_id(&args.id)?;
     if db::delete(&conn, &args.id)? {
         if json_out {
@@ -1086,9 +1087,9 @@ fn cmd_delete(db_path: PathBuf, args: DeleteArgs, json_out: bool) -> Result<()> 
     Ok(())
 }
 
-fn cmd_promote(db_path: PathBuf, args: PromoteArgs, json_out: bool) -> Result<()> {
+fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     validate::validate_id(&args.id)?;
     let (found, _) = db::update(
         &conn,
@@ -1117,9 +1118,9 @@ fn cmd_promote(db_path: PathBuf, args: PromoteArgs, json_out: bool) -> Result<()
     Ok(())
 }
 
-fn cmd_forget(db_path: PathBuf, args: ForgetArgs, json_out: bool) -> Result<()> {
+fn cmd_forget(db_path: &Path, args: &ForgetArgs, json_out: bool) -> Result<()> {
     let tier = args.tier.as_deref().and_then(Tier::from_str);
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     match db::forget(
         &conn,
         args.namespace.as_deref(),
@@ -1141,9 +1142,9 @@ fn cmd_forget(db_path: PathBuf, args: ForgetArgs, json_out: bool) -> Result<()> 
     Ok(())
 }
 
-fn cmd_link(db_path: PathBuf, args: LinkArgs, json_out: bool) -> Result<()> {
+fn cmd_link(db_path: &Path, args: &LinkArgs, json_out: bool) -> Result<()> {
     validate::validate_link(&args.source_id, &args.target_id, &args.relation)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     db::create_link(&conn, &args.source_id, &args.target_id, &args.relation)?;
     if json_out {
         println!("{}", serde_json::json!({"linked": true}));
@@ -1156,7 +1157,7 @@ fn cmd_link(db_path: PathBuf, args: LinkArgs, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_consolidate(db_path: PathBuf, args: ConsolidateArgs, json_out: bool) -> Result<()> {
+fn cmd_consolidate(db_path: &Path, args: ConsolidateArgs, json_out: bool) -> Result<()> {
     let ids: Vec<String> = args
         .ids
         .split(',')
@@ -1165,7 +1166,7 @@ fn cmd_consolidate(db_path: PathBuf, args: ConsolidateArgs, json_out: bool) -> R
         .collect();
     let namespace = args.namespace.unwrap_or_else(auto_namespace);
     validate::validate_consolidate(&ids, &args.title, &args.summary, &namespace)?;
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let new_id = db::consolidate(
         &conn,
         &ids,
@@ -1186,8 +1187,8 @@ fn cmd_consolidate(db_path: PathBuf, args: ConsolidateArgs, json_out: bool) -> R
     Ok(())
 }
 
-fn cmd_gc(db_path: PathBuf, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
-    let conn = db::open(&db_path)?;
+fn cmd_gc(db_path: &Path, json_out: bool, app_config: &config::AppConfig) -> Result<()> {
+    let conn = db::open(db_path)?;
     let count = db::gc(&conn, app_config.effective_archive_on_gc())?;
     if json_out {
         println!("{}", serde_json::json!({"expired_deleted": count}));
@@ -1197,9 +1198,9 @@ fn cmd_gc(db_path: PathBuf, json_out: bool, app_config: &config::AppConfig) -> R
     Ok(())
 }
 
-fn cmd_stats(db_path: PathBuf, json_out: bool) -> Result<()> {
-    let conn = db::open(&db_path)?;
-    let stats = db::stats(&conn, &db_path)?;
+fn cmd_stats(db_path: &Path, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
+    let stats = db::stats(&conn, db_path)?;
     if json_out {
         println!("{}", serde_json::to_string(&stats)?);
         return Ok(());
@@ -1219,8 +1220,8 @@ fn cmd_stats(db_path: PathBuf, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_namespaces(db_path: PathBuf, json_out: bool) -> Result<()> {
-    let conn = db::open(&db_path)?;
+fn cmd_namespaces(db_path: &Path, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
     let ns = db::list_namespaces(&conn)?;
     if json_out {
         println!(
@@ -1239,8 +1240,8 @@ fn cmd_namespaces(db_path: PathBuf, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_export(db_path: PathBuf) -> Result<()> {
-    let conn = db::open(&db_path)?;
+fn cmd_export(db_path: &Path) -> Result<()> {
+    let conn = db::open(db_path)?;
     let memories = db::export_all(&conn)?;
     let links = db::export_links(&conn)?;
     println!(
@@ -1253,7 +1254,7 @@ fn cmd_export(db_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
+fn cmd_import(db_path: &Path, json_out: bool) -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
@@ -1262,7 +1263,7 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
         serde_json::from_value(data.get("memories").cloned().unwrap_or_default())?;
     let links: Vec<models::MemoryLink> =
         serde_json::from_value(data.get("links").cloned().unwrap_or_default()).unwrap_or_default();
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let mut imported = 0usize;
     let mut errors = Vec::new();
     for mem in memories {
@@ -1297,8 +1298,8 @@ fn cmd_import(db_path: PathBuf, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_resolve(db_path: PathBuf, args: ResolveArgs, json_out: bool) -> Result<()> {
-    let conn = db::open(&db_path)?;
+fn cmd_resolve(db_path: &Path, args: &ResolveArgs, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
     validate::validate_link(&args.winner_id, &args.loser_id, "supersedes")?;
     db::create_link(&conn, &args.winner_id, &args.loser_id, "supersedes")?;
     let _ = db::update(
@@ -1334,8 +1335,9 @@ fn cmd_resolve(db_path: PathBuf, args: ResolveArgs, json_out: bool) -> Result<()
     Ok(())
 }
 
-fn cmd_shell(db_path: PathBuf) -> Result<()> {
-    let conn = db::open(&db_path)?;
+#[allow(clippy::too_many_lines)]
+fn cmd_shell(db_path: &Path) -> Result<()> {
+    let conn = db::open(db_path)?;
     println!(
         "{}",
         color::bold("ai-memory shell — type 'help' for commands, 'quit' to exit")
@@ -1455,7 +1457,7 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
                     Err(e) => eprintln!("error: {e}"),
                 }
             }
-            "stats" => match db::stats(&conn, &db_path) {
+            "stats" => match db::stats(&conn, db_path) {
                 Ok(s) => {
                     println!("  total: {}, links: {}", s.total, s.links_count);
                     for t in &s.by_tier {
@@ -1495,8 +1497,9 @@ fn cmd_shell(db_path: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
-    let local_conn = db::open(&db_path)?;
+#[allow(clippy::too_many_lines)]
+fn cmd_sync(db_path: &Path, args: &SyncArgs, json_out: bool) -> Result<()> {
+    let local_conn = db::open(db_path)?;
     let remote_conn = db::open(&args.remote_db)?;
     match args.direction.as_str() {
         "pull" => {
@@ -1635,8 +1638,9 @@ fn cmd_sync(db_path: PathBuf, args: SyncArgs, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: bool) -> Result<()> {
-    let conn = db::open(&db_path)?;
+#[allow(clippy::too_many_lines)]
+fn cmd_auto_consolidate(db_path: &Path, args: &AutoConsolidateArgs, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
     let tier_filter = if args.short_only {
         Some(Tier::Short)
     } else {
@@ -1751,8 +1755,8 @@ fn cmd_auto_consolidate(db_path: PathBuf, args: AutoConsolidateArgs, json_out: b
     Ok(())
 }
 
-fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()> {
-    let conn = db::open(&db_path)?;
+fn cmd_archive(db_path: &Path, args: ArchiveArgs, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
     match args.action {
         ArchiveAction::List {
             namespace,
@@ -1820,8 +1824,9 @@ fn cmd_archive(db_path: PathBuf, args: ArchiveArgs, json_out: bool) -> Result<()
     Ok(())
 }
 
+#[allow(clippy::too_many_lines)]
 fn cmd_mine(
-    db_path: PathBuf,
+    db_path: &Path,
     args: MineArgs,
     json_out: bool,
     app_config: &config::AppConfig,
@@ -1907,7 +1912,7 @@ fn cmd_mine(
     }
 
     // Store memories
-    let conn = db::open(&db_path)?;
+    let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let now = Utc::now();
 
@@ -1919,7 +1924,7 @@ fn cmd_mine(
     conn.execute_batch("BEGIN")?;
 
     for conv in &filtered {
-        let mined = if let Some(m) = mine::conversation_to_memory(conv, format) { m } else {
+        let Some(mined) = mine::conversation_to_memory(conv, format) else {
             skipped += 1;
             continue;
         };
