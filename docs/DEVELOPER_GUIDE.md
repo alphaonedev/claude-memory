@@ -17,7 +17,7 @@ main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (2
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 23 tools, notification handling
+mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 26 tools, notification handling
 validate.rs      -- Input validation for all write paths
 errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
 color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
@@ -69,7 +69,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **23 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **26 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
 - `tool_definitions()` -- returns the 23 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
@@ -87,7 +87,7 @@ Protocol version: `2024-11-05`. All tool responses are wrapped in MCP content bl
 
 **MCP Prompts:** The server exposes 2 prompts via `prompts/list`:
 - **recall-first** -- System prompt with 8 behavioral rules for proactive memory use. Supports an optional `namespace` argument for scoped recall.
-- **memory-workflow** -- Quick reference card for all 23 tool usage patterns.
+- **memory-workflow** -- Quick reference card for all 26 tool usage patterns.
 
 **MCP Error Codes:** The server uses standard JSON-RPC 2.0 error codes:
 - `-32700` -- Parse error (malformed JSON)
@@ -326,8 +326,8 @@ The `config.rs` module defines 4 feature tiers that gate functionality:
 |------|-----------|-----|-----------------|
 | `keyword` | No | No | 13 base tools + `memory_capabilities` + 4 archive tools |
 | `semantic` | Yes | No | 14 base tools + `memory_capabilities` + 4 archive tools |
-| `smart` | Yes | Yes | All 23 tools |
-| `autonomous` | Yes | Yes | All 23 tools + autonomous behaviors |
+| `smart` | Yes | Yes | All 26 tools |
+| `autonomous` | Yes | Yes | All 26 tools + autonomous behaviors |
 
 The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be changed at runtime. The `memory_capabilities` tool reports the active tier and which features are available, allowing AI clients to adapt their behavior.
 
@@ -735,7 +735,7 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 23 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 26 tools.
 
 ```bash
 ai-memory mcp
@@ -948,7 +948,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **185 tests** total: 139 unit tests across all 15 modules + 46 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
+The project has **191 tests** total: 140 unit tests across all 15 modules + 51 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
 
 ```bash
 # Run all tests

@@ -1805,7 +1805,7 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 23, "expected 23 MCP tools");
+    assert_eq!(tools.len(), 26, "expected 26 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
@@ -2397,14 +2397,212 @@ fn test_promote_clears_expires_at() {
 }
 
 #[test]
-fn test_version_flag_patch2() {
+fn test_version_flag_patch3() {
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let output = cmd(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.5.4-patch.2"),
-        "version should be 0.5.4-patch.2, got: {}",
+        stdout.contains("0.5.4-patch.3"),
+        "version should be 0.5.4-patch.3, got: {}",
         stdout
     );
+}
+
+// --- Patch 3: namespace standard auto-prepend via MCP ---
+
+#[test]
+fn test_mcp_namespace_standard_auto_prepend() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-ns-auto-{}.db", uuid::Uuid::new_v4()));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Store a standard memory
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "test-ns",
+            "-T",
+            "NS Standard",
+            "--content",
+            "Follow these rules",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let std_id = stored["id"].as_str().unwrap().to_string();
+
+    // Store another memory in same namespace
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "test-ns",
+            "-T",
+            "Regular memory",
+            "--content",
+            "Some content",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+
+    // Set standard via MCP, then recall with namespace
+    let mcp_input = format!(
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"test-ns","id":"{}"}}}}}}"#,
+            std_id
+        ),
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_recall","arguments":{"context":"rules","namespace":"test-ns","format":"json"}}}"#,
+    );
+
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(mcp_input.as_bytes()).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.len() >= 3,
+        "expected 3 MCP responses, got {}",
+        lines.len()
+    );
+
+    // Parse recall response (line 3)
+    let recall_resp: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let recall_text = recall_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let recall_data: serde_json::Value = serde_json::from_str(recall_text).unwrap();
+
+    // Standard should be present as a separate field
+    assert!(
+        recall_data.get("standard").is_some(),
+        "recall should include 'standard' field"
+    );
+    assert_eq!(recall_data["standard"]["id"], std_id);
+    assert_eq!(recall_data["standard"]["title"], "NS Standard");
+
+    // Standard should NOT be duplicated in the memories array
+    if let Some(memories) = recall_data["memories"].as_array() {
+        for m in memories {
+            assert_ne!(
+                m["id"].as_str().unwrap_or(""),
+                &std_id,
+                "standard should be deduplicated from memories array"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// --- Patch 3: cascade cleanup on delete ---
+
+#[test]
+fn test_namespace_standard_cascade_on_delete() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-ns-cascade-{}.db", uuid::Uuid::new_v4()));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Store and set as standard
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-t",
+            "long",
+            "-n",
+            "cascade-ns",
+            "-T",
+            "Will be deleted",
+            "--content",
+            "Standard to delete",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let stored: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let std_id = stored["id"].as_str().unwrap().to_string();
+
+    // Set standard, then delete the memory, then get standard
+    let mcp_input = format!(
+        "{}\n{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        format!(
+            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"cascade-ns","id":"{}"}}}}}}"#,
+            std_id
+        ),
+        format!(
+            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_delete","arguments":{{"id":"{}"}}}}}}"#,
+            std_id
+        ),
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_namespace_get_standard","arguments":{"namespace":"cascade-ns"}}}"#,
+    );
+
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                stdin.write_all(mcp_input.as_bytes()).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.len() >= 4,
+        "expected 4 MCP responses, got {}",
+        lines.len()
+    );
+
+    // After delete, get_standard should return null (cascade cleaned up)
+    let get_resp: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    let get_text = get_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("");
+    let get_data: serde_json::Value = serde_json::from_str(get_text).unwrap();
+    assert!(
+        get_data["standard_id"].is_null(),
+        "standard should be null after deleting the standard memory, got: {}",
+        get_data
+    );
+
+    let _ = std::fs::remove_file(&db_path);
 }

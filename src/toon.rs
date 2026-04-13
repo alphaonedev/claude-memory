@@ -71,6 +71,15 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
         out.push('\n');
     }
 
+    // Namespace standard — separate section if present
+    if let Some(standard) = response.get("standard") {
+        out.push_str("standard[id|title|content]:\n");
+        let id = format_value(standard.get("id"));
+        let title = format_value(standard.get("title"));
+        let content = format_value(standard.get("content"));
+        out.push_str(&format!("{}|{}|{}\n", id, title, content));
+    }
+
     // Header line — field names declared once
     out.push_str("memories[");
     out.push_str(&fields.join("|"));
