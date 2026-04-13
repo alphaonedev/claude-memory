@@ -1,11 +1,11 @@
 Name:           ai-memory
-Version:        0.5.1
+Version:        0.5.4.4
 Release:        1%{?dist}
 Summary:        AI-agnostic persistent memory system — MCP server, HTTP API, and CLI
 
 License:        Apache-2.0
 URL:            https://github.com/alphaonedev/ai-memory-mcp
-Source0:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v%{version}/ai-memory-%{_target_platform}.tar.gz
+Source0:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v%{version}/ai-memory-x86_64-unknown-linux-gnu.tar.gz
 
 # Pre-built binary — no build dependencies needed
 AutoReqProv:    no
@@ -18,14 +18,23 @@ feature tiers from keyword to autonomous with local LLMs via Ollama. Works with
 Claude, ChatGPT, Grok, Cursor, Windsurf, Continue.dev, OpenClaw, Llama, and
 any MCP client. 97.8%% recall accuracy on ICLR 2025 LongMemEval benchmark.
 
+%prep
+tar xzf %{SOURCE0}
+
 %install
 mkdir -p %{buildroot}%{_bindir}
-install -m 0755 %{_sourcedir}/ai-memory %{buildroot}%{_bindir}/ai-memory
+install -m 0755 ai-memory %{buildroot}%{_bindir}/ai-memory
 
 %files
 %{_bindir}/ai-memory
 
 %changelog
+* Sun Apr 13 2026 AlphaOne LLC <alphaonedev@users.noreply.github.com> - 0.5.4.4-1
+- Three-level rule layering (global + parent + namespace)
+- License migrated from MIT to Apache-2.0
+- OIN 2.0 membership, CLA, trademark filing
+- Archive system, 23 MCP tools, configurable TTL, 14 security fixes
+
 * Tue Apr 08 2026 AlphaOne LLC <alphaonedev@users.noreply.github.com> - 0.5.1-1
 - Docker image on GHCR, auto-built on tag push
 - Official MCP Registry published
