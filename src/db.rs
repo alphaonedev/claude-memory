@@ -549,6 +549,7 @@ pub fn search(
 }
 
 /// Recall — fuzzy OR search + touch + auto-promote + TTL extension.
+#[allow(clippy::too_many_arguments)]
 pub fn recall(
     conn: &Connection,
     context: &str,

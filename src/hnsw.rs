@@ -186,6 +186,7 @@ impl VectorIndex {
     }
 
     /// Force a full rebuild of the HNSW index from all entries.
+    #[allow(dead_code)]
     pub fn rebuild(&self) {
         let mut state = match self.inner.lock() {
             Ok(s) => s,

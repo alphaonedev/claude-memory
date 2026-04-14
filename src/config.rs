@@ -146,6 +146,7 @@ impl FeatureTier {
     }
 
     /// Automatically select the best tier that fits within `mb` megabytes.
+    #[cfg(test)]
     pub fn from_memory_budget(mb: usize) -> Self {
         if mb >= 4096 {
             Self::Autonomous
@@ -347,6 +348,7 @@ impl ResolvedTtl {
     }
 
     /// Get the TTL extension on access for a given tier.
+    #[cfg(test)]
     pub fn extend_for_tier(&self, tier: &Tier) -> Option<i64> {
         match tier {
             Tier::Short => Some(self.short_extend_secs),

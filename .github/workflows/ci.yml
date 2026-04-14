@@ -31,7 +31,7 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy
-        run: cargo clippy -- -D warnings -A dead_code -A clippy::too_many_arguments -A clippy::manual_map -A clippy::manual_is_multiple_of
+        run: cargo clippy -- -D warnings
 
       - name: Run tests
         env:

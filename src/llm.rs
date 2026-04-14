@@ -5,6 +5,7 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
 
+#[allow(dead_code)]
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -37,6 +38,7 @@ pub struct OllamaClient {
 impl OllamaClient {
     /// Creates a new OllamaClient with the default Ollama URL (http://localhost:11434).
     /// Checks that Ollama is reachable before returning.
+    #[allow(dead_code)]
     pub fn new(model: &str) -> Result<Self> {
         Self::new_with_url(DEFAULT_OLLAMA_URL, model)
     }
