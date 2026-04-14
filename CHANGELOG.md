@@ -111,7 +111,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Ubuntu PPA: `sudo add-apt-repository ppa:jbridger2021/ai-memory && sudo apt install ai-memory`
+- Ubuntu PPA: `sudo add-apt-repository ppa:jbridger2021/ppa && sudo apt install ai-memory`
 - Fedora COPR: `sudo dnf copr enable alpha-one-ai/ai-memory && sudo dnf install ai-memory`
 - CI workflows for automated PPA and COPR uploads on tag push
 - debian/ packaging directory (control, rules, changelog, copyright)

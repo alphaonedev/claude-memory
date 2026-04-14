@@ -33,7 +33,7 @@
 
    **Ubuntu (PPA — recommended):**
    ```bash
-   sudo add-apt-repository ppa:jbridger2021/ai-memory
+   sudo add-apt-repository ppa:jbridger2021/ppa
    sudo apt update
    sudo apt install ai-memory
    ```

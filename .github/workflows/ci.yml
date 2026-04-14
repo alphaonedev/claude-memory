@@ -220,7 +220,7 @@ jobs:
       - name: Upload to PPA
         run: |
           cd ..
-          dput ppa:jbridger2021/ai-memory ai-memory_${{ steps.version.outputs.version }}-1_source.changes
+          dput ppa:jbridger2021/ppa ai-memory_${{ steps.version.outputs.version }}-1_source.changes
 
   copr:
     name: Fedora COPR

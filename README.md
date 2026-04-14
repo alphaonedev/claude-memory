@@ -52,7 +52,7 @@ Pre-built binaries require no dependencies. Building from source needs Rust and 
 curl -fsSL https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/install.sh | sh
 
 # Ubuntu (PPA)
-sudo add-apt-repository ppa:jbridger2021/ai-memory && sudo apt install ai-memory
+sudo add-apt-repository ppa:jbridger2021/ppa && sudo apt install ai-memory
 
 # Fedora/RHEL (COPR)
 sudo dnf copr enable alpha-one-ai/ai-memory && sudo dnf install ai-memory
