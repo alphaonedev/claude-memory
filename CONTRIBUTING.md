@@ -83,6 +83,18 @@ Examples:
 - `fix: prevent duplicate entries during sync`
 - `docs: update CLI usage examples`
 
+## Branch Protection & Code Review
+
+The `main` branch is protected. The following rules are enforced:
+
+- **No direct pushes to `main`.** All changes must go through a pull request.
+- **Owner approval required.** Every PR to `main` requires approval from `@alphaonedev` (CODEOWNERS). No exceptions.
+- **CI must pass.** Both `Check (ubuntu-latest)` and `Check (macos-latest)` status checks must succeed before merge.
+- **Stale reviews are dismissed.** If you push new commits after receiving approval, the approval is invalidated and must be re-granted.
+- **Force pushes and branch deletion are blocked** on `main`.
+
+PRs to `develop` do not require owner approval but must pass CI. Maintainers merge `develop` into `main` for releases.
+
 ## Release Process
 
 1. Version bumps are coordinated by maintainers.
