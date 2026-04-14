@@ -1,6 +1,6 @@
 # ai-memory Roadmap
 
-> **ai-memory is the nervous system for AI agent collectives — persistent, synced, human-owned knowledge infrastructure that makes every agent smarter because any agent learned.**
+> **AI endpoint memory.** Every AI agent gets persistent, synced memory — the same way every network endpoint gets an IP address. A primitive, not a product.
 
 > Single repo: `alphaonedev/ai-memory-mcp`
 > Current production version: **v0.5.4.4** (2026-04-13)
