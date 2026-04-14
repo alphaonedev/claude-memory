@@ -94,27 +94,66 @@ Delivered:
 
 ---
 
-## Phase 1 — Smart Recall + Agent Identity
+## Phase 1 — Memory Schema, Hierarchy & Governance
 
-**Target: v0.6.0 | LOE: 6-8 sessions**
+**Target: v0.6.0 | LOE: 8-10 sessions**
 
-Two objectives: make recall dramatically smarter, and lay the schema foundation for multi-agent.
+The foundation for everything that follows. Three pillars: evolve the schema without breaking anything, establish the memory hierarchy, and define who governs what.
 
-### 1a. Smart Recall
+### 1a. Schema Evolution
+
+| Task | Sessions | Deliverable |
+|------|:--------:|-------------|
+| `metadata` JSON column | 1 | Add `metadata TEXT NOT NULL DEFAULT '{}'` to memories table. Fixed core columns stay (id, tier, namespace, title, content, priority, confidence, access_count, timestamps, embedding). Everything else lives in flexible JSON — `agent_id`, `scope`, `schema_version`, `governance`, custom fields. No migrations ever again. |
+| `agent_id` in metadata | 0.5 | Every memory knows which agent stored it. Populated on store via MCP/CLI/API. Foundation for multi-agent attribution. |
+| Agent registration | 0.5 | `memory_agent_register` — agents announce themselves with an ID, type (AI model, human, system), and capability set. Stored in metadata. |
+
+**Design principle:** The core columns are the primitive — they will not change in 20 years. The metadata JSON is the evolution surface — any future feature adds a field to metadata, not a column to the schema. Old databases open in new code. New databases open in old code. Sync between different versions works because unknown metadata fields are preserved, not rejected.
+
+### 1b. Memory Hierarchy
+
+Namespaces become hierarchical paths. Visibility flows up. Policies flow down.
+
+| Task | Sessions | Deliverable |
+|------|:--------:|-------------|
+| Hierarchical namespace paths | 1-2 | `/`-delimited namespaces: `org/unit/team/agent`. Existing flat namespaces still work — hierarchy is opt-in. |
+| Visibility rules | 1 | An agent at `alphaone/engineering/platform/agent-1` can read its own memories + team + unit + org + collective. Enforced at query time via namespace prefix matching. |
+| Memory promotion (vertical) | 0.5 | Promote a memory UP the hierarchy: agent learning → team knowledge → unit policy → org standard. Existing `memory_promote` extended with a `--to-namespace` flag. |
+| N-level rule inheritance | 1 | Extend three-level standard system to N levels. Org rules cascade to units, units cascade to teams, teams cascade to agents. |
+
+```
+collective                                    ← cross-org commons
+└── alphaone                                  ← org memory
+    ├── engineering                            ← unit memory
+    │   ├── platform                           ← team memory
+    │   │   ├── agent-claude-ops-1             ← individual agent
+    │   │   └── agent-grok-monitor-2           ← individual agent
+    │   └── security                           ← team memory
+    │       └── agent-claude-sec-1             ← individual agent
+    └── operations                             ← unit memory
+        └── sre                                ← team memory
+            └── agent-codex-deploy-1           ← individual agent
+```
+
+### 1c. Governance
+
+Every level of the hierarchy has a governance model: who can store, who can promote, who can delete, and who approves changes at that level.
+
+| Task | Sessions | Deliverable |
+|------|:--------:|-------------|
+| Governance metadata | 1 | Each namespace level can define a `governance` policy in its standard: `{ "write": "any", "promote": "approve", "delete": "owner", "approver": "human" }` |
+| Governance roles | 0.5 | `owner` (full control), `writer` (store + update), `reader` (recall + search only). Stored per-namespace in standards. |
+| Approval workflow | 1 | When governance requires approval for promotion or deletion, the action is queued with status `pending`. An approver (human or designated AI agent) confirms or rejects. |
+| Governance type | 0.5 | `"approver": "human"` or `"approver": "agent:agent-id"` or `"approver": "consensus:3"` (N agents must agree). The governance model itself is flexible — some orgs want humans in the loop, some want AI autonomy, some want consensus. ai-memory doesn't choose — it provides the mechanism. |
+
+**Why governance matters:** Without it, any agent can write anything anywhere. That's fine for a single agent. For 100 agents in an organization, it's chaos. Governance is the difference between collective intelligence and collective noise. But governance must be flexible — a startup with 3 agents wants zero friction. An enterprise with 1000 agents wants approval chains. The governance model is metadata, not code — it's configured per namespace, not hardcoded.
+
+### 1d. Smart Recall
 
 | Task | Sessions | Deliverable |
 |------|:--------:|-------------|
 | Context-budget-aware recall | 1-2 | `budget_tokens` parameter — return as many memories as fit in N tokens. **No competitor has this.** LLMs have finite context windows. "Give me the most relevant memories that fit in 4K tokens" is the killer feature. |
-| Graph-aware recall | 1-2 | 1-hop linked memories included in recall results. SQLite recursive CTEs — `WITH RECURSIVE` traversal. If you recall a memory, you also get everything it's linked to (related_to, derived_from). |
-| Decay scoring tuning | 0.5 | Configurable half-life parameter for recency decay. |
-
-### 1b. Agent Identity
-
-| Task | Sessions | Deliverable |
-|------|:--------:|-------------|
-| `agent_id` schema field | 0.5 | New column on memories table. Every memory knows which agent stored it. Foundation for all multi-agent features. |
-| `scope` field | 0.5 | `private` / `project` / `team` / `global` visibility enforcement at query time. Works with existing namespace hierarchy. |
-| Agent registration | 0.5 | `memory_agent_register` MCP tool — agents announce themselves with an ID and capability set. |
+| Hierarchy-aware recall | 0.5 | Recall automatically includes memories from the agent's level + all ancestor namespaces. An agent in `alphaone/engineering/platform` gets platform memories + engineering policies + org standards in one recall. |
 
 ---
 
@@ -135,7 +174,7 @@ Memories become a connected graph, not a flat list. This is the irreplaceable mo
 
 ---
 
-## Phase 3 — Multi-Agent Sync
+## Phase 3 — Memory Sharing & Sync
 
 **Target: v0.8.0 | LOE: 8-10 sessions**
 
@@ -145,7 +184,7 @@ The unlock. AI agents become a collective intelligence.
 
 | Task | Sessions | Deliverable |
 |------|:--------:|-------------|
-| CRDT-lite merge rules | 2 | Defined conflict resolution for every field: last-write-wins for content, max-wins for access_count, union for tags, higher-confidence-wins for contradictions. |
+| CRDT-lite merge rules | 2 | Defined conflict resolution for every field: last-write-wins for content, max-wins for access_count, union for tags, higher-confidence-wins for contradictions. Governance metadata determines whether merge is automatic or requires approval. |
 | Vector clock per agent | 1 | Each agent tracks its sync state — "last memory I've seen from Agent B." Enables efficient delta sync. |
 | Merge verification | 1 | `ai-memory sync --dry-run` shows what would change before committing. |
 
@@ -155,17 +194,27 @@ The unlock. AI agents become a collective intelligence.
 |------|:--------:|-------------|
 | Auto background sync daemon | 1-2 | `ai-memory sync-daemon --peers /path/to/peer1.db,/path/to/peer2.db` — watches for changes, auto-merges. Built on `notify` crate + existing sync logic. |
 | HTTP sync endpoint | 1 | `POST /api/v1/sync` — push/pull memories over the existing HTTP API. Agents on different machines sync via network. |
-| Selective sync | 1 | Sync only specific namespaces or scopes. Team agents sync team memories. Private stays private. |
+| Selective sync | 1 | Sync follows the hierarchy. Team agents sync team-level memories. Unit agents sync unit-level. Private stays private. Governed by namespace visibility rules from Phase 1. |
 
-### Use Cases This Enables
+### What This Enables
+
+**Individual memory:** An agent's private knowledge. Stored at `org/unit/team/agent-id`. Visible only to that agent. No sync unless the agent promotes it.
+
+**Team memory:** Shared knowledge for a team of agents working together. Stored at `org/unit/team`. Auto-synced between all agents in the team. Governed by team-level governance policy.
+
+**Unit memory:** Department-wide knowledge. Stored at `org/unit`. Policies, standards, shared context for all teams in the unit.
+
+**Organizational memory:** Company-wide knowledge. Stored at `org`. Compliance rules, architecture standards, incident learnings. Every agent in the org inherits it.
+
+**Collective memory:** The global organization's complete knowledge — the union of all memories at all levels. An org-level query returns everything: individual learnings, team knowledge, unit policies, org standards. The collective IS the organization's AI intelligence.
 
 **Shift handoff:** Night shift agents sync to day shift agents automatically. Zero knowledge gap.
 
-**Swarm intelligence:** 100 agents processing tickets. Each learns. Memory syncs across the swarm. The 100th ticket benefits from all 99 prior learnings.
+**Swarm intelligence:** 100 agents processing tickets. Each learns at the individual level. Valuable learnings get promoted to team level. Team level syncs across the swarm. The 100th ticket benefits from all 99 prior learnings.
 
-**Knowledge inheritance:** Server decommissioned. Agent dies. Replacement agent syncs and has full institutional knowledge from day one. Zero onboarding.
+**Knowledge inheritance:** Server decommissioned. Agent dies. Replacement agent syncs team + unit + org memories and has full institutional knowledge from day one.
 
-**Distributed immune system:** One agent encounters a novel failure pattern. Stores the signature. Syncs to all agents in the mesh. Entire fleet immunized.
+**Distributed immune system:** One agent encounters a novel failure pattern. Promotes it to team level. Syncs to all agents in the team. If it's critical, promoted to org level — entire fleet immunized.
 
 ---
 
@@ -297,15 +346,15 @@ ai-memory becomes a **standard**, not just a product.
 | Phase | Milestone | Sessions | What It Unlocks | Infra Scale |
 |:-----:|-----------|:--------:|-----------------|:-----------:|
 | 0 | Foundation (v0.5.4) | 5-7 | **COMPLETE** | Small |
-| 1 | Smart Recall + Agent Identity (v0.6.0) | 6-8 | Budget-aware recall, agent-attributed memories | Small |
+| 1 | Schema, Hierarchy & Governance (v0.6.0) | 8-10 | Flexible schema, org hierarchy, governance model | Small |
 | 2 | Knowledge Graph Engine (v0.7.0) | 5-7 | Connected knowledge, multi-hop reasoning | Small |
-| 3 | Multi-Agent Sync (v0.8.0) | 8-10 | Collective intelligence across systems | Small-Mid |
+| 3 | Memory Sharing & Sync (v0.8.0) | 8-10 | Collective intelligence across systems | Small-Mid |
 | 4 | Autonomous Curator (v0.9.0) | 4-6 | Self-improving memory | Small-Mid |
 | 5 | Team Hub — PostgreSQL (v0.9.5) | 4-6 | Organizational shared knowledge | Mid |
 | 5b | Data Tier Backends (v0.9.5+) | 15-19 | Enterprise-scale, specialized workloads | Mid-Big |
 | 6 | Production GA (v1.0.0) | 6-8 | Stability contract, SDKs, portability | All |
-| 7 | Federation & Protocol (v1.x+) | 8-12 | Infrastructure for humanity | All |
-| | **TOTAL** | **62-83** | | |
+| 7 | Federation & Protocol (v1.x+) | 8-12 | Open knowledge commons | All |
+| | **TOTAL** | **64-85** | | |
 
 ---
 
