@@ -2,10 +2,12 @@ Name:           ai-memory
 Version:        0.5.4.4
 Release:        1%{?dist}
 Summary:        AI-agnostic persistent memory system — MCP server, HTTP API, and CLI
+ExclusiveArch:  x86_64 aarch64
 
 License:        Apache-2.0
 URL:            https://github.com/alphaonedev/ai-memory-mcp
 Source0:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v%{version}/ai-memory-x86_64-unknown-linux-gnu.tar.gz
+Source1:        https://github.com/alphaonedev/ai-memory-mcp/releases/download/v%{version}/ai-memory-aarch64-unknown-linux-gnu.tar.gz
 
 # Pre-built binary — no build dependencies needed
 AutoReqProv:    no
@@ -19,7 +21,12 @@ Claude, ChatGPT, Grok, Cursor, Windsurf, Continue.dev, OpenClaw, Llama, and
 any MCP client. 97.8%% recall accuracy on ICLR 2025 LongMemEval benchmark.
 
 %prep
+%ifarch x86_64
 tar xzf %{SOURCE0}
+%endif
+%ifarch aarch64
+tar xzf %{SOURCE1}
+%endif
 
 %install
 mkdir -p %{buildroot}%{_bindir}

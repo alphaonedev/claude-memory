@@ -248,9 +248,11 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p ~/rpmbuild/{SOURCES,SPECS,SRPMS}
 
-          # Download the pre-built binary tarball as the source
+          # Download both architecture tarballs
           curl -sL -o ~/rpmbuild/SOURCES/ai-memory-x86_64-unknown-linux-gnu.tar.gz \
             "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sL -o ~/rpmbuild/SOURCES/ai-memory-aarch64-unknown-linux-gnu.tar.gz \
+            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
 
           # Update spec version and copy
           sed "s/^Version:.*/Version:        ${VERSION}/" ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
