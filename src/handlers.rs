@@ -3,8 +3,9 @@
 
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, Query, Request, State},
     http::StatusCode,
+    middleware::Next,
     response::IntoResponse,
 };
 use chrono::{Duration, Utc};
@@ -25,6 +26,56 @@ use crate::validate;
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;
 
 const MAX_BULK_SIZE: usize = 1000;
+
+/// Shared state for API key authentication middleware.
+#[derive(Clone)]
+pub struct ApiKeyState {
+    pub key: Option<String>,
+}
+
+/// Middleware: reject requests with 401 if `api_key` is configured and request
+/// doesn't provide a matching `X-API-Key` header or `?api_key=` query param.
+/// The `/api/v1/health` endpoint is exempt.
+pub async fn api_key_auth(
+    State(auth): State<ApiKeyState>,
+    req: Request,
+    next: Next,
+) -> impl IntoResponse {
+    let Some(ref expected) = auth.key else {
+        // No API key configured — allow all requests
+        return next.run(req).await.into_response();
+    };
+
+    // Exempt health endpoint
+    if req.uri().path() == "/api/v1/health" {
+        return next.run(req).await.into_response();
+    }
+
+    // Check X-API-Key header
+    if let Some(header_val) = req.headers().get("x-api-key")
+        && let Ok(val) = header_val.to_str()
+        && val == expected.as_str()
+    {
+        return next.run(req).await.into_response();
+    }
+
+    // Check ?api_key= query param
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some(val) = pair.strip_prefix("api_key=")
+                && val == expected.as_str()
+            {
+                return next.run(req).await.into_response();
+            }
+        }
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(json!({"error": "missing or invalid API key"})),
+    )
+        .into_response()
+}
 
 pub async fn health(State(state): State<Db>) -> impl IntoResponse {
     let lock = state.lock().await;
@@ -74,6 +125,7 @@ pub async fn create_memory(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
+        metadata: body.metadata,
     };
 
     // Check for contradictions
@@ -161,6 +213,7 @@ pub async fn update_memory(
         body.priority,
         body.confidence,
         body.expires_at.as_deref(),
+        body.metadata.as_ref(),
     ) {
         Ok((true, _)) => {
             let mem = db::get(&lock.0, &id).ok().flatten();
@@ -222,6 +275,7 @@ pub async fn promote_memory(State(state): State<Db>, Path(id): Path<String>) -> 
         None,
         None,
         Some(&Tier::Long),
+        None,
         None,
         None,
         None,
@@ -679,6 +733,7 @@ pub async fn bulk_create(
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at,
+            metadata: body.metadata,
         };
         match db::insert(&lock.0, &mem) {
             Ok(_) => created += 1,
@@ -829,6 +884,7 @@ mod tests {
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at: None,
+            metadata: serde_json::json!({}),
         };
         let id = db::insert(&lock.0, &mem).unwrap();
         let got = db::get(&lock.0, &id).unwrap().unwrap();
@@ -855,6 +911,7 @@ mod tests {
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at: None,
+            metadata: serde_json::json!({}),
         };
         db::insert(&lock.0, &mem).unwrap();
         let results = db::recall(
@@ -904,5 +961,175 @@ mod tests {
         )
         .unwrap();
         assert!(results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_and_update_with_metadata() {
+        let state = test_state();
+        let lock = state.lock().await;
+        let now = Utc::now();
+
+        // Create with metadata
+        let mem = Memory {
+            id: Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "test".into(),
+            title: "HTTP metadata test".into(),
+            content: "Testing metadata through handler layer.".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "api".into(),
+            access_count: 0,
+            created_at: now.to_rfc3339(),
+            updated_at: now.to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({"http_test": true, "version": 1}),
+        };
+        let id = db::insert(&lock.0, &mem).unwrap();
+
+        // Verify metadata persisted
+        let got = db::get(&lock.0, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["http_test"], true);
+        assert_eq!(got.metadata["version"], 1);
+
+        // Update metadata via db::update (same path as update_memory handler)
+        let new_meta =
+            serde_json::json!({"http_test": true, "version": 2, "updated_by": "handler"});
+        let (found, _) = db::update(
+            &lock.0,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&new_meta),
+        )
+        .unwrap();
+        assert!(found);
+
+        // Verify updated metadata
+        let got = db::get(&lock.0, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["version"], 2);
+        assert_eq!(got.metadata["updated_by"], "handler");
+    }
+
+    // --- API key auth middleware tests ---
+
+    use axum::{Router, body::Body, routing::get as axum_get};
+    use tower::ServiceExt as _;
+
+    async fn dummy_handler() -> impl IntoResponse {
+        (StatusCode::OK, "ok")
+    }
+
+    fn auth_app(api_key: Option<&str>) -> Router {
+        let auth_state = ApiKeyState {
+            key: api_key.map(String::from),
+        };
+        Router::new()
+            .route("/api/v1/health", axum_get(dummy_handler))
+            .route("/api/v1/memories", axum_get(dummy_handler))
+            .layer(axum::middleware::from_fn_with_state(
+                auth_state,
+                api_key_auth,
+            ))
+    }
+
+    #[tokio::test]
+    async fn api_key_no_key_configured_allows_all() {
+        let app = auth_app(None);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_valid_header_allows() {
+        let app = auth_app(Some("secret123"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories")
+                    .header("x-api-key", "secret123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_invalid_header_rejected() {
+        let app = auth_app(Some("secret123"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories")
+                    .header("x-api-key", "wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_missing_header_rejected() {
+        let app = auth_app(Some("secret123"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_key_valid_query_param_allows() {
+        let app = auth_app(Some("secret123"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories?api_key=secret123")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn api_key_health_exempt() {
+        let app = auth_app(Some("secret123"));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

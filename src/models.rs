@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Memory tier — mirrors human memory systems.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -75,6 +76,8 @@ pub struct Memory {
     pub last_accessed_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    #[serde(default = "default_metadata")]
+    pub metadata: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +108,8 @@ pub struct CreateMemory {
     pub expires_at: Option<String>,
     #[serde(default)]
     pub ttl_secs: Option<i64>,
+    #[serde(default = "default_metadata")]
+    pub metadata: Value,
 }
 
 fn default_tier() -> Tier {
@@ -122,6 +127,9 @@ fn default_confidence() -> f64 {
 fn default_source() -> String {
     "api".to_string()
 }
+pub fn default_metadata() -> Value {
+    Value::Object(serde_json::Map::new())
+}
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateMemory {
@@ -133,6 +141,7 @@ pub struct UpdateMemory {
     pub priority: Option<i32>,
     pub confidence: Option<f64>,
     pub expires_at: Option<String>,
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

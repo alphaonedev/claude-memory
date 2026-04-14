@@ -524,12 +524,18 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 
     // Automatic GC
     let gc_state = state.clone();
+    let archive_max_days = app_config.archive_max_days;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(GC_INTERVAL_SECS)).await;
             let lock = gc_state.lock().await;
             match db::gc(&lock.0, lock.3) {
                 Ok(n) if n > 0 => tracing::info!("gc: expired {n} memories"),
+                _ => {}
+            }
+            // Auto-purge old archives if configured
+            match db::auto_purge_archive(&lock.0, archive_max_days) {
+                Ok(n) if n > 0 => tracing::info!("gc: purged {n} old archived memories"),
                 _ => {}
             }
         }
@@ -543,6 +549,13 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         let lock = shutdown_state.lock().await;
         let _ = db::checkpoint(&lock.0);
     };
+
+    let api_key_state = handlers::ApiKeyState {
+        key: app_config.api_key.clone(),
+    };
+    if api_key_state.key.is_some() {
+        tracing::info!("API key authentication enabled");
+    }
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -575,8 +588,12 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             post(handlers::restore_archive),
         )
         .route("/api/v1/archive/stats", get(handlers::archive_stats))
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            handlers::api_key_auth,
+        ))
         .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB max request body
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB default (bulk/import bodies capped at MAX_BULK_SIZE * per-memory limit)
         .layer(CorsLayer::permissive())
         .with_state(state);
 
@@ -652,6 +669,7 @@ fn cmd_store(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
+        metadata: models::default_metadata(),
     };
     let contradictions =
         db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
@@ -736,6 +754,7 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
         args.priority,
         args.confidence,
         args.expires_at.as_deref(),
+        None,
     )?;
     if !found {
         eprintln!("not found: {}", args.id);
@@ -1101,6 +1120,7 @@ fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()>
         None,
         None,
         Some(""),
+        None,
     )?;
     if !found {
         eprintln!("not found: {}", args.id);
@@ -1311,6 +1331,7 @@ fn cmd_resolve(db_path: &Path, args: &ResolveArgs, json_out: bool) -> Result<()>
         None,
         Some(1),
         Some(0.1),
+        None,
         None,
     )?;
     db::touch(
@@ -1948,6 +1969,7 @@ fn cmd_mine(
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at,
+            metadata: models::default_metadata(),
         };
 
         match db::insert(&conn, &mem) {

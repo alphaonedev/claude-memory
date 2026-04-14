@@ -28,13 +28,13 @@ uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Semantic embedding support
-candle-core = "0.8"
-candle-nn = "0.8"
-candle-transformers = "0.8"
-hf-hub = { version = "0.3", features = ["tokio"] }
-tokenizers = { version = "0.21" }
+candle-core = "0.10"
+candle-nn = "0.10"
+candle-transformers = "0.10"
+hf-hub = { version = "0.5", features = ["tokio"] }
+tokenizers = { version = "0.22" }
 instant-distance = "0.6"
-reqwest = { version = "0.11", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 
 [dev-dependencies]
@@ -42,6 +42,7 @@ criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tempfile = "3"
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "recall"
@@ -51,6 +52,10 @@ harness = false
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
 pkg-fmt = "tgz"
+
+[patch.crates-io]
+# paste is unmaintained (RUSTSEC-2024-0436); using alphaonedev fork for maintenance
+paste = { git = "https://github.com/alphaonedev/paste", rev = "6a30252" }
 
 [profile.release]
 opt-level = 3

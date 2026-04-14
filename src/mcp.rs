@@ -89,7 +89,8 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "array", "items": {"type": "string"}, "default": []},
                         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"}
+                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"},
+                        "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}}
                     },
                     "required": ["title", "content"]
                 }
@@ -192,7 +193,8 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "priority": {"type": "integer", "minimum": 1, "maximum": 10},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-                        "expires_at": {"type": "string", "description": "Expiry timestamp (RFC3339), or null to clear"}
+                        "expires_at": {"type": "string", "description": "Expiry timestamp (RFC3339), or null to clear"},
+                        "metadata": {"type": "object", "description": "Arbitrary JSON metadata"}
                     },
                     "required": ["id"]
                 }
@@ -501,6 +503,13 @@ fn handle_store(
     validate::validate_priority(priority).map_err(|e| e.to_string())?;
     validate::validate_confidence(confidence).map_err(|e| e.to_string())?;
 
+    let metadata = if params["metadata"].is_object() {
+        params["metadata"].clone()
+    } else {
+        serde_json::json!({})
+    };
+    validate::validate_metadata(&metadata).map_err(|e| e.to_string())?;
+
     let now = chrono::Utc::now();
     let expires_at = resolved_ttl
         .ttl_for_tier(&tier)
@@ -521,6 +530,7 @@ fn handle_store(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
+        metadata,
     };
 
     // True dedup: check for exact title+namespace match (#97)
@@ -542,6 +552,7 @@ fn handle_store(
             Some(mem.priority),         // priority
             Some(mem.confidence),       // confidence
             None,                       // expires_at
+            Some(&mem.metadata),        // metadata
         )
         .map_err(|e| e.to_string())?;
         // Regenerate embedding if content changed during dedup update
@@ -827,6 +838,7 @@ fn handle_auto_tag(
         None,
         None,
         None,
+        None,
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"id": id, "new_tags": tags, "all_tags": all_tags}))
@@ -994,6 +1006,14 @@ fn handle_update(
         validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
     }
 
+    let metadata = if params["metadata"].is_object() {
+        let m = params["metadata"].clone();
+        validate::validate_metadata(&m).map_err(|e| e.to_string())?;
+        Some(m)
+    } else {
+        None
+    };
+
     let (found, content_changed) = db::update(
         conn,
         id,
@@ -1005,6 +1025,7 @@ fn handle_update(
         priority,
         confidence,
         expires_at,
+        metadata.as_ref(),
     )
     .map_err(|e| e.to_string())?;
 

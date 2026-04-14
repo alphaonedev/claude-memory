@@ -1,0 +1,9 @@
+# cargo audit configuration
+# https://github.com/rustsec/rustsec/tree/main/cargo-audit
+
+[advisories]
+# RUSTSEC-2026-0097: rand unsound with custom logger using rand::rng()
+# Affects rand 0.8.5 (via instant-distance, hf-hub) and 0.9.2 (via tokenizers, candle-core).
+# Not applicable: we do not use a custom global logger that calls rand::rng().
+# No upstream fix available — blocked on rand crate patch.
+ignore = ["RUSTSEC-2026-0097"]

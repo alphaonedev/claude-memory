@@ -2733,3 +2733,250 @@ fn test_namespace_standard_cascade_on_delete() {
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+#[test]
+fn test_mcp_store_with_metadata() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-mcp-meta-{}.db", uuid::Uuid::new_v4()));
+
+    // Store with metadata, then recall in JSON format to verify it persists
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Metadata MCP test","content":"Testing metadata via MCP","tier":"long","metadata":{{"agent_id":"claude-test","session":42}}}}}}}}"#).ok();
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_recall","arguments":{{"context":"Metadata MCP test","format":"json"}}}}}}"#).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 responses, got: {stdout}");
+
+    // Parse store response to get the ID
+    let store_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let store_text = store_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let store_data: serde_json::Value = serde_json::from_str(store_text).unwrap();
+    assert!(store_data["id"].is_string(), "store should return an id");
+
+    // Parse recall response — should contain metadata
+    let recall_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let recall_text = recall_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let recall_data: serde_json::Value = serde_json::from_str(recall_text).unwrap();
+    let memories = recall_data["memories"].as_array().unwrap();
+    assert!(!memories.is_empty(), "recall should return results");
+    assert_eq!(memories[0]["metadata"]["agent_id"], "claude-test");
+    assert_eq!(memories[0]["metadata"]["session"], 42);
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_mcp_update_metadata() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-mcp-meta-upd-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+
+    // Store with initial metadata
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Update meta test","content":"Initial content","tier":"long","metadata":{{"version":1}}}}}}}}"#).ok();
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_recall","arguments":{{"context":"Update meta test","format":"json"}}}}}}"#).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 2, "expected 2 responses");
+
+    // Get the stored ID
+    let store_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let store_text = store_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let store_data: serde_json::Value = serde_json::from_str(store_text).unwrap();
+    let id = store_data["id"].as_str().unwrap();
+
+    // Update metadata via a second MCP session, then get to verify
+    let output2 = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_update","arguments":{{"id":"{}","metadata":{{"version":2,"updated":true}}}}}}}}"#, id).ok();
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"memory_get","arguments":{{"id":"{}"}}}}}}"#, id).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout2 = String::from_utf8_lossy(&output2.stdout);
+    let lines2: Vec<&str> = stdout2.trim().lines().collect();
+    assert_eq!(lines2.len(), 2, "expected 2 responses from update session");
+
+    // Verify update succeeded
+    let update_resp: serde_json::Value = serde_json::from_str(lines2[0]).unwrap();
+    let update_text = update_resp["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
+    let update_data: serde_json::Value = serde_json::from_str(update_text).unwrap();
+    assert_eq!(update_data["updated"], true);
+
+    // Verify get returns new metadata
+    let get_resp: serde_json::Value = serde_json::from_str(lines2[1]).unwrap();
+    let get_text = get_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let get_data: serde_json::Value = serde_json::from_str(get_text).unwrap();
+    assert_eq!(get_data["metadata"]["version"], 2);
+    assert_eq!(get_data["metadata"]["updated"], true);
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_mcp_store_invalid_metadata_defaults_to_empty() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-mcp-meta-inv-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+
+    // Store with metadata as array (invalid — should default to {})
+    // Then store with metadata as string (invalid — should default to {})
+    // Then store with metadata as null (invalid — should default to {})
+    // Verify all three have empty metadata
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                // metadata as array
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Array meta","content":"test","tier":"long","metadata":[1,2,3]}}}}}}"#).ok();
+                // metadata as string
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"String meta","content":"test","tier":"long","metadata":"not an object"}}}}}}"#).ok();
+                // metadata as null
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Null meta","content":"test","tier":"long","metadata":null}}}}}}"#).ok();
+                // Recall all to verify
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{{"name":"memory_list","arguments":{{"format":"json"}}}}}}"#).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 4, "expected 4 responses, got: {stdout}");
+
+    // All three stores should succeed (invalid metadata silently defaults to {})
+    for i in 0..3 {
+        let resp: serde_json::Value = serde_json::from_str(lines[i]).unwrap();
+        let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+        let data: serde_json::Value = serde_json::from_str(text).unwrap();
+        assert!(
+            data["id"].is_string(),
+            "store {} should succeed, got: {}",
+            i + 1,
+            text
+        );
+    }
+
+    // List should show all 3 with empty metadata
+    let list_resp: serde_json::Value = serde_json::from_str(lines[3]).unwrap();
+    let list_text = list_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let list_data: serde_json::Value = serde_json::from_str(list_text).unwrap();
+    let memories = list_data["memories"].as_array().unwrap();
+    assert_eq!(memories.len(), 3);
+    for mem in memories {
+        assert_eq!(
+            mem["metadata"],
+            serde_json::json!({}),
+            "invalid metadata should default to empty object, got: {}",
+            mem["metadata"]
+        );
+    }
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_mcp_dedup_replaces_metadata() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-mcp-meta-dup-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+
+    // Store with metadata v1, then store same title+namespace with metadata v2
+    // The MCP dedup path goes through db::update, not db::insert upsert
+    let output = cmd(binary)
+        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Dedup meta test","content":"first","tier":"long","namespace":"test","metadata":{{"version":1}}}}}}}}"#).ok();
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_store","arguments":{{"title":"Dedup meta test","content":"second","tier":"long","namespace":"test","metadata":{{"version":2,"extra":"added"}}}}}}}}"#).ok();
+                writeln!(stdin, r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_recall","arguments":{{"context":"Dedup meta test","namespace":"test","format":"json"}}}}}}"#).ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert_eq!(lines.len(), 3, "expected 3 responses, got: {stdout}");
+
+    // Second store should indicate dedup
+    let store2: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let store2_text = store2["result"]["content"][0]["text"].as_str().unwrap();
+    let store2_data: serde_json::Value = serde_json::from_str(store2_text).unwrap();
+    assert_eq!(store2_data["duplicate"], true);
+
+    // Recall should return the memory with v2 metadata
+    let recall: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let recall_text = recall["result"]["content"][0]["text"].as_str().unwrap();
+    let recall_data: serde_json::Value = serde_json::from_str(recall_text).unwrap();
+    let memories = recall_data["memories"].as_array().unwrap();
+    assert!(!memories.is_empty());
+    assert_eq!(memories[0]["metadata"]["version"], 2);
+    assert_eq!(memories[0]["metadata"]["extra"], "added");
+
+    let _ = std::fs::remove_file(&db_path);
+}

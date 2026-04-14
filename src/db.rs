@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS memories (
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL,
     last_accessed_at TEXT,
-    expires_at       TEXT
+    expires_at       TEXT,
+    metadata         TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -73,7 +74,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 6;
+const CURRENT_SCHEMA_VERSION: i64 = 7;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -163,7 +164,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                     last_accessed_at TEXT,
                     expires_at       TEXT,
                     archived_at      TEXT NOT NULL,
-                    archive_reason   TEXT NOT NULL DEFAULT 'ttl_expired'
+                    archive_reason   TEXT NOT NULL DEFAULT 'ttl_expired',
+                    metadata         TEXT NOT NULL DEFAULT '{}'
                 );
                 CREATE INDEX IF NOT EXISTS idx_archived_namespace ON archived_memories(namespace);
                 CREATE INDEX IF NOT EXISTS idx_archived_at ON archived_memories(archived_at);",
@@ -185,6 +187,27 @@ fn migrate(conn: &Connection) -> Result<()> {
                 .is_ok();
             if !has_parent {
                 conn.execute_batch("ALTER TABLE namespace_meta ADD COLUMN parent_namespace TEXT;")?;
+            }
+        }
+        if version < 7 {
+            // Add metadata JSON column to memories and archived_memories tables
+            let has_metadata: bool = conn
+                .prepare("SELECT metadata FROM memories LIMIT 0")
+                .is_ok();
+            if !has_metadata {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )?;
+            }
+            let has_archive_metadata: bool = conn
+                .prepare("SELECT metadata FROM archived_memories LIMIT 0")
+                .is_ok();
+            if !has_archive_metadata {
+                conn.execute(
+                    "ALTER TABLE archived_memories ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'",
+                    [],
+                )?;
             }
         }
 
@@ -213,6 +236,13 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
     let tier_str: String = row.get("tier")?;
     let tier = Tier::from_str(&tier_str).unwrap_or(Tier::Mid);
+    let metadata_str: String = row
+        .get::<_, String>("metadata")
+        .unwrap_or_else(|_| "{}".to_string());
+    let metadata: serde_json::Value = serde_json::from_str(&metadata_str).unwrap_or_else(|e| {
+        tracing::warn!("corrupt metadata in DB row, defaulting to {{}}: {e}");
+        serde_json::json!({})
+    });
     Ok(Memory {
         id: row.get("id")?,
         tier,
@@ -228,15 +258,17 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         updated_at: row.get("updated_at")?,
         last_accessed_at: row.get("last_accessed_at")?,
         expires_at: row.get("expires_at")?,
+        metadata,
     })
 }
 
 /// Insert with upsert on title+namespace. Returns the ID (existing or new).
 pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
+    let metadata_json = serde_json::to_string(&mem.metadata)?;
     conn.execute(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -249,11 +281,13 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                         ELSE memories.tier END,
             updated_at = excluded.updated_at,
             expires_at = CASE WHEN excluded.tier = 'long' OR memories.tier = 'long' THEN NULL
-                              ELSE COALESCE(excluded.expires_at, memories.expires_at) END",
+                              ELSE COALESCE(excluded.expires_at, memories.expires_at) END,
+            metadata = excluded.metadata",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
+            metadata_json,
         ],
     )?;
     // Return the actual ID (could be the existing one on conflict)
@@ -342,6 +376,7 @@ pub fn update(
     priority: Option<i32>,
     confidence: Option<f64>,
     expires_at: Option<&str>,
+    metadata: Option<&serde_json::Value>,
 ) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
@@ -375,7 +410,9 @@ pub fn update(
         Some(v) => Some(v),
         None => existing.expires_at.as_deref(),
     };
+    let metadata = metadata.unwrap_or(&existing.metadata);
     let tags_json = serde_json::to_string(tags)?;
+    let metadata_json = serde_json::to_string(metadata)?;
     let now = Utc::now().to_rfc3339();
 
     // Check for title+namespace collision with a DIFFERENT memory
@@ -395,9 +432,9 @@ pub fn update(
     }
 
     conn.execute(
-        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9
-         WHERE id=?10",
-        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, id],
+        "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10
+         WHERE id=?11",
+        params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id],
     )?;
     Ok((true, content_changed))
 }
@@ -511,7 +548,7 @@ pub fn search(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at
+                m.last_accessed_at, m.expires_at, m.metadata
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1
@@ -567,7 +604,7 @@ pub fn recall(
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at,
+                m.last_accessed_at, m.expires_at, m.metadata,
                 (fts.rank * -1)
                 + (m.priority * 0.5)
                 + (MIN(m.access_count, 50) * 0.1)
@@ -590,7 +627,7 @@ pub fn recall(
         params![fts_query, namespace, now, tags_filter, since, until, limit],
         |row| {
             let mem = row_to_memory(row)?;
-            let score: f64 = row.get(14)?;
+            let score: f64 = row.get(15)?;
             Ok((mem, score))
         },
     )?;
@@ -611,7 +648,7 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at
+                m.last_accessed_at, m.expires_at, m.metadata
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1 AND m.namespace = ?2
@@ -709,12 +746,32 @@ pub fn consolidate(
         let mut max_priority = 5i32;
         let mut all_tags: Vec<String> = Vec::new();
         let mut total_access = 0i64;
+        let mut merged_metadata = serde_json::Map::new();
         for id in ids {
             match get(conn, id)? {
                 Some(mem) => {
                     max_priority = max_priority.max(mem.priority);
                     all_tags.extend(mem.tags);
                     total_access = total_access.saturating_add(mem.access_count);
+                    // Merge metadata: later values overwrite earlier ones on key conflict
+                    if let serde_json::Value::Object(map) = mem.metadata {
+                        for (k, v) in map {
+                            if let Some(existing) = merged_metadata.get(&k)
+                                && std::mem::discriminant(existing) != std::mem::discriminant(&v)
+                            {
+                                tracing::warn!(
+                                    "consolidate: key '{}' type changed during merge",
+                                    k
+                                );
+                            }
+                            merged_metadata.insert(k, v);
+                        }
+                    } else {
+                        tracing::warn!(
+                            "memory {} has non-object metadata during consolidate, skipping",
+                            id
+                        );
+                    }
                 }
                 None => anyhow::bail!("memory not found: {id}"),
             }
@@ -722,11 +779,15 @@ pub fn consolidate(
         all_tags.sort();
         all_tags.dedup();
         let tags_json = serde_json::to_string(&all_tags)?;
+        let merged_metadata_value = serde_json::Value::Object(merged_metadata);
+        crate::validate::validate_metadata(&merged_metadata_value)
+            .context("merged metadata exceeds size limit")?;
+        let metadata_json = serde_json::to_string(&merged_metadata_value)?;
 
         conn.execute(
-            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1.0, ?8, ?9, ?10, ?10)",
-            params![new_id, tier.as_str(), namespace, title, summary, tags_json, max_priority, source, total_access, now],
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1.0, ?8, ?9, ?10, ?10, ?11)",
+            params![new_id, tier.as_str(), namespace, title, summary, tags_json, max_priority, source, total_access, now, metadata_json],
         )?;
 
         for id in ids {
@@ -890,6 +951,14 @@ pub fn gc_if_needed(conn: &Connection, archive: bool) -> Result<usize> {
     }
 }
 
+/// Purge old archives if `archive_max_days` is configured.
+pub fn auto_purge_archive(conn: &Connection, max_days: Option<i64>) -> Result<usize> {
+    match max_days {
+        Some(days) if days > 0 => purge_archive(conn, Some(days)),
+        _ => Ok(0),
+    }
+}
+
 pub fn gc(conn: &Connection, archive: bool) -> Result<usize> {
     let now = Utc::now().to_rfc3339();
     conn.execute_batch("BEGIN IMMEDIATE")?;
@@ -899,10 +968,10 @@ pub fn gc(conn: &Connection, archive: bool) -> Result<usize> {
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason)
+                  expires_at, archived_at, archive_reason, metadata)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?1, 'ttl_expired'
+                        expires_at, ?1, 'ttl_expired', metadata
                  FROM memories
                  WHERE expires_at IS NOT NULL AND expires_at < ?1",
                 params![now],
@@ -945,7 +1014,7 @@ pub fn list_archived(
         Some(ns) => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
              source, access_count, created_at, updated_at, last_accessed_at, \
-             expires_at, archived_at, archive_reason \
+             expires_at, archived_at, archive_reason, metadata \
              FROM archived_memories WHERE namespace = ?1 \
              ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3"
                 .to_string(),
@@ -954,7 +1023,7 @@ pub fn list_archived(
         None => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
              source, access_count, created_at, updated_at, last_accessed_at, \
-             expires_at, archived_at, archive_reason \
+             expires_at, archived_at, archive_reason, metadata \
              FROM archived_memories \
              ORDER BY archived_at DESC LIMIT ?1 OFFSET ?2"
                 .to_string(),
@@ -965,6 +1034,11 @@ pub fn list_archived(
         params_vec.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
+        let metadata_str = row
+            .get::<_, String>(16)
+            .unwrap_or_else(|_| "{}".to_string());
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata_str).unwrap_or_else(|_| serde_json::json!({}));
         Ok(serde_json::json!({
             "id": row.get::<_, String>(0)?,
             "tier": row.get::<_, String>(1)?,
@@ -982,6 +1056,7 @@ pub fn list_archived(
             "expires_at": row.get::<_, Option<String>>(13)?,
             "archived_at": row.get::<_, String>(14)?,
             "archive_reason": row.get::<_, String>(15)?,
+            "metadata": metadata,
         }))
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -1015,12 +1090,30 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
                 "cannot restore: memory {id} already exists in active table (would overwrite)"
             );
         }
+        // Validate archived metadata before restoring
+        let archived_metadata: String = conn
+            .query_row(
+                "SELECT metadata FROM archived_memories WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or_else(|_| "{}".to_string());
+        let meta_value: serde_json::Value =
+            serde_json::from_str(&archived_metadata).unwrap_or_else(|_| serde_json::json!({}));
+        if let Err(e) = crate::validate::validate_metadata(&meta_value) {
+            tracing::warn!("archived memory {id} has invalid metadata, resetting to {{}}: {e}");
+            conn.execute(
+                "UPDATE archived_memories SET metadata = '{}' WHERE id = ?1",
+                params![id],
+            )?;
+        }
+
         conn.execute(
             "INSERT INTO memories
              (id, tier, namespace, title, content, tags, priority, confidence,
-              source, access_count, created_at, updated_at, last_accessed_at, expires_at)
+              source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
              SELECT id, 'long', namespace, title, content, tags, priority, confidence,
-                    source, access_count, created_at, ?1, last_accessed_at, NULL
+                    source, access_count, created_at, ?1, last_accessed_at, NULL, metadata
              FROM archived_memories WHERE id = ?2",
             params![now, id],
         )?;
@@ -1112,9 +1205,10 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
 /// Only overwrites if the incoming memory is newer (by `updated_at`).
 pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
+    let metadata_json = serde_json::to_string(&mem.metadata)?;
     conn.execute(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.content ELSE memories.content END,
             tags = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.tags ELSE memories.tags END,
@@ -1128,11 +1222,13 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             updated_at = MAX(memories.updated_at, excluded.updated_at),
             access_count = MAX(memories.access_count, excluded.access_count),
             expires_at = CASE WHEN excluded.tier = 'long' OR memories.tier = 'long' THEN NULL
-                              ELSE COALESCE(excluded.expires_at, memories.expires_at) END",
+                              ELSE COALESCE(excluded.expires_at, memories.expires_at) END,
+            metadata = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.metadata ELSE memories.metadata END",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
+            metadata_json,
         ],
     )?;
     let actual_id: String = conn.query_row(
@@ -1243,7 +1339,7 @@ pub fn recall_hybrid(
     let mut fts_stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.embedding,
+                m.last_accessed_at, m.expires_at, m.metadata, m.embedding,
                 (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
                 + (m.confidence * 2.0)
                 + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
@@ -1265,7 +1361,7 @@ pub fn recall_hybrid(
     let mut sem_stmt = conn.prepare(
         "SELECT id, tier, namespace, title, content, tags, priority,
                 confidence, source, access_count, created_at, updated_at,
-                last_accessed_at, expires_at, embedding
+                last_accessed_at, expires_at, metadata, embedding
          FROM memories
          WHERE embedding IS NOT NULL
            AND (?1 IS NULL OR namespace = ?1)
@@ -1290,7 +1386,7 @@ pub fn recall_hybrid(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            let fts_score: f64 = row.get(15)?;
+            let fts_score: f64 = row.get(16)?;
             Ok((mem, fts_score))
         },
     )?;
@@ -1359,7 +1455,7 @@ pub fn recall_hybrid(
         let sem_rows =
             sem_stmt.query_map(params![namespace, now, tags_filter, since, until], |row| {
                 let mem = row_to_memory(row)?;
-                let emb_bytes: Option<Vec<u8>> = row.get(14)?;
+                let emb_bytes: Option<Vec<u8>> = row.get(15)?;
                 Ok((mem, emb_bytes))
             })?;
 
@@ -1567,6 +1663,7 @@ mod tests {
             expires_at: tier
                 .default_ttl_secs()
                 .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339()),
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -1614,6 +1711,7 @@ mod tests {
             Some(9),
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1643,6 +1741,7 @@ mod tests {
             Some(8),
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1654,6 +1753,7 @@ mod tests {
             &id,
             None,
             Some("New content"),
+            None,
             None,
             None,
             None,
@@ -1673,6 +1773,7 @@ mod tests {
             &conn,
             "bad-id",
             Some("New"),
+            None,
             None,
             None,
             None,
@@ -1703,6 +1804,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1724,6 +1826,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert!(found);
@@ -1737,6 +1840,7 @@ mod tests {
             None,
             None,
             Some(&Tier::Long),
+            None,
             None,
             None,
             None,
@@ -1762,6 +1866,7 @@ mod tests {
             &conn,
             &id_a,
             Some("Beta"),
+            None,
             None,
             None,
             None,
@@ -2222,5 +2327,425 @@ mod tests {
 
         let got = get(&conn, &id).unwrap().unwrap();
         assert_eq!(got.content, "Updated via sync");
+    }
+
+    // --- Metadata tests (Task 1.1) ---
+
+    #[test]
+    fn metadata_default_empty_object() {
+        let conn = test_db();
+        let mem = make_memory("Default metadata", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn metadata_store_and_retrieve() {
+        let conn = test_db();
+        let mut mem = make_memory("With metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({"agent_id": "claude-1", "session": 42});
+        let id = insert(&conn, &mem).unwrap();
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["agent_id"], "claude-1");
+        assert_eq!(got.metadata["session"], 42);
+    }
+
+    #[test]
+    fn metadata_roundtrip_nested_json() {
+        let conn = test_db();
+        let mut mem = make_memory("Nested metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({
+            "agent": {"type": "ai:claude", "version": "4.6"},
+            "tags_extra": ["experimental"],
+            "score": 0.95
+        });
+        let id = insert(&conn, &mem).unwrap();
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["agent"]["type"], "ai:claude");
+        assert_eq!(got.metadata["tags_extra"][0], "experimental");
+        assert!((got.metadata["score"].as_f64().unwrap() - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metadata_preserved_on_update() {
+        let conn = test_db();
+        let mut mem = make_memory("Update metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({"key": "original"});
+        let id = insert(&conn, &mem).unwrap();
+
+        // Update without metadata — should preserve existing
+        let (found, _) = update(
+            &conn,
+            &id,
+            None,
+            Some("new content"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(found);
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["key"], "original");
+        assert_eq!(got.content, "new content");
+
+        // Update with new metadata — should replace
+        let new_meta = serde_json::json!({"key": "updated", "extra": true});
+        let (found, _) = update(
+            &conn,
+            &id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&new_meta),
+        )
+        .unwrap();
+        assert!(found);
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["key"], "updated");
+        assert_eq!(got.metadata["extra"], true);
+    }
+
+    #[test]
+    fn metadata_preserved_on_upsert() {
+        let conn = test_db();
+        let mut mem = make_memory("Upsert meta", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({"version": 1});
+        insert(&conn, &mem).unwrap();
+
+        // Insert again with same title+namespace — upsert should update metadata
+        let mut mem2 = make_memory("Upsert meta", "test", Tier::Long, 5);
+        mem2.metadata = serde_json::json!({"version": 2});
+        let id = insert(&conn, &mem2).unwrap();
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["version"], 2);
+    }
+
+    #[test]
+    fn metadata_in_list_and_search() {
+        let conn = test_db();
+        let mut mem = make_memory("Searchable metadata", "test", Tier::Long, 8);
+        mem.metadata = serde_json::json!({"source_model": "opus"});
+        insert(&conn, &mem).unwrap();
+
+        let results = list(&conn, Some("test"), None, 10, 0, None, None, None, None).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].metadata["source_model"], "opus");
+
+        let results = search(
+            &conn,
+            "Searchable",
+            Some("test"),
+            None,
+            10,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].metadata["source_model"], "opus");
+    }
+
+    #[test]
+    fn metadata_in_recall() {
+        let conn = test_db();
+        let mut mem = make_memory("Recallable metadata", "test", Tier::Long, 8);
+        mem.metadata = serde_json::json!({"context": "test-recall"});
+        insert(&conn, &mem).unwrap();
+
+        let results = recall(
+            &conn,
+            "Recallable",
+            Some("test"),
+            10,
+            None,
+            None,
+            None,
+            3600,
+            86400,
+        )
+        .unwrap();
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0.metadata["context"], "test-recall");
+    }
+
+    #[test]
+    fn metadata_in_export_import() {
+        let conn = test_db();
+        let mut mem = make_memory("Export metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({"exported": true});
+        insert(&conn, &mem).unwrap();
+
+        let exported = export_all(&conn).unwrap();
+        assert_eq!(exported.len(), 1);
+        assert_eq!(exported[0].metadata["exported"], true);
+
+        // Import into fresh DB
+        let conn2 = test_db();
+        insert(&conn2, &exported[0]).unwrap();
+        let got = get(&conn2, &exported[0].id).unwrap().unwrap();
+        assert_eq!(got.metadata["exported"], true);
+    }
+
+    #[test]
+    fn metadata_schema_migration() {
+        // Simulate a pre-v7 database (no metadata column) by creating one
+        // and checking that migration adds the column with correct default
+        let conn = test_db();
+        let mem = make_memory("Migration test", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+
+        // Verify the column exists and has the default value
+        let metadata_str: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(metadata_str, "{}");
+    }
+
+    #[test]
+    fn metadata_survives_archive_restore_cycle() {
+        let conn = test_db();
+        let mut mem = make_memory("Archivable", "test", Tier::Short, 5);
+        mem.metadata = serde_json::json!({"origin": "archive-test"});
+        // Set expiry in the past so GC will archive it
+        mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        let id = insert(&conn, &mem).unwrap();
+
+        // Run GC with archive=true — should archive the expired memory
+        let deleted = gc(&conn, true).unwrap();
+        assert_eq!(deleted, 1);
+
+        // Verify metadata is in the archive
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0]["metadata"]["origin"], "archive-test");
+
+        // Restore and verify metadata survives the round-trip
+        let restored = restore_archived(&conn, &id).unwrap();
+        assert!(restored);
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["origin"], "archive-test");
+    }
+
+    #[test]
+    fn metadata_in_insert_if_newer() {
+        let conn = test_db();
+        let mut mem = make_memory("Sync metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({"version": 1});
+        let id = insert(&conn, &mem).unwrap();
+
+        // Insert newer version with different metadata
+        mem.id = id.clone();
+        mem.metadata = serde_json::json!({"version": 2, "synced": true});
+        mem.updated_at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+        insert_if_newer(&conn, &mem).unwrap();
+
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["version"], 2);
+        assert_eq!(got.metadata["synced"], true);
+
+        // Insert older version — metadata should NOT be overwritten
+        mem.metadata = serde_json::json!({"version": 0, "stale": true});
+        mem.updated_at = "2020-01-01T00:00:00+00:00".to_string();
+        insert_if_newer(&conn, &mem).unwrap();
+
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["version"], 2); // still the newer one
+        assert!(got.metadata.get("stale").is_none());
+    }
+
+    #[test]
+    fn metadata_merged_in_consolidate() {
+        let conn = test_db();
+        let mut mem_a = make_memory("Consolidate A", "test", Tier::Long, 5);
+        mem_a.metadata = serde_json::json!({"agent": "claude", "shared": "from_a"});
+        let id_a = insert(&conn, &mem_a).unwrap();
+
+        let mut mem_b = make_memory("Consolidate B", "test", Tier::Long, 7);
+        mem_b.metadata = serde_json::json!({"model": "opus", "shared": "from_b"});
+        let id_b = insert(&conn, &mem_b).unwrap();
+
+        let new_id = consolidate(
+            &conn,
+            &[id_a, id_b],
+            "Merged",
+            "Combined content",
+            "test",
+            &Tier::Long,
+            "consolidation",
+        )
+        .unwrap();
+
+        let got = get(&conn, &new_id).unwrap().unwrap();
+        // Both keys present; "shared" key takes value from later source (mem_b)
+        assert_eq!(got.metadata["agent"], "claude");
+        assert_eq!(got.metadata["model"], "opus");
+        assert_eq!(got.metadata["shared"], "from_b");
+    }
+
+    #[test]
+    fn metadata_consolidate_rejects_oversized_merge() {
+        let conn = test_db();
+        // Create two memories with large unique-key metadata that together exceed 64KB
+        let mut mem_a = make_memory("Big meta A", "test", Tier::Long, 5);
+        let big_val_a: serde_json::Map<String, serde_json::Value> = (0..500)
+            .map(|i| {
+                (
+                    format!("key_a_{i}"),
+                    serde_json::Value::String("x".repeat(60)),
+                )
+            })
+            .collect();
+        mem_a.metadata = serde_json::Value::Object(big_val_a);
+        let id_a = insert(&conn, &mem_a).unwrap();
+
+        let mut mem_b = make_memory("Big meta B", "test", Tier::Long, 5);
+        let big_val_b: serde_json::Map<String, serde_json::Value> = (0..500)
+            .map(|i| {
+                (
+                    format!("key_b_{i}"),
+                    serde_json::Value::String("x".repeat(60)),
+                )
+            })
+            .collect();
+        mem_b.metadata = serde_json::Value::Object(big_val_b);
+        let id_b = insert(&conn, &mem_b).unwrap();
+
+        // Consolidate should fail because merged metadata exceeds 64KB
+        let result = consolidate(
+            &conn,
+            &[id_a, id_b],
+            "Oversized merge",
+            "Should fail",
+            "test",
+            &Tier::Long,
+            "consolidation",
+        );
+        let err = result.expect_err("consolidate should fail for oversized merged metadata");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("merged metadata exceeds size limit"),
+            "expected metadata size error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn metadata_special_characters_roundtrip() {
+        let conn = test_db();
+        let mut mem = make_memory("Special chars metadata", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({
+            "pipe": "a|b|c",
+            "newline": "line1\nline2",
+            "tab": "col1\tcol2",
+            "backslash": "path\\to\\file",
+            "unicode": "\u{1F600}\u{1F4A9}",
+            "cjk": "\u{4e16}\u{754c}",
+            "empty": "",
+            "nested_special": {"inner|key": "val\nue"}
+        });
+        let id = insert(&conn, &mem).unwrap();
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata["pipe"], "a|b|c");
+        assert_eq!(got.metadata["newline"], "line1\nline2");
+        assert_eq!(got.metadata["unicode"], "\u{1F600}\u{1F4A9}");
+        assert_eq!(got.metadata["cjk"], "\u{4e16}\u{754c}");
+        assert_eq!(got.metadata["nested_special"]["inner|key"], "val\nue");
+    }
+
+    #[test]
+    fn metadata_corrupt_column_falls_back_to_empty() {
+        let conn = test_db();
+        let mem = make_memory("Corrupt test", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+
+        // Manually corrupt the metadata column
+        conn.execute(
+            "UPDATE memories SET metadata = 'NOT VALID JSON {{{{' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        // row_to_memory should fall back to {} without panicking
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn metadata_restore_resets_corrupt_archived_metadata() {
+        let conn = test_db();
+        let mut mem = make_memory("Corrupt archive", "test", Tier::Short, 5);
+        mem.metadata = serde_json::json!({"valid": true});
+        mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        let id = insert(&conn, &mem).unwrap();
+
+        // Archive via GC
+        gc(&conn, true).unwrap();
+
+        // Corrupt the archived metadata directly
+        conn.execute(
+            "UPDATE archived_memories SET metadata = 'CORRUPT JSON' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        // Restore — should reset metadata to {} instead of failing
+        let restored = restore_archived(&conn, &id).unwrap();
+        assert!(restored);
+        let got = get(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn auto_purge_archive_respects_max_days() {
+        let conn = test_db();
+        let mut mem = make_memory("Purge test", "test", Tier::Short, 5);
+        mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        insert(&conn, &mem).unwrap();
+        gc(&conn, true).unwrap();
+
+        // Archive exists
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+
+        // Backdate archived_at to 30 days ago so purge can detect it
+        conn.execute(
+            "UPDATE archived_memories SET archived_at = ?1",
+            params![(chrono::Utc::now() - chrono::Duration::days(30)).to_rfc3339()],
+        )
+        .unwrap();
+
+        // Purge with None (disabled) — no-op
+        let purged = auto_purge_archive(&conn, None).unwrap();
+        assert_eq!(purged, 0);
+        assert_eq!(list_archived(&conn, None, 10, 0).unwrap().len(), 1);
+
+        // Purge with 0 days — should NOT purge (guard condition)
+        let purged = auto_purge_archive(&conn, Some(0)).unwrap();
+        assert_eq!(purged, 0);
+
+        // Purge with 90 days — archive is only 30 days old, should NOT purge
+        let purged = auto_purge_archive(&conn, Some(90)).unwrap();
+        assert_eq!(purged, 0);
+
+        // Purge with 7 days — archive is 30 days old, should be purged
+        let purged = auto_purge_archive(&conn, Some(7)).unwrap();
+        assert_eq!(purged, 1);
+        assert!(list_archived(&conn, None, 10, 0).unwrap().is_empty());
     }
 }
