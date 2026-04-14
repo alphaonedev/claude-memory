@@ -1,4 +1,4 @@
-# Contributing to ai-memory-mcp
+# Contributing to ai-memory
 
 Thank you for considering contributing to ai-memory-mcp. This document outlines the process for contributing to this project.
 
@@ -51,7 +51,7 @@ AI_MEMORY_NO_CONFIG=1 cargo test
 
 ## Testing Requirements
 
-All three checks must pass before submitting a PR:
+All four checks must pass before submitting a PR:
 
 ```bash
 cargo fmt --check
@@ -71,7 +71,7 @@ cargo audit
 1. Fork the repository (external contributors) or branch directly (collaborators).
 2. Create a feature branch from `develop` (`git checkout develop && git checkout -b feature/my-change`).
 3. Make your changes, following the code style and testing guidelines above.
-4. Ensure `cargo fmt`, `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic`, and `AI_MEMORY_NO_CONFIG=1 cargo test` all pass.
+4. Ensure all four gates pass: `cargo fmt`, `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic`, `AI_MEMORY_NO_CONFIG=1 cargo test`, and `cargo audit`.
 5. Push your branch and open a pull request against `develop` (not `main`).
 6. Fill out the PR description with what changed and why.
 7. Address any review feedback.

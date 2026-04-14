@@ -48,9 +48,9 @@ PRs to `develop` do not require owner approval but must pass all CI checks (fmt,
   cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
   ```
   Zero warnings. If a pedantic lint requires `#[allow(clippy::...)]`, it must be justified in the PR description.
-- **SPDX headers** required on all source files:
+- **SPDX headers** required on all source files. Use the year of file creation:
   ```rust
-  // Copyright 2026 AlphaOne LLC
+  // Copyright <YEAR> AlphaOne LLC
   // SPDX-License-Identifier: Apache-2.0
   ```
 - No new production `unwrap()` calls. Use `?`, `.map_err()`, `unwrap_or_default()`, or match expressions.
@@ -104,12 +104,13 @@ AI_MEMORY_NO_CONFIG=1 cargo test
 
 ### 2.2 Full Pre-PR Verification
 
-Contributors must run all three before submitting:
+Contributors must run all four before submitting:
 
 ```bash
 cargo fmt --check
 cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
 AI_MEMORY_NO_CONFIG=1 cargo test
+cargo audit
 ```
 
 ### 2.3 Full Spectrum Functional Test
@@ -252,6 +253,7 @@ Before tagging a release:
 - [ ] MCP tool counts updated in 4 locations (see Section 2.6)
 - [ ] `Cargo.toml` version matches the tag
 - [ ] All new source files have SPDX headers
+- [ ] Homebrew tap updated (`alphaonedev/homebrew-tap`) with new SHA256 hashes
 
 ### 4.4 Post-Release
 
@@ -284,6 +286,13 @@ Before tagging a release:
 | Branch protection | GitHub repo settings + `.github/CODEOWNERS` |
 | Contributing guide | `CONTRIBUTING.md` |
 | CLA | `CLA.md` |
+| LICENSE | `LICENSE` |
+| NOTICE | `NOTICE` |
 | CHANGELOG | `CHANGELOG.md` |
 | Roadmap | `ROADMAP.md` |
+| Install guide | `docs/INSTALL.md` |
+| User guide | `docs/USER_GUIDE.md` |
+| Developer guide | `docs/DEVELOPER_GUIDE.md` |
+| Admin guide | `docs/ADMIN_GUIDE.md` |
 | OIN agreement | `OIN_LICENSE_AGREEMENT.pdf` |
+| Homebrew tap | `alphaonedev/homebrew-tap` (separate repo) |
