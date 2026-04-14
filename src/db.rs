@@ -278,8 +278,10 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Memory>> {
 /// Look up a memory by ID prefix. Returns the memory if exactly one match is found.
 /// Returns `Ok(None)` if no matches. Returns an error if the prefix is ambiguous (>1 match).
 pub fn get_by_prefix(conn: &Connection, prefix: &str) -> Result<Option<Memory>> {
-    let pattern = format!("{prefix}%");
-    let mut stmt = conn.prepare("SELECT * FROM memories WHERE id LIKE ?1")?;
+    // Escape SQL LIKE wildcards in the prefix to prevent % and _ from matching broadly
+    let escaped = prefix.replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("{escaped}%");
+    let mut stmt = conn.prepare("SELECT * FROM memories WHERE id LIKE ?1 ESCAPE '\\'")?;
     let rows: Vec<Memory> = stmt
         .query_map(params![pattern], row_to_memory)?
         .filter_map(Result::ok)
