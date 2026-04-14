@@ -22,14 +22,14 @@ pub enum EmbeddingModel {
 
 impl EmbeddingModel {
     /// Embedding vector dimensionality.
-    pub fn dim(&self) -> usize {
+    pub fn dim(self) -> usize {
         match self {
             Self::MiniLmL6V2 => 384,
             Self::NomicEmbedV15 => 768,
         }
     }
 
-    /// HuggingFace model identifier.
+    /// `HuggingFace` model identifier.
     pub fn hf_model_id(&self) -> &str {
         match self {
             Self::MiniLmL6V2 => "sentence-transformers/all-MiniLM-L6-v2",
@@ -81,7 +81,7 @@ impl LlmModel {
 pub enum FeatureTier {
     /// FTS5 keyword search only — 0 MB extra.
     Keyword,
-    /// MiniLM embeddings + HNSW index — ~256 MB.
+    /// `MiniLM` embeddings + HNSW index — ~256 MB.
     Semantic,
     /// nomic-embed + Gemma 4 E2B via Ollama — ~1 GB.
     Smart,
@@ -112,31 +112,31 @@ impl FeatureTier {
     }
 
     /// Build the full [`TierConfig`] for this tier.
-    pub fn config(&self) -> TierConfig {
+    pub fn config(self) -> TierConfig {
         match self {
             Self::Keyword => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: None,
                 llm_model: None,
                 cross_encoder: false,
                 max_memory_mb: 0,
             },
             Self::Semantic => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::MiniLmL6V2),
                 llm_model: None,
                 cross_encoder: false,
                 max_memory_mb: 256,
             },
             Self::Smart => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::NomicEmbedV15),
                 llm_model: Some(LlmModel::Gemma4E2B),
                 cross_encoder: false,
                 max_memory_mb: 1024,
             },
             Self::Autonomous => TierConfig {
-                tier: *self,
+                tier: self,
                 embedding_model: Some(EmbeddingModel::NomicEmbedV15),
                 llm_model: Some(LlmModel::Gemma4E4B),
                 cross_encoder: true,
@@ -146,6 +146,7 @@ impl FeatureTier {
     }
 
     /// Automatically select the best tier that fits within `mb` megabytes.
+    #[allow(dead_code)]
     pub fn from_memory_budget(mb: usize) -> Self {
         if mb >= 4096 {
             Self::Autonomous
@@ -202,13 +203,11 @@ impl TierConfig {
             models: CapabilityModels {
                 embedding: self
                     .embedding_model
-                    .map(|m| m.hf_model_id().to_string())
-                    .unwrap_or_else(|| "none".to_string()),
-                embedding_dim: self.embedding_model.map(|m| m.dim()).unwrap_or(0),
+                    .map_or_else(|| "none".to_string(), |m| m.hf_model_id().to_string()),
+                embedding_dim: self.embedding_model.map_or(0, EmbeddingModel::dim),
                 llm: self
                     .llm_model
-                    .map(|m| m.ollama_model_id().to_string())
-                    .unwrap_or_else(|| "none".to_string()),
+                    .map_or_else(|| "none".to_string(), |m| m.ollama_model_id().to_string()),
                 cross_encoder: if self.cross_encoder {
                     "cross-encoder/ms-marco-MiniLM-L-6-v2".to_string()
                 } else {
@@ -233,6 +232,7 @@ pub struct Capabilities {
 }
 
 /// Boolean feature flags exposed in the capabilities report.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityFeatures {
     pub keyword_search: bool,
@@ -260,6 +260,7 @@ pub struct CapabilityModels {
 // ---------------------------------------------------------------------------
 
 /// Per-tier TTL overrides loaded from `[ttl]` section of config.toml.
+#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TtlConfig {
     /// Short-tier default TTL in seconds (default: 21600 = 6 hours)
@@ -276,6 +277,7 @@ pub struct TtlConfig {
 
 /// Resolved TTL values after merging config overrides with compiled defaults.
 #[derive(Debug, Clone)]
+#[allow(clippy::struct_field_names)]
 pub struct ResolvedTtl {
     pub short_ttl_secs: Option<i64>,
     pub mid_ttl_secs: Option<i64>,
@@ -297,12 +299,13 @@ impl Default for ResolvedTtl {
 }
 
 /// Maximum configurable TTL: 10 years in seconds. Prevents integer overflow
-/// when adding Duration to Utc::now().
+/// when adding Duration to `Utc::now()`.
 const MAX_TTL_SECS: i64 = 315_360_000;
 
+#[allow(dead_code)]
 impl ResolvedTtl {
     /// Build from optional config overrides, falling back to compiled defaults.
-    /// TTL values are clamped to MAX_TTL_SECS (10 years) to prevent overflow.
+    /// TTL values are clamped to `MAX_TTL_SECS` (10 years) to prevent overflow.
     /// Extension values are clamped to non-negative.
     pub fn from_config(cfg: Option<&TtlConfig>) -> Self {
         let defaults = Self::default();
@@ -317,18 +320,9 @@ impl ResolvedTtl {
             }
         };
         Self {
-            short_ttl_secs: c
-                .short_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.short_ttl_secs),
-            mid_ttl_secs: c
-                .mid_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.mid_ttl_secs),
-            long_ttl_secs: c
-                .long_ttl_secs
-                .map(clamp_ttl)
-                .unwrap_or(defaults.long_ttl_secs),
+            short_ttl_secs: c.short_ttl_secs.map_or(defaults.short_ttl_secs, clamp_ttl),
+            mid_ttl_secs: c.mid_ttl_secs.map_or(defaults.mid_ttl_secs, clamp_ttl),
+            long_ttl_secs: c.long_ttl_secs.map_or(defaults.long_ttl_secs, clamp_ttl),
             short_extend_secs: c
                 .short_extend_secs
                 .unwrap_or(defaults.short_extend_secs)
@@ -371,13 +365,13 @@ const CONFIG_FILE: &str = "config.toml";
 pub struct AppConfig {
     /// Feature tier: keyword, semantic, smart, autonomous
     pub tier: Option<String>,
-    /// Path to the SQLite database file
+    /// Path to the `SQLite` database file
     pub db: Option<String>,
-    /// Ollama base URL for LLM generation (default: http://localhost:11434)
+    /// Ollama base URL for LLM generation (default: <http://localhost:11434>)
     pub ollama_url: Option<String>,
-    /// Separate URL for embedding model (defaults to ollama_url if unset)
+    /// Separate URL for embedding model (defaults to `ollama_url` if unset)
     pub embed_url: Option<String>,
-    /// Embedding model override: mini_lm_l6_v2 or nomic_embed_v15
+    /// Embedding model override: `mini_lm_l6_v2` or `nomic_embed_v15`
     pub embedding_model: Option<String>,
     /// LLM model override (Ollama tag, e.g. "gemma4:e2b")
     pub llm_model: Option<String>,
@@ -445,8 +439,7 @@ impl AppConfig {
         // Otherwise check config
         self.db
             .as_ref()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| cli_db.to_path_buf())
+            .map_or_else(|| cli_db.to_path_buf(), PathBuf::from)
     }
 
     /// Resolve Ollama URL for LLM generation (config or default).
@@ -466,7 +459,7 @@ impl AppConfig {
         self.archive_on_gc.unwrap_or(true)
     }
 
-    /// Resolve URL for embedding model (falls back to ollama_url).
+    /// Resolve URL for embedding model (falls back to `ollama_url`).
     pub fn effective_embed_url(&self) -> &str {
         self.embed_url
             .as_deref()

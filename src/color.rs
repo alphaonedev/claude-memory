@@ -57,7 +57,7 @@ pub fn tier_color(tier: &str, text: &str) -> String {
 
 /// Priority as a colored bar: ████░░░░░░
 pub fn priority_bar(p: i32) -> String {
-    let filled = p.clamp(1, 10) as usize;
+    let filled = usize::try_from(p.clamp(1, 10)).expect("i32 as usize");
     let empty = 10 - filled;
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
     if p >= 8 {

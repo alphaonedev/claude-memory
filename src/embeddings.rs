@@ -12,14 +12,16 @@ use tokenizers::Tokenizer;
 use crate::config::EmbeddingModel;
 
 const MINILM_MODEL_ID: &str = "sentence-transformers/all-MiniLM-L6-v2";
+#[allow(dead_code)]
 const MINILM_DIM: usize = 384;
 const MAX_SEQ_LEN: usize = 256;
-/// Fallback subdirectory under $HOME for pre-downloaded MiniLM model files
+/// Fallback subdirectory under $HOME for pre-downloaded `MiniLM` model files
 const FALLBACK_MODEL_SUBDIR: &str =
     ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/main";
 
 /// Nomic model ID and Ollama tag
 const NOMIC_OLLAMA_MODEL: &str = "nomic-embed-text";
+#[allow(dead_code)]
 const NOMIC_DIM: usize = 768;
 
 /// Semantic embedding engine supporting multiple backends.
@@ -49,6 +51,7 @@ unsafe impl Sync for Embedder {}
 impl Embedder {
     /// Create a new local (candle) embedder for MiniLM-L6-v2.
     /// Downloads the model if it is not already cached.
+    #[allow(dead_code)]
     pub fn new() -> Result<Self> {
         Self::new_local()
     }
@@ -60,10 +63,7 @@ impl Embedder {
         let (config_path, tokenizer_path, weights_path) = match Self::download_via_hf_hub() {
             Ok(paths) => paths,
             Err(e) => {
-                eprintln!(
-                    "ai-memory: hf-hub download failed ({}), trying fallback dir",
-                    e
-                );
+                eprintln!("ai-memory: hf-hub download failed ({e}), trying fallback dir");
                 Self::load_from_fallback()?
             }
         };
@@ -132,6 +132,7 @@ impl Embedder {
     }
 
     /// Embedding vector dimensionality for this embedder.
+    #[allow(dead_code)]
     pub fn dim(&self) -> usize {
         match self {
             Self::Local { .. } => MINILM_DIM,
@@ -203,6 +204,7 @@ impl Embedder {
     }
 
     /// Generate embeddings for multiple texts in one call.
+    #[allow(dead_code)]
     pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
@@ -260,7 +262,8 @@ impl Embedder {
     }
 }
 
-/// Constant for backward compatibility — dimension of the default (MiniLM) embedding.
+/// Constant for backward compatibility — dimension of the default (`MiniLM`) embedding.
+#[allow(dead_code)]
 pub const EMBEDDING_DIM: usize = MINILM_DIM;
 
 #[cfg(test)]

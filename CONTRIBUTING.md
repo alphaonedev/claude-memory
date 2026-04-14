@@ -40,7 +40,7 @@ cargo test
 ## Code Style
 
 - Run `cargo fmt` before committing. All code must be formatted with rustfmt.
-- Run `cargo clippy` and resolve all warnings. CI will reject code with clippy warnings.
+- Run `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` and resolve all failures. CI will reject code that does not pass this check.
 - Follow standard Rust naming conventions and idioms.
 
 ## Testing Requirements
