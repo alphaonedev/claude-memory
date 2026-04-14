@@ -11,11 +11,13 @@
 
 ## North Star
 
+**AI endpoint memory is a primitive, not a product.**
+
 AI agents are stateless by default. Every session starts from zero. Models get replaced. Vendors shut down. Infrastructure gets rebuilt. The knowledge disappears with them.
 
 ai-memory makes knowledge persistent. What agents learn survives the agent, the model, the vendor, and the platform. One agent learns it, every agent knows it — across systems, across teams, across time.
 
-The goal is simple: **no AI agent should ever have to relearn what any AI agent already knows.**
+No AI agent should ever have to relearn what any AI agent already knows.
 
 ---
 
