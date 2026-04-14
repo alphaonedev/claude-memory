@@ -328,10 +328,22 @@ jobs:
           SERIES=noble
           sed -i "1s/(.*)/(${VERSION}-1) ${SERIES}; urgency=medium/" debian/changelog
 
-      - name: Build source package
+      - name: Create orig tarball
         run: |
-          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign
-          dpkg-source -b .
+          VERSION=${{ steps.version.outputs.version }}
+          cd ..
+          tar czf "ai-memory_${VERSION}.orig.tar.gz" \
+            --exclude='.git' \
+            --exclude='target' \
+            --exclude='backup' \
+            ai-memory-mcp
+          ls -la "ai-memory_${VERSION}.orig.tar.gz"
+
+      - name: Build source package
+        env:
+          DEBUILD_DPKG_BUILDPACKAGE_OPTS: "-d"
+        run: |
+          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign -d
 
       - name: Sign source package
         run: |
