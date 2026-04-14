@@ -1,7 +1,7 @@
 [package]
 name = "ai-memory"
 version = "0.5.4-patch.4"
-edition = "2021"
+edition = "2024"
 authors = ["AlphaOne LLC"]
 description = "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI for any AI platform"
 license = "Apache-2.0"
