@@ -289,7 +289,13 @@ pub fn get_by_prefix(conn: &Connection, prefix: &str) -> Result<Option<Memory>> 
     match rows.len() {
         0 => Ok(None),
         1 => Ok(Some(rows.into_iter().next().expect("len checked"))),
-        n => anyhow::bail!("ambiguous ID prefix '{prefix}': {n} matches"),
+        n => {
+            let ids: Vec<String> = rows.iter().map(|m| m.id.clone()).collect();
+            anyhow::bail!(
+                "ambiguous ID prefix '{prefix}': {n} matches\n{}",
+                ids.join("\n")
+            );
+        }
     }
 }
 
@@ -2275,6 +2281,12 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("ambiguous"));
         assert!(err_msg.contains("2 matches"));
+        // Error should list the matching full IDs so the user can pick one
+        assert!(
+            err_msg.contains("aaaa1111-0000-0000-0000-000000000001"),
+            "error should list matching IDs, got: {err_msg}"
+        );
+        assert!(err_msg.contains("aaaa2222-0000-0000-0000-000000000002"));
     }
 
     #[test]
