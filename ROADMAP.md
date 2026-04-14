@@ -194,6 +194,69 @@ For agent teams that need a central sync point. SQLite remains the default for i
 
 ---
 
+## Phase 5b — Data Tier Backends (Mid-to-Big Infrastructure)
+
+**Target: v0.9.5+ | LOE: 15-19 sessions | Post-GA for Tier 3-4**
+
+SQLite is the backbone for small infrastructure (single agent, single system). PostgreSQL (Phase 5) is the hub for mid infrastructure (agent teams, multi-system). For big infrastructure — enterprise scale, specialized workloads, high-throughput agent swarms — optional data tier backends unlock domain-specific performance.
+
+**Gate:** Each tier requires the `StorageBackend` trait (introduced in Phase 5 with PostgreSQL). Backends are additive — SQLite always works, backends are opt-in.
+
+### Small Infrastructure (default — ships today)
+
+| Backend | Notes |
+|---------|-------|
+| **SQLite + FTS5** | Default. Local-first. Zero infrastructure. Handles 10K+ memories, 500+ q/s keyword tier. |
+
+### Mid Infrastructure (Phase 5)
+
+| Backend | Sessions | Notes |
+|---------|:--------:|-------|
+| **PostgreSQL + pgvector** | 2-3 | Team hub. Shared sync point. `tsquery` for FTS, pgvector for embeddings. Closest SQLite analog. |
+
+### Big Infrastructure — Tier 2: Vector-Native
+
+For agent swarms needing sub-millisecond vector search at 100K+ memories.
+
+| Backend | Sessions | Difficulty | Notes |
+|---------|:--------:|:----------:|-------|
+| **Qdrant** | 1 | Low-Medium | Purpose-built vector DB, payload filtering, simple REST API. Best for pure semantic recall at scale. |
+| **Pinecone** | 1 | Low-Medium | Managed vector search, clean SDK, metadata filtering. Best for teams that want zero-ops vector search. |
+| **Weaviate** | 1-2 | Medium | Hybrid BM25 + vector built in, GraphQL query layer. Best for hybrid recall without custom blending. |
+| **Milvus / Zilliz** | 1-2 | Medium | Strong vector search, scalar filtering. Best for massive-scale (millions of memories) deployments. |
+
+### Big Infrastructure — Tier 3: Multi-Model & Graph
+
+For agent collectives needing native graph traversal and multi-model queries.
+
+| Backend | Sessions | Difficulty | Notes |
+|---------|:--------:|:----------:|-------|
+| **Neo4j** | 2-3 | High | Native graph model for memory links. Cypher queries for multi-hop traversal. Vector index (5.x+). Best for knowledge graph-heavy workloads. |
+| **SurrealDB** | 2 | Medium-High | Multi-model (document + graph + vector). SurrealQL. Best for teams wanting one backend for everything. |
+
+### Big Infrastructure — Tier 4: Relational & Cache
+
+For enterprise environments with existing database infrastructure.
+
+| Backend | Sessions | Difficulty | Notes |
+|---------|:--------:|:----------:|-------|
+| **TiDB** | 1-2 | Medium | MySQL-compatible + vector search, distributed transactions. Best for enterprises already on MySQL/TiDB. |
+| **Redis (RediSearch)** | 1-2 | Medium | In-memory FTS + vector. No ACID — eventual consistency. Best for ultra-low-latency recall where durability is handled by SQLite sync. |
+| **MongoDB Atlas Vector** | 1-2 | Medium | Document model maps to Memory struct. Atlas Vector Search. Best for teams already on MongoDB. |
+
+### Data Tier Infrastructure
+
+| Task | Sessions | Deliverable |
+|------|:--------:|-------------|
+| `StorageBackend` trait | 1-2 | Async CRUD, recall, search, FTS, transaction interfaces. Introduced with PostgreSQL in Phase 5. |
+| `ai-memory migrate` CLI | 1 | `--from sqlite --to <backend>` zero-downtime migration between any backends. |
+| Hybrid mode | 1 | Local SQLite cache + remote backend. Offline-first with sync. Agents always work locally, backends provide scale and sharing. |
+| Integration test matrix | 1 | CI pipeline testing all backends against full test suite. |
+
+**Contribution model:** Tier 2-4 backends can be community-contributed. AlphaOne builds and maintains SQLite + PostgreSQL. Community contributes backends against the `StorageBackend` trait and maintains them.
+
+---
+
 ## Phase 6 — Production GA
 
 **Target: v1.0.0 | LOE: 6-8 sessions**
@@ -227,17 +290,18 @@ ai-memory becomes a **standard**, not just a product.
 
 ## Program Summary
 
-| Phase | Milestone | Sessions | What It Unlocks |
-|:-----:|-----------|:--------:|-----------------|
-| 0 | Foundation (v0.5.4) | 5-7 | **COMPLETE** |
-| 1 | Smart Recall + Agent Identity (v0.6.0) | 6-8 | Budget-aware recall, agent-attributed memories |
-| 2 | Knowledge Graph Engine (v0.7.0) | 5-7 | Connected knowledge, multi-hop reasoning |
-| 3 | Multi-Agent Sync (v0.8.0) | 8-10 | Collective intelligence across systems |
-| 4 | Autonomous Curator (v0.9.0) | 4-6 | Self-improving memory |
-| 5 | Team Hub (v0.9.5) | 4-6 | Organizational shared knowledge |
-| 6 | Production GA (v1.0.0) | 6-8 | Stability contract, SDKs, portability |
-| 7 | Federation & Protocol (v1.x+) | 8-12 | Infrastructure for humanity |
-| | **TOTAL** | **47-64** | |
+| Phase | Milestone | Sessions | What It Unlocks | Infra Scale |
+|:-----:|-----------|:--------:|-----------------|:-----------:|
+| 0 | Foundation (v0.5.4) | 5-7 | **COMPLETE** | Small |
+| 1 | Smart Recall + Agent Identity (v0.6.0) | 6-8 | Budget-aware recall, agent-attributed memories | Small |
+| 2 | Knowledge Graph Engine (v0.7.0) | 5-7 | Connected knowledge, multi-hop reasoning | Small |
+| 3 | Multi-Agent Sync (v0.8.0) | 8-10 | Collective intelligence across systems | Small-Mid |
+| 4 | Autonomous Curator (v0.9.0) | 4-6 | Self-improving memory | Small-Mid |
+| 5 | Team Hub — PostgreSQL (v0.9.5) | 4-6 | Organizational shared knowledge | Mid |
+| 5b | Data Tier Backends (v0.9.5+) | 15-19 | Enterprise-scale, specialized workloads | Mid-Big |
+| 6 | Production GA (v1.0.0) | 6-8 | Stability contract, SDKs, portability | All |
+| 7 | Federation & Protocol (v1.x+) | 8-12 | Infrastructure for humanity | All |
+| | **TOTAL** | **62-83** | | |
 
 ---
 
@@ -245,8 +309,7 @@ ai-memory becomes a **standard**, not just a product.
 
 Decisions made, not deferred. These are intentional exclusions:
 
-- **10 database backends** — SQLite is the backbone. PostgreSQL is the one optional hub. No Qdrant, Pinecone, Weaviate, Milvus, Neo4j, SurrealDB, TiDB, Redis, MongoDB.
-- **StorageBackend trait abstraction** — Killed. Zero user value, high complexity. If PostgreSQL is needed, it gets its own implementation, not a generic trait.
+- **Backends as default** — SQLite is always the default. PostgreSQL is the mid-tier hub. Tier 2-4 backends (Qdrant, Pinecone, Weaviate, Milvus, Neo4j, SurrealDB, TiDB, Redis, MongoDB) are opt-in for big infrastructure and primarily community-contributed.
 - **CRDT full implementation** — CRDT-lite merge rules for metadata fields. Not a full CRDT library. Pragmatic conflict resolution, not theoretical purity.
 - **Mobile SDKs** — Not until post-GA. The agents are the users, not mobile apps.
 - **Cloud-hosted service** — ai-memory is infrastructure, not SaaS. Self-hosted always. No vendor lock-in.
