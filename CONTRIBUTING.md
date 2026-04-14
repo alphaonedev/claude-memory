@@ -45,9 +45,18 @@ cargo test
 
 ## Testing Requirements
 
-- All existing tests must pass (`cargo test`).
+All three checks must pass before submitting a PR:
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+AI_MEMORY_NO_CONFIG=1 cargo test
+```
+
+- All existing tests must pass. The `AI_MEMORY_NO_CONFIG=1` env var prevents loading `~/.config/ai-memory/config.toml` which may trigger embedder/LLM initialization.
 - New code must include tests. Bug fixes should include a regression test.
 - If you add a new MCP tool, HTTP endpoint, or CLI command, include integration tests covering the primary usage path.
+- If clippy pedantic requires `#[allow(clippy::...)]`, justify it in your PR description.
 
 ## Pull Request Process
 
