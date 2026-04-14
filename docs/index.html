@@ -345,7 +345,7 @@
             Built-in memory systems load your entire memory into every message. ai-memory uses zero context tokens until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked and compressed via TOON format (79% smaller than JSON).
         </p>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
-            Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw <img src="pixel-lobster.svg" alt="OpenClaw lobster" style="height:1.2em;vertical-align:middle"> &middot; Llama &middot; any MCP client
+            Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw <img src="pixel-lobster.svg" alt="OpenClaw lobster" style="height:1.2em;vertical-align:middle"> &middot; Hermes Agent &middot; Llama &middot; any MCP client
         </p>
         <div class="stats-row">
             <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
@@ -456,6 +456,12 @@
                 <span class="platform-icon" style="font-size:1.8rem">🦞</span>
                 <h4>OpenClaw <img src="pixel-lobster.svg" alt="lobster" style="height:1.2em;vertical-align:middle"></h4>
                 <p>Self-hosted AI assistant with MCP via <code>mcp.servers</code> config</p>
+                <span class="platform-tag tag-mcp">MCP Native</span>
+            </div>
+            <div class="platform-card">
+                <span class="platform-icon" style="font-size:1.8rem">🪽</span>
+                <h4>Hermes Agent</h4>
+                <p>Nous Research open-weight agent with YAML-based MCP config</p>
                 <span class="platform-tag tag-mcp">MCP Native</span>
             </div>
             <div class="platform-card">
@@ -629,6 +635,7 @@
                     <span class="integration-tab" onclick="switchTab('tab-grok')">Grok API</span>
                     <span class="integration-tab" onclick="switchTab('tab-llama')">Llama</span>
                     <span class="integration-tab" onclick="switchTab('tab-openclaw')">OpenClaw <img src="pixel-lobster.svg" alt="lobster" style="height:1em;vertical-align:middle"></span>
+                    <span class="integration-tab" onclick="switchTab('tab-hermes')">Hermes Agent</span>
                     <span class="integration-tab" onclick="switchTab('tab-mcp-generic')">Any MCP Client</span>
                 </div>
 
@@ -843,6 +850,32 @@
                     <p style="font-size:.85rem"><strong>CLI shortcut:</strong></p>
                     <pre><code><span class="tok-cmd">openclaw</span> mcp set memory <span class="tok-str">'{"command":"ai-memory","args":["--db","~/.local/share/ai-memory/memories.db","mcp","--tier","semantic"]}'</span><span class="lang-label">bash</span></code></pre>
                     <p style="font-size:.85rem"><strong>Management:</strong> <code>openclaw mcp list</code> · <code>openclaw mcp show &lt;name&gt;</code> · <code>openclaw mcp unset &lt;name&gt;</code>. See <a href="https://docs.openclaw.ai/cli/mcp">OpenClaw MCP docs</a>.</p>
+                </div>
+
+                <div id="tab-hermes" class="integration-panel">
+                    <p><strong>Nous Research Hermes Agent Configuration:</strong></p>
+                    <table style="font-size:.85rem; margin-bottom:1rem; width:100%; border-collapse:collapse;">
+                        <tr style="border-bottom:1px solid #ddd;"><th style="text-align:left;padding:4px 8px;">Scope</th><th style="text-align:left;padding:4px 8px;">File</th><th style="text-align:left;padding:4px 8px;">Applies to</th></tr>
+                        <tr><td style="padding:4px 8px;"><strong>Global only</strong></td><td style="padding:4px 8px;"><code>~/.hermes/config.yaml</code></td><td style="padding:4px 8px;">All projects (no per-project scope)</td></tr>
+                    </table>
+                    <p style="font-size:.85rem"><strong>Important:</strong> Hermes uses YAML format with <code>mcp_servers</code> (underscored, NOT camelCase).</p>
+                    <pre><code><span class="tok-cm"># Hermes Agent MCP configuration</span>
+<span class="tok-cm"># File: ~/.hermes/config.yaml</span>
+
+<span class="tok-key">mcp_servers</span>:
+  <span class="tok-key">memory</span>:
+    <span class="tok-key">command</span>: <span class="tok-str">ai-memory</span>
+    <span class="tok-key">args</span>:
+      - <span class="tok-str">"--db"</span>
+      - <span class="tok-str">"~/.local/share/ai-memory/memories.db"</span>
+      - <span class="tok-str">"mcp"</span>
+      - <span class="tok-str">"--tier"</span>
+      - <span class="tok-str">"semantic"</span><span class="lang-label">yaml</span></code></pre>
+                    <p style="font-size:.85rem"><strong>HTTP remote (alternative):</strong></p>
+                    <pre><code><span class="tok-key">mcp_servers</span>:
+  <span class="tok-key">memory</span>:
+    <span class="tok-key">url</span>: <span class="tok-str">"http://localhost:9077/mcp"</span><span class="lang-label">yaml</span></code></pre>
+                    <p style="font-size:.85rem">Supports both stdio (local) and HTTP (remote) transports. Per-server tool filtering via <code>tools.include</code>/<code>tools.exclude</code>. Additional fields: <code>env</code>, <code>timeout</code>, <code>connect_timeout</code>, <code>enabled</code>, <code>sampling</code>. See <a href="https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp">Hermes MCP docs</a>.</p>
                 </div>
 
                 <div id="tab-mcp-generic" class="integration-panel">
