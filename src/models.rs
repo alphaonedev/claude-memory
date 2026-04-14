@@ -30,14 +30,14 @@ impl Tier {
         }
     }
 
-    /// Numeric rank for tier comparison: Short=0, Mid=1, Long=2.
-    pub fn rank(&self) -> u8 {
-        match self {
-            Self::Short => 0,
-            Self::Mid => 1,
-            Self::Long => 2,
-        }
-    }
+    // /// Numeric rank for tier comparison: Short=0, Mid=1, Long=2.
+    // pub fn rank(&self) -> u8 {
+    //     match self {
+    //         Self::Short => 0,
+    //         Self::Mid => 1,
+    //         Self::Long => 2,
+    //     }
+    // }
 
     pub fn default_ttl_secs(&self) -> Option<i64> {
         match self {
@@ -153,6 +153,7 @@ pub struct SearchQuery {
     pub tags: Option<String>, // comma-separated
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn default_limit() -> Option<usize> {
     Some(20)
 }
@@ -192,6 +193,7 @@ pub struct RecallQuery {
     pub until: Option<String>,
 }
 
+#[allow(clippy::unnecessary_wraps)]
 fn default_recall_limit() -> Option<usize> {
     Some(10)
 }

@@ -4,11 +4,14 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use rusqlite::{params, Connection};
+use std::collections::HashMap;
 use std::path::Path;
 
-use crate::models::*;
+use crate::models::{
+    Memory, MemoryLink, NamespaceCount, Stats, Tier, TierCount, PROMOTION_THRESHOLD,
+};
 
-const SCHEMA: &str = r#"
+const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS memories (
     id               TEXT PRIMARY KEY,
     tier             TEXT NOT NULL,
@@ -68,7 +71,7 @@ END;
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
-"#;
+";
 
 const CURRENT_SCHEMA_VERSION: i64 = 6;
 
@@ -84,6 +87,7 @@ pub fn open(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+#[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row(
@@ -325,7 +329,7 @@ pub fn touch(conn: &Connection, id: &str, short_extend: i64, mid_extend: i64) ->
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Update a memory by ID. Returns (found, content_changed) so callers can
+/// Update a memory by ID. Returns (found, `content_changed`) so callers can
 /// re-generate embeddings when the searchable text has changed.
 pub fn update(
     conn: &Connection,
@@ -341,9 +345,8 @@ pub fn update(
 ) -> Result<(bool, bool)> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
-    let existing = match rows.next() {
-        Some(Ok(m)) => m,
-        _ => return Ok((false, false)),
+    let Some(Ok(existing)) = rows.next() else {
+        return Ok((false, false));
     };
     drop(rows);
     drop(stmt);
@@ -368,7 +371,7 @@ pub fn update(
     let confidence = confidence.unwrap_or(existing.confidence);
     // Treat empty string as None (clear expiry) — don't store "" in the DB
     let expires_at = match expires_at {
-        Some("") | Some("null") => None,
+        Some("" | "null") => None,
         Some(v) => Some(v),
         None => existing.expires_at.as_deref(),
     };
@@ -386,10 +389,7 @@ pub fn update(
             .ok();
         if let Some(other_id) = collision {
             anyhow::bail!(
-                "title '{}' already exists in namespace '{}' (memory {})",
-                new_title,
-                namespace,
-                other_id
+                "title '{new_title}' already exists in namespace '{namespace}' (memory {other_id})"
             );
         }
     }
@@ -483,8 +483,8 @@ pub fn list(
             since,
             until,
             tags_filter,
-            limit as i64,
-            offset as i64
+            limit,
+            offset,
         ],
         row_to_memory,
     )?;
@@ -540,7 +540,7 @@ pub fn search(
             since,
             until,
             tags_filter,
-            limit as i64
+            limit,
         ],
         row_to_memory,
     )?;
@@ -549,6 +549,7 @@ pub fn search(
 }
 
 /// Recall — fuzzy OR search + touch + auto-promote + TTL extension.
+#[allow(clippy::too_many_arguments)]
 pub fn recall(
     conn: &Connection,
     context: &str,
@@ -586,15 +587,7 @@ pub fn recall(
          LIMIT ?7",
     )?;
     let rows = stmt.query_map(
-        params![
-            fts_query,
-            namespace,
-            now,
-            tags_filter,
-            since,
-            until,
-            limit as i64
-        ],
+        params![fts_query, namespace, now, tags_filter, since, until, limit],
         |row| {
             let mem = row_to_memory(row)?;
             let score: f64 = row.get(14)?;
@@ -647,7 +640,7 @@ pub fn create_link(
         )
         .unwrap_or(false);
     if !source_exists {
-        anyhow::bail!("source memory not found: {}", source_id);
+        anyhow::bail!("source memory not found: {source_id}");
     }
     let target_exists: bool = conn
         .query_row(
@@ -657,7 +650,7 @@ pub fn create_link(
         )
         .unwrap_or(false);
     if !target_exists {
-        anyhow::bail!("target memory not found: {}", target_id);
+        anyhow::bail!("target memory not found: {target_id}");
     }
     let now = Utc::now().to_rfc3339();
     conn.execute(
@@ -696,7 +689,7 @@ pub fn delete_link(conn: &Connection, source_id: &str, target_id: &str) -> Resul
 // --- Consolidation ---
 
 /// Consolidate multiple memories into one. Returns the new memory ID.
-/// Deletes the source memories and creates links from new → old (derived_from).
+/// Deletes the source memories and creates links from new → old (`derived_from`).
 pub fn consolidate(
     conn: &Connection,
     ids: &[String],
@@ -723,7 +716,7 @@ pub fn consolidate(
                     all_tags.extend(mem.tags);
                     total_access = total_access.saturating_add(mem.access_count);
                 }
-                None => anyhow::bail!("memory not found: {}", id),
+                None => anyhow::bail!("memory not found: {id}"),
             }
         }
         all_tags.sort();
@@ -807,7 +800,7 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
             if clean.is_empty() {
                 return String::new();
             }
-            format!("\"{}\"", clean)
+            format!("\"{clean}\"")
         })
         .filter(|t| !t.is_empty())
         .collect();
@@ -956,11 +949,7 @@ pub fn list_archived(
              FROM archived_memories WHERE namespace = ?1 \
              ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3"
                 .to_string(),
-            vec![
-                Box::new(ns.to_string()),
-                Box::new(limit as i64),
-                Box::new(offset as i64),
-            ],
+            vec![Box::new(ns.to_string()), Box::new(limit), Box::new(offset)],
         ),
         None => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
@@ -969,11 +958,11 @@ pub fn list_archived(
              FROM archived_memories \
              ORDER BY archived_at DESC LIMIT ?1 OFFSET ?2"
                 .to_string(),
-            vec![Box::new(limit as i64), Box::new(offset as i64)],
+            vec![Box::new(limit), Box::new(offset)],
         ),
     };
     let params_refs: Vec<&dyn rusqlite::types::ToSql> =
-        params_vec.iter().map(|p| p.as_ref()).collect();
+        params_vec.iter().map(std::convert::AsRef::as_ref).collect();
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_refs.as_slice(), |row| {
         Ok(serde_json::json!({
@@ -1023,8 +1012,7 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
             .unwrap_or(false);
         if active_exists {
             anyhow::bail!(
-                "cannot restore: memory {} already exists in active table (would overwrite)",
-                id
+                "cannot restore: memory {id} already exists in active table (would overwrite)"
             );
         }
         conn.execute(
@@ -1121,7 +1109,7 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
 }
 
 /// Insert with timestamp-aware conflict resolution for sync.
-/// Only overwrites if the incoming memory is newer (by updated_at).
+/// Only overwrites if the incoming memory is newer (by `updated_at`).
 pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     conn.execute(
@@ -1168,6 +1156,7 @@ pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<(
 }
 
 /// Load an embedding vector for a memory. Returns None if not set.
+#[allow(clippy::unnecessary_wraps)]
 pub fn get_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
     let result: Option<Vec<u8>> = conn
         .query_row(
@@ -1232,6 +1221,7 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
 /// When an HNSW `vector_index` is provided, uses approximate nearest-neighbor
 /// search instead of scanning all embeddings linearly.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 pub fn recall_hybrid(
     conn: &Connection,
     context: &str,
@@ -1285,8 +1275,6 @@ pub fn recall_hybrid(
            AND (?5 IS NULL OR created_at <= ?5)",
     )?;
 
-    use std::collections::HashMap;
-
     // Collect FTS results with scores
     let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
 
@@ -1298,7 +1286,7 @@ pub fn recall_hybrid(
             tags_filter,
             since,
             until,
-            fts_limit as i64
+            fts_limit,
         ],
         |row| {
             let mem = row_to_memory(row)?;
@@ -1314,9 +1302,12 @@ pub fn recall_hybrid(
             max_fts_score = fts_score;
         }
         // Compute cosine similarity if embedding exists
-        let cosine = get_embedding(conn, &mem.id)?
-            .map(|emb| crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb) as f64)
-            .unwrap_or(0.0);
+        let cosine = get_embedding(conn, &mem.id)?.map_or(0.0, |emb| {
+            f64::from(crate::embeddings::Embedder::cosine_similarity(
+                query_embedding,
+                &emb,
+            ))
+        });
         scored.insert(mem.id.clone(), (mem, fts_score, cosine));
     }
 
@@ -1330,7 +1321,7 @@ pub fn recall_hybrid(
             if scored.contains_key(&hit.id) {
                 continue;
             }
-            let cosine = (1.0 - hit.distance) as f64;
+            let cosine = f64::from(1.0 - hit.distance);
             if cosine > 0.3 {
                 if let Some(mem) = get(conn, &hit.id)? {
                     // Apply namespace/expiry/tag filters
@@ -1383,9 +1374,10 @@ pub fn recall_hybrid(
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
                         .collect();
-                    let cosine =
-                        crate::embeddings::Embedder::cosine_similarity(query_embedding, &emb)
-                            as f64;
+                    let cosine = f64::from(crate::embeddings::Embedder::cosine_similarity(
+                        query_embedding,
+                        &emb,
+                    ));
                     if cosine > 0.3 {
                         scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                     }
@@ -1406,7 +1398,7 @@ pub fn recall_hybrid(
             } else {
                 0.0
             };
-            let content_len = mem.content.len() as f64;
+            let content_len = f64::from(i32::try_from(mem.content.len()).expect("usize as i64"));
             // Lerp semantic_weight from 0.50 (≤500 chars) to 0.15 (≥5000 chars)
             let semantic_weight = if content_len <= 500.0 {
                 0.50
@@ -1462,7 +1454,7 @@ pub fn set_namespace_standard(
 ) -> Result<()> {
     // Verify the memory exists (but allow cross-namespace — shared policy)
     let _mem = get(conn, standard_id)?
-        .ok_or_else(|| anyhow::anyhow!("memory not found: {}", standard_id))?;
+        .ok_or_else(|| anyhow::anyhow!("memory not found: {standard_id}"))?;
     // Resolve parent: explicit > auto-detect by `-` prefix > none
     let resolved_parent = match parent {
         Some(p) => {
@@ -1505,6 +1497,7 @@ fn auto_detect_parent(conn: &Connection, namespace: &str) -> Option<String> {
 }
 
 /// Get the standard memory ID for a namespace.
+#[allow(clippy::unnecessary_wraps)]
 pub fn get_namespace_standard(conn: &Connection, namespace: &str) -> Result<Option<String>> {
     let result = conn
         .query_row(

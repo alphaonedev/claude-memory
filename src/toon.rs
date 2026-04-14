@@ -10,6 +10,7 @@
 //! Reference: <https://www.tensorlake.ai/blog-posts/toon-vs-json>
 
 use serde_json::Value;
+use std::fmt::Write;
 
 /// Standard memory fields in TOON column order.
 const MEMORY_FIELDS: &[&str] = &[
@@ -61,10 +62,10 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
     // Metadata line — key:value pairs for non-array fields
     let mut meta = Vec::new();
     if let Some(count) = response.get("count") {
-        meta.push(format!("count:{}", count));
+        meta.push(format!("count:{count}"));
     }
     if let Some(mode) = response.get("mode").and_then(|v| v.as_str()) {
-        meta.push(format!("mode:{}", mode));
+        meta.push(format!("mode:{mode}"));
     }
     if !meta.is_empty() {
         out.push_str(&meta.join("|"));
@@ -85,7 +86,7 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
             let id = format_value(standard.get("id"));
             let title = format_value(standard.get("title"));
             let content = format_value(standard.get("content"));
-            out.push_str(&format!("{}|{}|{}\n", id, title, content));
+            let _ = writeln!(out, "{id}|{title}|{content}");
         }
     }
 

@@ -15,7 +15,7 @@ use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::*;
+use crate::models::{Memory, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -72,6 +72,7 @@ fn err_response(id: Value, code: i64, message: String) -> RpcResponse {
 
 // --- Tool definitions ---
 
+#[allow(clippy::too_many_lines)]
 fn tool_definitions() -> Value {
     json!({
         "tools": [
@@ -419,7 +420,7 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
                 .get("arguments")
                 .and_then(|a| a.get("namespace"))
                 .and_then(|v| v.as_str())
-                .map(|ns| format!(" Scope recall to namespace \"{}\" when relevant.", ns))
+                .map(|ns| format!(" Scope recall to namespace \"{ns}\" when relevant."))
                 .unwrap_or_default();
 
             Ok(json!({
@@ -467,6 +468,7 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
 
 // --- Tool handlers ---
 
+#[allow(clippy::too_many_lines)]
 fn handle_store(
     conn: &rusqlite::Connection,
     params: &Value,
@@ -480,7 +482,7 @@ fn handle_store(
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
     let namespace = params["namespace"].as_str().unwrap_or("global").to_string();
     let source = params["source"].as_str().unwrap_or("claude").to_string();
-    let priority = params["priority"].as_i64().unwrap_or(5) as i32;
+    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).expect("i64 as i32");
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
         .as_array()
@@ -601,8 +603,8 @@ fn handle_store(
     Ok(response)
 }
 
-/// Inject namespace standard into a recall/session_start response.
-/// Inject namespace standards into a recall/session_start response.
+/// Inject namespace standard into a `recall/session_start` response.
+/// Inject namespace standards into a `recall/session_start` response.
 /// Three-level rule layering: global ("*") + parent chain + namespace-specific.
 /// Max depth 5 to prevent cycles.
 fn inject_namespace_standard(
@@ -688,14 +690,6 @@ fn handle_recall(
     archive_on_gc: bool,
     resolved_ttl: &crate::config::ResolvedTtl,
 ) -> Result<Value, String> {
-    let _ = db::gc_if_needed(conn, archive_on_gc);
-    let context = params["context"].as_str().ok_or("context is required")?;
-    let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
-    let tags = params["tags"].as_str();
-    let since = params["since"].as_str();
-    let until = params["until"].as_str();
-
     // Helper: serialize scored memories with score field (#95)
     fn scored_memories(results: Vec<(Memory, f64)>) -> Vec<Value> {
         results
@@ -712,6 +706,14 @@ fn handle_recall(
             })
             .collect()
     }
+
+    let _ = db::gc_if_needed(conn, archive_on_gc);
+    let context = params["context"].as_str().ok_or("context is required")?;
+    let namespace = params["namespace"].as_str();
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
+    let tags = params["tags"].as_str();
+    let since = params["since"].as_str();
+    let until = params["until"].as_str();
 
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
@@ -734,8 +736,8 @@ fn handle_recall(
 
                 // Apply cross-encoder reranking if available
                 if let Some(ce) = reranker {
-                    let reranked = ce.rerank(context, results);
-                    let memories = scored_memories(reranked);
+                    let ce_reranked = ce.rerank(context, results);
+                    let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
@@ -863,7 +865,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let query = params["query"].as_str().ok_or("query is required")?;
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
     let results = db::search(
         conn,
@@ -883,7 +885,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = params["limit"].as_u64().unwrap_or(20) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
     let results = db::list(
         conn,
@@ -965,7 +967,9 @@ fn handle_update(
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
-    let priority = params["priority"].as_i64().map(|p| p as i32);
+    let priority = params["priority"]
+        .as_i64()
+        .map(|p| i32::try_from(p).expect("i64 as i32"));
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
 
@@ -1088,7 +1092,7 @@ fn handle_consolidate(
                 validate::validate_id(s).map_err(|e| e.to_string())?;
                 ids.push(s.to_string());
             }
-            None => return Err(format!("ids[{}] must be a string", i)),
+            None => return Err(format!("ids[{i}] must be a string")),
         }
     }
     let title = params["title"].as_str().ok_or("title is required")?;
@@ -1103,7 +1107,7 @@ fn handle_consolidate(
         for id in &ids {
             match db::get(conn, id) {
                 Ok(Some(mem)) => memory_pairs.push((mem.title, mem.content)),
-                Ok(None) => return Err(format!("memory not found: {}", id)),
+                Ok(None) => return Err(format!("memory not found: {id}")),
                 Err(e) => return Err(e.to_string()),
             }
         }
@@ -1140,7 +1144,7 @@ fn handle_consolidate(
 
     // Generate embedding for the consolidated memory (#52)
     if let Some(emb) = embedder {
-        let text = format!("{} {}", title, summary);
+        let text = format!("{title} {summary}");
         match emb.embed(&text) {
             Ok(embedding) => {
                 if let Err(e) = db::set_embedding(conn, &new_id, &embedding) {
@@ -1177,7 +1181,7 @@ fn handle_consolidate(
     let standard_ids: Vec<&str> = ids
         .iter()
         .filter(|id| db::is_namespace_standard(conn, id))
-        .map(|s| s.as_str())
+        .map(std::string::String::as_str)
         .collect();
     if !standard_ids.is_empty() {
         result["warning"] = json!(format!(
@@ -1269,19 +1273,18 @@ fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Op
 ///
 /// Example: cwd = /home/user/monorepo/frontend
 ///   → checks "frontend" (cwd), "monorepo" (parent), stops at home dir
-///   → if "monorepo" has a standard, sets parent_namespace of "frontend" to "monorepo"
+///   → if "monorepo" has a standard, sets `parent_namespace` of "frontend" to "monorepo"
 fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
     // Only run if this namespace doesn't already have an explicit parent
     if db::get_namespace_parent(conn, namespace).is_some() {
         return;
     }
-    let cwd = match std::env::current_dir() {
-        Ok(p) => p,
-        Err(_) => return,
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
     };
     let home = dirs::home_dir().unwrap_or_default();
     // Walk up from parent of cwd (cwd itself IS the namespace)
-    let mut current = cwd.parent().map(|p| p.to_path_buf());
+    let mut current = cwd.parent().map(std::path::Path::to_path_buf);
     while let Some(dir) = current {
         // Stop at or above home directory
         if dir == home || !dir.starts_with(&home) {
@@ -1308,7 +1311,7 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
                 break;
             }
         }
-        current = dir.parent().map(|p| p.to_path_buf());
+        current = dir.parent().map(std::path::Path::to_path_buf);
     }
 }
 
@@ -1318,8 +1321,8 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
 
 fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(50) as usize;
-    let offset = params["offset"].as_u64().unwrap_or(0) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).expect("u64 as usize");
+    let offset = usize::try_from(params["offset"].as_u64().unwrap_or(0)).expect("u64 as usize");
     let items =
         db::list_archived(conn, namespace, limit.min(1000), offset).map_err(|e| e.to_string())?;
     Ok(json!({"archived": items, "count": items.len()}))
@@ -1369,7 +1372,7 @@ fn handle_session_start(
     llm: Option<&OllamaClient>,
 ) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = params["limit"].as_u64().unwrap_or(10) as usize;
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
 
     let results = db::list(
         conn,
@@ -1429,6 +1432,8 @@ fn handle_session_start(
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -1464,7 +1469,7 @@ fn handle_request(
                 }
             }),
         ),
-        "notifications/initialized" => ok_response(id, json!({})),
+        "notifications/initialized" | "ping" => ok_response(id, json!({})),
         "tools/list" => ok_response(id, tool_definitions()),
         "prompts/list" => ok_response(id, prompt_definitions()),
         "prompts/get" => {
@@ -1584,13 +1589,13 @@ fn handle_request(
                 ),
             }
         }
-        "ping" => ok_response(id, json!({})),
         _ => err_response(id, -32601, format!("method not found: {}", req.method)),
     }
 }
 
 /// Run the MCP server over stdio. Blocks until stdin closes.
 /// Initializes components based on the requested feature tier.
+#[allow(clippy::too_many_lines)]
 pub fn run_mcp_server(
     db_path: &Path,
     tier: FeatureTier,
@@ -1616,10 +1621,7 @@ pub fn run_mcp_server(
                     tier_config.llm_model = Some(crate::config::LlmModel::Gemma4E4B);
                     eprintln!("ai-memory: llm_model override from config: gemma4:e4b");
                 }
-                other => eprintln!(
-                    "ai-memory: unknown llm_model '{}', using tier default",
-                    other
-                ),
+                other => eprintln!("ai-memory: unknown llm_model '{other}', using tier default"),
             }
         }
     }
@@ -1641,10 +1643,9 @@ pub fn run_mcp_server(
                         "ai-memory: embedding_model override from config: nomic_embed_v15 (Ollama)"
                     );
                 }
-                other => eprintln!(
-                    "ai-memory: unknown embedding_model '{}', using tier default",
-                    other
-                ),
+                other => {
+                    eprintln!("ai-memory: unknown embedding_model '{other}', using tier default");
+                }
             }
         }
     }
@@ -1660,10 +1661,7 @@ pub fn run_mcp_server(
         let ollama_url = app_config.effective_ollama_url();
         match OllamaClient::new_with_url(ollama_url, model_id) {
             Ok(client) => {
-                eprintln!(
-                    "ai-memory: Ollama connected, ensuring model {} is available...",
-                    model_id
-                );
+                eprintln!("ai-memory: Ollama connected, ensuring model {model_id} is available...");
                 if let Err(e) = client.ensure_model() {
                     eprintln!("ai-memory: model pull failed: {e} (LLM features disabled)");
                     None
@@ -1686,9 +1684,11 @@ pub fn run_mcp_server(
     let embed_client: Option<Arc<OllamaClient>> = {
         let embed_url = app_config.effective_embed_url();
         let ollama_url = app_config.effective_ollama_url();
-        if embed_url != ollama_url {
+        if embed_url == ollama_url {
+            llm.clone()
+        } else {
             // Separate embed URL configured — create a dedicated client for embeddings
-            eprintln!("ai-memory: using separate embed URL: {}", embed_url);
+            eprintln!("ai-memory: using separate embed URL: {embed_url}");
             match OllamaClient::new_with_url(embed_url, "nomic-embed-text") {
                 Ok(client) => Some(Arc::new(client)),
                 Err(e) => {
@@ -1696,8 +1696,6 @@ pub fn run_mcp_server(
                     llm.clone()
                 }
             }
-        } else {
-            llm.clone()
         }
     };
     let embedder = if let Some(ref emb_model) = tier_config.embedding_model {
@@ -1710,7 +1708,7 @@ pub fn run_mcp_server(
                         eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
                         let mut ok = 0usize;
                         for (id, title, content) in &unembedded {
-                            let text = format!("{} {}", title, content);
+                            let text = format!("{title} {content}");
                             match emb.embed(&text) {
                                 Ok(embedding) => {
                                     if db::set_embedding(&conn, id, &embedding).is_ok() {
@@ -1786,10 +1784,7 @@ pub fn run_mcp_server(
     } else {
         "keyword"
     };
-    eprintln!(
-        "ai-memory MCP server started (stdio, tier={})",
-        effective_tier
-    );
+    eprintln!("ai-memory MCP server started (stdio, tier={effective_tier})");
 
     for line in stdin.lock().lines() {
         let line = line?;

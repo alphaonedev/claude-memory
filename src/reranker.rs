@@ -63,10 +63,7 @@ impl CrossEncoder {
         match Self::load_neural() {
             Ok(ce) => ce,
             Err(e) => {
-                eprintln!(
-                    "ai-memory: neural cross-encoder failed ({}), using lexical fallback",
-                    e
-                );
+                eprintln!("ai-memory: neural cross-encoder failed ({e}), using lexical fallback");
                 Self::Lexical
             }
         }
@@ -170,6 +167,7 @@ impl CrossEncoder {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn neural_score(
         model: &BertModel,
         tokenizer: &Tokenizer,
@@ -181,7 +179,7 @@ impl CrossEncoder {
         content: &str,
     ) -> Result<f32> {
         // Cross-encoder input: "[CLS] query [SEP] title content [SEP]"
-        let document = format!("{} {}", title, content);
+        let document = format!("{title} {content}");
 
         let encoding = tokenizer
             .encode((query, document.as_str()), true)
@@ -229,7 +227,7 @@ impl CrossEncoder {
         let mut scored: Vec<(Memory, f64)> = candidates
             .drain(..)
             .map(|(mem, original_score)| {
-                let ce_score = self.score(query, &mem.title, &mem.content) as f64;
+                let ce_score = f64::from(self.score(query, &mem.title, &mem.content));
                 let final_score =
                     ORIGINAL_WEIGHT * original_score + CROSS_ENCODER_WEIGHT * ce_score;
                 (mem, final_score)
@@ -268,7 +266,9 @@ fn lexical_score(query: &str, title: &str, content: &str) -> f32 {
     let query_set: HashSet<&str> = query_terms.iter().copied().collect();
 
     // 1. Jaccard term overlap
+    #[allow(clippy::cast_precision_loss)]
     let intersection = query_set.intersection(&doc_terms).count() as f32;
+    #[allow(clippy::cast_precision_loss)]
     let union = query_set.union(&doc_terms).count() as f32;
     let jaccard = if union > 0.0 {
         intersection / union
@@ -291,16 +291,21 @@ fn lexical_score(query: &str, title: &str, content: &str) -> f32 {
         0.0
     } else {
         let doc_bigram_set: HashSet<(&str, &str)> = doc_bigrams.into_iter().collect();
+        #[allow(clippy::cast_precision_loss)]
         let hits = query_bigrams
             .iter()
             .filter(|b| doc_bigram_set.contains(b))
             .count() as f32;
-        hits / query_bigrams.len() as f32
+        #[allow(clippy::cast_precision_loss)]
+        let query_bigrams_len = query_bigrams.len() as f32;
+        hits / query_bigrams_len
     };
 
     // 4. Title match bonus
     let title_set: HashSet<&str> = title_terms.iter().copied().collect();
+    #[allow(clippy::cast_precision_loss)]
     let title_hits = query_set.intersection(&title_set).count() as f32;
+    #[allow(clippy::cast_precision_loss)]
     let title_bonus = if query_set.is_empty() {
         0.0
     } else {
@@ -331,13 +336,16 @@ fn tfidf_score(query_terms: &[&str], doc_tokens: &[&str]) -> f32 {
         *tf_map.entry(tok).or_insert(0) += 1;
     }
 
+    #[allow(clippy::cast_precision_loss)]
     let total = doc_tokens.len() as f32;
+    #[allow(clippy::cast_precision_loss)]
     let unique = tf_map.len() as f32;
 
     let mut score_sum: f32 = 0.0;
     let query_lower: Vec<String> = query_terms.iter().map(|t| t.to_lowercase()).collect();
 
     for qt in &query_lower {
+        #[allow(clippy::cast_precision_loss)]
         let tf = tf_map
             .iter()
             .filter(|(k, _)| k.to_lowercase() == *qt)
@@ -349,12 +357,14 @@ fn tfidf_score(query_terms: &[&str], doc_tokens: &[&str]) -> f32 {
         }
 
         let tf_norm = tf / total;
+        #[allow(clippy::cast_precision_loss)]
         let doc_freq = tf_map.keys().filter(|k| k.to_lowercase() == *qt).count() as f32;
         let idf = (unique / (1.0 + doc_freq)).ln() + 1.0;
 
         score_sum += tf_norm * idf;
     }
 
+    #[allow(clippy::cast_precision_loss)]
     let max_possible = query_lower.len() as f32;
     (score_sum / max_possible).clamp(0.0, 1.0)
 }
