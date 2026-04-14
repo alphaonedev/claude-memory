@@ -2,6 +2,7 @@
 
 > Authoritative reference for all development, testing, security, and release processes.
 > Maintained by AlphaOne LLC. All contributors and AI agents must follow these standards.
+> In case of conflict with CONTRIBUTING.md, this document takes precedence.
 
 ---
 
@@ -36,14 +37,22 @@ There is no separate development repo. `ai-memory-mcp-dev` is archived.
 
 No code reaches `main` without the project owner's explicit approval.
 
+PRs to `develop` do not require owner approval but must pass all CI checks (fmt, clippy pedantic, tests).
+
 ### 1.4 Code Style
 
+- **Rust 1.75+** minimum supported version.
 - **`cargo fmt`** is mandatory. CI enforces via `cargo fmt --check`. Always run before committing.
 - **`cargo clippy`** with pedantic:
   ```
   cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
   ```
   Zero warnings. If a pedantic lint requires `#[allow(clippy::...)]`, it must be justified in the PR description.
+- **SPDX headers** required on all source files:
+  ```rust
+  // Copyright 2026 AlphaOne LLC
+  // SPDX-License-Identifier: Apache-2.0
+  ```
 - No new production `unwrap()` calls. Use `?`, `.map_err()`, `unwrap_or_default()`, or match expressions.
 - All SQL queries must use parameterized queries (`params![]`). No string interpolation in SQL.
 - FTS5 input sanitized via `sanitize_fts5_query()`.
@@ -103,7 +112,7 @@ AI_MEMORY_NO_CONFIG=1 cargo test
 
 ### 2.3 Full Spectrum Functional Test
 
-Run against the compiled binary via CLI. Covers all commands with edge cases.
+Run against the compiled binary via CLI. Covers all 26 commands with edge cases. When adding a new command, add a corresponding row to this table.
 
 | Category | Tests | Scope |
 |----------|:-----:|-------|
@@ -230,7 +239,7 @@ Every patch/release must be reviewed against these 10 areas:
    - PPA: Ubuntu PPA upload (`ppa:jbridger2021/ppa`)
    - COPR: Fedora COPR upload (`alpha-one-ai/ai-memory`)
 5. Verify: `gh release view v{VERSION} --repo alphaonedev/ai-memory-mcp`
-6. Update Homebrew tap: `alphaonedev/homebrew-tap` with new SHA256 hashes
+6. Update Homebrew tap (manual): `alphaonedev/homebrew-tap` — download platform tarballs, compute SHA256 hashes, update `Formula/ai-memory.rb`
 
 ### 4.3 Documentation Sync
 

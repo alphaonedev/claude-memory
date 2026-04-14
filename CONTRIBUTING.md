@@ -33,14 +33,20 @@ Open a feature request at [GitHub Issues](https://github.com/alphaonedev/ai-memo
 ```bash
 git clone https://github.com/alphaonedev/ai-memory-mcp.git
 cd ai-memory-mcp
+git checkout develop
 cargo build
-cargo test
+AI_MEMORY_NO_CONFIG=1 cargo test
 ```
 
 ## Code Style
 
 - Run `cargo fmt` before committing. All code must be formatted with rustfmt.
 - Run `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` and resolve all failures. CI will reject code that does not pass this check.
+- All new source files must include the copyright header:
+  ```rust
+  // Copyright 2026 AlphaOne LLC
+  // SPDX-License-Identifier: Apache-2.0
+  ```
 - Follow standard Rust naming conventions and idioms.
 
 ## Testing Requirements
@@ -57,6 +63,7 @@ AI_MEMORY_NO_CONFIG=1 cargo test
 - New code must include tests. Bug fixes should include a regression test.
 - If you add a new MCP tool, HTTP endpoint, or CLI command, include integration tests covering the primary usage path.
 - If clippy pedantic requires `#[allow(clippy::...)]`, justify it in your PR description.
+- Run `cargo audit` to check for known vulnerabilities in dependencies.
 
 ## Pull Request Process
 
@@ -72,7 +79,7 @@ AI_MEMORY_NO_CONFIG=1 cargo test
 
 See the 8-step feature checklist in [DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for end-to-end guidance on adding new features.
 
-PRs require at least one approval before merging.
+For the full engineering standards (security review, release process, test protocols), see [ENGINEERING_STANDARDS.md](docs/ENGINEERING_STANDARDS.md). In case of conflict, ENGINEERING_STANDARDS.md is authoritative.
 
 ## Commit Message Conventions
 
@@ -102,7 +109,7 @@ The `main` branch is protected. The following rules are enforced:
 - **Stale reviews are dismissed.** If you push new commits after receiving approval, the approval is invalidated and must be re-granted.
 - **Force pushes and branch deletion are blocked** on `main`.
 
-PRs to `develop` do not require owner approval but must pass CI. Maintainers merge `develop` into `main` for releases.
+PRs to `develop` do not require owner approval but must pass CI (fmt, clippy pedantic, tests). Maintainers merge `develop` into `main` for releases.
 
 ## Release Process
 
