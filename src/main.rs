@@ -493,13 +493,11 @@ async fn main() -> Result<()> {
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
-    if result.is_ok() {
-        if let Some(cp_path) = db_path_for_checkpoint {
-            if let Ok(conn) = db::open(&cp_path) {
+    if result.is_ok()
+        && let Some(cp_path) = db_path_for_checkpoint
+            && let Ok(conn) = db::open(&cp_path) {
                 let _ = db::checkpoint(&conn);
             }
-        }
-    }
 
     result
 }
@@ -721,11 +719,10 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
     if let Some(c) = args.confidence {
         validate::validate_confidence(c)?;
     }
-    if let Some(ref ts) = args.expires_at {
-        if !ts.is_empty() {
+    if let Some(ref ts) = args.expires_at
+        && !ts.is_empty() {
             validate::validate_expires_at_format(ts)?;
         }
-    }
     let (found, _content_changed) = db::update(
         &conn,
         &args.id,
@@ -792,21 +789,19 @@ fn cmd_recall(
             Ok(emb) => {
                 eprintln!("ai-memory: embedder loaded ({})", emb.model_description());
                 // Backfill embeddings for memories that don't have them
-                if let Ok(unembedded) = db::get_unembedded_ids(&conn) {
-                    if !unembedded.is_empty() {
+                if let Ok(unembedded) = db::get_unembedded_ids(&conn)
+                    && !unembedded.is_empty() {
                         eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
                         let mut ok = 0usize;
                         for (id, title, content) in &unembedded {
                             let text = format!("{title} {content}");
-                            if let Ok(embedding) = emb.embed(&text) {
-                                if db::set_embedding(&conn, id, &embedding).is_ok() {
+                            if let Ok(embedding) = emb.embed(&text)
+                                && db::set_embedding(&conn, id, &embedding).is_ok() {
                                     ok += 1;
                                 }
-                            }
                         }
                         eprintln!("ai-memory: backfilled {}/{}", ok, unembedded.len());
                     }
-                }
                 Some(emb)
             }
             Err(e) => {

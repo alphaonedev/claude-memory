@@ -132,11 +132,10 @@ pub fn validate_expires_at(expires_at: Option<&str>) -> Result<()> {
         if !is_valid_rfc3339(ts) {
             bail!("expires_at is not valid RFC3339: '{ts}'");
         }
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-            if dt < chrono::Utc::now() {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts)
+            && dt < chrono::Utc::now() {
                 bail!("expires_at is in the past");
             }
-        }
     }
     Ok(())
 }
@@ -220,17 +219,15 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
     if !is_valid_rfc3339(&mem.updated_at) {
         bail!("updated_at is not valid RFC3339");
     }
-    if let Some(ref ts) = mem.last_accessed_at {
-        if !is_valid_rfc3339(ts) {
+    if let Some(ref ts) = mem.last_accessed_at
+        && !is_valid_rfc3339(ts) {
             bail!("last_accessed_at is not valid RFC3339");
         }
-    }
     // Don't reject past expires_at on import — may be importing historical data
-    if let Some(ref ts) = mem.expires_at {
-        if !is_valid_rfc3339(ts) {
+    if let Some(ref ts) = mem.expires_at
+        && !is_valid_rfc3339(ts) {
             bail!("expires_at is not valid RFC3339");
         }
-    }
     Ok(())
 }
 

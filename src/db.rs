@@ -1322,37 +1322,31 @@ pub fn recall_hybrid(
                 continue;
             }
             let cosine = f64::from(1.0 - hit.distance);
-            if cosine > 0.3 {
-                if let Some(mem) = get(conn, &hit.id)? {
+            if cosine > 0.3
+                && let Some(mem) = get(conn, &hit.id)? {
                     // Apply namespace/expiry/tag filters
-                    if let Some(ns) = namespace {
-                        if mem.namespace != ns {
+                    if let Some(ns) = namespace
+                        && mem.namespace != ns {
                             continue;
                         }
-                    }
-                    if let Some(exp) = &mem.expires_at {
-                        if exp.as_str() <= now.as_str() {
+                    if let Some(exp) = &mem.expires_at
+                        && exp.as_str() <= now.as_str() {
                             continue;
                         }
-                    }
-                    if let Some(tf) = tags_filter {
-                        if !mem.tags.iter().any(|t| t == tf) {
+                    if let Some(tf) = tags_filter
+                        && !mem.tags.iter().any(|t| t == tf) {
                             continue;
                         }
-                    }
-                    if let Some(s) = since {
-                        if mem.created_at.as_str() < s {
+                    if let Some(s) = since
+                        && mem.created_at.as_str() < s {
                             continue;
                         }
-                    }
-                    if let Some(u) = until {
-                        if mem.created_at.as_str() > u {
+                    if let Some(u) = until
+                        && mem.created_at.as_str() > u {
                             continue;
                         }
-                    }
                     scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                 }
-            }
         }
     } else {
         // Fallback: linear scan over all embeddings
@@ -1368,8 +1362,8 @@ pub fn recall_hybrid(
             if scored.contains_key(&mem.id) {
                 continue;
             }
-            if let Some(bytes) = emb_bytes {
-                if !bytes.is_empty() {
+            if let Some(bytes) = emb_bytes
+                && !bytes.is_empty() {
                     let emb: Vec<f32> = bytes
                         .chunks_exact(4)
                         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
@@ -1382,7 +1376,6 @@ pub fn recall_hybrid(
                         scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                     }
                 }
-            }
         }
     }
 

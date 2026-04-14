@@ -545,8 +545,8 @@ fn handle_store(
         )
         .map_err(|e| e.to_string())?;
         // Regenerate embedding if content changed during dedup update
-        if content_changed {
-            if let Some(emb) = embedder {
+        if content_changed
+            && let Some(emb) = embedder {
                 let text = format!("{} {}", mem.title, mem.content);
                 if let Ok(embedding) = emb.embed(&text) {
                     let _ = db::set_embedding(conn, &dup.id, &embedding);
@@ -556,7 +556,6 @@ fn handle_store(
                     }
                 }
             }
-        }
         return Ok(json!({
             "id": dup.id,
             "tier": mem.tier,
@@ -630,8 +629,8 @@ fn inject_namespace_standard(
     }
 
     // Level 2+: walk parent chain from namespace, then add namespace itself
-    if let Some(ns) = namespace {
-        if ns != "*" {
+    if let Some(ns) = namespace
+        && ns != "*" {
             // Collect the parent chain (bottom-up), then reverse to get top-down order
             let mut chain: Vec<String> = Vec::new();
             let mut current = ns.to_string();
@@ -658,7 +657,6 @@ fn inject_namespace_standard(
                 add_standard(ns_std, &mut standard_ids, &mut standards);
             }
         }
-    }
 
     if standards.is_empty() {
         return;
@@ -780,13 +778,12 @@ fn handle_capabilities(
 ) -> Result<Value, String> {
     let mut caps = tier_config.capabilities();
     // Report actual cross-encoder state, not just config (#93)
-    if let Some(ce) = reranker {
-        if !ce.is_neural() {
+    if let Some(ce) = reranker
+        && !ce.is_neural() {
             caps.features.cross_encoder_reranking = false;
             caps.features.memory_reflection = false;
             caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
         }
-    }
     serde_json::to_value(caps).map_err(|e| e.to_string())
 }
 
@@ -1015,8 +1012,8 @@ fn handle_update(
     }
 
     // Regenerate embedding when title or content changed
-    if content_changed {
-        if let Some(emb) = embedder {
+    if content_changed
+        && let Some(emb) = embedder {
             let mem = db::get(conn, id).map_err(|e| e.to_string())?;
             if let Some(ref m) = mem {
                 let text = format!("{} {}", m.title, m.content);
@@ -1029,7 +1026,6 @@ fn handle_update(
                 }
             }
         }
-    }
 
     let mem = db::get(conn, id).map_err(|e| e.to_string())?;
     Ok(json!({"updated": true, "memory": mem}))
@@ -1404,8 +1400,8 @@ fn handle_session_start(
         "mode": "session_start",
     });
 
-    if let Some(llm_client) = llm {
-        if !results.is_empty() {
+    if let Some(llm_client) = llm
+        && !results.is_empty() {
             let pairs: Vec<(String, String)> = results
                 .iter()
                 .map(|m| (m.title.clone(), m.content.clone()))
@@ -1419,7 +1415,6 @@ fn handle_session_start(
                 }
             }
         }
-    }
 
     // Auto-register parent chain from filesystem path (runs once, skips if parent already set)
     if let Some(ns) = namespace {
@@ -1610,8 +1605,8 @@ pub fn run_mcp_server(
 
     // Apply config.toml overrides — tiers gate features, models are independently configurable
     // Only override if the tier actually uses an LLM (smart/autonomous)
-    if tier_config.llm_model.is_some() {
-        if let Some(ref llm_override) = app_config.llm_model {
+    if tier_config.llm_model.is_some()
+        && let Some(ref llm_override) = app_config.llm_model {
             match llm_override.as_str() {
                 "gemma4:e2b" => {
                     tier_config.llm_model = Some(crate::config::LlmModel::Gemma4E2B);
@@ -1624,11 +1619,10 @@ pub fn run_mcp_server(
                 other => eprintln!("ai-memory: unknown llm_model '{other}', using tier default"),
             }
         }
-    }
 
     // Apply embedding model override from config.toml
-    if tier_config.embedding_model.is_some() {
-        if let Some(ref emb_override) = app_config.embedding_model {
+    if tier_config.embedding_model.is_some()
+        && let Some(ref emb_override) = app_config.embedding_model {
             match emb_override.as_str() {
                 "mini_lm_l6_v2" => {
                     tier_config.embedding_model = Some(crate::config::EmbeddingModel::MiniLmL6V2);
@@ -1648,7 +1642,6 @@ pub fn run_mcp_server(
                 }
             }
         }
-    }
 
     // --- Initialize LLM (smart tier and above) — before embedder so Ollama
     //     client can be shared with nomic embedder ---
