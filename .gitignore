@@ -16,7 +16,3 @@ credentials*
 # Benchmark results
 benchmarks/longmemeval/results/
 .mcpregistry_*
-
-# Dev-only files (not pushed to production)
-ROADMAP.md
-ENGINEERINGSTANDARD.md
