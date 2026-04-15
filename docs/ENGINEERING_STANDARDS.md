@@ -1,40 +1,57 @@
 # ai-memory Engineering Standards
 
-> Established through Issues #1, #49, #51, #52, #55 and 55+ closed issues across dev and prod repos.
-> This document is the authoritative reference for all development, testing, security, and release processes.
+> Authoritative reference for all development, testing, security, and release processes.
+> Maintained by AlphaOne LLC. All contributors and AI agents must follow these standards.
+> In case of conflict with CONTRIBUTING.md, this document takes precedence.
 
 ---
 
 ## 1. Development Standards
 
-### 1.1 Repository Structure
+### 1.1 Repository
 
-| Repo | Purpose | Default Branch |
-|------|---------|----------------|
-| `alphaonedev/ai-memory-mcp-dev` | Development | `develop` |
-| `alphaonedev/ai-memory-mcp` | Production | `main` |
+| Repo | Purpose | Branches |
+|------|---------|----------|
+| `alphaonedev/ai-memory-mcp` | Single source of truth | `main` (production), `develop` (active development) |
+
+There is no separate development repo. `ai-memory-mcp-dev` is archived.
 
 ### 1.2 Branch Strategy
 
-- Feature/patch branches created from `develop` (e.g., `patch/v0.5.4.2`, `fix/phase0-gap-tests`)
-- PRs merge to `develop` in dev repo
-- Identical diff applied to prod `main` via separate PR
-- Dev-only files (e.g., `ROADMAP.md`) are gitignored and never pushed to prod
+- `main` — production releases, protected branch, requires owner approval
+- `develop` — active development, all PRs target this branch
+- Feature/fix branches created from `develop` (e.g., `feature/batch-import`, `fix/ttl-overflow`)
+- Maintainers merge `develop` into `main` when cutting a release
 
-### 1.3 Dev/Prod Sync Rules
+### 1.3 Branch Protection (main)
 
-- **Dev must match prod before any new patch work begins.** If codebases have diverged, overwrite dev with prod main first, then apply changes.
-- Documentation updates must be applied to both repos simultaneously.
-- Test counts and tool counts in docs must match across both repos.
+| Rule | Enforcement |
+|------|-------------|
+| Direct pushes | Blocked — PRs required |
+| Approving reviews | 1 required from `@alphaonedev` (CODEOWNERS) |
+| Stale review dismissal | Enabled — new pushes invalidate approvals |
+| CI status checks | `Check (ubuntu-latest)` + `Check (macos-latest)` must pass |
+| Branch up-to-date | Required before merge |
+| Force pushes | Blocked |
+| Branch deletion | Blocked |
 
-*Reference: Session 2026-04-12 -- 6 core files had diverged (2000+ lines diff). Resolved by full overwrite of dev with prod (commit `fbc7d69`).*
+No code reaches `main` without the project owner's explicit approval.
+
+PRs to `develop` do not require owner approval but must pass all CI checks (fmt, clippy pedantic, tests).
 
 ### 1.4 Code Style
 
+- **Rust 1.87+** minimum supported version (MSRV). Required for `is_multiple_of()` stabilization.
 - **`cargo fmt`** is mandatory. CI enforces via `cargo fmt --check`. Always run before committing.
-- **`cargo clippy`** with these flags:
+- **`cargo clippy`** with pedantic:
   ```
-  -D warnings -A dead_code -A clippy::too_many_arguments -A clippy::manual_map -A clippy::manual_is_multiple_of
+  cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+  ```
+  Zero warnings. If a pedantic lint requires `#[allow(clippy::...)]`, it must be justified in the PR description.
+- **SPDX headers** required on all source files. Use the year of file creation:
+  ```rust
+  // Copyright <YEAR> AlphaOne LLC
+  // SPDX-License-Identifier: Apache-2.0
   ```
 - No new production `unwrap()` calls. Use `?`, `.map_err()`, `unwrap_or_default()`, or match expressions.
 - All SQL queries must use parameterized queries (`params![]`). No string interpolation in SQL.
@@ -42,8 +59,15 @@
 
 ### 1.5 Commit Messages
 
-- Descriptive of what was changed and why
-- Prefix with type: `fix:`, `feat:`, `chore:`, `style:`, `docs:`
+Format:
+```
+<type>: <short summary>
+
+<optional body explaining the change in more detail>
+```
+
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`, `perf`.
+
 - Reference issues: `Closes #52`
 - AI-generated commits include: `Co-Authored-By: Claude Opus 4.6 (1M context) <noreply@anthropic.com>`
 
@@ -54,12 +78,15 @@ Every PR must pass these gates before merge:
 | Gate | Requirement |
 |------|-------------|
 | `cargo fmt --check` | Clean |
-| `cargo clippy` | 0 new warnings |
-| `cargo test` | All passing, 0 failures |
+| `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` | Zero warnings |
+| `AI_MEMORY_NO_CONFIG=1 cargo test` | All passing, 0 failures |
 | `cargo audit` | 0 vulnerabilities (warnings acceptable if transitive) |
-| Functional test | All categories pass |
-| Security review | 0 ship-blocking findings |
+| Functional test | All categories pass (maintainer performs during review) |
+| Security review | 0 ship-blocking findings (maintainer performs during review) |
 | Documentation sync | Test counts and tool counts updated in all docs |
+| CLA | Signed (see [CLA.md](../CLA.md)) |
+
+Contributors are responsible for the first four gates. Maintainers perform the functional test, security review, and documentation sync verification during PR review.
 
 ---
 
@@ -70,11 +97,25 @@ Every PR must pass these gates before merge:
 - **Environment:** `AI_MEMORY_NO_CONFIG=1` to prevent config interference
 - **Platforms:** Must pass on both `ubuntu-latest` and `macos-latest`
 - **Result:** 0 failures required
-- **Baseline (v0.5.4.2):** 185 tests (139 unit + 46 integration)
 
-### 2.2 Full Spectrum Functional Test
+```bash
+AI_MEMORY_NO_CONFIG=1 cargo test
+```
 
-Run against the compiled binary via CLI. Covers all 26 commands with edge cases.
+### 2.2 Full Pre-PR Verification
+
+Contributors must run all four before submitting:
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+AI_MEMORY_NO_CONFIG=1 cargo test
+cargo audit
+```
+
+### 2.3 Full Spectrum Functional Test
+
+Run against the compiled binary via CLI. Covers all 26 commands with edge cases. When adding a new command, add a corresponding row to this table.
 
 | Category | Tests | Scope |
 |----------|:-----:|-------|
@@ -95,12 +136,9 @@ Run against the compiled binary via CLI. Covers all 26 commands with edge cases.
 | GC | 2 | Removes expired, preserves long-tier |
 | Export/Import | 2 | JSON roundtrip, count match |
 | Delete | 1 | Hard delete + not-found verification |
-| Patch-specific | varies | Per-patch feature verification |
 | Edge cases | 7+ | Unicode, FTS injection, priority/confidence bounds, large content |
 
-*Reference: Issue #51 (functional test protocol), Issue #52 Comment 2 (70-test suite).*
-
-### 2.3 Memory & TTL Test Protocol
+### 2.4 Memory & TTL Test Protocol
 
 15-20 tests covering the memory lifecycle:
 
@@ -115,13 +153,13 @@ Run against the compiled binary via CLI. Covers all 26 commands with edge cases.
 | Tier protection | Downgrade silently blocked, upgrades allowed |
 | Upsert semantics | Duplicate title preserves higher tier |
 
-### 2.4 Pass/Fail Criteria
+### 2.5 Pass/Fail Criteria
 
 - **Pass:** Test produces expected result.
-- **Acceptable known behavior:** TTL refresh on recall sets `expires_at = now + extend_secs` (rolling window). When recalled shortly after creation, this can be earlier than the initial TTL. This is by-design, not a bug. Document with "T9 Note" if encountered.
+- **Acceptable known behavior:** TTL refresh on recall sets `expires_at = now + extend_secs` (rolling window). When recalled shortly after creation, this can be earlier than the initial TTL. This is by-design, not a bug.
 - **Ship-blocking fail:** Any functional test failure not documented as by-design.
 
-### 2.5 Test Count Documentation Locations
+### 2.6 Test Count Documentation Locations
 
 When test counts change, update ALL of these:
 
@@ -133,7 +171,7 @@ When test counts change, update ALL of these:
 | `docs/DEVELOPER_GUIDE.md` | 1 |
 | `docs/index.html` | 2 |
 
-MCP tool count (currently 23) in:
+MCP tool count in:
 
 | File | Instances |
 |------|:---------:|
@@ -163,7 +201,7 @@ Every patch/release must be reviewed against these 10 areas:
 | 5 | `unwrap()` calls | Zero new production `unwrap()` — use `?` or `.map_err()` |
 | 6 | Error message leakage | Only expose tier names and IDs, not internal state or stack traces |
 | 7 | Race conditions | Check embedding regen, HNSW updates, consolidate paths |
-| 8 | Auth/authz | Local service by design; HTTP API has no auth (documented accepted risk) |
+| 8 | Auth/authz | HTTP API requires `--auth-token` for non-localhost access |
 | 9 | Data in logs | Only UUIDs, error messages, GC counts; no user content |
 | 10 | CORS | Strict hostname check with required separator |
 
@@ -176,45 +214,46 @@ Every patch/release must be reviewed against these 10 areas:
 | **Medium** | Defense-in-depth gap with existing fallback | Should fix. May ship with documented timeline. |
 | **Low** | Cosmetic, non-exploitable edge case | Acceptable. Fix if convenient. |
 
-*Reference: Issue #52 Comment 2 (10-area security review), Issue #1 Comment 13 (9-finding codebase audit).*
-
 ---
 
 ## 4. Release Standards
 
 ### 4.1 Version Numbering
 
-- Format: `MAJOR.MINOR.PATCH-patch.N` in `Cargo.toml` (e.g., `0.5.4-patch.2`)
-- Git tag format: `vMAJOR.MINOR.PATCH.N` (e.g., `v0.5.4.2`)
+- Format: `MAJOR.MINOR.PATCH-patch.N` in `Cargo.toml` (e.g., `0.5.4-patch.4`)
+- Git tag format: `vMAJOR.MINOR.PATCH.N` (e.g., `v0.5.4.4`)
 - Binary reports: `ai-memory MAJOR.MINOR.PATCH-patch.N`
 
 ### 4.2 Release Process
 
-1. Ensure all gates pass locally:
-   - `cargo fmt` (run it, don't just check)
-   - `cargo clippy -- -D warnings -A dead_code -A clippy::too_many_arguments -A clippy::manual_map -A clippy::manual_is_multiple_of`
-   - `cargo test` with `AI_MEMORY_NO_CONFIG=1`
-   - `cargo audit`
-2. Commit, push to prod `main`
-3. Push tag `v{VERSION}` to prod `main`
+1. Merge `develop` into `main` via PR (owner approval required)
+2. Ensure all gates pass locally:
+   ```bash
+   cargo fmt
+   cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+   AI_MEMORY_NO_CONFIG=1 cargo test
+   cargo audit
+   ```
+3. Push tag `v{VERSION}` to `main`
 4. CI pipeline triggers automatically:
-   - Check phase (fmt, clippy, test, audit, build) on ubuntu + macos
+   - Check phase (fmt, clippy pedantic, test, audit, build) on ubuntu + macos
    - Release phase: 5 platform binaries + `.deb`/`.rpm` packages
    - Docker: push to GHCR (`ghcr.io/alphaonedev/ai-memory:VERSION` + `:latest`)
-   - PPA: Ubuntu PPA upload
-   - COPR: Fedora COPR upload
+   - PPA: Ubuntu PPA upload (`ppa:jbridger2021/ppa`)
+   - COPR: Fedora COPR upload (`alpha-one-ai/ai-memory`)
 5. Verify: `gh release view v{VERSION} --repo alphaonedev/ai-memory-mcp`
-6. Install on node: download binary from GitHub Releases to `/usr/local/bin/ai-memory`
+6. Update Homebrew tap (manual): `alphaonedev/homebrew-tap` — download platform tarballs, compute SHA256 hashes, update `Formula/ai-memory.rb`
 
 ### 4.3 Documentation Sync
 
 Before tagging a release:
 
 - [ ] `CHANGELOG.md` has entry for this version with all fixes
-- [ ] Test counts updated in 7 locations (see Section 2.5)
-- [ ] MCP tool counts updated in 4 locations (see Section 2.5)
-- [ ] Both dev and prod repos have identical source files
+- [ ] Test counts updated in 7 locations (see Section 2.6)
+- [ ] MCP tool counts updated in 4 locations (see Section 2.6)
 - [ ] `Cargo.toml` version matches the tag
+- [ ] All new source files have SPDX headers
+- [ ] Homebrew tap updated (`alphaonedev/homebrew-tap`) with new SHA256 hashes
 
 ### 4.4 Post-Release
 
@@ -224,14 +263,36 @@ Before tagging a release:
 
 ---
 
-## 5. Key References
+## 5. Legal & Licensing
+
+| Item | Status |
+|------|--------|
+| License | Apache License, Version 2.0 |
+| Patent grant | Apache 2.0 Section 3 (contributor patent grant) |
+| Patent retaliation | Apache 2.0 Section 3 (attacker loses license) |
+| CLA | Required for all contributors ([CLA.md](../CLA.md)) |
+| OIN membership | Active (AlphaOne LLC, 3,900+ member cross-license) |
+| Trademark | ai-memory(TM) — USPTO Serial No. 99761257 (pending) |
+| SPDX headers | Required on all source files: `// SPDX-License-Identifier: Apache-2.0` |
+| NOTICE file | Required per Apache 2.0 Section 4(d) |
+
+---
+
+## 6. Key References
 
 | Reference | Location |
 |-----------|----------|
 | CI/CD workflow | `.github/workflows/ci.yml` |
-| Phase 0 tracker | [Issue #1](https://github.com/alphaonedev/ai-memory-mcp-dev/issues/1) |
-| Update facility audit | [Issue #49](https://github.com/alphaonedev/ai-memory-mcp-dev/issues/49) |
-| Functional test protocol | [Issue #51](https://github.com/alphaonedev/ai-memory-mcp-dev/issues/51) |
-| Patch 2 close-out & test standard | [Issue #52](https://github.com/alphaonedev/ai-memory-mcp-dev/issues/52) |
-| cargo-audit CI | [Issue #55](https://github.com/alphaonedev/ai-memory-mcp-dev/issues/55) |
-| CHANGELOG | `CHANGELOG.md` in both repos |
+| Branch protection | GitHub repo settings + `.github/CODEOWNERS` |
+| Contributing guide | `CONTRIBUTING.md` |
+| CLA | `CLA.md` |
+| LICENSE | `LICENSE` |
+| NOTICE | `NOTICE` |
+| CHANGELOG | `CHANGELOG.md` |
+| Roadmap | `ROADMAP.md` |
+| Install guide | `docs/INSTALL.md` |
+| User guide | `docs/USER_GUIDE.md` |
+| Developer guide | `docs/DEVELOPER_GUIDE.md` |
+| Admin guide | `docs/ADMIN_GUIDE.md` |
+| OIN agreement | `OIN_LICENSE_AGREEMENT.pdf` |
+| Homebrew tap | `alphaonedev/homebrew-tap` (separate repo) |

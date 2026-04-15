@@ -919,12 +919,24 @@ fn handle_delete(
 ) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
+    // Try exact delete first; fall back to prefix resolution
     let deleted = db::delete(conn, id).map_err(|e| e.to_string())?;
     if deleted {
         if let Some(idx) = vector_index {
             idx.remove(id);
         }
         Ok(json!({"deleted": true}))
+    } else if let Some(mem) = db::get_by_prefix(conn, id).map_err(|e| e.to_string())? {
+        let full_id = mem.id.clone();
+        let deleted = db::delete(conn, &full_id).map_err(|e| e.to_string())?;
+        if deleted {
+            if let Some(idx) = vector_index {
+                idx.remove(&full_id);
+            }
+            Ok(json!({"deleted": true}))
+        } else {
+            Err("memory not found".into())
+        }
     } else {
         Err("memory not found".into())
     }
@@ -933,18 +945,26 @@ fn handle_delete(
 fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
+    // Resolve prefix if exact ID not found
+    let resolved_id = if db::get(conn, id).map_err(|e| e.to_string())?.is_some() {
+        id.to_string()
+    } else if let Some(mem) = db::get_by_prefix(conn, id).map_err(|e| e.to_string())? {
+        mem.id
+    } else {
+        return Err("memory not found".into());
+    };
     // Atomic promote: set tier=long and clear expires_at in a single UPDATE
     let now = chrono::Utc::now().to_rfc3339();
     let changed = conn
         .execute(
             "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, id],
+            rusqlite::params![now, resolved_id],
         )
         .map_err(|e| e.to_string())?;
     if changed == 0 {
         return Err("memory not found".into());
     }
-    Ok(json!({"promoted": true, "id": id, "tier": "long"}))
+    Ok(json!({"promoted": true, "id": resolved_id, "tier": "long"}))
 }
 
 fn handle_forget(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
@@ -968,6 +988,14 @@ fn handle_update(
 ) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
+    // Resolve prefix if exact ID not found
+    let resolved_id = if db::get(conn, id).map_err(|e| e.to_string())?.is_some() {
+        id.to_string()
+    } else if let Some(mem) = db::get_by_prefix(conn, id).map_err(|e| e.to_string())? {
+        mem.id
+    } else {
+        return Err("memory not found".into());
+    };
     let title = params["title"].as_str();
     let content = params["content"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
@@ -1016,7 +1044,7 @@ fn handle_update(
 
     let (found, content_changed) = db::update(
         conn,
-        id,
+        &resolved_id,
         title,
         content,
         tier.as_ref(),
@@ -1035,29 +1063,29 @@ fn handle_update(
 
     // Regenerate embedding when title or content changed
     if content_changed && let Some(emb) = embedder {
-        let mem = db::get(conn, id).map_err(|e| e.to_string())?;
+        let mem = db::get(conn, &resolved_id).map_err(|e| e.to_string())?;
         if let Some(ref m) = mem {
             let text = format!("{} {}", m.title, m.content);
             if let Ok(embedding) = emb.embed(&text) {
-                let _ = db::set_embedding(conn, id, &embedding);
+                let _ = db::set_embedding(conn, &resolved_id, &embedding);
                 if let Some(idx) = vector_index {
-                    idx.remove(id);
-                    idx.insert(id.to_string(), embedding);
+                    idx.remove(&resolved_id);
+                    idx.insert(resolved_id.clone(), embedding);
                 }
             }
         }
     }
 
-    let mem = db::get(conn, id).map_err(|e| e.to_string())?;
+    let mem = db::get(conn, &resolved_id).map_err(|e| e.to_string())?;
     Ok(json!({"updated": true, "memory": mem}))
 }
 
 fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
-    match db::get(conn, id).map_err(|e| e.to_string())? {
+    match db::resolve_id(conn, id).map_err(|e| e.to_string())? {
         Some(mem) => {
-            let links = db::get_links(conn, id).unwrap_or_default();
+            let links = db::get_links(conn, &mem.id).unwrap_or_default();
             // Flatten: merge memory fields with links at top level (#96)
             let mut val = serde_json::to_value(&mem).map_err(|e| e.to_string())?;
             if let Some(obj) = val.as_object_mut() {

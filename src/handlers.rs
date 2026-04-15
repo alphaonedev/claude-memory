@@ -165,13 +165,17 @@ pub async fn get_memory(State(state): State<Db>, Path(id): Path<String>) -> impl
             .into_response();
     }
     let lock = state.lock().await;
-    match db::get(&lock.0, &id) {
+    match db::resolve_id(&lock.0, &id) {
         Ok(Some(mem)) => {
-            let links = db::get_links(&lock.0, &id).unwrap_or_default();
+            let links = db::get_links(&lock.0, &mem.id).unwrap_or_default();
             Json(json!({"memory": mem, "links": links})).into_response()
         }
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
         Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("ambiguous ID prefix") {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+            }
             tracing::error!("handler error: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -202,9 +206,28 @@ pub async fn update_memory(
             .into_response();
     }
     let lock = state.lock().await;
+    // Resolve prefix if exact ID not found
+    let resolved_id = match db::resolve_id(&lock.0, &id) {
+        Ok(Some(mem)) => mem.id,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("ambiguous ID prefix") {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+            }
+            tracing::error!("handler error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
     match db::update(
         &lock.0,
-        &id,
+        &resolved_id,
         body.title.as_deref(),
         body.content.as_deref(),
         body.tier.as_ref(),
@@ -216,7 +239,7 @@ pub async fn update_memory(
         body.metadata.as_ref(),
     ) {
         Ok((true, _)) => {
-            let mem = db::get(&lock.0, &id).ok().flatten();
+            let mem = db::get(&lock.0, &resolved_id).ok().flatten();
             Json(json!(mem)).into_response()
         }
         Ok((false, _)) => {
@@ -246,9 +269,38 @@ pub async fn delete_memory(State(state): State<Db>, Path(id): Path<String>) -> i
             .into_response();
     }
     let lock = state.lock().await;
+    // Try exact delete first; fall back to prefix resolution
     match db::delete(&lock.0, &id) {
         Ok(true) => Json(json!({"deleted": true})).into_response(),
-        Ok(false) => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
+        Ok(false) => {
+            // Prefix fallback
+            match db::get_by_prefix(&lock.0, &id) {
+                Ok(Some(mem)) => {
+                    let full_id = mem.id;
+                    match db::delete(&lock.0, &full_id) {
+                        Ok(true) => Json(json!({"deleted": true})).into_response(),
+                        _ => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})))
+                            .into_response(),
+                    }
+                }
+                Ok(None) => {
+                    (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("ambiguous ID prefix") {
+                        (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response()
+                    } else {
+                        tracing::error!("handler error: {e}");
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(json!({"error": "internal server error"})),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
@@ -269,9 +321,28 @@ pub async fn promote_memory(State(state): State<Db>, Path(id): Path<String>) -> 
             .into_response();
     }
     let lock = state.lock().await;
+    // Resolve prefix if exact ID not found
+    let resolved_id = match db::resolve_id(&lock.0, &id) {
+        Ok(Some(mem)) => mem.id,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response();
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("ambiguous ID prefix") {
+                return (StatusCode::BAD_REQUEST, Json(json!({"error": msg}))).into_response();
+            }
+            tracing::error!("handler error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
     match db::update(
         &lock.0,
-        &id,
+        &resolved_id,
         None,
         None,
         Some(&Tier::Long),
@@ -285,7 +356,7 @@ pub async fn promote_memory(State(state): State<Db>, Path(id): Path<String>) -> 
         Ok((true, _)) => {
             if let Err(e) = lock.0.execute(
                 "UPDATE memories SET expires_at = NULL WHERE id = ?1",
-                rusqlite::params![id],
+                rusqlite::params![resolved_id],
             ) {
                 tracing::error!("promote clear expiry failed: {e}");
                 return (
@@ -294,7 +365,7 @@ pub async fn promote_memory(State(state): State<Db>, Path(id): Path<String>) -> 
                 )
                     .into_response();
             }
-            Json(json!({"promoted": true, "id": id, "tier": "long"})).into_response()
+            Json(json!({"promoted": true, "id": resolved_id, "tier": "long"})).into_response()
         }
         Ok((false, _)) => {
             (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()

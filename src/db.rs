@@ -309,6 +309,38 @@ pub fn get(conn: &Connection, id: &str) -> Result<Option<Memory>> {
     }
 }
 
+/// Look up a memory by ID prefix. Returns the memory if exactly one match is found.
+/// Returns `Ok(None)` if no matches. Returns an error if the prefix is ambiguous (>1 match).
+pub fn get_by_prefix(conn: &Connection, prefix: &str) -> Result<Option<Memory>> {
+    // Escape SQL LIKE wildcards in the prefix to prevent % and _ from matching broadly
+    let escaped = prefix.replace('%', "\\%").replace('_', "\\_");
+    let pattern = format!("{escaped}%");
+    let mut stmt = conn.prepare("SELECT * FROM memories WHERE id LIKE ?1 ESCAPE '\\'")?;
+    let rows: Vec<Memory> = stmt
+        .query_map(params![pattern], row_to_memory)?
+        .filter_map(Result::ok)
+        .collect();
+    match rows.len() {
+        0 => Ok(None),
+        1 => Ok(Some(rows.into_iter().next().expect("len checked"))),
+        n => {
+            let ids: Vec<String> = rows.iter().map(|m| m.id.clone()).collect();
+            anyhow::bail!(
+                "ambiguous ID prefix '{prefix}': {n} matches\n{}",
+                ids.join("\n")
+            );
+        }
+    }
+}
+
+/// Resolve an ID that may be a prefix. Tries exact match first, then prefix match.
+pub fn resolve_id(conn: &Connection, id: &str) -> Result<Option<Memory>> {
+    if let Some(mem) = get(conn, id)? {
+        return Ok(Some(mem));
+    }
+    get_by_prefix(conn, id)
+}
+
 /// Bump access count, extend TTL, auto-promote — atomic via transaction.
 pub fn touch(conn: &Connection, id: &str, short_extend: i64, mid_extend: i64) -> Result<()> {
     let now = Utc::now();
@@ -2311,6 +2343,73 @@ mod tests {
         // Empty input returns placeholder
         let sanitized3 = sanitize_fts_query("", true);
         assert_eq!(sanitized3, "\"_empty_\"");
+    }
+
+    #[test]
+    fn get_by_prefix_8char() {
+        let conn = test_db();
+        let mem = make_memory("Prefix test", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        let prefix = &id[..8];
+        let got = get_by_prefix(&conn, prefix).unwrap().unwrap();
+        assert_eq!(got.id, id);
+        assert_eq!(got.title, "Prefix test");
+    }
+
+    #[test]
+    fn get_by_prefix_full_uuid() {
+        let conn = test_db();
+        let mem = make_memory("Full UUID prefix", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        // Full UUID used as prefix still works (LIKE 'full-uuid%' matches exact)
+        let got = get_by_prefix(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.id, id);
+    }
+
+    #[test]
+    fn get_by_prefix_nonexistent() {
+        let conn = test_db();
+        let got = get_by_prefix(&conn, "ffffffff").unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn get_by_prefix_ambiguous() {
+        let conn = test_db();
+        // Insert two memories with IDs sharing a common prefix
+        let mut mem1 = make_memory("Ambig A", "test", Tier::Long, 5);
+        mem1.id = "aaaa1111-0000-0000-0000-000000000001".to_string();
+        insert(&conn, &mem1).unwrap();
+        let mut mem2 = make_memory("Ambig B", "test2", Tier::Long, 5);
+        mem2.id = "aaaa2222-0000-0000-0000-000000000002".to_string();
+        insert(&conn, &mem2).unwrap();
+        let result = get_by_prefix(&conn, "aaaa");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("ambiguous"));
+        assert!(err_msg.contains("2 matches"));
+        // Error should list the matching full IDs so the user can pick one
+        assert!(
+            err_msg.contains("aaaa1111-0000-0000-0000-000000000001"),
+            "error should list matching IDs, got: {err_msg}"
+        );
+        assert!(err_msg.contains("aaaa2222-0000-0000-0000-000000000002"));
+    }
+
+    #[test]
+    fn resolve_id_exact_then_prefix() {
+        let conn = test_db();
+        let mem = make_memory("Resolve test", "test", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        // Exact match
+        let got = resolve_id(&conn, &id).unwrap().unwrap();
+        assert_eq!(got.id, id);
+        // Prefix match
+        let got2 = resolve_id(&conn, &id[..8]).unwrap().unwrap();
+        assert_eq!(got2.id, id);
+        // Nonexistent
+        let got3 = resolve_id(&conn, "zzzzzzzz").unwrap();
+        assert!(got3.is_none());
     }
 
     #[test]
