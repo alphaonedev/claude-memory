@@ -385,6 +385,10 @@ pub struct AppConfig {
     pub ttl: Option<TtlConfig>,
     /// Archive memories before GC deletion (default: true)
     pub archive_on_gc: Option<bool>,
+    /// Optional API key for HTTP API authentication
+    pub api_key: Option<String>,
+    /// Maximum archive age in days for automatic purge during GC (default: disabled)
+    pub archive_max_days: Option<i64>,
 }
 
 impl AppConfig {

@@ -18,13 +18,13 @@ mod validate;
 
 use anyhow::Result;
 use axum::{
+    Router,
     extract::DefaultBodyLimit,
     routing::{delete, get, post, put},
-    Router,
 };
 use chrono::{Duration, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use clap_complete::{generate, Shell};
+use clap_complete::{Shell, generate};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -493,12 +493,11 @@ async fn main() -> Result<()> {
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
-    if result.is_ok() {
-        if let Some(cp_path) = db_path_for_checkpoint {
-            if let Ok(conn) = db::open(&cp_path) {
-                let _ = db::checkpoint(&conn);
-            }
-        }
+    if result.is_ok()
+        && let Some(cp_path) = db_path_for_checkpoint
+        && let Ok(conn) = db::open(&cp_path)
+    {
+        let _ = db::checkpoint(&conn);
     }
 
     result
@@ -525,12 +524,18 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 
     // Automatic GC
     let gc_state = state.clone();
+    let archive_max_days = app_config.archive_max_days;
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(tokio::time::Duration::from_secs(GC_INTERVAL_SECS)).await;
             let lock = gc_state.lock().await;
             match db::gc(&lock.0, lock.3) {
                 Ok(n) if n > 0 => tracing::info!("gc: expired {n} memories"),
+                _ => {}
+            }
+            // Auto-purge old archives if configured
+            match db::auto_purge_archive(&lock.0, archive_max_days) {
+                Ok(n) if n > 0 => tracing::info!("gc: purged {n} old archived memories"),
                 _ => {}
             }
         }
@@ -544,6 +549,13 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         let lock = shutdown_state.lock().await;
         let _ = db::checkpoint(&lock.0);
     };
+
+    let api_key_state = handlers::ApiKeyState {
+        key: app_config.api_key.clone(),
+    };
+    if api_key_state.key.is_some() {
+        tracing::info!("API key authentication enabled");
+    }
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -576,9 +588,13 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             post(handlers::restore_archive),
         )
         .route("/api/v1/archive/stats", get(handlers::archive_stats))
+        .layer(axum::middleware::from_fn_with_state(
+            api_key_state,
+            handlers::api_key_auth,
+        ))
         .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024)) // 50MB max request body
-        .layer(CorsLayer::permissive())
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB default (bulk/import bodies capped at MAX_BULK_SIZE * per-memory limit)
+        .layer(CorsLayer::new())
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
@@ -653,6 +669,7 @@ fn cmd_store(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
+        metadata: models::default_metadata(),
     };
     let contradictions =
         db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
@@ -729,10 +746,10 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
     if let Some(c) = args.confidence {
         validate::validate_confidence(c)?;
     }
-    if let Some(ref ts) = args.expires_at {
-        if !ts.is_empty() {
-            validate::validate_expires_at_format(ts)?;
-        }
+    if let Some(ref ts) = args.expires_at
+        && !ts.is_empty()
+    {
+        validate::validate_expires_at_format(ts)?;
     }
     let (found, _content_changed) = db::update(
         &conn,
@@ -745,6 +762,7 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
         args.priority,
         args.confidence,
         args.expires_at.as_deref(),
+        None,
     )?;
     if !found {
         eprintln!("not found: {}", args.id);
@@ -800,20 +818,20 @@ fn cmd_recall(
             Ok(emb) => {
                 eprintln!("ai-memory: embedder loaded ({})", emb.model_description());
                 // Backfill embeddings for memories that don't have them
-                if let Ok(unembedded) = db::get_unembedded_ids(&conn) {
-                    if !unembedded.is_empty() {
-                        eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
-                        let mut ok = 0usize;
-                        for (id, title, content) in &unembedded {
-                            let text = format!("{title} {content}");
-                            if let Ok(embedding) = emb.embed(&text) {
-                                if db::set_embedding(&conn, id, &embedding).is_ok() {
-                                    ok += 1;
-                                }
-                            }
+                if let Ok(unembedded) = db::get_unembedded_ids(&conn)
+                    && !unembedded.is_empty()
+                {
+                    eprintln!("ai-memory: backfilling {} memories...", unembedded.len());
+                    let mut ok = 0usize;
+                    for (id, title, content) in &unembedded {
+                        let text = format!("{title} {content}");
+                        if let Ok(embedding) = emb.embed(&text)
+                            && db::set_embedding(&conn, id, &embedding).is_ok()
+                        {
+                            ok += 1;
                         }
-                        eprintln!("ai-memory: backfilled {}/{}", ok, unembedded.len());
                     }
+                    eprintln!("ai-memory: backfilled {}/{}", ok, unembedded.len());
                 }
                 Some(emb)
             }
@@ -1126,6 +1144,7 @@ fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()>
         None,
         None,
         Some(""),
+        None,
     )?;
     if !found {
         eprintln!("not found: {}", args.id);
@@ -1150,6 +1169,7 @@ fn cmd_forget(db_path: &Path, args: &ForgetArgs, json_out: bool) -> Result<()> {
         args.namespace.as_deref(),
         args.pattern.as_deref(),
         tier.as_ref(),
+        true, // always archive from CLI
     ) {
         Ok(n) => {
             if json_out {
@@ -1336,6 +1356,7 @@ fn cmd_resolve(db_path: &Path, args: &ResolveArgs, json_out: bool) -> Result<()>
         None,
         Some(1),
         Some(0.1),
+        None,
         None,
     )?;
     db::touch(
@@ -1973,6 +1994,7 @@ fn cmd_mine(
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at,
+            metadata: models::default_metadata(),
         };
 
         match db::insert(&conn, &mem) {

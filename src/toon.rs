@@ -26,6 +26,7 @@ const MEMORY_FIELDS: &[&str] = &[
     "source",
     "created_at",
     "updated_at",
+    "metadata",
 ];
 
 /// Compact memory fields — omits timestamps for tighter output.
@@ -144,15 +145,27 @@ fn format_value(val: Option<&Value>) -> String {
                 .collect();
             escape_toon(&items.join(","))
         }
-        Some(Value::Object(_)) => "[object]".to_string(),
+        Some(obj @ Value::Object(m)) => {
+            if m.is_empty() {
+                String::new()
+            } else {
+                escape_toon(&serde_json::to_string(obj).unwrap_or_default())
+            }
+        }
     }
 }
 
 /// Escape special characters in TOON values.
 fn escape_toon(s: &str) -> String {
-    if s.contains('|') || s.contains('\n') || s.contains('\r') || s.contains('\\') {
+    if s.contains('|')
+        || s.contains('\n')
+        || s.contains('\r')
+        || s.contains('\\')
+        || s.contains(':')
+    {
         s.replace('\\', "\\\\")
             .replace('|', "\\|")
+            .replace(':', "\\:")
             .replace('\n', "\\n")
             .replace('\r', "\\r")
     } else {

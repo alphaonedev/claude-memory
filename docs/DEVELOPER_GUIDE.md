@@ -59,7 +59,7 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 ### `src/models.rs`
 
 - `Tier` enum (`Short`, `Mid`, `Long`) with TTL defaults: 6h, 7d, none
-- `Memory` struct -- the core data type with 14 fields
+- `Memory` struct -- the core data type with 15 fields (includes extensible `metadata` JSON column)
 - `MemoryLink` struct -- typed directional links between memories
 - Request types: `CreateMemory`, `UpdateMemory`, `SearchQuery`, `ListQuery`, `RecallQuery`, `RecallBody`, `LinkBody`, `ForgetQuery`, `ConsolidateBody`, `ImportBody`
 - Response types: `Stats`, `TierCount`, `NamespaceCount`

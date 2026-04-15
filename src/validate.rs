@@ -1,9 +1,9 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
-use crate::models::{CreateMemory, Memory, UpdateMemory, MAX_CONTENT_SIZE};
+use crate::models::{CreateMemory, MAX_CONTENT_SIZE, Memory, UpdateMemory};
 
 const MAX_TITLE_LEN: usize = 512;
 const MAX_NAMESPACE_LEN: usize = 128;
@@ -12,6 +12,8 @@ const MAX_TAG_LEN: usize = 128;
 const MAX_TAGS_COUNT: usize = 50;
 const MAX_RELATION_LEN: usize = 64;
 const MAX_ID_LEN: usize = 128;
+const MAX_METADATA_SIZE: usize = 65_536;
+const MAX_METADATA_DEPTH: usize = 32;
 
 const VALID_SOURCES: &[&str] = &[
     "user",
@@ -30,7 +32,7 @@ fn is_valid_rfc3339(s: &str) -> bool {
 }
 
 fn is_clean_string(s: &str) -> bool {
-    !s.contains('\0')
+    !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 pub fn validate_title(title: &str) -> Result<()> {
@@ -132,10 +134,10 @@ pub fn validate_expires_at(expires_at: Option<&str>) -> Result<()> {
         if !is_valid_rfc3339(ts) {
             bail!("expires_at is not valid RFC3339: '{ts}'");
         }
-        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-            if dt < chrono::Utc::now() {
-                bail!("expires_at is in the past");
-            }
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts)
+            && dt < chrono::Utc::now()
+        {
+            bail!("expires_at is in the past");
         }
     }
     Ok(())
@@ -151,6 +153,33 @@ pub fn validate_ttl_secs(ttl: Option<i64>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+pub fn validate_metadata(metadata: &serde_json::Value) -> Result<()> {
+    if !metadata.is_object() {
+        bail!("metadata must be a JSON object");
+    }
+    let serialized = serde_json::to_string(metadata)
+        .map_err(|e| anyhow::anyhow!("metadata is not valid JSON: {e}"))?;
+    if serialized.len() > MAX_METADATA_SIZE {
+        bail!(
+            "metadata exceeds max size of {MAX_METADATA_SIZE} bytes (got {})",
+            serialized.len()
+        );
+    }
+    let depth = json_depth(metadata);
+    if depth > MAX_METADATA_DEPTH {
+        bail!("metadata nesting depth exceeds limit of {MAX_METADATA_DEPTH} (got {depth})");
+    }
+    Ok(())
+}
+
+fn json_depth(val: &serde_json::Value) -> usize {
+    match val {
+        serde_json::Value::Object(map) => 1 + map.values().map(json_depth).max().unwrap_or(0),
+        serde_json::Value::Array(arr) => 1 + arr.iter().map(json_depth).max().unwrap_or(0),
+        _ => 0,
+    }
 }
 
 pub fn validate_relation(relation: &str) -> Result<()> {
@@ -198,6 +227,7 @@ pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_confidence(mem.confidence)?;
     validate_expires_at(mem.expires_at.as_deref())?;
     validate_ttl_secs(mem.ttl_secs)?;
+    validate_metadata(&mem.metadata)?;
     Ok(())
 }
 
@@ -220,17 +250,18 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
     if !is_valid_rfc3339(&mem.updated_at) {
         bail!("updated_at is not valid RFC3339");
     }
-    if let Some(ref ts) = mem.last_accessed_at {
-        if !is_valid_rfc3339(ts) {
-            bail!("last_accessed_at is not valid RFC3339");
-        }
+    if let Some(ref ts) = mem.last_accessed_at
+        && !is_valid_rfc3339(ts)
+    {
+        bail!("last_accessed_at is not valid RFC3339");
     }
     // Don't reject past expires_at on import — may be importing historical data
-    if let Some(ref ts) = mem.expires_at {
-        if !is_valid_rfc3339(ts) {
-            bail!("expires_at is not valid RFC3339");
-        }
+    if let Some(ref ts) = mem.expires_at
+        && !is_valid_rfc3339(ts)
+    {
+        bail!("expires_at is not valid RFC3339");
     }
+    validate_metadata(&mem.metadata)?;
     Ok(())
 }
 
@@ -258,6 +289,9 @@ pub fn validate_update(update: &UpdateMemory) -> Result<()> {
     }
     if let Some(ref ts) = update.expires_at {
         validate_expires_at_format(ts)?;
+    }
+    if let Some(ref meta) = update.metadata {
+        validate_metadata(meta)?;
     }
     Ok(())
 }
@@ -384,5 +418,52 @@ mod tests {
     fn test_self_link_rejected() {
         assert!(validate_link("abc", "abc", "related_to").is_err());
         assert!(validate_link("abc", "def", "related_to").is_ok());
+    }
+
+    #[test]
+    fn test_valid_metadata() {
+        assert!(validate_metadata(&serde_json::json!({})).is_ok());
+        assert!(validate_metadata(&serde_json::json!({"key": "value"})).is_ok());
+        assert!(validate_metadata(&serde_json::json!({"nested": {"a": 1}})).is_ok());
+        // Non-object types rejected
+        assert!(validate_metadata(&serde_json::json!("string")).is_err());
+        assert!(validate_metadata(&serde_json::json!(42)).is_err());
+        assert!(validate_metadata(&serde_json::json!([1, 2])).is_err());
+        assert!(validate_metadata(&serde_json::json!(null)).is_err());
+    }
+
+    #[test]
+    fn test_clean_string_rejects_control_chars() {
+        assert!(is_clean_string("normal text"));
+        assert!(is_clean_string("with\nnewline"));
+        assert!(is_clean_string("with\ttab"));
+        assert!(!is_clean_string("has\0null"));
+        assert!(!is_clean_string("has\x07bell"));
+        assert!(!is_clean_string("has\x1b[31mANSI\x1b[0m"));
+        assert!(!is_clean_string("has\x08backspace"));
+    }
+
+    #[test]
+    fn test_oversized_metadata_rejected() {
+        let big_value = "x".repeat(MAX_METADATA_SIZE);
+        let meta = serde_json::json!({"big": big_value});
+        assert!(validate_metadata(&meta).is_err());
+    }
+
+    #[test]
+    fn test_deeply_nested_metadata_rejected() {
+        // Build a 33-level deep object (exceeds MAX_METADATA_DEPTH of 32)
+        let mut val = serde_json::json!("leaf");
+        for _ in 0..33 {
+            val = serde_json::json!({"nested": val});
+        }
+        assert!(validate_metadata(&val).is_err());
+
+        // 32 levels should be fine
+        let mut val = serde_json::json!("leaf");
+        for _ in 0..31 {
+            val = serde_json::json!({"nested": val});
+        }
+        assert!(validate_metadata(&val).is_ok());
     }
 }
