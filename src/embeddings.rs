@@ -6,7 +6,7 @@ use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use candle_transformers::models::bert::{BertModel, Config};
 use hf_hub::{Repo, RepoType, api::sync::Api};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokenizers::Tokenizer;
 
 use crate::config::EmbeddingModel;
@@ -32,7 +32,7 @@ const NOMIC_DIM: usize = 768;
 pub enum Embedder {
     /// Candle-based local embedding (MiniLM-L6-v2, 384-dim)
     Local {
-        model: Arc<BertModel>,
+        model: Arc<Mutex<BertModel>>,
         tokenizer: Arc<Tokenizer>,
         device: Device,
     },
@@ -42,11 +42,6 @@ pub enum Embedder {
         model_name: String,
     },
 }
-
-// BertModel does not implement Send/Sync by default but the CPU-backed
-// tensors are safe to share across threads.
-unsafe impl Send for Embedder {}
-unsafe impl Sync for Embedder {}
 
 impl Embedder {
     /// Create a new local (candle) embedder for MiniLM-L6-v2.
@@ -92,7 +87,7 @@ impl Embedder {
         let model = BertModel::load(vb, &config).context("failed to build BertModel")?;
 
         Ok(Self::Local {
-            model: Arc::new(model),
+            model: Arc::new(Mutex::new(model)),
             tokenizer: Arc::new(tokenizer),
             device,
         })
@@ -155,7 +150,12 @@ impl Embedder {
                 model,
                 tokenizer,
                 device,
-            } => Self::embed_local(model, tokenizer, device, text),
+            } => {
+                let model_guard = model
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("model lock poisoned: {e}"))?;
+                Self::embed_local(&model_guard, tokenizer, device, text)
+            }
             Self::Ollama { client, model_name } => client.embed_text(text, model_name),
         }
     }
