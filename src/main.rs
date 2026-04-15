@@ -594,7 +594,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         ))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB default (bulk/import bodies capped at MAX_BULK_SIZE * per-memory limit)
-        .layer(CorsLayer::permissive())
+        .layer(CorsLayer::new())
         .with_state(state);
 
     let addr = format!("{}:{}", args.host, args.port);
