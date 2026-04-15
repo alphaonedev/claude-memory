@@ -127,7 +127,7 @@ That's it. Everything below is optional detail.
 
 > **Pre-built binaries have no prerequisites** -- just run `install.sh` or `install.ps1` as shown above. The requirements below only apply when building from source.
 
-- **Rust toolchain** (1.75+): Install via [rustup](https://rustup.rs/)
+- **Rust toolchain (1.87+): Install via [rustup](https://rustup.rs/)
   ```bash
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
   ```
@@ -531,6 +531,54 @@ openclaw mcp set memory '{"command":"ai-memory","args":["--db","~/.local/share/a
 ```
 
 > **Notes for OpenClaw:** Uses `mcp.servers` key (not camelCase `mcpServers` — this is critical). CLI management: `openclaw mcp list`, `openclaw mcp show <name>`, `openclaw mcp unset <name>`. See [OpenClaw MCP docs](https://docs.openclaw.ai/cli/mcp).
+
+#### Nous Research Hermes Agent
+
+| Scope | File | Notes |
+|-------|------|-------|
+| **Global only** | `~/.hermes/config.yaml` | YAML format, no per-project scope |
+
+> **Important:** Hermes uses `mcp_servers` (underscored YAML key, NOT camelCase `mcpServers`).
+
+**Stdio (local):**
+
+```yaml
+mcp_servers:
+  memory:
+    command: ai-memory
+    args:
+      - "--db"
+      - "~/.local/share/ai-memory/memories.db"
+      - "mcp"
+      - "--tier"
+      - "semantic"
+```
+
+**HTTP (remote — requires ai-memory running as HTTP daemon):**
+
+```yaml
+mcp_servers:
+  memory:
+    url: "http://localhost:9077/mcp"
+```
+
+**With tool filtering (restrict to core tools):**
+
+```yaml
+mcp_servers:
+  memory:
+    command: ai-memory
+    args: ["--db", "~/.local/share/ai-memory/memories.db", "mcp", "--tier", "semantic"]
+    tools:
+      include:
+        - memory_store
+        - memory_recall
+        - memory_search
+        - memory_list
+        - memory_get
+```
+
+> **Notes for Hermes Agent:** Uses YAML format with underscored `mcp_servers` key. Supports both stdio (local subprocess) and HTTP (remote endpoint) transports. Per-server tool filtering via `tools.include`/`tools.exclude`. Additional supported fields: `env` (environment variables), `timeout` (tool call timeout), `connect_timeout` (connection timeout), `enabled` (boolean), `sampling` (LLM inference config). See [Hermes MCP docs](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp).
 
 If `ai-memory` is not in your PATH, use the full path to the binary in any of the configurations above:
 

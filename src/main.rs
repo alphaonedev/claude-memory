@@ -711,7 +711,15 @@ fn cmd_store(
 fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
     let conn = db::open(db_path)?;
-    validate::validate_id(&args.id)?;
+    // Resolve prefix if exact ID not found
+    let resolved_id = if db::get(&conn, &args.id)?.is_some() {
+        args.id.clone()
+    } else if let Some(mem) = db::get_by_prefix(&conn, &args.id)? {
+        mem.id
+    } else {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
+    };
     let tier = args.tier.as_deref().and_then(Tier::from_str);
     let tags: Option<Vec<String>> = args.tags.as_ref().map(|t| {
         t.split(',')
@@ -745,7 +753,7 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
     }
     let (found, _content_changed) = db::update(
         &conn,
-        &args.id,
+        &resolved_id,
         args.title.as_deref(),
         args.content.as_deref(),
         tier.as_ref(),
@@ -760,7 +768,7 @@ fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
         eprintln!("not found: {}", args.id);
         std::process::exit(1);
     }
-    if let Some(mem) = db::get(&conn, &args.id)? {
+    if let Some(mem) = db::get(&conn, &resolved_id)? {
         if json_out {
             println!("{}", serde_json::to_string(&mem)?);
         } else {
@@ -1015,9 +1023,8 @@ fn cmd_search(
 fn cmd_get(db_path: &Path, args: &GetArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
     let conn = db::open(db_path)?;
-    validate::validate_id(&args.id)?;
-    if let Some(mem) = db::get(&conn, &args.id)? {
-        let links = db::get_links(&conn, &args.id).unwrap_or_default();
+    if let Some(mem) = db::resolve_id(&conn, &args.id)? {
+        let links = db::get_links(&conn, &mem.id).unwrap_or_default();
         if json_out {
             println!(
                 "{}",
@@ -1091,12 +1098,21 @@ fn cmd_list(
 fn cmd_delete(db_path: &Path, args: &DeleteArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
     let conn = db::open(db_path)?;
-    validate::validate_id(&args.id)?;
+    // Try exact delete first; if not found, resolve prefix to get the full ID
     if db::delete(&conn, &args.id)? {
         if json_out {
             println!("{}", serde_json::json!({"deleted": true, "id": args.id}));
         } else {
             println!("deleted: {}", args.id);
+        }
+    } else if let Some(mem) = db::get_by_prefix(&conn, &args.id)? {
+        let full_id = mem.id.clone();
+        if db::delete(&conn, &full_id)? {
+            if json_out {
+                println!("{}", serde_json::json!({"deleted": true, "id": full_id}));
+            } else {
+                println!("deleted: {full_id}");
+            }
         }
     } else {
         eprintln!("not found: {}", args.id);
@@ -1108,10 +1124,18 @@ fn cmd_delete(db_path: &Path, args: &DeleteArgs, json_out: bool) -> Result<()> {
 fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
     let conn = db::open(db_path)?;
-    validate::validate_id(&args.id)?;
+    // Resolve prefix if exact ID not found
+    let resolved_id = if db::get(&conn, &args.id)?.is_some() {
+        args.id.clone()
+    } else if let Some(mem) = db::get_by_prefix(&conn, &args.id)? {
+        mem.id
+    } else {
+        eprintln!("not found: {}", args.id);
+        std::process::exit(1);
+    };
     let (found, _) = db::update(
         &conn,
-        &args.id,
+        &resolved_id,
         None,
         None,
         Some(&Tier::Long),
@@ -1129,10 +1153,10 @@ fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()>
     if json_out {
         println!(
             "{}",
-            serde_json::json!({"promoted": true, "id": args.id, "tier": "long"})
+            serde_json::json!({"promoted": true, "id": resolved_id, "tier": "long"})
         );
     } else {
-        println!("promoted to long-term: {}", args.id);
+        println!("promoted to long-term: {resolved_id}");
     }
     Ok(())
 }

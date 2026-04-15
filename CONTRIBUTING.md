@@ -1,4 +1,4 @@
-# Contributing to ai-memory-mcp
+# Contributing to ai-memory
 
 Thank you for considering contributing to ai-memory-mcp. This document outlines the process for contributing to this project.
 
@@ -24,7 +24,7 @@ Open a feature request at [GitHub Issues](https://github.com/alphaonedev/ai-memo
 
 ### Prerequisites
 
-- **Rust 1.75+** (install via [rustup](https://rustup.rs/))
+- **Rust 1.87+** (install via [rustup](https://rustup.rs/))
 - **C compiler** (gcc, clang, or MSVC)
 - Git
 
@@ -33,35 +33,54 @@ Open a feature request at [GitHub Issues](https://github.com/alphaonedev/ai-memo
 ```bash
 git clone https://github.com/alphaonedev/ai-memory-mcp.git
 cd ai-memory-mcp
+git checkout develop
 cargo build
-cargo test
+AI_MEMORY_NO_CONFIG=1 cargo test
 ```
 
 ## Code Style
 
 - Run `cargo fmt` before committing. All code must be formatted with rustfmt.
 - Run `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` and resolve all failures. CI will reject code that does not pass this check.
+- All new source files must include the copyright header:
+  ```rust
+  // Copyright 2026 AlphaOne LLC
+  // SPDX-License-Identifier: Apache-2.0
+  ```
 - Follow standard Rust naming conventions and idioms.
 
 ## Testing Requirements
 
-- All existing tests must pass (`cargo test`).
+All four checks must pass before submitting a PR:
+
+```bash
+cargo fmt --check
+cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+AI_MEMORY_NO_CONFIG=1 cargo test
+cargo audit
+```
+
+- All four checks must pass. CI will reject PRs that fail any of them.
+- `AI_MEMORY_NO_CONFIG=1` prevents loading `~/.config/ai-memory/config.toml` which may trigger embedder/LLM initialization.
 - New code must include tests. Bug fixes should include a regression test.
 - If you add a new MCP tool, HTTP endpoint, or CLI command, include integration tests covering the primary usage path.
+- If clippy pedantic requires `#[allow(clippy::...)]`, justify it in your PR description.
 
 ## Pull Request Process
 
-1. Fork the repository.
-2. Create a feature branch from `main` (`git checkout -b feature/my-change`).
+1. Fork the repository (external contributors) or branch directly (collaborators).
+2. Create a feature branch from `develop` (`git checkout develop && git checkout -b feature/my-change`).
 3. Make your changes, following the code style and testing guidelines above.
-4. Ensure `cargo fmt`, `cargo clippy`, and `cargo test` all pass.
-5. Push your branch and open a pull request against `main`.
+4. Ensure all four gates pass: `cargo fmt`, `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic`, `AI_MEMORY_NO_CONFIG=1 cargo test`, and `cargo audit`.
+5. Push your branch and open a pull request against `develop` (not `main`).
 6. Fill out the PR description with what changed and why.
 7. Address any review feedback.
 
+**Note:** All PRs target the `develop` branch. The `main` branch is for production releases only — `develop` → `main` merges are done by maintainers when cutting a release.
+
 See the 8-step feature checklist in [DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md) for end-to-end guidance on adding new features.
 
-PRs require at least one approval before merging.
+For the full engineering standards (security review, release process, test protocols), see [ENGINEERING_STANDARDS.md](docs/ENGINEERING_STANDARDS.md). In case of conflict, ENGINEERING_STANDARDS.md is authoritative.
 
 ## Commit Message Conventions
 
@@ -80,6 +99,18 @@ Examples:
 - `feat: add batch memory import from JSONL`
 - `fix: prevent duplicate entries during sync`
 - `docs: update CLI usage examples`
+
+## Branch Protection & Code Review
+
+The `main` branch is protected. The following rules are enforced:
+
+- **No direct pushes to `main`.** All changes must go through a pull request.
+- **Owner approval required.** Every PR to `main` requires approval from `@alphaonedev` (CODEOWNERS). No exceptions.
+- **CI must pass.** Both `Check (ubuntu-latest)` and `Check (macos-latest)` status checks must succeed before merge.
+- **Stale reviews are dismissed.** If you push new commits after receiving approval, the approval is invalidated and must be re-granted.
+- **Force pushes and branch deletion are blocked** on `main`.
+
+PRs to `develop` do not require owner approval but must pass CI (fmt, clippy pedantic, tests). Maintainers merge `develop` into `main` for releases.
 
 ## Release Process
 

@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, develop]
     tags: ["v*"]
   pull_request:
-    branches: [main]
+    branches: [main, develop]
 
 env:
   CARGO_TERM_COLOR: always
@@ -134,6 +134,127 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  crates-io:
+    name: Publish to crates.io
+    needs: check
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish --allow-dirty || echo "::warning::crates.io publish skipped (version may already exist)"
+
+  homebrew:
+    name: Update Homebrew formula
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download release assets and compute SHA256
+        id: sha
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BASE="https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}"
+
+          for TARGET in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            curl -sL -o "ai-memory-${TARGET}.tar.gz" "${BASE}/ai-memory-${TARGET}.tar.gz"
+            SHA=$(sha256sum "ai-memory-${TARGET}.tar.gz" | cut -d' ' -f1)
+            # Convert target to env-safe name
+            SAFE=$(echo "$TARGET" | tr '-' '_')
+            echo "sha_${SAFE}=${SHA}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v5
+        with:
+          repository: alphaonedev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cat > homebrew-tap/Formula/ai-memory.rb << 'FORMULA_EOF'
+          class AiMemory < Formula
+            desc "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI"
+            homepage "https://alphaonedev.github.io/ai-memory-mcp/"
+            version "VERSION_PLACEHOLDER"
+            license "Apache-2.0"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_AARCH64_APPLE_DARWIN"
+              else
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_X86_64_APPLE_DARWIN"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_AARCH64_UNKNOWN_LINUX_GNU"
+              else
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_X86_64_UNKNOWN_LINUX_GNU"
+              end
+            end
+
+            def install
+              bin.install "ai-memory"
+            end
+
+            def caveats
+              <<~EOS
+                To use with an MCP-compatible AI (Claude Code, Codex CLI, Gemini CLI, OpenClaw, etc.),
+                add to your AI platform's MCP config:
+
+                  {
+                    "mcpServers": {
+                      "memory": {
+                        "command": "ai-memory",
+                        "args": ["--db", "~/.local/share/ai-memory/memories.db", "mcp"]
+                      }
+                    }
+                  }
+
+                Documentation: https://alphaonedev.github.io/ai-memory-mcp/
+              EOS
+            end
+
+            test do
+              system "#{bin}/ai-memory", "stats", "--json", "--db", testpath/"test.db"
+            end
+          end
+          FORMULA_EOF
+
+          # Replace placeholders with actual values
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_X86_64_UNKNOWN_LINUX_GNU/${{ steps.sha.outputs.sha_x86_64_unknown_linux_gnu }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_AARCH64_UNKNOWN_LINUX_GNU/${{ steps.sha.outputs.sha_aarch64_unknown_linux_gnu }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_X86_64_APPLE_DARWIN/${{ steps.sha.outputs.sha_x86_64_apple_darwin }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_AARCH64_APPLE_DARWIN/${{ steps.sha.outputs.sha_aarch64_apple_darwin }}/" homebrew-tap/Formula/ai-memory.rb
+
+      - name: Push updated formula
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ai-memory.rb
+          git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
+          git push
+
   docker:
     name: Docker (GHCR)
     needs: check
@@ -207,10 +328,22 @@ jobs:
           SERIES=noble
           sed -i "1s/(.*)/(${VERSION}-1) ${SERIES}; urgency=medium/" debian/changelog
 
-      - name: Build source package
+      - name: Create orig tarball
         run: |
-          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign
-          dpkg-source -b .
+          VERSION=${{ steps.version.outputs.version }}
+          cd ..
+          tar czf "ai-memory_${VERSION}.orig.tar.gz" \
+            --exclude='.git' \
+            --exclude='target' \
+            --exclude='backup' \
+            ai-memory-mcp
+          ls -la "ai-memory_${VERSION}.orig.tar.gz"
+
+      - name: Build source package
+        env:
+          DEBUILD_DPKG_BUILDPACKAGE_OPTS: "-d"
+        run: |
+          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign -d
 
       - name: Sign source package
         run: |
