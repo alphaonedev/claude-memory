@@ -17,8 +17,8 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 dirs = "6"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-clap_mangen = "0.3"
-rusqlite = { version = "0.39", features = ["bundled"] }
+clap_mangen = "0.2"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -34,11 +34,11 @@ candle-transformers = "0.10"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22" }
 instant-distance = "0.6"
-reqwest = { version = "0.13", default-features = false, features = ["blocking", "json", "rustls"] }
-toml = "1.1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+toml = "0.8"
 
 [dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tempfile = "3"
