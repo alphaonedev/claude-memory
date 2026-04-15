@@ -13,7 +13,7 @@
 //!   from `cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, ONNX-free).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use candle_core::{Device, Tensor};
@@ -39,16 +39,13 @@ pub enum CrossEncoder {
     Lexical,
     /// Neural BERT-based cross-encoder (ms-marco-MiniLM-L-6-v2).
     Neural {
-        model: Arc<BertModel>,
+        model: Arc<Mutex<BertModel>>,
         tokenizer: Arc<Tokenizer>,
         classifier_weight: Tensor,
         classifier_bias: Tensor,
         device: Device,
     },
 }
-
-unsafe impl Send for CrossEncoder {}
-unsafe impl Sync for CrossEncoder {}
 
 impl CrossEncoder {
     /// Create a new lexical cross-encoder (no model download required).
@@ -124,7 +121,7 @@ impl CrossEncoder {
             .context("failed to load classifier.bias")?;
 
         Ok(Self::Neural {
-            model: Arc::new(model),
+            model: Arc::new(Mutex::new(model)),
             tokenizer: Arc::new(tokenizer),
             classifier_weight,
             classifier_bias,
@@ -145,8 +142,15 @@ impl CrossEncoder {
                 classifier_bias,
                 device,
             } => {
+                let model_guard = match model.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!("cross-encoder model lock poisoned: {e}");
+                        return lexical_score(query, title, content);
+                    }
+                };
                 match Self::neural_score(
-                    model,
+                    &model_guard,
                     tokenizer,
                     classifier_weight,
                     classifier_bias,
