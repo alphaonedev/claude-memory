@@ -1374,7 +1374,15 @@ fn handle_gc(conn: &rusqlite::Connection, params: &Value, archive: bool) -> Resu
             .query_row(
                 "SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at < ?1",
                 rusqlite::params![now],
-                |r| r.get(0),
+                |r| {
+                    usize::try_from(r.get::<_, i64>(0)?).map_err(|e| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            0,
+                            rusqlite::types::Type::Integer,
+                            Box::new(e),
+                        )
+                    })
+                },
             )
             .unwrap_or(0);
         return Ok(json!({"collected": count, "dry_run": true}));
