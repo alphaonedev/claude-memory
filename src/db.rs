@@ -497,8 +497,6 @@ pub fn list(
     until: Option<&str>,
     tags_filter: Option<&str>,
 ) -> Result<Vec<Memory>> {
-    let limit = u32::try_from(limit).expect("usize as u32");
-    let offset = u32::try_from(offset).expect("usize as u32");
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let mut stmt = conn.prepare(
@@ -543,7 +541,6 @@ pub fn search(
     until: Option<&str>,
     tags_filter: Option<&str>,
 ) -> Result<Vec<Memory>> {
-    let limit = u32::try_from(limit).expect("usize as u32");
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let fts_query = sanitize_fts_query(query, false);
@@ -601,7 +598,6 @@ pub fn recall(
     short_extend: i64,
     mid_extend: i64,
 ) -> Result<Vec<(Memory, f64)>> {
-    let limit = u32::try_from(limit).expect("usize as u32");
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
 
@@ -883,7 +879,7 @@ pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
     let rows = stmt.query_map(params![now], |row| {
         Ok(NamespaceCount {
             namespace: row.get(0)?,
-            count: usize::try_from(row.get::<_, i64>(1)?).expect("usize"),
+            count: row.get(1)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -891,15 +887,7 @@ pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
 }
 
 pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
-    let total: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| {
-        usize::try_from(r.get::<_, i64>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(e),
-            )
-        })
-    })?;
+    let total: usize = conn.query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))?;
 
     let mut stmt =
         conn.prepare("SELECT tier, COUNT(*) FROM memories GROUP BY tier ORDER BY COUNT(*) DESC")?;
@@ -907,7 +895,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         .query_map([], |row| {
             Ok(TierCount {
                 tier: row.get(0)?,
-                count: usize::try_from(row.get::<_, i64>(1)?).expect("usize"),
+                count: row.get(1)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -919,7 +907,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         .query_map([], |row| {
             Ok(NamespaceCount {
                 namespace: row.get(0)?,
-                count: usize::try_from(row.get::<_, i64>(1)?).expect("usize"),
+                count: row.get(1)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -928,26 +916,11 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
     let one_hour = (Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
     let expiring_soon: usize = conn.query_row(
         "SELECT COUNT(*) FROM memories WHERE expires_at IS NOT NULL AND expires_at > ?1 AND expires_at <= ?2",
-        params![now, one_hour], |r| {
-            usize::try_from(r.get::<_, i64>(0)?).map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(
-                0,
-                rusqlite::types::Type::Integer,
-                Box::new(e),
-            )
-        })},
+        params![now, one_hour], |r| r.get(0),
     )?;
 
     let links_count: usize = conn
-        .query_row("SELECT COUNT(*) FROM memory_links", [], |r| {
-            usize::try_from(r.get::<_, i64>(0)?).map_err(|e| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    0,
-                    rusqlite::types::Type::Integer,
-                    Box::new(e),
-                )
-            })
-        })
+        .query_row("SELECT COUNT(*) FROM memory_links", [], |r| r.get(0))
         .unwrap_or(0);
     let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
 
@@ -1037,8 +1010,6 @@ pub fn list_archived(
     limit: usize,
     offset: usize,
 ) -> Result<Vec<serde_json::Value>> {
-    let limit = u32::try_from(limit).expect("usize as u32");
-    let offset = u32::try_from(offset).expect("usize as u32");
     let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match namespace {
         Some(ns) => (
             "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
@@ -1403,7 +1374,6 @@ pub fn recall_hybrid(
     // Collect FTS results with scores
     let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
 
-    let fts_limit = u32::try_from(fts_limit).expect("usize as u32");
     let fts_rows = fts_stmt.query_map(
         params![
             fts_query,
