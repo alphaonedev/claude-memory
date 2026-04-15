@@ -32,7 +32,7 @@ fn is_valid_rfc3339(s: &str) -> bool {
 }
 
 fn is_clean_string(s: &str) -> bool {
-    !s.contains('\0')
+    !s.chars().any(|c| c.is_control() && c != '\n' && c != '\t')
 }
 
 pub fn validate_title(title: &str) -> Result<()> {
@@ -430,6 +430,17 @@ mod tests {
         assert!(validate_metadata(&serde_json::json!(42)).is_err());
         assert!(validate_metadata(&serde_json::json!([1, 2])).is_err());
         assert!(validate_metadata(&serde_json::json!(null)).is_err());
+    }
+
+    #[test]
+    fn test_clean_string_rejects_control_chars() {
+        assert!(is_clean_string("normal text"));
+        assert!(is_clean_string("with\nnewline"));
+        assert!(is_clean_string("with\ttab"));
+        assert!(!is_clean_string("has\0null"));
+        assert!(!is_clean_string("has\x07bell"));
+        assert!(!is_clean_string("has\x1b[31mANSI\x1b[0m"));
+        assert!(!is_clean_string("has\x08backspace"));
     }
 
     #[test]
