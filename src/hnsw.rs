@@ -15,6 +15,9 @@ use std::sync::Mutex;
 /// Maximum overflow entries before triggering a rebuild.
 const REBUILD_THRESHOLD: usize = 200;
 
+/// Maximum entries before evicting oldest to prevent unbounded memory growth.
+const MAX_ENTRIES: usize = 100_000;
+
 /// A point in the HNSW index — wraps a dense embedding vector.
 #[derive(Clone, Debug)]
 pub struct EmbeddingPoint(pub Vec<f32>);
@@ -96,6 +99,14 @@ impl VectorIndex {
 
         // Auto-rebuild if overflow is large
         if state.overflow.len() >= REBUILD_THRESHOLD {
+            state.hnsw = Self::build_hnsw(&state.all_entries);
+            state.overflow.clear();
+        }
+
+        // Evict oldest entries if over capacity
+        if state.all_entries.len() > MAX_ENTRIES {
+            let excess = state.all_entries.len() - MAX_ENTRIES;
+            state.all_entries.drain(..excess);
             state.hnsw = Self::build_hnsw(&state.all_entries);
             state.overflow.clear();
         }
