@@ -553,6 +553,7 @@ pub async fn forget_memories(
         body.namespace.as_deref(),
         body.pattern.as_deref(),
         body.tier.as_ref(),
+        lock.3, // archive_on_gc
     ) {
         Ok(n) => Json(json!({"deleted": n})).into_response(),
         Err(e) => (

@@ -164,13 +164,14 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_forget",
-                "description": "Bulk delete memories matching a pattern, namespace, or tier.",
+                "description": "Bulk delete memories matching a pattern, namespace, or tier. Archives before deletion. Use dry_run to preview.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "namespace": {"type": "string"},
                         "pattern": {"type": "string"},
-                        "tier": {"type": "string", "enum": ["short", "mid", "long"]}
+                        "tier": {"type": "string", "enum": ["short", "mid", "long"]},
+                        "dry_run": {"type": "boolean", "default": false, "description": "If true, report what would be deleted without deleting"}
                     }
                 }
             },
@@ -953,26 +954,45 @@ fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, 
     } else {
         return Err("memory not found".into());
     };
-    // Atomic promote: set tier=long and clear expires_at in a single UPDATE
-    let now = chrono::Utc::now().to_rfc3339();
-    let changed = conn
-        .execute(
-            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, resolved_id],
-        )
-        .map_err(|e| e.to_string())?;
-    if changed == 0 {
+    let (found, _) = db::update(
+        conn,
+        &resolved_id,
+        None,
+        None,
+        Some(&Tier::Long),
+        None,
+        None,
+        None,
+        None,
+        Some(""), // empty string clears expires_at
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    if !found {
         return Err("memory not found".into());
     }
     Ok(json!({"promoted": true, "id": resolved_id, "tier": "long"}))
 }
 
-fn handle_forget(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_forget(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    archive: bool,
+) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let pattern = params["pattern"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let deleted = db::forget(conn, namespace, pattern, tier.as_ref()).map_err(|e| e.to_string())?;
-    Ok(json!({"deleted": deleted}))
+    let dry_run = params["dry_run"].as_bool().unwrap_or(false);
+
+    if dry_run {
+        let count =
+            db::forget_count(conn, namespace, pattern, tier.as_ref()).map_err(|e| e.to_string())?;
+        return Ok(json!({"would_delete": count, "dry_run": true}));
+    }
+
+    let deleted =
+        db::forget(conn, namespace, pattern, tier.as_ref(), archive).map_err(|e| e.to_string())?;
+    Ok(json!({"deleted": deleted, "archived": archive}))
 }
 
 fn handle_stats(conn: &rusqlite::Connection, db_path: &Path) -> Result<Value, String> {
@@ -1319,6 +1339,7 @@ fn lookup_namespace_standard(conn: &rusqlite::Connection, namespace: &str) -> Op
 /// Example: cwd = /home/user/monorepo/frontend
 ///   → checks "frontend" (cwd), "monorepo" (parent), stops at home dir
 ///   → if "monorepo" has a standard, sets `parent_namespace` of "frontend" to "monorepo"
+#[allow(dead_code)]
 fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
     // Only run if this namespace doesn't already have an explicit parent
     if db::get_namespace_parent(conn, namespace).is_some() {
@@ -1466,10 +1487,9 @@ fn handle_session_start(
         }
     }
 
-    // Auto-register parent chain from filesystem path (runs once, skips if parent already set)
-    if let Some(ns) = namespace {
-        auto_register_path_hierarchy(conn, ns);
-    }
+    // Auto-register parent chain from filesystem path — disabled by default
+    // to prevent filesystem structure leakage into the memory database.
+    // Uncomment or gate behind a config flag if desired.
 
     // Auto-prepend namespace standard (after LLM summary, separate field)
     inject_namespace_standard(conn, namespace, &mut response);
@@ -1556,7 +1576,7 @@ fn handle_request(
                 "memory_list" => handle_list(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index),
                 "memory_promote" => handle_promote(conn, arguments),
-                "memory_forget" => handle_forget(conn, arguments),
+                "memory_forget" => handle_forget(conn, arguments, archive_on_gc),
                 "memory_stats" => handle_stats(conn, db_path),
                 "memory_update" => handle_update(conn, arguments, embedder, vector_index),
                 "memory_get" => handle_get(conn, arguments),

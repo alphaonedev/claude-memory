@@ -481,8 +481,8 @@ pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
     Ok(changed > 0)
 }
 
-/// Forget by pattern — delete memories matching namespace + FTS pattern + tier.
-pub fn forget(
+/// Count memories that would be deleted by forget (for `dry_run`).
+pub fn forget_count(
     conn: &Connection,
     namespace: Option<&str>,
     pattern: Option<&str>,
@@ -490,6 +490,82 @@ pub fn forget(
 ) -> Result<usize> {
     if pattern.is_none() && namespace.is_none() && tier.is_none() {
         anyhow::bail!("at least one of namespace, pattern, or tier is required");
+    }
+    if let Some(pat) = pattern {
+        let fts_query = sanitize_fts_query(pat, true);
+        let tier_str = tier.map(|t| t.as_str().to_string());
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE rowid IN (
+                SELECT m.rowid FROM memories_fts fts
+                JOIN memories m ON m.rowid = fts.rowid
+                WHERE memories_fts MATCH ?1
+                  AND (?2 IS NULL OR m.namespace = ?2)
+                  AND (?3 IS NULL OR m.tier = ?3)
+            )",
+            params![fts_query, namespace, tier_str],
+            |r| r.get(0),
+        )?;
+        return Ok(usize::try_from(count).unwrap_or(0));
+    }
+    let tier_str = tier.map(|t| t.as_str().to_string());
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR tier = ?2)",
+        params![namespace, tier_str],
+        |r| r.get(0),
+    )?;
+    Ok(usize::try_from(count).unwrap_or(0))
+}
+
+/// Forget by pattern — delete memories matching namespace + FTS pattern + tier.
+/// If `archive` is true, archives memories before deletion.
+pub fn forget(
+    conn: &Connection,
+    namespace: Option<&str>,
+    pattern: Option<&str>,
+    tier: Option<&Tier>,
+    archive: bool,
+) -> Result<usize> {
+    if pattern.is_none() && namespace.is_none() && tier.is_none() {
+        anyhow::bail!("at least one of namespace, pattern, or tier is required");
+    }
+
+    if archive {
+        // Archive matching memories before deletion
+        let now = Utc::now().to_rfc3339();
+        if let Some(pat) = pattern {
+            let fts_query = sanitize_fts_query(pat, true);
+            let tier_str = tier.map(|t| t.as_str().to_string());
+            conn.execute(
+                "INSERT OR REPLACE INTO archived_memories
+                 (id, tier, namespace, title, content, tags, priority, confidence,
+                  source, access_count, created_at, updated_at, last_accessed_at,
+                  expires_at, archived_at, archive_reason)
+                 SELECT id, tier, namespace, title, content, tags, priority, confidence,
+                        source, access_count, created_at, updated_at, last_accessed_at,
+                        expires_at, ?4, 'forget'
+                 FROM memories WHERE rowid IN (
+                    SELECT m.rowid FROM memories_fts fts
+                    JOIN memories m ON m.rowid = fts.rowid
+                    WHERE memories_fts MATCH ?1
+                      AND (?2 IS NULL OR m.namespace = ?2)
+                      AND (?3 IS NULL OR m.tier = ?3)
+                 )",
+                params![fts_query, namespace, tier_str, now],
+            )?;
+        } else {
+            let tier_str = tier.map(|t| t.as_str().to_string());
+            conn.execute(
+                "INSERT OR REPLACE INTO archived_memories
+                 (id, tier, namespace, title, content, tags, priority, confidence,
+                  source, access_count, created_at, updated_at, last_accessed_at,
+                  expires_at, archived_at, archive_reason)
+                 SELECT id, tier, namespace, title, content, tags, priority, confidence,
+                        source, access_count, created_at, updated_at, last_accessed_at,
+                        expires_at, ?3, 'forget'
+                 FROM memories WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR tier = ?2)",
+                params![namespace, tier_str, now],
+            )?;
+        }
     }
 
     // If pattern provided, use FTS to find matching IDs
@@ -811,6 +887,15 @@ pub fn consolidate(
         all_tags.sort();
         all_tags.dedup();
         let tags_json = serde_json::to_string(&all_tags)?;
+        // Record source IDs in metadata for provenance (links would be CASCADE-deleted)
+        merged_metadata.insert(
+            "derived_from".to_string(),
+            serde_json::Value::Array(
+                ids.iter()
+                    .map(|id| serde_json::Value::String(id.clone()))
+                    .collect(),
+            ),
+        );
         let merged_metadata_value = serde_json::Value::Object(merged_metadata);
         crate::validate::validate_metadata(&merged_metadata_value)
             .context("merged metadata exceeds size limit")?;
@@ -822,10 +907,10 @@ pub fn consolidate(
             params![new_id, tier.as_str(), namespace, title, summary, tags_json, max_priority, source, total_access, now, metadata_json],
         )?;
 
-        for id in ids {
-            create_link(conn, &new_id, id, "derived_from")?;
-        }
-
+        // Delete source memories first. Note: we intentionally do NOT create
+        // derived_from links before deletion because ON DELETE CASCADE would
+        // immediately remove them. Instead, source IDs are recorded in the
+        // consolidated memory's metadata for provenance.
         for id in ids {
             delete(conn, id)?;
         }
@@ -2294,7 +2379,7 @@ mod tests {
         insert(&conn, &make_memory("B", "delete-me", Tier::Long, 5)).unwrap();
         insert(&conn, &make_memory("C", "keep", Tier::Long, 5)).unwrap();
 
-        let deleted = forget(&conn, Some("delete-me"), None, None).unwrap();
+        let deleted = forget(&conn, Some("delete-me"), None, None, false).unwrap();
         assert_eq!(deleted, 2);
         let remaining = list(&conn, None, None, 100, 0, None, None, None, None).unwrap();
         assert_eq!(remaining.len(), 1);

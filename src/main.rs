@@ -1169,6 +1169,7 @@ fn cmd_forget(db_path: &Path, args: &ForgetArgs, json_out: bool) -> Result<()> {
         args.namespace.as_deref(),
         args.pattern.as_deref(),
         tier.as_ref(),
+        true, // always archive from CLI
     ) {
         Ok(n) => {
             if json_out {
