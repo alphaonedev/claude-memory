@@ -906,6 +906,9 @@ ai-memory includes hardening across all input paths:
 | [User Guide](docs/USER_GUIDE.md) | AI assistant users who want persistent memory |
 | [Developer Guide](docs/DEVELOPER_GUIDE.md) | Building on or contributing to ai-memory |
 | [Admin Guide](docs/ADMIN_GUIDE.md) | Deploying, monitoring, and troubleshooting |
+| [Engineering Standards](docs/ENGINEERING_STANDARDS.md) | Code, test, security, and release standards (authoritative) |
+| [AI Developer Workflow](docs/AI_DEVELOPER_WORKFLOW.md) | Step-by-step workflow for AI coding agents contributing to this repo |
+| [AI Developer Governance Standard](docs/AI_DEVELOPER_GOVERNANCE.md) | Policy for AI participation: authority, attribution, review, audit |
 | [GitHub Pages](https://alphaonedev.github.io/ai-memory-mcp/) | Visual overview with animated diagrams |
 
 ---

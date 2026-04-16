@@ -82,6 +82,17 @@ See the 8-step feature checklist in [DEVELOPER_GUIDE.md](docs/DEVELOPER_GUIDE.md
 
 For the full engineering standards (security review, release process, test protocols), see [ENGINEERING_STANDARDS.md](docs/ENGINEERING_STANDARDS.md). In case of conflict, ENGINEERING_STANDARDS.md is authoritative.
 
+## AI-Assisted Contributions
+
+If you are contributing with the help of an AI coding agent (Claude Code, Cursor, Copilot, Codex, Grok CLI, Gemini CLI, Continue.dev, Windsurf, OpenClaw, or any MCP-compatible client), two additional documents are mandatory reading:
+
+- [`docs/AI_DEVELOPER_WORKFLOW.md`](docs/AI_DEVELOPER_WORKFLOW.md) — the step-by-step workflow every AI session must follow (recall → plan → branch → implement → gates → self-review → PR → handoff).
+- [`docs/AI_DEVELOPER_GOVERNANCE.md`](docs/AI_DEVELOPER_GOVERNANCE.md) — the policy boundaries for AI participation: authorized agents, authority classes (Trivial / Standard / Sensitive / Restricted), attribution rules, review requirements, security policy, memory governance, and audit.
+
+Every AI-authored commit must include a `Co-Authored-By:` trailer naming the model and provider. Every AI-authored PR must include the **AI involvement** section described in [`AI_DEVELOPER_WORKFLOW.md` §8.2](docs/AI_DEVELOPER_WORKFLOW.md). The accountable human (the person driving the agent) signs the [CLA](CLA.md) and is responsible for compliance.
+
+Precedence (highest first): `LICENSE`/`CLA.md`/`NOTICE`/`CODE_OF_CONDUCT.md` > [`AI_DEVELOPER_GOVERNANCE.md`](docs/AI_DEVELOPER_GOVERNANCE.md) > [`ENGINEERING_STANDARDS.md`](docs/ENGINEERING_STANDARDS.md) > [`AI_DEVELOPER_WORKFLOW.md`](docs/AI_DEVELOPER_WORKFLOW.md) > this `CONTRIBUTING.md`.
+
 ## Commit Message Conventions
 
 Use the following format:

@@ -3,6 +3,12 @@
 > Authoritative reference for all development, testing, security, and release processes.
 > Maintained by AlphaOne LLC. All contributors and AI agents must follow these standards.
 > In case of conflict with CONTRIBUTING.md, this document takes precedence.
+>
+> **AI agents** must additionally follow [`AI_DEVELOPER_WORKFLOW.md`](AI_DEVELOPER_WORKFLOW.md)
+> (operational steps) and [`AI_DEVELOPER_GOVERNANCE.md`](AI_DEVELOPER_GOVERNANCE.md)
+> (policy boundaries). The Governance standard takes precedence over this document
+> only on matters of AI participation; this document remains authoritative for
+> code, test, security, and release.
 
 ---
 
@@ -285,6 +291,8 @@ Before tagging a release:
 | CI/CD workflow | `.github/workflows/ci.yml` |
 | Branch protection | GitHub repo settings + `.github/CODEOWNERS` |
 | Contributing guide | `CONTRIBUTING.md` |
+| AI Developer Workflow | `docs/AI_DEVELOPER_WORKFLOW.md` |
+| AI Developer Governance Standard | `docs/AI_DEVELOPER_GOVERNANCE.md` |
 | CLA | `CLA.md` |
 | LICENSE | `LICENSE` |
 | NOTICE | `NOTICE` |
