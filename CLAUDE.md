@@ -102,9 +102,60 @@ SQLite with WAL mode, FTS5 virtual table for full-text search, schema version v7
 
 - `AI_MEMORY_DB` — database path override
 - `AI_MEMORY_NO_CONFIG=1` — skip loading `~/.config/ai-memory/config.toml`
+- `AI_MEMORY_AGENT_ID` — default `agent_id` for memories this process writes (see §Agent Identity below)
 - `RUST_LOG` — tracing filter (e.g. `RUST_LOG=ai_memory=debug`)
 
 Config precedence: CLI flags > config file > compiled defaults.
+
+### Agent Identity (NHI) — `metadata.agent_id`
+
+Every stored memory carries `metadata.agent_id` — a best-effort Non-Human Identity
+marker. See design discussion on issue #148. **agent_id is a *claimed* identity,
+not an *attested* one** — do not use it for security decisions without pairing
+with agent registration (Task 1.3, upcoming).
+
+**Resolution precedence (CLI and MCP):**
+
+1. Explicit value from caller (`--agent-id` flag, MCP `agent_id` tool param, or
+   `metadata.agent_id` embedded in an MCP store request)
+2. `AI_MEMORY_AGENT_ID` environment variable
+3. (MCP only) Value captured from `initialize.clientInfo.name` →
+   `ai:<client>@<hostname>:pid-<pid>`
+4. `host:<hostname>:pid-<pid>-<uuid8>` (stable per-process)
+5. `anonymous:pid-<pid>-<uuid8>` (fallback if hostname unavailable)
+
+**HTTP daemon mode** is multi-tenant, so there is no process-level default:
+
+1. `agent_id` field in `POST /api/v1/memories` body
+2. `X-Agent-Id` request header
+3. Per-request `anonymous:req-<uuid8>` (logged at WARN)
+
+**Validation:** `^[A-Za-z0-9_\-:@./]{1,128}$` — permits prefixed forms
+(`ai:`, `host:`, `anonymous:`), `@` scope separator, `/` for future SPIFFE-style
+ids. Rejects whitespace, null bytes, control chars, shell metacharacters.
+
+**Immutability:** Once a memory is stored, `metadata.agent_id` is preserved across
+update, dedup (UPSERT), MCP `memory_update`, HTTP `PUT /memories/{id}`, import,
+sync, and consolidate. Preservation is enforced at both caller layer
+(`identity::preserve_agent_id`) and SQL layer (`json_set` CASE clauses in
+`db::insert` and `db::insert_if_newer`).
+
+**Filter by agent_id:** `list` and `search` accept `--agent-id <id>` (CLI), the
+`agent_id` property (MCP tool), or `?agent_id=<id>` (HTTP query param).
+
+**Special metadata keys produced by the system** (do not overwrite):
+
+- `imported_from_agent_id` — original claim preserved when `ai-memory import`
+  restamps agent_id with caller's id (absent when `--trust-source` is passed)
+- `consolidated_from_agents` — array of source authors, preserved on
+  `memory_consolidate` (the consolidator's id becomes `agent_id`)
+- `mined_from` — source format tag (`claude` / `chatgpt` / `slack`) stamped by
+  `ai-memory mine` alongside the caller's `agent_id`
+
+**Defaults that leak:** The fallback `host:<hostname>:pid-…` exposes hostname and
+PID. When writing memories to a shared or upstream database, set `--agent-id` or
+`AI_MEMORY_AGENT_ID` to something scrubbed (an opaque identifier, `alice`, etc.).
+Tracking issue: #198.
 
 ## Adding New Functionality
 

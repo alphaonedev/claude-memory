@@ -481,6 +481,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 - **Contradiction resolution** -- mark one memory as superseding another, demote the loser
 - **Forget by pattern** -- bulk delete by namespace + FTS pattern + tier
 - **Source tracking** -- tracks origin: user, claude, hook, api, cli, import, consolidation, system
+- **Agent identity (NHI)** -- every memory carries `metadata.agent_id` (claimed identity) with defense-in-depth immutability across update/dedup/import/sync/consolidate; filter `list`/`search` by agent
 - **Tagging** -- comma-separated tags with filter support
 
 ### Interfaces

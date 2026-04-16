@@ -3865,3 +3865,174 @@ fn test_mine_stamps_caller_agent_id() {
     let _ = std::fs::remove_file(&db_path);
     let _ = std::fs::remove_dir_all(&mine_dir);
 }
+
+/// Task 1.2 coverage gap: verify `metadata.agent_id` is present in the
+/// `memory_recall` response shape. The spec deliberately excluded the recall
+/// path from `--agent-id` filtering, but the field still needs to be visible
+/// in the response for downstream tooling to act on provenance.
+#[test]
+fn test_agentid_visible_in_recall_response() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let db_path = fresh_db();
+
+    // Store two memories by different agents. Using non-hyphenated tokens so
+    // FTS5 tokenizer doesn't split them.
+    for (agent, title) in [("alice", "RecallAgentATitle"), ("bob", "RecallAgentBTitle")] {
+        let out = cmd(binary)
+            .args([
+                "--db",
+                db_path.to_str().unwrap(),
+                "--agent-id",
+                agent,
+                "--json",
+                "store",
+                "-T",
+                title,
+                "-c",
+                "DistinctiveRecallToken body content",
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+    }
+
+    // Recall via MCP in JSON format — agent_id must be visible on every returned memory.
+    let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    let req2 = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_recall","arguments":{"context":"DistinctiveRecallToken","format":"json"}}}"#;
+
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, "{req1}").ok();
+                writeln!(stdin, "{req2}").ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout.trim().lines().last().unwrap();
+    let resp: serde_json::Value = serde_json::from_str(last_line).unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let data: serde_json::Value = serde_json::from_str(text).unwrap();
+    let memories = data["memories"].as_array().expect("memories array");
+    assert!(
+        memories.len() >= 2,
+        "recall should return both memories, got: {data}"
+    );
+
+    let agents: Vec<String> = memories
+        .iter()
+        .filter_map(|m| m["metadata"]["agent_id"].as_str().map(ToString::to_string))
+        .collect();
+    assert!(
+        agents.contains(&"alice".to_string()),
+        "recall memories must include alice's agent_id, got: {agents:?}"
+    );
+    assert!(
+        agents.contains(&"bob".to_string()),
+        "recall memories must include bob's agent_id, got: {agents:?}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+/// Task 1.2 coverage gap: verify `agent_id` round-trips through both TOON
+/// non-compact (`format: "toon"`) and JSON formats. TOON **compact** format
+/// deliberately omits `metadata` for token efficiency (see src/toon.rs
+/// `MEMORY_FIELDS_COMPACT`), so `agent_id` is NOT visible in that format —
+/// that's a known tradeoff tracked separately. This test pins the two formats
+/// where agent_id must show up.
+#[test]
+fn test_agentid_visible_in_toon_and_json() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let db_path = fresh_db();
+
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-id",
+            "toon-alice",
+            "--json",
+            "store",
+            "-T",
+            "ToonTestMemoryTitle",
+            "-c",
+            "ToonDistinctiveContent body",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Non-compact TOON — metadata column present, agent_id must appear.
+    let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    let req_toon = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"memory_list","arguments":{"format":"toon"}}}"#;
+    let req_json = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_list","arguments":{"format":"json"}}}"#;
+
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, "{req1}").ok();
+                writeln!(stdin, "{req_toon}").ok();
+                writeln!(stdin, "{req_json}").ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.trim().lines().collect();
+    assert!(
+        lines.len() >= 3,
+        "expected 3 responses (init+2 tools), got:\n{stdout}"
+    );
+
+    // lines[0] = initialize response; lines[1] = TOON tool call; lines[2] = JSON tool call.
+    // TOON (non-compact)
+    let resp_toon: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let text_toon = resp_toon["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text_toon.contains("toon-alice"),
+        "TOON (non-compact) must surface agent_id within metadata; got:\n{text_toon}"
+    );
+
+    // JSON
+    let resp_json: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let text_json = resp_json["result"]["content"][0]["text"].as_str().unwrap();
+    let data: serde_json::Value = serde_json::from_str(text_json).unwrap();
+    let stored_agent = data["memories"][0]["metadata"]["agent_id"].as_str();
+    assert_eq!(
+        stored_agent,
+        Some("toon-alice"),
+        "JSON response must surface agent_id; got:\n{data}"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}
