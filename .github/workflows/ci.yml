@@ -384,14 +384,33 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p ~/rpmbuild/{SOURCES,SPECS,SRPMS}
 
-          # Download both architecture tarballs
+          # Download both architecture tarballs (filename uses the full SemVer tag)
           curl -sL -o ~/rpmbuild/SOURCES/ai-memory-x86_64-unknown-linux-gnu.tar.gz \
             "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
           curl -sL -o ~/rpmbuild/SOURCES/ai-memory-aarch64-unknown-linux-gnu.tar.gz \
             "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
 
-          # Update spec version and copy
-          sed "s/^Version:.*/Version:        ${VERSION}/" ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
+          # RPM Version: field forbids '-'. For SemVer pre-release tags
+          # (e.g. 0.6.0-alpha.1), split into Version: <core> + Release: 0.<n>.<pre>%{?dist}
+          # per Fedora packaging guidelines for pre-release versions.
+          if [[ "$VERSION" == *-* ]]; then
+            RPM_VERSION="${VERSION%%-*}"
+            PRE="${VERSION#*-}"
+            # Replace dots in the pre-release identifier so rpm sees a clean token
+            # (e.g. "alpha.1" -> "0.1.alpha1")
+            PRE_TAG="${PRE//./}"
+            RPM_RELEASE="0.1.${PRE_TAG}%{?dist}"
+          else
+            RPM_VERSION="$VERSION"
+            RPM_RELEASE="1%{?dist}"
+          fi
+          echo "RPM Version: $RPM_VERSION"
+          echo "RPM Release: $RPM_RELEASE"
+
+          # Rewrite spec with the computed Version:/Release: pair
+          sed -e "s/^Version:.*/Version:        ${RPM_VERSION}/" \
+              -e "s/^Release:.*/Release:        ${RPM_RELEASE}/" \
+              ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
 
           # Build source RPM
           rpmbuild -bs ~/rpmbuild/SPECS/ai-memory.spec \
