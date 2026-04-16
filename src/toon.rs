@@ -242,9 +242,7 @@ mod tests {
         });
         let toon = memories_to_toon(&resp, true);
         // #199: agent_id is in the compact header; it's empty when metadata is absent
-        assert!(
-            toon.contains("memories[id|title|tier|namespace|priority|score|tags|agent_id]:")
-        );
+        assert!(toon.contains("memories[id|title|tier|namespace|priority|score|tags|agent_id]:"));
         assert!(!toon.contains("created_at"));
         assert!(!toon.contains("confidence"));
     }
