@@ -159,10 +159,12 @@ The SOP applies, and only applies, when **all** of the following are true:
 1. The PR targets `develop` (never `main` — `main` merges remain Restricted, §3.2 #1).
 2. The PR was authored by an AI agent (commit `Co-Authored-By:` trailer present
    per §4.1) on behalf of the accountable human (§2.3).
-3. The PR's GitHub author identity is the same as the only available CODEOWNER
-   (current state: `@alphaonedev` is the sole CODEOWNER per `.github/CODEOWNERS`),
-   making code-owner approval structurally impossible without bypassing the rule
-   that a PR's author cannot self-approve.
+3. The PR's GitHub author identity is the **policy-mandated single approver**
+   (`@alphaonedev`, per §5.4), who by GitHub's hardcoded rule cannot self-approve.
+   This pre-condition is satisfied automatically for every AI-authored PR while
+   §5.4 stands. The historical "structural deadlock" framing is preserved here
+   only as background; the operative rationale is now policy (§5.4), not
+   configuration.
 4. The PR has passed all four local gates (fmt, clippy pedantic, test, audit).
 5. Both required CI status checks (`Check (ubuntu-latest)`, `Check (macos-latest)`)
    are reporting `SUCCESS` on the PR's head commit at the moment the SOP runs.
@@ -170,9 +172,10 @@ The SOP applies, and only applies, when **all** of the following are true:
    (`required_signatures: true` is satisfied).
 7. The PR description includes the **AI involvement** section per §4.2.
 
-If any of (1)–(7) is false, the SOP does **not** apply and the merge proceeds
-through normal review (or, if no normal review path exists, the agent stops and
-hands back to the human).
+If any of (1)–(7) is false, the SOP does **not** apply. For AI-authored PRs (per
+§5.4), there is no alternate review path — the agent must stop and hand back to
+the accountable human. For non-AI-authored PRs (no `Co-Authored-By:` trailer),
+the merge proceeds through normal review.
 
 #### 3.4.2 The procedure
 
@@ -382,7 +385,65 @@ ready and must record the result in the PR description.
 
 AI agents may **comment** on PRs (suggest changes, ask questions) but their comments
 do **not** count toward the GitHub "approving review" requirement. Approvals must
-come from humans.
+come from humans, and — for AI-authored PRs — must come specifically from the
+single approver designated in §5.4.
+
+### 5.4 Sole approver for AI-authored PRs
+
+**Only `@alphaonedev` may approve PRs whose commits carry the AI agent
+`Co-Authored-By:` trailer (per §4.1).** This is project policy, set by the
+accountable human (§2.3), and is binding regardless of GitHub branch-protection
+configuration, CODEOWNERS state, or the write-access roles of other collaborators.
+
+Concretely:
+
+1. **No other write-access collaborator may approve an AI-authored PR**, even if
+   they are otherwise qualified to approve human-authored PRs in this repository.
+   This includes (current state) `@bentompkins` and `@njendev` and applies to
+   any future write-access collaborator unless this policy is amended via PR.
+
+2. **`.github/CODEOWNERS` must remain `* @alphaonedev`** for the purpose of
+   approving AI-authored PRs. Adding additional CODEOWNER entries to broaden
+   approval rights for AI-authored PRs is **Restricted** (§3.2 #6) — the project
+   has explicitly chosen to keep AI-PR approval concentrated in the accountable
+   human.
+
+3. **No AI agent may approve any PR**, AI-authored or human-authored
+   (reaffirms §5.3).
+
+4. **`@alphaonedev` cannot self-approve their own PRs** (GitHub hardcoded rule).
+   Combined with (1), this means AI-authored PRs to `develop` always satisfy the
+   §3.4.1 pre-condition (3) and merge via the §3.4 NHI Merge SOP. AI-authored
+   PRs to `main` are forbidden entirely (§3.2 #1).
+
+5. **Identification of an AI-authored PR** is by the presence of the
+   `Co-Authored-By:` trailer on **any** commit in the PR. A PR with even one
+   AI-authored commit is, for purposes of this section, an AI-authored PR.
+
+#### 5.4.1 Why concentration
+
+The project deliberately concentrates approval authority in the accountable
+human rather than distributing it across collaborators. The reasons:
+
+- **Consistency** — a single approver produces uniform standards over time.
+- **Auditability** — every AI-authored merge has one named human owner.
+- **Defense-in-depth** — distributing approval would create paths for AI
+  contributions to land without the accountable human's review.
+- **The §3.4 SOP makes the bottleneck efficient** — the SOP's admin-merge
+  mechanism does not require the approver to also be the merger, so the
+  concentration is administrative, not throughput-limiting.
+
+#### 5.4.2 Amending §5.4
+
+This policy is itself Sensitive (§3.1). Any PR proposing to relax §5.4 — for
+example, by adding fallback approvers or distributing approval rights — must:
+
+- Be opened as a **draft PR** (§3.1, Sensitive class).
+- Be approved by `@alphaonedev` only.
+- Cite the rationale for the change in the PR description.
+- Update the precedence stack in §3.4.1 pre-condition (3) and §1
+  (Precedence) at the top of this document if the relaxation changes the
+  classification of any §3 prohibition.
 
 ---
 
