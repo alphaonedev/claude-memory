@@ -1,6 +1,6 @@
 [package]
 name = "ai-memory"
-version = "0.5.4-patch.6"
+version = "0.6.0-alpha.0"
 edition = "2024"
 rust-version = "1.87"
 authors = ["AlphaOne LLC"]

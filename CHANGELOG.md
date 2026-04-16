@@ -5,6 +5,105 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0-alpha.0] — Unreleased — Phase 1 integration train
+
+First cut of the v0.6.0 release train. Integration branch for Phase 1 tasks 1.3–1.12
+plus the already-landed foundation work (1.1, 1.2). Pre-release; API is not yet stable.
+Successive alphas will be tagged at each track completion (A/B/C/D per
+[docs/PHASE-1.md](docs/PHASE-1.md) §Dependency Graph).
+
+### Added — Task 1.1 (schema metadata foundation)
+
+- **`metadata` JSON column** on `memories` and `archived_memories` tables, default `'{}'`.
+  Schema migration to v7. All CRUD paths preserve metadata.
+- **`Memory.metadata: serde_json::Value`** field with serde defaults.
+- **`CreateMemory.metadata`**, **`UpdateMemory.metadata`** — MCP, HTTP, and CLI all accept
+  arbitrary JSON metadata on store/update.
+- **TOON format** renders `metadata` column inline.
+
+### Added — Task 1.2 (Agent Identity in Metadata, NHI-hardened) — [#193]
+
+- **`metadata.agent_id`** on every stored memory, resolved via a defense-in-depth
+  precedence chain (explicit flag / body / MCP param → `AI_MEMORY_AGENT_ID` env →
+  MCP `initialize.clientInfo.name` → `host:<host>:pid-<pid>-<uuid8>` →
+  `anonymous:pid-<pid>-<uuid8>`).
+- **HTTP `X-Agent-Id` request header** honored when no body `agent_id` is supplied;
+  per-request `anonymous:req-<uuid8>` synthesized otherwise, with `WARN` log line.
+- **`--agent-id` global CLI flag** (also reads `AI_MEMORY_AGENT_ID` env var).
+- **`--agent-id` filter** on `list` and `search` (CLI, MCP tool param, HTTP query param).
+- **Immutability**: `metadata.agent_id` is preserved across UPDATE, UPSERT dedup,
+  import, sync, consolidate, and MCP `memory_update`. Enforced at both SQL level
+  (`json_set` CASE clauses in `db::insert` and `db::insert_if_newer`) and caller
+  level (`identity::preserve_agent_id` in every path that writes metadata).
+- **Validation**: `^[A-Za-z0-9_\-:@./]{1,128}$` — permits prefixed / scoped / SPIFFE
+  forms, rejects whitespace, null bytes, control chars, shell metacharacters.
+- **New module** `src/identity.rs` (17 unit tests): precedence chain, process
+  discriminator (`OnceLock<pid-<pid>-<uuid8>>`), component sanitization, HTTP
+  resolution, provenance preservation.
+- **`gethostname = "0.5"`** added as dependency (minimal, no transitive deps).
+- **28 new tests** (20+ beyond spec minimum of 4): 17 unit + 2 validator + 9 integration.
+
+### Security — red-team findings fixed during Task 1.2 review
+
+- **T-3 (HIGH)**: MCP `memory_update` could rewrite `metadata.agent_id` on an existing
+  memory, bypassing the documented immutability invariant. Fixed in commit `b228dcc`
+  by wiring `identity::preserve_agent_id` into `handle_update`. Regression test
+  `test_mcp_update_preserves_agent_id`.
+- **GAP 1 (HIGH)**: `cmd_import` blindly trusted `metadata.agent_id` in input JSON,
+  allowing an attacker-crafted file to forge any agent identity. Fixed in `356b448`:
+  restamps with caller's id by default; `--trust-source` flag opts into legitimate
+  backup-restore; original claim preserved as `imported_from_agent_id`. `cmd_sync`
+  gets the same treatment on `pull` and `merge` paths.
+- **GAP 2 (MEDIUM)**: `db::consolidate` merged source metadata with last-write-wins
+  semantics on `agent_id`, nondeterministically dropping attribution and giving the
+  consolidator no record. Fixed in `356b448`: consolidator's id is authoritative;
+  all source authors preserved in `metadata.consolidated_from_agents` array.
+  HTTP `ConsolidateBody` gains optional `agent_id` field plus `X-Agent-Id` header.
+- **GAP 3 (LOW)**: `cmd_mine` produced memories with empty metadata, orphaning them
+  from every agent_id filter. Fixed in `356b448`: caller's `agent_id` +
+  `mined_from` source tag injected into every mined memory.
+- **Defense-in-depth**: `db::insert_if_newer` (sync `merge` path) gains the same
+  SQL-level `json_set` preservation clause as `db::insert`.
+
+### Documentation — Phase 1.5 governance — [#194]
+
+- **Governance §2.1 + §2.1.1**: new `Supervised off-host agents` approved class with
+  7 binding pre-conditions (heartbeat, dead-man's switch, rate limit, lock-aware
+  operation, instance-disambiguating attribution, etc.).
+- **Governance §3.4.3.1**: concurrency lock primitive (short-tier `ai-memory` entry
+  as lock, 15-min TTL, race-loser-yields semantics, stale-lock human escalation).
+- **Governance §3.4.4.1 / §3.4.4.2**: audit-memory retention policy (immutable,
+  non-consolidatable, append-only) + volume control at scale.
+- **Governance new §3.5** (7 sub-sections): multi-agent coordination — branch
+  ownership, handoff procedure, stale-branch GC, inter-agent conflict resolution,
+  §3.4 SOP serialization, humans-in-CLI vs supervised off-host coordination,
+  single-agent operation default.
+- **Governance §5.4**: sole-approver policy applies uniformly to every approved
+  agent class.
+- **Workflow §8.5.1**: multi-agent operation cross-reference + lock acquisition
+  discipline.
+
+### Pending — remaining Phase 1 tasks to land in this release train
+
+- Task 1.3 — Agent Registration — depends on 1.2 ✓
+- Task 1.4 — Hierarchical Namespace Paths — depends on 1.1 ✓
+- Task 1.5 — Visibility Rules — depends on 1.4
+- Task 1.6 — N-Level Rule Inheritance — depends on 1.4
+- Task 1.7 — Vertical Promotion — depends on 1.4
+- Task 1.8 — Governance Metadata — depends on 1.1 ✓
+- Task 1.9 — Governance Roles — depends on 1.8
+- Task 1.10 — Approval Workflow — depends on 1.9
+- Task 1.11 — Budget-Aware Recall — depends on 1.1 ✓
+- Task 1.12 — Hierarchy-Aware Recall — depends on 1.4 + 1.11
+
+### Release engineering
+
+- Branched from `develop` @ `ee6cf9a` on 2026-04-16.
+- Successive alphas (`v0.6.0-alpha.N`) tagged at each track completion; `v0.6.0-rc.1`
+  at feature-complete; `v0.6.0` GA when Phase 1 is done and external review window
+  closes.
+- `main` remains frozen at v0.5.4-patch.6 until v0.6.0 GA — no more 0.5.4 patches.
+
 ## [0.5.4-patch.4] — 2026-04-13
 
 ### Added
