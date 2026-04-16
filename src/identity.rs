@@ -41,6 +41,25 @@ use crate::validate;
 /// `env = "AI_MEMORY_AGENT_ID"`; read directly for MCP fallback).
 const ENV_AGENT_ID: &str = "AI_MEMORY_AGENT_ID";
 
+/// Environment variable opt-out for the hostname-revealing default (#198).
+/// When truthy (`1`, `true`, `yes`, `on`), the `host:<hostname>:pid-...`
+/// fallback is skipped and `anonymous:pid-...` is used instead.
+/// `AppConfig::effective_anonymize_default()` mirrors the same semantics
+/// from the config file, and CLI startup maps config → this env var so
+/// the downstream resolution stays env-only.
+const ENV_ANONYMIZE: &str = "AI_MEMORY_ANONYMIZE";
+
+/// Returns true when the hostname-revealing default should be suppressed.
+fn anonymize_default_enabled() -> bool {
+    let Ok(v) = std::env::var(ENV_ANONYMIZE) else {
+        return false;
+    };
+    matches!(
+        v.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 /// Returns a stable-for-this-process discriminator of the form
 /// `<pid>-<uuid8>`. Used to make process-level defaults collision-free
 /// when many agents share a host (e.g., 25 MCP clients on one machine).
@@ -127,8 +146,10 @@ pub fn resolve_agent_id(explicit: Option<&str>, mcp_client: Option<&str>) -> Res
         // Fall through to host: default if the synthesized id is somehow invalid
     }
 
-    // 4. host:<hostname>:<discriminator>
-    if let Some(host) = hostname_opt() {
+    // 4. host:<hostname>:<discriminator> — unless operator opted out (#198).
+    if !anonymize_default_enabled()
+        && let Some(host) = hostname_opt()
+    {
         let host_s = sanitize_component(&host);
         if !host_s.is_empty() {
             let discriminator = process_discriminator();

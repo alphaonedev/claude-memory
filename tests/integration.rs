@@ -4348,3 +4348,307 @@ fn test_mcp_agent_register_and_list() {
 
     let _ = std::fs::remove_file(&db_path);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.2 follow-ups (#196-#199)
+// ---------------------------------------------------------------------------
+
+fn fresh_followup_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-followup-{}.db", uuid::Uuid::new_v4()))
+}
+
+#[test]
+fn test_196_cli_store_echoes_agent_id() {
+    // CLI already returned full metadata.agent_id pre-#196; this locks in the
+    // behavior so a future refactor doesn't regress it.
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(binary)
+        .env_remove("AI_MEMORY_AGENT_ID")
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-id",
+            "echo-test",
+            "--json",
+            "store",
+            "-T",
+            "echo-probe",
+            "-c",
+            "content",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["metadata"]["agent_id"], "echo-test");
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_196_mcp_store_echoes_resolved_agent_id() {
+    use std::io::Write;
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let mut child = cmd(binary)
+        .env_remove("AI_MEMORY_AGENT_ID")
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":1,"method":"initialize",
+            "params":{"clientInfo":{"name":"echo-test","version":"1"}}
+        })
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"memory_store","arguments":{
+                "title":"echo-mcp","content":"hi","agent_id":"mcp-echo"
+            }}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let body: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(
+        body["agent_id"], "mcp-echo",
+        "#196: MCP memory_store must echo agent_id in response"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_197_cli_list_rejects_invalid_agent_id_filter() {
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "list",
+            "--agent-id",
+            "alice bob",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "#197: list must reject invalid agent_id filter with non-zero exit"
+    );
+    let err = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(
+        err.contains("agent_id"),
+        "expected agent_id validation message, got: {err}"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_197_cli_search_rejects_invalid_agent_id_filter() {
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "search",
+            "foo",
+            "--agent-id",
+            "evil;id",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "#197: search must reject invalid agent_id filter"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_197_mcp_list_rejects_invalid_agent_id_filter() {
+    use std::io::Write;
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let mut child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"memory_list","arguments":{"agent_id":"alice bob"}}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    // MCP tool errors surface via result.isError=true + error text.
+    let is_error = resp["result"]["isError"].as_bool().unwrap_or(false);
+    assert!(
+        is_error,
+        "#197: MCP memory_list must return isError=true for invalid agent_id filter; got: {resp}"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_198_anonymize_env_skips_host_fallback() {
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let out = cmd(binary)
+        .env_remove("AI_MEMORY_AGENT_ID")
+        .env("AI_MEMORY_ANONYMIZE", "1")
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-T",
+            "anon-probe",
+            "-c",
+            "content",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "store failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = v["metadata"]["agent_id"].as_str().unwrap_or("");
+    assert!(
+        id.starts_with("anonymous:"),
+        "#198: AI_MEMORY_ANONYMIZE=1 must collapse fallback to anonymous:; got: {id}"
+    );
+    assert!(!id.starts_with("host:"), "must not leak hostname");
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_199_toon_compact_surfaces_agent_id() {
+    // Build a minimal response object and render via the library's TOON path
+    // by exercising `memory_list` through the MCP surface with format=toon_compact.
+    use std::io::Write;
+    let db_path = fresh_followup_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Seed a memory stamped with a known agent_id via CLI (fast), then verify
+    // TOON compact output surfaces it.
+    let seed = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-id",
+            "toon-agent",
+            "store",
+            "-T",
+            "toon-compact-probe",
+            "-c",
+            "hi",
+            "-n",
+            "toon-ns",
+        ])
+        .output()
+        .unwrap();
+    assert!(seed.status.success());
+
+    let mut child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name":"memory_list","arguments":{
+                "namespace":"toon-ns","format":"toon_compact"
+            }}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    // Header must declare agent_id column.
+    assert!(
+        text.contains("agent_id"),
+        "#199: toon_compact header must include agent_id column; got:\n{text}"
+    );
+    // Data row must contain the stamped id.
+    assert!(
+        text.contains("toon-agent"),
+        "#199: toon_compact data row must surface agent_id value; got:\n{text}"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}

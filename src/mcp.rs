@@ -612,11 +612,17 @@ fn handle_store(
                 }
             }
         }
+        // #196: echo the preserved agent_id (original on dedup, not the caller's)
+        let echoed_agent_id = preserved_metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         return Ok(json!({
             "id": dup.id,
             "tier": mem.tier,
             "title": mem.title,
             "namespace": mem.namespace,
+            "agent_id": echoed_agent_id,
             "duplicate": true,
             "action": "updated existing memory"
         }));
@@ -650,8 +656,14 @@ fn handle_store(
         }
     }
 
-    let mut response =
-        json!({"id": actual_id, "tier": mem.tier, "title": mem.title, "namespace": mem.namespace});
+    // #196: echo the resolved agent_id
+    let mut response = json!({
+        "id": actual_id,
+        "tier": mem.tier,
+        "title": mem.title,
+        "namespace": mem.namespace,
+        "agent_id": agent_id,
+    });
     if !contradiction_ids.is_empty() {
         response["potential_contradictions"] = json!(contradiction_ids);
     }
@@ -924,6 +936,9 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
     let agent_id = params["agent_id"].as_str();
+    if let Some(aid) = agent_id {
+        validate::validate_agent_id(aid).map_err(|e| e.to_string())?;
+    }
     let results = db::search(
         conn,
         query,
@@ -945,6 +960,9 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
     let tier = params["tier"].as_str().and_then(Tier::from_str);
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
     let agent_id = params["agent_id"].as_str();
+    if let Some(aid) = agent_id {
+        validate::validate_agent_id(aid).map_err(|e| e.to_string())?;
+    }
 
     let results = db::list(
         conn,

@@ -30,6 +30,9 @@ const MEMORY_FIELDS: &[&str] = &[
 ];
 
 /// Compact memory fields — omits timestamps for tighter output.
+/// Includes `agent_id` (pulled out of `metadata.agent_id`) so AI clients using
+/// the default compact format can see provenance without switching to
+/// non-compact TOON or JSON. See issue #199.
 const MEMORY_FIELDS_COMPACT: &[&str] = &[
     "id",
     "title",
@@ -38,6 +41,7 @@ const MEMORY_FIELDS_COMPACT: &[&str] = &[
     "priority",
     "score",
     "tags",
+    "agent_id",
 ];
 
 /// Serialize a recall/list/search response to TOON format.
@@ -101,7 +105,15 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
         for mem in memories {
             let row: Vec<String> = fields
                 .iter()
-                .map(|&field| format_value(mem.get(field)))
+                .map(|&field| {
+                    // #199: `agent_id` is nested inside metadata in the Memory struct.
+                    // Surface it as a top-level TOON column by digging into metadata.
+                    if field == "agent_id" {
+                        format_value(mem.get("metadata").and_then(|m| m.get("agent_id")))
+                    } else {
+                        format_value(mem.get(field))
+                    }
+                })
                 .collect();
             out.push_str(&row.join("|"));
             out.push('\n');
@@ -229,9 +241,35 @@ mod tests {
             "count": 1
         });
         let toon = memories_to_toon(&resp, true);
-        assert!(toon.contains("memories[id|title|tier|namespace|priority|score|tags]:"));
+        // #199: agent_id is in the compact header; it's empty when metadata is absent
+        assert!(
+            toon.contains("memories[id|title|tier|namespace|priority|score|tags|agent_id]:")
+        );
         assert!(!toon.contains("created_at"));
         assert!(!toon.contains("confidence"));
+    }
+
+    #[test]
+    fn compact_mode_surfaces_agent_id_from_metadata() {
+        let resp = json!({
+            "memories": [{
+                "id": "x",
+                "title": "Test",
+                "tier": "mid",
+                "namespace": "test",
+                "priority": 5,
+                "score": 0.5,
+                "tags": [],
+                "metadata": {"agent_id": "alice"}
+            }],
+            "count": 1
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(
+            row.ends_with("|alice"),
+            "agent_id must be the last compact column; row: {row}"
+        );
     }
 
     #[test]

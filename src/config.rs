@@ -389,6 +389,23 @@ pub struct AppConfig {
     pub api_key: Option<String>,
     /// Maximum archive age in days for automatic purge during GC (default: disabled)
     pub archive_max_days: Option<i64>,
+    /// Identity-resolution overrides (Task 1.2 follow-up #198).
+    pub identity: Option<IdentityConfig>,
+}
+
+/// Identity-resolution configuration (Task 1.2 follow-up #198).
+///
+/// Lets operators opt out of the default `host:<hostname>:pid-<pid>-<uuid8>`
+/// fallback when no explicit `agent_id` is supplied. `anonymize_default = true`
+/// swaps the hostname-revealing default for `anonymous:pid-<pid>-<uuid8>`,
+/// matching what the `AI_MEMORY_ANONYMIZE=1` env var does ephemerally.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IdentityConfig {
+    /// When true, the "no flag, no env, no MCP clientInfo" fallback uses
+    /// `anonymous:pid-<pid>-<uuid8>` instead of the hostname-revealing
+    /// `host:<hostname>:pid-<pid>-<uuid8>`. Default false.
+    #[serde(default)]
+    pub anonymize_default: bool,
 }
 
 impl AppConfig {
@@ -461,6 +478,21 @@ impl AppConfig {
     /// Whether to archive memories before GC deletion (default: true).
     pub fn effective_archive_on_gc(&self) -> bool {
         self.archive_on_gc.unwrap_or(true)
+    }
+
+    /// Whether to anonymize the default `agent_id` fallback (Task 1.2 #198).
+    /// Precedence: `AI_MEMORY_ANONYMIZE=1` env var (truthy) > config file > default false.
+    pub fn effective_anonymize_default(&self) -> bool {
+        if let Ok(v) = std::env::var("AI_MEMORY_ANONYMIZE") {
+            let v = v.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+            if matches!(v.as_str(), "0" | "false" | "no" | "off" | "") {
+                return false;
+            }
+        }
+        self.identity.as_ref().is_some_and(|i| i.anonymize_default)
     }
 
     /// Resolve URL for embedding model (falls back to `ollama_url`).

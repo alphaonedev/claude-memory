@@ -159,7 +159,19 @@ pub async fn create_memory(
 
     match db::insert(&lock.0, &mem) {
         Ok(actual_id) => {
-            let mut response = json!({"id": actual_id, "tier": mem.tier, "namespace": mem.namespace, "title": mem.title});
+            // #196: echo the resolved agent_id so callers don't need a follow-up get.
+            let resolved_agent_id = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let mut response = json!({
+                "id": actual_id,
+                "tier": mem.tier,
+                "namespace": mem.namespace,
+                "title": mem.title,
+                "agent_id": resolved_agent_id,
+            });
             if !contradiction_ids.is_empty() {
                 response["potential_contradictions"] = json!(contradiction_ids);
             }
@@ -484,6 +496,16 @@ pub async fn list_memories(
     State(state): State<Db>,
     Query(p): Query<ListQuery>,
 ) -> impl IntoResponse {
+    // #197: validate agent_id filter values
+    if let Some(ref aid) = p.agent_id
+        && let Err(e) = validate::validate_agent_id(aid)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid agent_id filter: {e}")})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
     let limit = p.limit.unwrap_or(20).min(200);
     match db::list(
@@ -518,6 +540,16 @@ pub async fn search_memories(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "query is required"})),
+        )
+            .into_response();
+    }
+    // #197: validate agent_id filter values
+    if let Some(ref aid) = p.agent_id
+        && let Err(e) = validate::validate_agent_id(aid)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid agent_id filter: {e}")})),
         )
             .into_response();
     }

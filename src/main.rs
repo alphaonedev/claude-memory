@@ -471,6 +471,12 @@ async fn main() -> Result<()> {
     color::init();
     let app_config = config::AppConfig::load();
     config::AppConfig::write_default_if_missing();
+    // #198: config → env mapping for agent_id anonymization. Env var already
+    // set by the caller wins; config is only applied when the env is unset.
+    if app_config.effective_anonymize_default() && std::env::var("AI_MEMORY_ANONYMIZE").is_err() {
+        // SAFETY: single-threaded startup before any worker threads spawn.
+        unsafe { std::env::set_var("AI_MEMORY_ANONYMIZE", "1") };
+    }
     let cli = Cli::parse();
     let db_path = app_config.effective_db(&cli.db);
     let j = cli.json;
@@ -1044,6 +1050,10 @@ fn cmd_search(
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
+    // #197: validate agent_id filter values
+    if let Some(ref aid) = args.agent_id {
+        validate::validate_agent_id(aid)?;
+    }
     let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
@@ -1120,6 +1130,10 @@ fn cmd_list(
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
+    // #197: validate agent_id filter values
+    if let Some(ref aid) = args.agent_id {
+        validate::validate_agent_id(aid)?;
+    }
     let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
