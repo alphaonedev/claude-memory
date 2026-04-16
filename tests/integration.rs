@@ -215,23 +215,37 @@ fn test_gc_removes_expired() {
 
 #[test]
 fn test_content_size_limit() {
+    use std::io::Write;
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-size-test-{}.db", uuid::Uuid::new_v4()));
 
     let huge_content = "x".repeat(70_000);
-    let output = cmd(binary)
+    // Pipe huge content via stdin (-c -) to avoid Windows' ~8191-char argv
+    // limit on CreateProcess (ERROR_FILENAME_EXCED_RANGE / code 206).
+    let mut child = cmd(binary)
         .args([
             "--db",
             db_path.to_str().unwrap(),
             "store",
             "-T",
             "too big",
-            "--content",
-            &huge_content,
+            "-c",
+            "-",
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(huge_content.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success(), "should reject oversized content");
 
     let _ = std::fs::remove_file(&db_path);
@@ -390,23 +404,36 @@ fn test_reject_bad_namespace() {
 
 #[test]
 fn test_reject_oversized_content() {
+    use std::io::Write;
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-val-size-{}.db", uuid::Uuid::new_v4()));
 
     let huge = "x".repeat(70_000);
-    let output = cmd(binary)
+    // Pipe via stdin (-c -) for Windows argv-length compatibility.
+    let mut child = cmd(binary)
         .args([
             "--db",
             db_path.to_str().unwrap(),
             "store",
             "-T",
             "huge",
-            "--content",
-            &huge,
+            "-c",
+            "-",
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(huge.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success(), "should reject oversized content");
 
     let _ = std::fs::remove_file(&db_path);
@@ -2402,15 +2429,18 @@ fn test_promote_clears_expires_at() {
 }
 
 #[test]
-fn test_version_flag_patch6() {
+fn test_version_flag_matches_cargo_pkg_version() {
+    // Pin the CLI --version output to whatever Cargo.toml says, so the test
+    // stays green across release-train bumps (0.5.4-patch.6 → 0.6.0-alpha.0
+    // → 0.6.0-alpha.1 → …) without having to be re-hardcoded each time.
     let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let expected = env!("CARGO_PKG_VERSION");
     let output = cmd(binary).args(["--version"]).output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("0.5.4-patch.6"),
-        "version should be 0.5.4-patch.6, got: {}",
-        stdout
+        stdout.contains(expected),
+        "--version output should contain CARGO_PKG_VERSION ({expected}), got: {stdout}"
     );
 }
 

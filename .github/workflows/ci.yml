@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, "release/**"]
     tags: ["v*"]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, "release/**"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,8 +15,9 @@ jobs:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
