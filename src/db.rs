@@ -282,7 +282,16 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             updated_at = excluded.updated_at,
             expires_at = CASE WHEN excluded.tier = 'long' OR memories.tier = 'long' THEN NULL
                               ELSE COALESCE(excluded.expires_at, memories.expires_at) END,
-            metadata = excluded.metadata",
+            -- Preserve metadata.agent_id across upsert (NHI provenance is immutable).
+            metadata = CASE
+                WHEN json_extract(memories.metadata, '$.agent_id') IS NOT NULL
+                THEN json_set(
+                    excluded.metadata,
+                    '$.agent_id',
+                    json_extract(memories.metadata, '$.agent_id')
+                )
+                ELSE excluded.metadata
+            END",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
@@ -604,6 +613,7 @@ pub fn list(
     since: Option<&str>,
     until: Option<&str>,
     tags_filter: Option<&str>,
+    agent_id: Option<&str>,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
@@ -616,6 +626,7 @@ pub fn list(
            AND (?5 IS NULL OR created_at >= ?5)
            AND (?6 IS NULL OR created_at <= ?6)
            AND (?7 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?7))
+           AND (?10 IS NULL OR json_extract(metadata, '$.agent_id') = ?10)
          ORDER BY priority DESC, updated_at DESC
          LIMIT ?8 OFFSET ?9",
     )?;
@@ -630,6 +641,7 @@ pub fn list(
             tags_filter,
             limit,
             offset,
+            agent_id,
         ],
         row_to_memory,
     )?;
@@ -648,6 +660,7 @@ pub fn search(
     since: Option<&str>,
     until: Option<&str>,
     tags_filter: Option<&str>,
+    agent_id: Option<&str>,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
@@ -667,6 +680,7 @@ pub fn search(
            AND (?6 IS NULL OR m.created_at >= ?6)
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
+           AND (?10 IS NULL OR json_extract(m.metadata, '$.agent_id') = ?10)
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
            + (MIN(m.access_count, 50) * 0.1)
@@ -686,6 +700,7 @@ pub fn search(
             until,
             tags_filter,
             limit,
+            agent_id,
         ],
         row_to_memory,
     )?;
@@ -835,6 +850,7 @@ pub fn delete_link(conn: &Connection, source_id: &str, target_id: &str) -> Resul
 
 /// Consolidate multiple memories into one. Returns the new memory ID.
 /// Deletes the source memories and creates links from new → old (`derived_from`).
+#[allow(clippy::too_many_arguments)]
 pub fn consolidate(
     conn: &Connection,
     ids: &[String],
@@ -843,6 +859,7 @@ pub fn consolidate(
     namespace: &str,
     tier: &Tier,
     source: &str,
+    consolidator_agent_id: &str,
 ) -> Result<String> {
     let now = Utc::now().to_rfc3339();
     let new_id = uuid::Uuid::new_v4().to_string();
@@ -855,15 +872,29 @@ pub fn consolidate(
         let mut all_tags: Vec<String> = Vec::new();
         let mut total_access = 0i64;
         let mut merged_metadata = serde_json::Map::new();
+        // Collect original agent_ids separately — they go into
+        // `consolidated_from_agents` for forensic attribution.
+        // The consolidator's own agent_id becomes `agent_id` on the result.
+        let mut source_agent_ids: Vec<String> = Vec::new();
         for id in ids {
             match get(conn, id)? {
                 Some(mem) => {
                     max_priority = max_priority.max(mem.priority);
                     all_tags.extend(mem.tags);
                     total_access = total_access.saturating_add(mem.access_count);
-                    // Merge metadata: later values overwrite earlier ones on key conflict
+                    // Merge metadata: later values overwrite earlier ones on key conflict.
+                    // Intentionally SKIP `agent_id` to avoid last-write-wins forgery;
+                    // the consolidator's id is authoritative on the result.
                     if let serde_json::Value::Object(map) = mem.metadata {
                         for (k, v) in map {
+                            if k == "agent_id" {
+                                if let serde_json::Value::String(aid) = &v
+                                    && !source_agent_ids.contains(aid)
+                                {
+                                    source_agent_ids.push(aid.clone());
+                                }
+                                continue;
+                            }
                             if let Some(existing) = merged_metadata.get(&k)
                                 && std::mem::discriminant(existing) != std::mem::discriminant(&v)
                             {
@@ -896,6 +927,23 @@ pub fn consolidate(
                     .collect(),
             ),
         );
+        // NHI: the consolidator owns the new memory (authoritative agent_id);
+        // original authors are preserved as a separate array for forensics.
+        merged_metadata.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(consolidator_agent_id.to_string()),
+        );
+        if !source_agent_ids.is_empty() {
+            merged_metadata.insert(
+                "consolidated_from_agents".to_string(),
+                serde_json::Value::Array(
+                    source_agent_ids
+                        .into_iter()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+        }
         let merged_metadata_value = serde_json::Value::Object(merged_metadata);
         crate::validate::validate_metadata(&merged_metadata_value)
             .context("merged metadata exceeds size limit")?;
@@ -1342,7 +1390,20 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             access_count = MAX(memories.access_count, excluded.access_count),
             expires_at = CASE WHEN excluded.tier = 'long' OR memories.tier = 'long' THEN NULL
                               ELSE COALESCE(excluded.expires_at, memories.expires_at) END,
-            metadata = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.metadata ELSE memories.metadata END",
+            -- Preserve metadata.agent_id across newer-wins merge (NHI provenance immutable).
+            metadata = CASE
+                WHEN json_extract(memories.metadata, '$.agent_id') IS NOT NULL
+                THEN json_set(
+                    CASE WHEN excluded.updated_at > memories.updated_at
+                         THEN excluded.metadata
+                         ELSE memories.metadata END,
+                    '$.agent_id',
+                    json_extract(memories.metadata, '$.agent_id')
+                )
+                ELSE CASE WHEN excluded.updated_at > memories.updated_at
+                          THEN excluded.metadata
+                          ELSE memories.metadata END
+            END",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
@@ -2021,7 +2082,19 @@ mod tests {
         insert(&conn, &make_memory("B", "ns2", Tier::Long, 5)).unwrap();
         insert(&conn, &make_memory("C", "ns1", Tier::Long, 5)).unwrap();
 
-        let results = list(&conn, Some("ns1"), None, 100, 0, None, None, None, None).unwrap();
+        let results = list(
+            &conn,
+            Some("ns1"),
+            None,
+            100,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -2037,6 +2110,7 @@ mod tests {
             Some(&Tier::Long),
             100,
             0,
+            None,
             None,
             None,
             None,
@@ -2057,7 +2131,7 @@ mod tests {
             )
             .unwrap();
         }
-        let results = list(&conn, None, None, 3, 0, None, None, None, None).unwrap();
+        let results = list(&conn, None, None, 3, 0, None, None, None, None, None).unwrap();
         assert_eq!(results.len(), 3);
     }
 
@@ -2071,7 +2145,19 @@ mod tests {
         .unwrap();
         insert(&conn, &make_memory("Redis cache", "test", Tier::Long, 5)).unwrap();
 
-        let results = search(&conn, "PostgreSQL", None, None, 10, None, None, None, None).unwrap();
+        let results = search(
+            &conn,
+            "PostgreSQL",
+            None,
+            None,
+            10,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].title.contains("PostgreSQL"));
     }
@@ -2086,6 +2172,7 @@ mod tests {
             None,
             None,
             10,
+            None,
             None,
             None,
             None,
@@ -2206,6 +2293,7 @@ mod tests {
             "test",
             &Tier::Long,
             "test",
+            "test-consolidator",
         )
         .unwrap();
         // Original memories should be deleted
@@ -2381,7 +2469,7 @@ mod tests {
 
         let deleted = forget(&conn, Some("delete-me"), None, None, false).unwrap();
         assert_eq!(deleted, 2);
-        let remaining = list(&conn, None, None, 100, 0, None, None, None, None).unwrap();
+        let remaining = list(&conn, None, None, 100, 0, None, None, None, None, None).unwrap();
         assert_eq!(remaining.len(), 1);
     }
 
@@ -2630,7 +2718,19 @@ mod tests {
         mem.metadata = serde_json::json!({"source_model": "opus"});
         insert(&conn, &mem).unwrap();
 
-        let results = list(&conn, Some("test"), None, 10, 0, None, None, None, None).unwrap();
+        let results = list(
+            &conn,
+            Some("test"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].metadata["source_model"], "opus");
 
@@ -2640,6 +2740,7 @@ mod tests {
             Some("test"),
             None,
             10,
+            None,
             None,
             None,
             None,
@@ -2781,6 +2882,7 @@ mod tests {
             "test",
             &Tier::Long,
             "consolidation",
+            "test-consolidator",
         )
         .unwrap();
 
@@ -2828,6 +2930,7 @@ mod tests {
             "test",
             &Tier::Long,
             "consolidation",
+            "test-consolidator",
         );
         let err = result.expect_err("consolidate should fail for oversized merged metadata");
         let msg = err.to_string();

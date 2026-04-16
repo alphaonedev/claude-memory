@@ -12,6 +12,7 @@ const MAX_TAG_LEN: usize = 128;
 const MAX_TAGS_COUNT: usize = 50;
 const MAX_RELATION_LEN: usize = 64;
 const MAX_ID_LEN: usize = 128;
+const MAX_AGENT_ID_LEN: usize = 128;
 const MAX_METADATA_SIZE: usize = 65_536;
 const MAX_METADATA_DEPTH: usize = 32;
 
@@ -92,6 +93,30 @@ pub fn validate_source(source: &str) -> Result<()> {
             source,
             VALID_SOURCES.join(", ")
         );
+    }
+    Ok(())
+}
+
+/// Validate an agent identifier (NHI-hardened).
+///
+/// Allowed characters: alphanumeric plus `_`, `-`, `:`, `@`, `.`, `/`.
+/// Length: 1..=128 bytes.
+///
+/// This intentionally permits prefixed/scoped forms such as
+/// `ai:claude-code@host-1:pid-123`, `host:dev-1:pid-9-deadbeef`,
+/// `anonymous:req-abcdef01`, and future SPIFFE-style ids containing `/`.
+/// Rejects whitespace, null bytes, control chars, and shell metacharacters.
+pub fn validate_agent_id(agent_id: &str) -> Result<()> {
+    if agent_id.is_empty() {
+        bail!("agent_id cannot be empty");
+    }
+    if agent_id.len() > MAX_AGENT_ID_LEN {
+        bail!("agent_id exceeds max length of {MAX_AGENT_ID_LEN} bytes");
+    }
+    for c in agent_id.chars() {
+        if !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '@' | '.' | '/')) {
+            bail!("agent_id contains invalid character '{c}' (allowed: alphanumeric, _-:@./)");
+        }
     }
     Ok(())
 }
@@ -375,6 +400,47 @@ mod tests {
         assert!(validate_source("import").is_ok());
         assert!(validate_source("").is_err());
         assert!(validate_source("random").is_err());
+    }
+
+    #[test]
+    fn test_valid_agent_id() {
+        // Accepted NHI-hardened formats
+        assert!(validate_agent_id("alice").is_ok());
+        assert!(validate_agent_id("ai:claude-code@host-1:pid-123").is_ok());
+        assert!(validate_agent_id("host:dev-1:pid-9-deadbeef").is_ok());
+        assert!(validate_agent_id("anonymous:req-abcdef01").is_ok());
+        assert!(validate_agent_id("anonymous:pid-42-0123abcd").is_ok());
+        assert!(validate_agent_id("spiffe://example.org/ns/prod").is_ok());
+        assert!(validate_agent_id("a").is_ok());
+        assert!(validate_agent_id(&"a".repeat(128)).is_ok());
+    }
+
+    #[test]
+    fn test_invalid_agent_id() {
+        // Empty / oversized
+        assert!(validate_agent_id("").is_err());
+        assert!(validate_agent_id(&"a".repeat(129)).is_err());
+
+        // Whitespace
+        assert!(validate_agent_id("alice bob").is_err());
+        assert!(validate_agent_id("alice\tbob").is_err());
+        assert!(validate_agent_id(" alice").is_err());
+        assert!(validate_agent_id("alice ").is_err());
+
+        // Null byte / control chars
+        assert!(validate_agent_id("has\0null").is_err());
+        assert!(validate_agent_id("has\x07bell").is_err());
+        assert!(validate_agent_id("has\nnewline").is_err());
+
+        // Shell metacharacters
+        assert!(validate_agent_id("alice;rm").is_err());
+        assert!(validate_agent_id("alice|cat").is_err());
+        assert!(validate_agent_id("alice&bg").is_err());
+        assert!(validate_agent_id("alice$VAR").is_err());
+        assert!(validate_agent_id("alice`cmd`").is_err());
+        assert!(validate_agent_id("alice\\bs").is_err());
+        assert!(validate_agent_id("alice?q").is_err());
+        assert!(validate_agent_id("alice*glob").is_err());
     }
 
     #[test]
