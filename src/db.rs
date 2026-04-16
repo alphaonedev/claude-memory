@@ -1041,7 +1041,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
     let links_count: usize = conn
         .query_row("SELECT COUNT(*) FROM memory_links", [], |r| r.get(0))
         .unwrap_or(0);
-    let db_size_bytes = std::fs::metadata(db_path).map(|m| m.len()).unwrap_or(0);
+    let db_size_bytes = std::fs::metadata(db_path).map_or(0, |m| m.len());
 
     Ok(Stats {
         total,

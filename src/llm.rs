@@ -74,8 +74,7 @@ impl OllamaClient {
             .get(&url)
             .timeout(Duration::from_secs(5))
             .send()
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+            .is_ok_and(|r| r.status().is_success())
     }
 
     /// Checks if the configured model is already pulled. If not, pulls it.
