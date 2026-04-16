@@ -16,3 +16,6 @@ credentials*
 # Benchmark results
 benchmarks/longmemeval/results/
 .mcpregistry_*
+
+# Local scratch (never committed)
+/backup/
