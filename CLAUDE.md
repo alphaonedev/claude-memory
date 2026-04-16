@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Required Reading at Session Start (AI agents)
+
+Before proposing any change to this repository, load the following into context:
+
+- [`docs/AI_DEVELOPER_WORKFLOW.md`](docs/AI_DEVELOPER_WORKFLOW.md) — the eight-phase
+  workflow every AI session must follow (recall → plan → branch → implement → gates →
+  self-review → PR → handoff).
+- [`docs/AI_DEVELOPER_GOVERNANCE.md`](docs/AI_DEVELOPER_GOVERNANCE.md) — authority
+  classes (Trivial / Standard / Sensitive / Restricted), attribution rules, security
+  policy, memory governance, and the hard prohibitions you must never violate.
+- [`docs/ENGINEERING_STANDARDS.md`](docs/ENGINEERING_STANDARDS.md) — code, test,
+  security, and release standards.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor procedures.
+
+Then run `memory_session_start` followed by `memory_recall <task topic>` to load
+project memory before responding. Default namespace for this repo is `ai-memory-mcp`.
+
+Every commit you author must end with a `Co-Authored-By:` trailer naming the model.
+Every PR you open must include the **AI involvement** section described in
+[`AI_DEVELOPER_WORKFLOW.md` §8.2](docs/AI_DEVELOPER_WORKFLOW.md).
+
 ## Build & Test Commands
 
 ```bash
