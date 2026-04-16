@@ -206,6 +206,7 @@ At the `semantic` tier and above, ai-memory downloads a sentence-transformer mod
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `AI_MEMORY_DB` | `ai-memory.db` | Database path (overridden by `--db`) |
+| `AI_MEMORY_AGENT_ID` | (auto) | Default `agent_id` stamped on memories this process writes. Used when no `--agent-id` flag is passed. See §Agent Identity below. |
 | `RUST_LOG` | (none) | Logging filter (e.g., `ai_memory=info,tower_http=debug`) |
 | `AI_MEMORY_NO_CONFIG` | (none) | Set to `1` to skip config file loading (useful for testing) |
 
@@ -482,6 +483,108 @@ Rebuild the FTS index (if it becomes corrupt):
 ```bash
 sqlite3 /path/to/ai-memory.db "INSERT INTO memories_fts(memories_fts) VALUES('rebuild')"
 ```
+
+## Agent Identity (NHI)
+
+Introduced in v0.6.0 via Task 1.2. Every memory carries `metadata.agent_id`, a
+best-effort Non-Human Identity marker for the agent that stored it. Design
+context and the threat model are tracked on issue [#148](https://github.com/alphaonedev/ai-memory-mcp/issues/148).
+
+### Trust model
+
+**`metadata.agent_id` is a *claimed* identity, not an *attested* one.** Any
+caller able to invoke the CLI / MCP / HTTP API can set any well-formed
+`agent_id`. Use it for provenance, audit, and filter scoping — **never as an
+authorization gate on its own.** True attestation arrives with agent
+registration (Task 1.3).
+
+### Resolution precedence
+
+**CLI and MCP (process-scoped):**
+
+1. Explicit caller value (`--agent-id`, MCP `agent_id` tool param, or
+   `metadata.agent_id` embedded in an MCP store request)
+2. `AI_MEMORY_AGENT_ID` environment variable
+3. (MCP only) `initialize.clientInfo.name` → `ai:<client>@<hostname>:pid-<pid>`
+4. `host:<hostname>:pid-<pid>-<uuid8>` (stable for the process's lifetime)
+5. `anonymous:pid-<pid>-<uuid8>` (only when hostname is unavailable)
+
+**HTTP daemon (request-scoped, no process-level default):**
+
+1. `agent_id` field in `POST /api/v1/memories` body
+2. `X-Agent-Id` request header
+3. `anonymous:req-<uuid8>` (synthesized per-request, logged at WARN)
+
+### Validation
+
+Server-side validator:
+`^[A-Za-z0-9_\-:@./]{1,128}$`
+
+This admits prefixed forms (`ai:`, `host:`, `anonymous:`, `human:`, `system:`),
+the `@` scope separator, `/` for future SPIFFE ids, and dots. Rejects whitespace,
+null bytes, ASCII control chars, and shell metacharacters. Payloads attempting
+SQL injection, JSON-path break-outs, or path traversal are all either validator-
+rejected or neutralized by the sanitizer (Unicode homoglyphs rejected outright).
+
+### Immutability guarantees
+
+Once a memory is stored, `metadata.agent_id` is preserved across every mutation:
+
+| Path | Preservation mechanism |
+|---|---|
+| `db::insert` UPSERT (dedup) | SQL `CASE WHEN json_extract(...) IS NOT NULL THEN json_set(...) ELSE excluded.metadata END` |
+| `db::insert_if_newer` (sync merge) | Same SQL CASE WHEN clause |
+| `db::update` with caller-supplied metadata | Caller preserves via `identity::preserve_agent_id` (every caller does — MCP `handle_store` dedup, MCP `handle_update`, HTTP `update_memory`) |
+| `db::consolidate` | Takes `consolidator_agent_id` parameter; original authors preserved in `metadata.consolidated_from_agents` |
+
+Admins running audit queries can rely on `metadata.agent_id` never changing
+post-write unless the memory is deleted and recreated.
+
+### Special metadata keys produced by the system
+
+These are written by the server; treat as read-only in queries:
+
+| Key | Written when | Shape |
+|---|---|---|
+| `agent_id` | Every write | String matching validator regex |
+| `imported_from_agent_id` | `ai-memory import` without `--trust-source`, when the incoming JSON's `agent_id` differed from the caller's | String |
+| `consolidated_from_agents` | `memory_consolidate` / `auto-consolidate` merges N sources | Array of deduplicated strings |
+| `mined_from` | `ai-memory mine` (Claude / ChatGPT / Slack export import) | String: `"claude"`, `"chatgpt"`, `"slack"` |
+| `derived_from` | `memory_consolidate` — array of source memory ids | Array of UUID strings |
+
+### Filtering by `agent_id`
+
+`list` and `search` accept an `agent_id` filter (exact match via SQLite
+`json_extract`):
+
+- CLI: `ai-memory list --agent-id alice`, `ai-memory search "x" --agent-id alice`
+- MCP: `agent_id` property on the `memory_list` / `memory_search` tool inputs
+- HTTP: `GET /api/v1/memories?agent_id=alice`, `GET /api/v1/search?q=x&agent_id=alice`
+
+`recall` does **not** accept the filter (by spec).
+
+### Operational warnings
+
+- **Default identities leak infrastructure.** When no explicit `agent_id` is
+  set, memories are stamped `host:<hostname>:pid-<pid>-<uuid8>`, exposing the
+  host's name and the running PID. For multi-tenant databases or any scenario
+  where the DB is shared outside its origin host, require callers to set
+  `AI_MEMORY_AGENT_ID` or `--agent-id` explicitly. See [#198] for tracked work
+  on a config-level opt-out.
+- **HTTP per-request anonymous fallback** emits a WARN log line
+  (`HTTP memory write without agent_id body field or X-Agent-Id header;
+  assigned anonymous:req-<uuid8>`). Grep for this in production logs to spot
+  unauthenticated writes.
+- **Import provenance** is restamped to the current caller by default. If you
+  need to restore legacy `agent_id` values verbatim (e.g., migrating a backup),
+  pass `--trust-source` explicitly.
+
+### Related tracked issues
+
+- [#148](https://github.com/alphaonedev/ai-memory-mcp/issues/148) — Task 1.2 design & NHI assessment
+- [#196](https://github.com/alphaonedev/ai-memory-mcp/issues/196) — Store responses don't echo resolved agent_id
+- [#197](https://github.com/alphaonedev/ai-memory-mcp/issues/197) — Filter values should run through validator
+- [#198](https://github.com/alphaonedev/ai-memory-mcp/issues/198) — Config-level opt-out for hostname/PID leak
 
 ## Security Hardening
 

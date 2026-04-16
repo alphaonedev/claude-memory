@@ -967,6 +967,86 @@ Show archive statistics: total count and breakdown by namespace.
 
 ---
 
+## Agent Identity (NHI) — `metadata.agent_id`
+
+Every stored memory carries a `metadata.agent_id` tag that records **who (or what) stored it**. You'll see it in `recall`, `list`, `search`, and `get` responses. You can filter by it too.
+
+### Quick examples
+
+```bash
+# Default: a host-qualified id is auto-generated
+ai-memory store -T "note" -c "content"
+# stored memory's metadata.agent_id = "host:your-hostname:pid-12345-abcdef01"
+
+# Use an explicit identity
+ai-memory --agent-id alice store -T "note" -c "content"
+
+# Or via environment variable
+AI_MEMORY_AGENT_ID=alice ai-memory store -T "note" -c "content"
+
+# Filter by agent
+ai-memory list --agent-id alice
+ai-memory search "some query" --agent-id alice
+```
+
+### Resolution precedence
+
+The identity that ends up in `metadata.agent_id` is resolved in order:
+
+1. The explicit value you passed (flag, env var, MCP param, or HTTP body field)
+2. `AI_MEMORY_AGENT_ID` environment variable
+3. (MCP server only) the MCP client's `initialize.clientInfo.name` →
+   `ai:<client>@<hostname>:pid-<pid>`
+4. `host:<hostname>:pid-<pid>-<uuid8>` — a collision-free host-qualified default
+5. `anonymous:pid-<pid>-<uuid8>` — last-resort fallback if hostname lookup fails
+
+For the **HTTP API**, the precedence within a single request is:
+
+1. `agent_id` field in the POST/PUT JSON body
+2. `X-Agent-Id` request header
+3. Per-request synthesized `anonymous:req-<uuid8>` (logged at WARN)
+
+### Format rules
+
+Valid `agent_id` values match `^[A-Za-z0-9_\-:@./]{1,128}$`. Prefixed forms
+(`ai:`, `host:`, `anonymous:`, and future `human:` / `system:`) are reserved for
+specific roles but not enforced. Whitespace, null bytes, control chars, and shell
+metacharacters are rejected at validation time.
+
+### Immutability
+
+Once a memory carries an `agent_id`, that value is preserved across `update`,
+`consolidate`, `import`, `sync`, and upsert dedup. You can update a memory's
+content as a different agent, but the original author's `agent_id` stays
+recorded. `import` restamps with the current caller's id by default — pass
+`--trust-source` to import the embedded ids as-is (use only for legitimate
+backup restoration).
+
+### Special metadata fields produced by the system
+
+These extra keys may appear alongside `agent_id` — they're informational:
+
+- `imported_from_agent_id` — the original claimed agent_id from JSON when
+  `import` restamped with your caller id (absent with `--trust-source`)
+- `consolidated_from_agents` — array of source authors when a memory was produced
+  by `consolidate`
+- `mined_from` — source format tag (`claude` / `chatgpt` / `slack`) when the
+  memory came from `ai-memory mine`
+
+### Trust model
+
+`agent_id` is a **claimed** identity, not an **attested** one. Anyone who can
+invoke `ai-memory` can set any `agent_id` they want (subject to the format
+regex). Use it for provenance and filtering, not for security decisions. True
+attestation via agent registration arrives with Task 1.3.
+
+### Default leaks hostname + PID
+
+The auto-generated `host:<hostname>:pid-<pid>-<uuid8>` default exposes your
+hostname and process id. When exporting / syncing / sharing a DB externally,
+pass `--agent-id` or `AI_MEMORY_AGENT_ID` to scrub that leakage. Tracking issue
+#198 covers an opt-out config flag.
+
 ## Zero Token Cost
 
 Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation, ai-memory uses **zero context tokens until recalled**. Only relevant memories come back, ranked by a 6-factor scoring algorithm. For Claude Code users: disable auto-memory (`"autoMemoryEnabled": false` in settings.json) to stop paying for 200+ lines of idle context.
