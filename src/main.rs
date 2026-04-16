@@ -8,6 +8,7 @@ mod embeddings;
 mod errors;
 mod handlers;
 mod hnsw;
+mod identity;
 mod llm;
 mod mcp;
 mod mine;
@@ -62,6 +63,11 @@ struct Cli {
     /// Output as JSON (machine-parseable)
     #[arg(long, global = true, default_value_t = false)]
     json: bool,
+    /// Agent identifier used for store operations. If unset, an NHI-hardened
+    /// default is synthesized (see `ai-memory store --help`). Accepts the
+    /// `AI_MEMORY_AGENT_ID` environment variable as a fallback.
+    #[arg(long, env = "AI_MEMORY_AGENT_ID", global = true)]
+    agent_id: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -105,7 +111,7 @@ enum Command {
     /// Export all memories as JSON
     Export,
     /// Import memories from JSON (stdin)
-    Import,
+    Import(ImportArgs),
     /// Resolve a contradiction — mark one memory as superseding another
     Resolve(ResolveArgs),
     /// Interactive memory shell (REPL)
@@ -268,6 +274,9 @@ struct SearchArgs {
     until: Option<String>,
     #[arg(long)]
     tags: Option<String>,
+    /// Filter by `metadata.agent_id` (exact match)
+    #[arg(long)]
+    agent_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -291,6 +300,9 @@ struct ListArgs {
     tags: Option<String>,
     #[arg(long, default_value_t = 0)]
     offset: usize,
+    /// Filter by `metadata.agent_id` (exact match)
+    #[arg(long)]
+    agent_id: Option<String>,
 }
 
 #[derive(Args)]
@@ -348,6 +360,18 @@ struct SyncArgs {
     /// Direction: pull, push, or merge
     #[arg(long, short, default_value = "merge")]
     direction: String,
+    /// Trust `metadata.agent_id` in remote memories (default: restamp with caller's id).
+    /// Only use this when syncing between databases you fully control (e.g., your own backup).
+    #[arg(long, default_value_t = false)]
+    trust_source: bool,
+}
+
+#[derive(Args)]
+struct ImportArgs {
+    /// Trust `metadata.agent_id` in imported JSON (default: restamp with caller's id).
+    /// Only use this when importing a JSON export you fully trust (e.g., your own backup).
+    #[arg(long, default_value_t = false)]
+    trust_source: bool,
 }
 
 #[derive(Args)]
@@ -424,6 +448,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let db_path = app_config.effective_db(&cli.db);
     let j = cli.json;
+    let cli_agent_id: Option<String> = cli.agent_id.clone();
     // Track whether command writes to DB (for WAL checkpoint)
     let is_write_command = matches!(
         cli.command,
@@ -436,9 +461,9 @@ async fn main() -> Result<()> {
             | Command::Consolidate(_)
             | Command::Resolve(_)
             | Command::Sync(_)
+            | Command::Import(_)
             | Command::AutoConsolidate(_)
             | Command::Gc
-            | Command::Import
     );
     let db_path_for_checkpoint = if is_write_command {
         Some(db_path.clone())
@@ -453,7 +478,7 @@ async fn main() -> Result<()> {
             mcp::run_mcp_server(&db_path, feature_tier, &app_config)?;
             Ok(())
         }
-        Command::Store(a) => cmd_store(&db_path, a, j, &app_config),
+        Command::Store(a) => cmd_store(&db_path, a, j, &app_config, cli_agent_id.as_deref()),
         Command::Update(a) => cmd_update(&db_path, &a, j),
         Command::Recall(a) => cmd_recall(&db_path, &a, j, &app_config),
         Command::Search(a) => cmd_search(&db_path, &a, j, &app_config),
@@ -463,16 +488,18 @@ async fn main() -> Result<()> {
         Command::Promote(a) => cmd_promote(&db_path, &a, j),
         Command::Forget(a) => cmd_forget(&db_path, &a, j),
         Command::Link(a) => cmd_link(&db_path, &a, j),
-        Command::Consolidate(a) => cmd_consolidate(&db_path, a, j),
+        Command::Consolidate(a) => cmd_consolidate(&db_path, a, j, cli_agent_id.as_deref()),
         Command::Resolve(a) => cmd_resolve(&db_path, &a, j),
         Command::Shell => cmd_shell(&db_path),
-        Command::Sync(a) => cmd_sync(&db_path, &a, j),
-        Command::AutoConsolidate(a) => cmd_auto_consolidate(&db_path, &a, j),
+        Command::Sync(a) => cmd_sync(&db_path, &a, j, cli_agent_id.as_deref()),
+        Command::AutoConsolidate(a) => {
+            cmd_auto_consolidate(&db_path, &a, j, cli_agent_id.as_deref())
+        }
         Command::Gc => cmd_gc(&db_path, j, &app_config),
         Command::Stats => cmd_stats(&db_path, j),
         Command::Namespaces => cmd_namespaces(&db_path, j),
         Command::Export => cmd_export(&db_path),
-        Command::Import => cmd_import(&db_path, j),
+        Command::Import(a) => cmd_import(&db_path, &a, j, cli_agent_id.as_deref()),
         Command::Completions(a) => {
             generate(
                 a.shell,
@@ -488,7 +515,7 @@ async fn main() -> Result<()> {
             man.render(&mut std::io::stdout())?;
             Ok(())
         }
-        Command::Mine(a) => cmd_mine(&db_path, a, j, &app_config),
+        Command::Mine(a) => cmd_mine(&db_path, a, j, &app_config, cli_agent_id.as_deref()),
         Command::Archive(a) => cmd_archive(&db_path, a, j),
     };
 
@@ -615,6 +642,7 @@ fn cmd_store(
     args: StoreArgs,
     json_out: bool,
     app_config: &config::AppConfig,
+    cli_agent_id: Option<&str>,
 ) -> Result<()> {
     let conn = db::open(db_path)?;
     let resolved_ttl = app_config.effective_ttl();
@@ -654,6 +682,16 @@ fn cmd_store(
             .or(resolved_ttl.ttl_for_tier(&tier))
             .map(|s| (now + Duration::seconds(s)).to_rfc3339())
     });
+    // Resolve agent_id via the NHI-hardened precedence chain. `cli_agent_id`
+    // already reflects `--agent-id` flag or `AI_MEMORY_AGENT_ID` env (clap
+    // merges both). When neither is set we fall through to the host/anonymous
+    // defaults provided by `crate::identity`.
+    let agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
+    let mut metadata = models::default_metadata();
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
+    }
+
     let mem = models::Memory {
         id: uuid::Uuid::new_v4().to_string(),
         tier,
@@ -669,7 +707,7 @@ fn cmd_store(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
-        metadata: models::default_metadata(),
+        metadata,
     };
     let contradictions =
         db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
@@ -990,6 +1028,7 @@ fn cmd_search(
         args.since.as_deref(),
         args.until.as_deref(),
         args.tags.as_deref(),
+        args.agent_id.as_deref(),
     )?;
     if json_out {
         println!(
@@ -1065,6 +1104,7 @@ fn cmd_list(
         args.since.as_deref(),
         args.until.as_deref(),
         args.tags.as_deref(),
+        args.agent_id.as_deref(),
     )?;
     if json_out {
         println!(
@@ -1201,7 +1241,12 @@ fn cmd_link(db_path: &Path, args: &LinkArgs, json_out: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_consolidate(db_path: &Path, args: ConsolidateArgs, json_out: bool) -> Result<()> {
+fn cmd_consolidate(
+    db_path: &Path,
+    args: ConsolidateArgs,
+    json_out: bool,
+    cli_agent_id: Option<&str>,
+) -> Result<()> {
     let ids: Vec<String> = args
         .ids
         .split(',')
@@ -1211,6 +1256,7 @@ fn cmd_consolidate(db_path: &Path, args: ConsolidateArgs, json_out: bool) -> Res
     let namespace = args.namespace.unwrap_or_else(auto_namespace);
     validate::validate_consolidate(&ids, &args.title, &args.summary, &namespace)?;
     let conn = db::open(db_path)?;
+    let consolidator_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
     let new_id = db::consolidate(
         &conn,
         &ids,
@@ -1219,6 +1265,7 @@ fn cmd_consolidate(db_path: &Path, args: ConsolidateArgs, json_out: bool) -> Res
         &namespace,
         &Tier::Long,
         "cli",
+        &consolidator_agent_id,
     )?;
     if json_out {
         println!(
@@ -1298,7 +1345,12 @@ fn cmd_export(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_import(db_path: &Path, json_out: bool) -> Result<()> {
+fn cmd_import(
+    db_path: &Path,
+    args: &ImportArgs,
+    json_out: bool,
+    cli_agent_id: Option<&str>,
+) -> Result<()> {
     use std::io::Read;
     let mut buf = String::new();
     std::io::stdin().read_to_string(&mut buf)?;
@@ -1307,10 +1359,40 @@ fn cmd_import(db_path: &Path, json_out: bool) -> Result<()> {
         serde_json::from_value(data.get("memories").cloned().unwrap_or_default())?;
     let links: Vec<models::MemoryLink> =
         serde_json::from_value(data.get("links").cloned().unwrap_or_default()).unwrap_or_default();
+
+    // NHI: by default restamp metadata.agent_id with the caller's id so an
+    // attacker-crafted JSON file cannot forge provenance. Pass --trust-source
+    // to preserve the imported agent_id (use only for trusted backups).
+    let caller_id = identity::resolve_agent_id(cli_agent_id, None)?;
+
     let conn = db::open(db_path)?;
     let mut imported = 0usize;
+    let mut restamped = 0usize;
     let mut errors = Vec::new();
-    for mem in memories {
+    for mut mem in memories {
+        if !args.trust_source {
+            let original = mem
+                .metadata
+                .get("agent_id")
+                .and_then(serde_json::Value::as_str)
+                .map(ToString::to_string);
+            if let Some(obj) = mem.metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String(caller_id.clone()),
+                );
+                if let Some(orig) = original.as_ref()
+                    && orig.as_str() != caller_id
+                {
+                    // Preserve the original claim for forensic purposes but not as authoritative id.
+                    obj.insert(
+                        "imported_from_agent_id".to_string(),
+                        serde_json::Value::String(orig.clone()),
+                    );
+                    restamped += 1;
+                }
+            }
+        }
         if let Err(e) = validate::validate_memory(&mem) {
             errors.push(format!("{}: {}", mem.id, e));
             continue;
@@ -1329,10 +1411,18 @@ fn cmd_import(db_path: &Path, json_out: bool) -> Result<()> {
     if json_out {
         println!(
             "{}",
-            serde_json::json!({"imported": imported, "errors": errors})
+            serde_json::json!({
+                "imported": imported,
+                "restamped": restamped,
+                "trusted_source": args.trust_source,
+                "errors": errors
+            })
         );
     } else {
-        println!("imported: {imported}");
+        println!("imported: {imported} (restamped agent_id on {restamped})");
+        if args.trust_source {
+            eprintln!("warning: --trust-source: agent_id from imported JSON was preserved as-is");
+        }
         if !errors.is_empty() {
             for e in &errors {
                 eprintln!("  {e}");
@@ -1450,7 +1540,7 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
                     eprintln!("usage: search <query>");
                     continue;
                 }
-                match db::search(&conn, &q, None, None, 20, None, None, None, None) {
+                match db::search(&conn, &q, None, None, 20, None, None, None, None, None) {
                     Ok(results) => {
                         for mem in &results {
                             println!(
@@ -1467,7 +1557,7 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
             }
             "list" | "ls" => {
                 let ns = parts.get(1).copied();
-                match db::list(&conn, ns, None, 20, 0, None, None, None, None) {
+                match db::list(&conn, ns, None, 20, 0, None, None, None, None, None) {
                     Ok(results) => {
                         for mem in &results {
                             let age = human_age(&mem.updated_at);
@@ -1542,21 +1632,59 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// NHI: restamp `metadata.agent_id` to the caller's id, preserving the original
+/// as `imported_from_agent_id` for forensics. Used by `import` and `sync` paths
+/// to prevent attacker-supplied JSON/DB from forging provenance.
+fn restamp_agent_id(mem: &mut models::Memory, caller_id: &str) {
+    let original = mem
+        .metadata
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .map(ToString::to_string);
+    if let Some(obj) = mem.metadata.as_object_mut() {
+        obj.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(caller_id.to_string()),
+        );
+        if let Some(orig) = original
+            && orig != caller_id
+        {
+            obj.insert(
+                "imported_from_agent_id".to_string(),
+                serde_json::Value::String(orig),
+            );
+        }
+    }
+}
+
 #[allow(clippy::too_many_lines)]
-fn cmd_sync(db_path: &Path, args: &SyncArgs, json_out: bool) -> Result<()> {
+fn cmd_sync(
+    db_path: &Path,
+    args: &SyncArgs,
+    json_out: bool,
+    cli_agent_id: Option<&str>,
+) -> Result<()> {
     let local_conn = db::open(db_path)?;
     let remote_conn = db::open(&args.remote_db)?;
+    // NHI: unless the caller opts into --trust-source, restamp any incoming
+    // memories with the caller's id so an attacker-controlled remote DB can't
+    // inject arbitrary agent_ids into the local store (and vice versa on push).
+    let caller_id = identity::resolve_agent_id(cli_agent_id, None)?;
     match args.direction.as_str() {
         "pull" => {
             let mems = db::export_all(&remote_conn)?;
             let links = db::export_links(&remote_conn)?;
             let mut n = 0;
             for mem in &mems {
-                if let Err(e) = validate::validate_memory(mem) {
-                    tracing::warn!("sync: skipping invalid memory {}: {}", mem.id, e);
+                let mut owned = mem.clone();
+                if !args.trust_source {
+                    restamp_agent_id(&mut owned, &caller_id);
+                }
+                if let Err(e) = validate::validate_memory(&owned) {
+                    tracing::warn!("sync: skipping invalid memory {}: {}", owned.id, e);
                     continue;
                 }
-                if db::insert(&local_conn, mem).is_ok() {
+                if db::insert(&local_conn, &owned).is_ok() {
                     n += 1;
                 }
             }
@@ -1623,12 +1751,18 @@ fn cmd_sync(db_path: &Path, args: &SyncArgs, json_out: bool) -> Result<()> {
             let l_mems = db::export_all(&local_conn)?;
             let l_links = db::export_links(&local_conn)?;
             let (mut pulled, mut pushed) = (0, 0);
-            // Use timestamp-aware insert so newer version wins on conflict
+            // Use timestamp-aware insert so newer version wins on conflict.
+            // NHI: restamp incoming remote memories with caller's agent_id
+            // (unless --trust-source) to prevent forged provenance via merge.
             for mem in &r_mems {
-                if validate::validate_memory(mem).is_err() {
+                let mut owned = mem.clone();
+                if !args.trust_source {
+                    restamp_agent_id(&mut owned, &caller_id);
+                }
+                if validate::validate_memory(&owned).is_err() {
                     continue;
                 }
-                if db::insert_if_newer(&local_conn, mem).is_ok() {
+                if db::insert_if_newer(&local_conn, &owned).is_ok() {
                     pulled += 1;
                 }
             }
@@ -1684,8 +1818,14 @@ fn cmd_sync(db_path: &Path, args: &SyncArgs, json_out: bool) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-fn cmd_auto_consolidate(db_path: &Path, args: &AutoConsolidateArgs, json_out: bool) -> Result<()> {
+fn cmd_auto_consolidate(
+    db_path: &Path,
+    args: &AutoConsolidateArgs,
+    json_out: bool,
+    cli_agent_id: Option<&str>,
+) -> Result<()> {
     let conn = db::open(db_path)?;
+    let consolidator_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
     let tier_filter = if args.short_only {
         Some(Tier::Short)
     } else {
@@ -1710,6 +1850,7 @@ fn cmd_auto_consolidate(db_path: &Path, args: &AutoConsolidateArgs, json_out: bo
             tier_filter.as_ref(),
             200,
             0,
+            None,
             None,
             None,
             None,
@@ -1773,6 +1914,7 @@ fn cmd_auto_consolidate(db_path: &Path, args: &AutoConsolidateArgs, json_out: bo
                     &ns.namespace,
                     &Tier::Long,
                     "auto-consolidate",
+                    &consolidator_agent_id,
                 )?;
                 consolidated_ids.extend(ids);
                 total += group.len();
@@ -1875,7 +2017,12 @@ fn cmd_mine(
     args: MineArgs,
     json_out: bool,
     app_config: &config::AppConfig,
+    cli_agent_id: Option<&str>,
 ) -> Result<()> {
+    // NHI: the caller (who ran `ai-memory mine`) is the attributable party for
+    // every mined memory. Without this, mined memories would be orphaned from
+    // all agent_id filters and governance checks.
+    let miner_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
     let format = mine::Format::from_str(&args.format).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid format: {} (use claude, chatgpt, slack)",
@@ -1979,6 +2126,17 @@ fn cmd_mine(
             .ttl_for_tier(&tier)
             .map(|s| (now + Duration::seconds(s)).to_rfc3339());
 
+        let mut metadata = models::default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(miner_agent_id.clone()),
+            );
+            obj.insert(
+                "mined_from".to_string(),
+                serde_json::Value::String(format.source_tag().to_string()),
+            );
+        }
         let mem = models::Memory {
             id: uuid::Uuid::new_v4().to_string(),
             tier: tier.clone(),
@@ -1994,7 +2152,7 @@ fn cmd_mine(
             updated_at: now.to_rfc3339(),
             last_accessed_at: None,
             expires_at,
-            metadata: models::default_metadata(),
+            metadata,
         };
 
         match db::insert(&conn, &mem) {

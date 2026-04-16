@@ -4,7 +4,7 @@
 use axum::{
     Json,
     extract::{Path, Query, Request, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     middleware::Next,
     response::IntoResponse,
 };
@@ -94,6 +94,7 @@ pub async fn health(State(state): State<Db>) -> impl IntoResponse {
 
 pub async fn create_memory(
     State(state): State<Db>,
+    headers: HeaderMap,
     Json(body): Json<CreateMemory>,
 ) -> impl IntoResponse {
     if let Err(e) = validate::validate_create(&body) {
@@ -103,6 +104,25 @@ pub async fn create_memory(
         )
             .into_response();
     }
+
+    // Resolve agent_id via the HTTP precedence chain (body → X-Agent-Id → per-request anonymous)
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let agent_id =
+        match crate::identity::resolve_http_agent_id(body.agent_id.as_deref(), header_agent_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid agent_id: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+    let mut metadata = body.metadata;
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
+    }
+
     let now = Utc::now();
     let lock = state.lock().await;
     let expires_at = body.expires_at.or_else(|| {
@@ -125,7 +145,7 @@ pub async fn create_memory(
         updated_at: now.to_rfc3339(),
         last_accessed_at: None,
         expires_at,
-        metadata: body.metadata,
+        metadata,
     };
 
     // Check for contradictions
@@ -225,6 +245,15 @@ pub async fn update_memory(
                 .into_response();
         }
     };
+    // Preserve existing agent_id when caller provides new metadata — provenance
+    // is immutable after first write (see NHI design in crate::identity).
+    let preserved_metadata = body.metadata.as_ref().map(|new_meta| {
+        let existing_meta = db::get(&lock.0, &resolved_id).ok().flatten().map_or_else(
+            || serde_json::Value::Object(serde_json::Map::new()),
+            |m| m.metadata,
+        );
+        crate::identity::preserve_agent_id(&existing_meta, new_meta)
+    });
     match db::update(
         &lock.0,
         &resolved_id,
@@ -236,7 +265,7 @@ pub async fn update_memory(
         body.priority,
         body.confidence,
         body.expires_at.as_deref(),
-        body.metadata.as_ref(),
+        preserved_metadata.as_ref(),
     ) {
         Ok((true, _)) => {
             let mem = db::get(&lock.0, &resolved_id).ok().flatten();
@@ -397,6 +426,7 @@ pub async fn list_memories(
         p.since.as_deref(),
         p.until.as_deref(),
         p.tags.as_deref(),
+        p.agent_id.as_deref(),
     ) {
         Ok(mems) => Json(json!({"memories": mems, "count": mems.len()})).into_response(),
         Err(e) => {
@@ -433,6 +463,7 @@ pub async fn search_memories(
         p.since.as_deref(),
         p.until.as_deref(),
         p.tags.as_deref(),
+        p.agent_id.as_deref(),
     ) {
         Ok(r) => Json(json!({"results": r, "count": r.len(), "query": p.q})).into_response(),
         Err(e) => {
@@ -720,6 +751,10 @@ pub struct ConsolidateBody {
     pub namespace: String,
     #[serde(default)]
     pub tier: Option<Tier>,
+    /// Optional `agent_id` for the consolidator (attributable on the result).
+    /// If unset, resolved from `X-Agent-Id` header or per-request anonymous id.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 fn default_ns() -> String {
     "global".to_string()
@@ -727,6 +762,7 @@ fn default_ns() -> String {
 
 pub async fn consolidate_memories(
     State(state): State<Db>,
+    headers: HeaderMap,
     Json(body): Json<ConsolidateBody>,
 ) -> impl IntoResponse {
     if let Err(e) =
@@ -738,6 +774,18 @@ pub async fn consolidate_memories(
         )
             .into_response();
     }
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let consolidator_agent_id =
+        match crate::identity::resolve_http_agent_id(body.agent_id.as_deref(), header_agent_id) {
+            Ok(id) => id,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid agent_id: {e}")})),
+                )
+                    .into_response();
+            }
+        };
     let lock = state.lock().await;
     let tier = body.tier.unwrap_or(Tier::Long);
     match db::consolidate(
@@ -748,6 +796,7 @@ pub async fn consolidate_memories(
         &body.namespace,
         &tier,
         "consolidation",
+        &consolidator_agent_id,
     ) {
         Ok(new_id) => (
             StatusCode::CREATED,
@@ -1026,6 +1075,7 @@ mod tests {
             None,
             10,
             0,
+            None,
             None,
             None,
             None,

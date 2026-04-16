@@ -90,7 +90,8 @@ fn tool_definitions() -> Value {
                         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
                         "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"},
-                        "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}}
+                        "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
+                        "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."}
                     },
                     "required": ["title", "content"]
                 }
@@ -122,6 +123,7 @@ fn tool_definitions() -> Value {
                         "namespace": {"type": "string"},
                         "tier": {"type": "string", "enum": ["short", "mid", "long"]},
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
+                        "agent_id": {"type": "string", "description": "Filter by metadata.agent_id (exact match)."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     },
                     "required": ["query"]
@@ -136,6 +138,7 @@ fn tool_definitions() -> Value {
                         "namespace": {"type": "string"},
                         "tier": {"type": "string", "enum": ["short", "mid", "long"]},
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
+                        "agent_id": {"type": "string", "description": "Filter by metadata.agent_id (exact match)."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     }
                 }
@@ -478,6 +481,7 @@ fn handle_store(
     embedder: Option<&Embedder>,
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,
+    mcp_client: Option<&str>,
 ) -> Result<Value, String> {
     let title = params["title"].as_str().ok_or("title is required")?;
     let content = params["content"].as_str().ok_or("content is required")?;
@@ -504,11 +508,28 @@ fn handle_store(
     validate::validate_priority(priority).map_err(|e| e.to_string())?;
     validate::validate_confidence(confidence).map_err(|e| e.to_string())?;
 
-    let metadata = if params["metadata"].is_object() {
+    let mut metadata = if params["metadata"].is_object() {
         params["metadata"].clone()
     } else {
         serde_json::json!({})
     };
+    // Resolve agent_id via the NHI-hardened precedence chain and merge into
+    // metadata. Explicit values win in this order:
+    //   1. top-level `agent_id` param
+    //   2. embedded `metadata.agent_id` (backward compatible with callers
+    //      that supply it inline)
+    //   3. env / MCP clientInfo / host / anonymous (handled inside `identity`)
+    let explicit_agent_id = params["agent_id"]
+        .as_str()
+        .or_else(|| metadata.get("agent_id").and_then(serde_json::Value::as_str));
+    let agent_id = crate::identity::resolve_agent_id(explicit_agent_id, mcp_client)
+        .map_err(|e| e.to_string())?;
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(agent_id.clone()),
+        );
+    }
     validate::validate_metadata(&metadata).map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now();
@@ -540,8 +561,11 @@ fn handle_store(
         .iter()
         .find(|c| c.title == mem.title && c.namespace == mem.namespace);
     if let Some(dup) = exact_dup {
-        // Update existing memory instead of creating a duplicate
-        // update(conn, id, title, content, tier, namespace, tags, priority, confidence, expires_at)
+        // Update existing memory instead of creating a duplicate.
+        // Preserve the original agent_id (provenance is immutable) — the
+        // existing memory's metadata.agent_id wins over anything in the
+        // incoming store.
+        let preserved_metadata = crate::identity::preserve_agent_id(&dup.metadata, &mem.metadata);
         let (_found, content_changed) = db::update(
             conn,
             &dup.id,
@@ -553,7 +577,7 @@ fn handle_store(
             Some(mem.priority),         // priority
             Some(mem.confidence),       // confidence
             None,                       // expires_at
-            Some(&mem.metadata),        // metadata
+            Some(&preserved_metadata),  // metadata (agent_id preserved)
         )
         .map_err(|e| e.to_string())?;
         // Regenerate embedding if content changed during dedup update
@@ -878,6 +902,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let tier = params["tier"].as_str().and_then(Tier::from_str);
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
 
+    let agent_id = params["agent_id"].as_str();
     let results = db::search(
         conn,
         query,
@@ -888,6 +913,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
         None,
         None,
         None,
+        agent_id,
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"results": results, "count": results.len()}))
@@ -897,6 +923,7 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
+    let agent_id = params["agent_id"].as_str();
 
     let results = db::list(
         conn,
@@ -908,6 +935,7 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
         None,
         None,
         None,
+        agent_id,
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"memories": results, "count": results.len()}))
@@ -1057,7 +1085,12 @@ fn handle_update(
     let metadata = if params["metadata"].is_object() {
         let m = params["metadata"].clone();
         validate::validate_metadata(&m).map_err(|e| e.to_string())?;
-        Some(m)
+        // Preserve existing metadata.agent_id — provenance is immutable.
+        // Without this, any MCP caller could rewrite the author of any memory.
+        let existing = db::get(conn, &resolved_id)
+            .map_err(|e| e.to_string())?
+            .map_or_else(|| serde_json::json!({}), |m| m.metadata);
+        Some(crate::identity::preserve_agent_id(&existing, &m))
     } else {
         None
     };
@@ -1146,6 +1179,7 @@ fn handle_consolidate(
     llm: Option<&OllamaClient>,
     embedder: Option<&Embedder>,
     vector_index: Option<&VectorIndex>,
+    mcp_client: Option<&str>,
 ) -> Result<Value, String> {
     let ids_arr = params["ids"]
         .as_array()
@@ -1196,6 +1230,11 @@ fn handle_consolidate(
         }
     }
 
+    // NHI: the caller (consolidator) owns the new memory's agent_id;
+    // source authors are preserved as a forensic array by db::consolidate.
+    let explicit_agent_id = params["agent_id"].as_str();
+    let consolidator_agent_id = crate::identity::resolve_agent_id(explicit_agent_id, mcp_client)
+        .map_err(|e| e.to_string())?;
     let new_id = db::consolidate(
         conn,
         &ids,
@@ -1204,6 +1243,7 @@ fn handle_consolidate(
         namespace,
         &Tier::Long,
         "consolidation",
+        &consolidator_agent_id,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1450,6 +1490,7 @@ fn handle_session_start(
         None,
         None,
         None,
+        None,
     )
     .map_err(|e| e.to_string())?;
 
@@ -1510,6 +1551,7 @@ fn handle_request(
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,
     archive_on_gc: bool,
+    mcp_client: Option<&str>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -1560,9 +1602,14 @@ fn handle_request(
             };
 
             let result = match tool_name {
-                "memory_store" => {
-                    handle_store(conn, arguments, embedder, vector_index, resolved_ttl)
-                }
+                "memory_store" => handle_store(
+                    conn,
+                    arguments,
+                    embedder,
+                    vector_index,
+                    resolved_ttl,
+                    mcp_client,
+                ),
                 "memory_recall" => handle_recall(
                     conn,
                     arguments,
@@ -1583,7 +1630,7 @@ fn handle_request(
                 "memory_link" => handle_link(conn, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
                 "memory_consolidate" => {
-                    handle_consolidate(conn, arguments, llm, embedder, vector_index)
+                    handle_consolidate(conn, arguments, llm, embedder, vector_index, mcp_client)
                 }
                 "memory_capabilities" => handle_capabilities(tier_config, reranker),
                 "memory_expand_query" => handle_expand_query(llm, arguments),
@@ -1848,6 +1895,11 @@ pub fn run_mcp_server(
     };
     eprintln!("ai-memory MCP server started (stdio, tier={effective_tier})");
 
+    // Captured from the MCP `initialize` handshake's `clientInfo.name`.
+    // Used by `crate::identity` to synthesize an `ai:<client>@<host>:pid-<pid>`
+    // agent_id when the caller doesn't supply one explicitly.
+    let mut mcp_client_name: Option<String> = None;
+
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -1864,6 +1916,14 @@ pub fn run_mcp_server(
                 continue;
             }
         };
+
+        // Capture clientInfo.name on initialize (even if id is Null / notification-style).
+        if req.method == "initialize"
+            && let Some(name) = req.params["clientInfo"]["name"].as_str()
+            && !name.is_empty()
+        {
+            mcp_client_name = Some(name.to_string());
+        }
 
         // Notifications have no id — no response expected per JSON-RPC spec
         if req.id.is_none() || req.id == Some(Value::Null) {
@@ -1883,6 +1943,7 @@ pub fn run_mcp_server(
             vector_index.as_ref(),
             &resolved_ttl,
             archive_on_gc,
+            mcp_client_name.as_deref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;

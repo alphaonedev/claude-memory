@@ -110,6 +110,10 @@ pub struct CreateMemory {
     pub ttl_secs: Option<i64>,
     #[serde(default = "default_metadata")]
     pub metadata: Value,
+    /// Optional agent identifier. When unset, the server resolves a default
+    /// via `crate::identity` (NHI-hardened precedence chain).
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 fn default_tier() -> Tier {
@@ -161,6 +165,9 @@ pub struct SearchQuery {
     pub until: Option<String>,
     #[serde(default)]
     pub tags: Option<String>, // comma-separated
+    /// Filter by `metadata.agent_id` (exact match).
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -186,6 +193,9 @@ pub struct ListQuery {
     pub until: Option<String>,
     #[serde(default)]
     pub tags: Option<String>,
+    /// Filter by `metadata.agent_id` (exact match).
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
