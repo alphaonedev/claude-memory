@@ -83,9 +83,31 @@ Successive alphas will be tagged at each track completion (A/B/C/D per
 - **Workflow §8.5.1**: multi-agent operation cross-reference + lock acquisition
   discipline.
 
+### Added — Task 1.3 (Agent Registration)
+
+- **`_agents` reserved namespace** holding one long-tier memory per registered
+  agent (`title = "agent:<agent_id>"`, `metadata.agent_type` +
+  `metadata.capabilities` + `metadata.registered_at` + `metadata.last_seen_at`).
+- **MCP tools**: `memory_agent_register`, `memory_agent_list` (brings tool count
+  to **28**).
+- **HTTP endpoints**: `POST /api/v1/agents`, `GET /api/v1/agents` (brings
+  endpoint count to **26**).
+- **CLI**: `ai-memory agents register --agent-id … --agent-type … [--capabilities …]`
+  and `ai-memory agents list` (default sub-command).
+- **`VALID_AGENT_TYPES`** closed set: `ai:claude-opus-4.6`, `ai:claude-opus-4.7`,
+  `ai:codex-5.4`, `ai:grok-4.2`, `human`, `system`. Enforced by
+  `validate_agent_type`.
+- **Re-registration semantics**: upsert refreshes `agent_type`, `capabilities`,
+  `last_seen_at`; preserves `registered_at` and `metadata.agent_id`
+  (rides existing immutability SQL clause).
+- **Trust model unchanged**: `agent_id` is still *claimed, not attested*. Future
+  work will pair registration with provable attestation.
+- **6 new integration tests**: register+list, duplicate-preserves-registered-at,
+  invalid-type-rejected, invalid-id-rejected, namespace-isolation (no leak into
+  `global`), and raw MCP JSON-RPC register/list roundtrip.
+
 ### Pending — remaining Phase 1 tasks to land in this release train
 
-- Task 1.3 — Agent Registration — depends on 1.2 ✓
 - Task 1.4 — Hierarchical Namespace Paths — depends on 1.1 ✓
 - Task 1.5 — Visibility Rules — depends on 1.4
 - Task 1.6 — N-Level Rule Inheritance — depends on 1.4
@@ -98,7 +120,7 @@ Successive alphas will be tagged at each track completion (A/B/C/D per
 
 ### Release engineering
 
-- Branched from `develop` @ `ee6cf9a` on 2026-04-16.
+- Branched from `develop` @ `ee6cf9a` on 2026-04-16; all Phase 1 work now lands on `release/v0.6.0`.
 - Successive alphas (`v0.6.0-alpha.N`) tagged at each track completion; `v0.6.0-rc.1`
   at feature-complete; `v0.6.0` GA when Phase 1 is done and external review window
   closes.

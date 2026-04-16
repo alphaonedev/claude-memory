@@ -3,7 +3,7 @@
 
 use anyhow::{Result, bail};
 
-use crate::models::{CreateMemory, MAX_CONTENT_SIZE, Memory, UpdateMemory};
+use crate::models::{CreateMemory, MAX_CONTENT_SIZE, Memory, UpdateMemory, VALID_AGENT_TYPES};
 
 const MAX_TITLE_LEN: usize = 512;
 const MAX_NAMESPACE_LEN: usize = 128;
@@ -119,6 +119,27 @@ pub fn validate_agent_id(agent_id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Validate an agent type against the closed `VALID_AGENT_TYPES` set.
+pub fn validate_agent_type(agent_type: &str) -> Result<()> {
+    if agent_type.is_empty() {
+        bail!("agent_type cannot be empty");
+    }
+    if !VALID_AGENT_TYPES.contains(&agent_type) {
+        bail!(
+            "invalid agent_type '{}' — must be one of: {}",
+            agent_type,
+            VALID_AGENT_TYPES.join(", ")
+        );
+    }
+    Ok(())
+}
+
+/// Validate a list of capability strings. Shares `validate_tags` rules
+/// (non-empty, <=128 bytes each, clean chars, <=50 entries).
+pub fn validate_capabilities(caps: &[String]) -> Result<()> {
+    validate_tags(caps)
 }
 
 pub fn validate_tags(tags: &[String]) -> Result<()> {
@@ -441,6 +462,28 @@ mod tests {
         assert!(validate_agent_id("alice\\bs").is_err());
         assert!(validate_agent_id("alice?q").is_err());
         assert!(validate_agent_id("alice*glob").is_err());
+    }
+
+    #[test]
+    fn test_valid_agent_type() {
+        assert!(validate_agent_type("ai:claude-opus-4.6").is_ok());
+        assert!(validate_agent_type("ai:codex-5.4").is_ok());
+        assert!(validate_agent_type("ai:grok-4.2").is_ok());
+        assert!(validate_agent_type("human").is_ok());
+        assert!(validate_agent_type("system").is_ok());
+    }
+
+    #[test]
+    fn test_invalid_agent_type() {
+        assert!(validate_agent_type("").is_err());
+        assert!(validate_agent_type("bogus").is_err());
+        assert!(validate_agent_type("AI:CLAUDE").is_err());
+        assert!(validate_agent_type("ai:claude").is_err());
+    }
+
+    #[test]
+    fn test_agents_namespace_accepted() {
+        assert!(validate_namespace("_agents").is_ok());
     }
 
     #[test]

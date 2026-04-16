@@ -10,7 +10,7 @@
 ## Prerequisites
 
 - Rust 1.87+ with `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` passing
-- All work branches from `develop`, PRs target `develop`
+- All Phase 1 work branches from `release/v0.6.0`, PRs target `release/v0.6.0` (the v0.6.0 integration train — `develop` only receives work between release trains)
 - AI coding agents: Claude Code Opus 4.6, OpenAI Codex 5.4, or xAI Grok 4.2 (or via IDE plugin in Cursor/Windsurf)
 - All code is Rust. No Python, no TypeScript, no shell scripts in core.
 - Follow [ENGINEERING_STANDARDS.md](ENGINEERING_STANDARDS.md) and [CONTRIBUTING.md](../CONTRIBUTING.md)
@@ -466,7 +466,7 @@ Requirements:
 7. Write minimum 8 new unit tests covering metadata CRUD, migration, roundtrip, and default values
 
 Constraints:
-- Branch from `develop`: git checkout develop && git checkout -b feature/schema-metadata
+- Branch from `release/v0.6.0`: git checkout release/v0.6.0 && git checkout -b feature/schema-metadata
 - Must pass: cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
 - Must pass: AI_MEMORY_NO_CONFIG=1 cargo test
 - All existing 192 tests must continue to pass
@@ -499,7 +499,7 @@ Requirements:
 7. Write minimum 4 new unit tests
 
 Constraints:
-- Branch: feature/agent-identity from develop
+- Branch: feature/agent-identity from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -526,7 +526,7 @@ Requirements:
 6. Write minimum 4 new unit tests
 
 Constraints:
-- Branch: feature/agent-register from develop
+- Branch: feature/agent-register from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -571,7 +571,7 @@ Requirements:
 Key design decision: The / character is currently rejected by validate_namespace(). You need to allow / as a delimiter while still rejecting \ and null bytes. Keep all other existing validation rules.
 
 Constraints:
-- Branch: feature/hierarchical-namespaces from develop
+- Branch: feature/hierarchical-namespaces from release/v0.6.0
 - Pedantic clippy clean, all tests pass
 - ZERO breaking changes to existing flat namespace behavior
 - No new unwrap() in production code
@@ -612,7 +612,7 @@ WHERE (json_extract(metadata, '$.scope') = 'collective')
    ... etc
 
 Constraints:
-- Branch: feature/visibility-rules from develop
+- Branch: feature/visibility-rules from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -640,7 +640,7 @@ Requirements:
 5. Write minimum 6 new unit tests: 4-level chain, missing intermediates skipped, existing 3-level behavior unchanged
 
 Constraints:
-- Branch: feature/n-level-rules from develop
+- Branch: feature/n-level-rules from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -669,7 +669,7 @@ Requirements:
 6. Write minimum 4 new unit tests
 
 Constraints:
-- Branch: feature/vertical-promotion from develop
+- Branch: feature/vertical-promotion from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -716,7 +716,7 @@ Requirements:
 8. Write minimum 6 new unit tests
 
 Constraints:
-- Branch: feature/governance-metadata from develop
+- Branch: feature/governance-metadata from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -750,7 +750,7 @@ Requirements:
 Key design: When governance blocks an operation, return a response like {"status": "pending", "pending_id": "...", "reason": "governance requires approval"} instead of an error. The caller knows the action was received but not yet executed.
 
 Constraints:
-- Branch: feature/governance-enforcement from develop
+- Branch: feature/governance-enforcement from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -778,7 +778,7 @@ Requirements:
 4. Write minimum 6 new unit tests
 
 Constraints:
-- Branch: feature/governance-approvers from develop
+- Branch: feature/governance-approvers from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -813,7 +813,7 @@ Requirements:
 The value: LLMs have finite context windows. Being able to say "give me the most relevant memories that fit in 4K tokens" means agents never waste context on low-relevance memories. This is a capability no other memory system offers.
 
 Constraints:
-- Branch: feature/budget-recall from develop
+- Branch: feature/budget-recall from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -841,7 +841,7 @@ Requirements:
 7. Write minimum 4 new unit tests
 
 Constraints:
-- Branch: feature/hierarchy-recall from develop
+- Branch: feature/hierarchy-recall from release/v0.6.0
 - Pedantic clippy clean, all tests pass, no new unwrap()
 ```
 
@@ -863,7 +863,7 @@ Week 2:
   Collab 3: [1.9 Governance Enforcement] → [1.10 Approvers] → [1.12 Hierarchy Recall]
 
 Week 3:
-  All:      Integration testing, merge to develop, red team review
+  All:      Integration testing, merge release/v0.6.0 → main, red team review
             Tag v0.6.0, release
 ```
 
@@ -871,7 +871,7 @@ Week 3:
 
 ## Integration Test Plan (Post-Merge)
 
-After all 12 tasks merge to `develop`, run the full integration scenario:
+After all 12 tasks merge to `release/v0.6.0`, run the full integration scenario:
 
 1. **Register 3 agents** with different types (AI Claude, AI Codex, human)
 2. **Create namespace hierarchy:** `testorg/engineering/platform/agent-1`
@@ -905,13 +905,13 @@ After all 12 tasks merge to `develop`, run the full integration scenario:
 
 ## PR Checklist (Every Task)
 
-- [ ] Branch from `develop`
+- [ ] Branch from `release/v0.6.0`
 - [ ] `cargo fmt --check` clean
 - [ ] `cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic` zero warnings
 - [ ] `AI_MEMORY_NO_CONFIG=1 cargo test` all passing
 - [ ] `cargo audit` clean
 - [ ] New tests cover all new functionality (minimum counts listed per task)
 - [ ] SPDX header on any new files
-- [ ] PR targets `develop`
+- [ ] PR targets `release/v0.6.0`
 - [ ] PR description states what changed and why
 - [ ] CLA signed (first PR only)

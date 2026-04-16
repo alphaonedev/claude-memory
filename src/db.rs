@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::models::{
-    Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD, Stats, Tier, TierCount,
+    AGENTS_NAMESPACE, AgentRegistration, Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD,
+    Stats, Tier, TierCount,
 };
 
 const SCHEMA: &str = r"
@@ -1051,6 +1052,131 @@ pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+/// Register or refresh an agent in the reserved `_agents` namespace.
+///
+/// Each agent is stored as a long-tier memory with `title = "agent:<agent_id>"`.
+/// Duplicate registration for the same `agent_id` refreshes `last_seen_at` and
+/// overwrites `agent_type` + `capabilities`, while preserving the original
+/// `registered_at` timestamp (caller-observable provenance).
+///
+/// Returns the stored memory ID.
+pub fn register_agent(
+    conn: &Connection,
+    agent_id: &str,
+    agent_type: &str,
+    capabilities: &[String],
+) -> Result<String> {
+    let title = format!("agent:{agent_id}");
+    let now = Utc::now().to_rfc3339();
+
+    // Preserve original registered_at across re-registration.
+    let registered_at = conn
+        .query_row(
+            "SELECT json_extract(metadata, '$.registered_at') FROM memories
+             WHERE namespace = ?1 AND title = ?2",
+            params![AGENTS_NAMESPACE, &title],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| now.clone());
+
+    let caps_json: Vec<serde_json::Value> = capabilities
+        .iter()
+        .map(|c| serde_json::Value::String(c.clone()))
+        .collect();
+
+    let metadata = serde_json::json!({
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+        "capabilities": caps_json,
+        "registered_at": registered_at,
+        "last_seen_at": now,
+    });
+
+    let content = serde_json::to_string(&metadata)
+        .context("failed to serialize agent registration content")?;
+
+    let mem = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier: Tier::Long,
+        namespace: AGENTS_NAMESPACE.to_string(),
+        title,
+        content,
+        tags: vec!["agent-registration".to_string()],
+        priority: 5,
+        confidence: 1.0,
+        source: "system".to_string(),
+        access_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        last_accessed_at: None,
+        expires_at: None,
+        metadata,
+    };
+
+    insert(conn, &mem)
+}
+
+/// List every registered agent. Rows are drawn from the `_agents` namespace
+/// and parsed out of each memory's metadata.
+pub fn list_agents(conn: &Connection) -> Result<Vec<AgentRegistration>> {
+    let now = Utc::now().to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT metadata FROM memories
+         WHERE namespace = ?1
+           AND (expires_at IS NULL OR expires_at > ?2)
+         ORDER BY json_extract(metadata, '$.registered_at') ASC",
+    )?;
+    let rows = stmt.query_map(params![AGENTS_NAMESPACE, now], |row| {
+        row.get::<_, String>(0)
+    })?;
+
+    let mut agents = Vec::new();
+    for r in rows {
+        let raw = r?;
+        let meta: serde_json::Value =
+            serde_json::from_str(&raw).context("failed to parse agent metadata as JSON")?;
+        let agent_id = meta
+            .get("agent_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let agent_type = meta
+            .get("agent_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let capabilities: Vec<String> = meta
+            .get("capabilities")
+            .and_then(serde_json::Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let registered_at = meta
+            .get("registered_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let last_seen_at = meta
+            .get("last_seen_at")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        agents.push(AgentRegistration {
+            agent_id,
+            agent_type,
+            capabilities,
+            registered_at,
+            last_seen_at,
+        });
+    }
+    Ok(agents)
 }
 
 pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {

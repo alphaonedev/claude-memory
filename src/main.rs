@@ -128,6 +128,32 @@ enum Command {
     Mine(MineArgs),
     /// Manage the memory archive (list, restore, purge, stats)
     Archive(ArchiveArgs),
+    /// Register or list agents (Task 1.3)
+    Agents(AgentsArgs),
+}
+
+#[derive(Args)]
+struct AgentsArgs {
+    #[command(subcommand)]
+    action: Option<AgentsAction>,
+}
+
+#[derive(Subcommand)]
+enum AgentsAction {
+    /// List registered agents (default)
+    List,
+    /// Register or refresh an agent
+    Register {
+        /// Agent identifier
+        #[arg(long)]
+        agent_id: String,
+        /// Agent type (ai:claude-opus-4.6, ai:claude-opus-4.7, ai:codex-5.4, ai:grok-4.2, human, system)
+        #[arg(long)]
+        agent_type: String,
+        /// Comma-separated capability tags
+        #[arg(long, default_value = "")]
+        capabilities: String,
+    },
 }
 
 #[derive(Args)]
@@ -517,6 +543,7 @@ async fn main() -> Result<()> {
         }
         Command::Mine(a) => cmd_mine(&db_path, a, j, &app_config, cli_agent_id.as_deref()),
         Command::Archive(a) => cmd_archive(&db_path, a, j),
+        Command::Agents(a) => cmd_agents(&db_path, a, j),
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -615,6 +642,8 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             post(handlers::restore_archive),
         )
         .route("/api/v1/archive/stats", get(handlers::archive_stats))
+        .route("/api/v1/agents", get(handlers::list_agents))
+        .route("/api/v1/agents", post(handlers::register_agent))
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             handlers::api_key_auth,
@@ -2005,6 +2034,74 @@ fn cmd_archive(db_path: &Path, args: ArchiveArgs, json_out: bool) -> Result<()> 
                         );
                     }
                 }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_agents(db_path: &Path, args: AgentsArgs, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
+    match args.action.unwrap_or(AgentsAction::List) {
+        AgentsAction::List => {
+            let agents = db::list_agents(&conn)?;
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::json!({"count": agents.len(), "agents": agents})
+                );
+            } else if agents.is_empty() {
+                println!("no registered agents");
+            } else {
+                for a in &agents {
+                    let caps = if a.capabilities.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", a.capabilities.join(","))
+                    };
+                    println!(
+                        "{}  type={}  registered={}  last_seen={}{}",
+                        a.agent_id, a.agent_type, a.registered_at, a.last_seen_at, caps
+                    );
+                }
+                println!("{} registered agents", agents.len());
+            }
+        }
+        AgentsAction::Register {
+            agent_id,
+            agent_type,
+            capabilities,
+        } => {
+            validate::validate_agent_id(&agent_id)?;
+            validate::validate_agent_type(&agent_type)?;
+            let caps: Vec<String> = capabilities
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+                .collect();
+            validate::validate_capabilities(&caps)?;
+            let id = db::register_agent(&conn, &agent_id, &agent_type, &caps)?;
+            if json_out {
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "registered": true,
+                        "id": id,
+                        "agent_id": agent_id,
+                        "agent_type": agent_type,
+                        "capabilities": caps,
+                    })
+                );
+            } else {
+                println!(
+                    "registered {agent_id} (type={agent_type}, capabilities={})",
+                    if caps.is_empty() {
+                        "-".to_string()
+                    } else {
+                        caps.join(",")
+                    }
+                );
             }
         }
     }

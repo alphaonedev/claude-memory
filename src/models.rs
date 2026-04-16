@@ -277,6 +277,36 @@ pub struct NamespaceCount {
     pub count: usize,
 }
 
+/// Namespace reserved for agent registrations (Task 1.3).
+pub const AGENTS_NAMESPACE: &str = "_agents";
+
+/// Closed set of agent types. Extend carefully — values are persisted.
+pub const VALID_AGENT_TYPES: &[&str] = &[
+    "ai:claude-opus-4.6",
+    "ai:claude-opus-4.7",
+    "ai:codex-5.4",
+    "ai:grok-4.2",
+    "human",
+    "system",
+];
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterAgentBody {
+    pub agent_id: String,
+    pub agent_type: String,
+    #[serde(default)]
+    pub capabilities: Option<Vec<String>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentRegistration {
+    pub agent_id: String,
+    pub agent_type: String,
+    pub capabilities: Vec<String>,
+    pub registered_at: String,
+    pub last_seen_at: String,
+}
+
 pub const MAX_CONTENT_SIZE: usize = 65_536;
 pub const PROMOTION_THRESHOLD: i64 = 5;
 /// How much to extend TTL on access (1 hour for short, 1 day for mid)

@@ -19,7 +19,7 @@ use crate::config::ResolvedTtl;
 use crate::db;
 use crate::models::{
     CreateMemory, ForgetQuery, LinkBody, ListQuery, Memory, MemoryLink, RecallBody, RecallQuery,
-    SearchQuery, Tier, UpdateMemory,
+    RegisterAgentBody, SearchQuery, Tier, UpdateMemory,
 };
 use crate::validate;
 
@@ -165,6 +165,76 @@ pub async fn create_memory(
             }
             (StatusCode::CREATED, Json(response)).into_response()
         }
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn register_agent(
+    State(state): State<Db>,
+    Json(body): Json<RegisterAgentBody>,
+) -> impl IntoResponse {
+    if let Err(e) = validate::validate_agent_id(&body.agent_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    if let Err(e) = validate::validate_agent_type(&body.agent_type) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    let capabilities = body.capabilities.unwrap_or_default();
+    if let Err(e) = validate::validate_capabilities(&capabilities) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+
+    let lock = state.lock().await;
+    match db::register_agent(&lock.0, &body.agent_id, &body.agent_type, &capabilities) {
+        Ok(id) => (
+            StatusCode::CREATED,
+            Json(json!({
+                "registered": true,
+                "id": id,
+                "agent_id": body.agent_id,
+                "agent_type": body.agent_type,
+                "capabilities": capabilities,
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn list_agents(State(state): State<Db>) -> impl IntoResponse {
+    let lock = state.lock().await;
+    match db::list_agents(&lock.0) {
+        Ok(agents) => (
+            StatusCode::OK,
+            Json(json!({"count": agents.len(), "agents": agents})),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
             (

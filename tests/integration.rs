@@ -1835,7 +1835,7 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 26, "expected 26 MCP tools");
+    assert_eq!(tools.len(), 28, "expected 28 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
@@ -1851,6 +1851,8 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"memory_link"));
     assert!(tool_names.contains(&"memory_get_links"));
     assert!(tool_names.contains(&"memory_consolidate"));
+    assert!(tool_names.contains(&"memory_agent_register"));
+    assert!(tool_names.contains(&"memory_agent_list"));
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -4033,6 +4035,316 @@ fn test_agentid_visible_in_toon_and_json() {
         Some("toon-alice"),
         "JSON response must surface agent_id; got:\n{data}"
     );
+
+    let _ = std::fs::remove_file(&db_path);
+}
+
+// ---------------------------------------------------------------------------
+// Task 1.3 — Agent Registration
+// ---------------------------------------------------------------------------
+
+fn fresh_agent_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-agentreg-{}.db", uuid::Uuid::new_v4()))
+}
+
+fn register_via_cli(
+    binary: &str,
+    db_path: &std::path::Path,
+    agent_id: &str,
+    agent_type: &str,
+    capabilities: &str,
+) -> std::process::Output {
+    cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "agents",
+            "register",
+            "--agent-id",
+            agent_id,
+            "--agent-type",
+            agent_type,
+            "--capabilities",
+            capabilities,
+        ])
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn test_agent_register_and_list() {
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let out = register_via_cli(
+        binary,
+        &db_path,
+        "alice",
+        "ai:claude-opus-4.6",
+        "recall,store",
+    );
+    assert!(
+        out.status.success(),
+        "register failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let reg: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(reg["registered"], true);
+    assert_eq!(reg["agent_id"], "alice");
+    assert_eq!(reg["agent_type"], "ai:claude-opus-4.6");
+
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "agents",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed["count"], 1);
+    let first = &listed["agents"][0];
+    assert_eq!(first["agent_id"], "alice");
+    assert_eq!(first["agent_type"], "ai:claude-opus-4.6");
+    assert_eq!(first["capabilities"][0], "recall");
+    assert_eq!(first["capabilities"][1], "store");
+    assert!(first["registered_at"].as_str().unwrap().contains('T'));
+    assert!(first["last_seen_at"].as_str().unwrap().contains('T'));
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_agent_register_duplicate_preserves_registered_at() {
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let _ = register_via_cli(binary, &db_path, "bob", "ai:codex-5.4", "search");
+    // Read back the original registered_at
+    let out1 = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "agents",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let listed1: serde_json::Value = serde_json::from_slice(&out1.stdout).unwrap();
+    let reg_at_1 = listed1["agents"][0]["registered_at"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Sleep enough that now() moves forward
+    std::thread::sleep(std::time::Duration::from_millis(50));
+
+    // Re-register with a different type + capabilities
+    let out2 = register_via_cli(binary, &db_path, "bob", "human", "review,approve");
+    assert!(out2.status.success());
+
+    let out3 = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "agents",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let listed2: serde_json::Value = serde_json::from_slice(&out3.stdout).unwrap();
+    assert_eq!(listed2["count"], 1, "duplicate must upsert, not append");
+    let row = &listed2["agents"][0];
+    assert_eq!(
+        row["agent_type"], "human",
+        "agent_type updates on re-register"
+    );
+    assert_eq!(row["capabilities"][0], "review");
+    assert_eq!(
+        row["registered_at"].as_str().unwrap(),
+        reg_at_1,
+        "registered_at preserved across re-register"
+    );
+    assert_ne!(
+        row["last_seen_at"].as_str().unwrap(),
+        reg_at_1,
+        "last_seen_at bumps on re-register"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_agent_register_rejects_invalid_type() {
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let out = register_via_cli(binary, &db_path, "carol", "bogus-type", "");
+    assert!(
+        !out.status.success(),
+        "invalid agent_type should exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("invalid agent_type"),
+        "expected validation message, got: {stderr}"
+    );
+
+    // Confirm no row was created.
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "agents",
+            "list",
+        ])
+        .output()
+        .unwrap();
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed["count"], 0);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_agent_register_rejects_invalid_agent_id() {
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let out = register_via_cli(binary, &db_path, "evil;id", "system", "");
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.to_lowercase().contains("agent_id"),
+        "expected agent_id validation message, got: {stderr}"
+    );
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_agents_list_uses_reserved_namespace() {
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let _ = register_via_cli(binary, &db_path, "dave", "system", "heartbeat");
+
+    // Agent row lives in the _agents namespace
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "list",
+            "-n",
+            "_agents",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let count = listed["count"].as_u64().unwrap_or(0);
+    assert_eq!(count, 1, "agent must occupy _agents namespace");
+
+    let title = listed["memories"][0]["title"].as_str().unwrap_or("");
+    assert_eq!(title, "agent:dave");
+
+    let agent_type = listed["memories"][0]["metadata"]["agent_type"]
+        .as_str()
+        .unwrap_or("");
+    assert_eq!(agent_type, "system");
+
+    // And does NOT appear under the default (global) namespace
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "list",
+            "-n",
+            "global",
+        ])
+        .output()
+        .unwrap();
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed["count"].as_u64().unwrap_or(0), 0);
+    let _ = std::fs::remove_file(&db_path);
+}
+
+#[test]
+fn test_mcp_agent_register_and_list() {
+    use std::io::Write;
+    let db_path = fresh_agent_db();
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    let mut child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let stdin = child.stdin.as_mut().unwrap();
+    let init = serde_json::json!({
+        "jsonrpc":"2.0","id":1,"method":"initialize",
+        "params":{"clientInfo":{"name":"test-suite","version":"1.0"}}
+    });
+    writeln!(stdin, "{init}").unwrap();
+
+    let reg = serde_json::json!({
+        "jsonrpc":"2.0","id":2,"method":"tools/call",
+        "params":{
+            "name":"memory_agent_register",
+            "arguments":{
+                "agent_id":"mcp-eve",
+                "agent_type":"ai:grok-4.2",
+                "capabilities":["code","chat"]
+            }
+        }
+    });
+    writeln!(stdin, "{reg}").unwrap();
+
+    let list = serde_json::json!({
+        "jsonrpc":"2.0","id":3,"method":"tools/call",
+        "params":{"name":"memory_agent_list","arguments":{}}
+    });
+    writeln!(stdin, "{list}").unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert!(
+        lines.len() >= 3,
+        "expected 3 JSON-RPC responses, got {}:\n{stdout}",
+        lines.len()
+    );
+
+    let reg_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let reg_text = reg_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let reg_json: serde_json::Value = serde_json::from_str(reg_text).unwrap();
+    assert_eq!(reg_json["registered"], true);
+    assert_eq!(reg_json["agent_id"], "mcp-eve");
+
+    let list_resp: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let list_text = list_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let list_json: serde_json::Value = serde_json::from_str(list_text).unwrap();
+    assert_eq!(list_json["count"], 1);
+    assert_eq!(list_json["agents"][0]["agent_id"], "mcp-eve");
+    assert_eq!(list_json["agents"][0]["agent_type"], "ai:grok-4.2");
+    let caps = list_json["agents"][0]["capabilities"].as_array().unwrap();
+    assert_eq!(caps.len(), 2);
 
     let _ = std::fs::remove_file(&db_path);
 }

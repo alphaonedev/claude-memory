@@ -388,6 +388,27 @@ fn tool_definitions() -> Value {
                     },
                     "required": ["namespace"]
                 }
+            },
+            {
+                "name": "memory_agent_register",
+                "description": "Register an agent in the reserved _agents namespace. Stores agent_type and capabilities, refreshes last_seen_at on re-registration while preserving registered_at. agent_id is claimed, not attested.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "Agent identifier (same validation as metadata.agent_id)"},
+                        "agent_type": {"type": "string", "enum": ["ai:claude-opus-4.6", "ai:claude-opus-4.7", "ai:codex-5.4", "ai:grok-4.2", "human", "system"]},
+                        "capabilities": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Optional capability tags"}
+                    },
+                    "required": ["agent_id", "agent_type"]
+                }
+            },
+            {
+                "name": "memory_agent_list",
+                "description": "List every registered agent.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -1425,6 +1446,44 @@ fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespace: &str) {
 // Archive tool handlers
 // ---------------------------------------------------------------------------
 
+fn handle_agent_register(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let agent_id = params["agent_id"].as_str().ok_or("agent_id is required")?;
+    let agent_type = params["agent_type"]
+        .as_str()
+        .ok_or("agent_type is required")?;
+    let capabilities: Vec<String> = params["capabilities"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    validate::validate_agent_id(agent_id).map_err(|e| e.to_string())?;
+    validate::validate_agent_type(agent_type).map_err(|e| e.to_string())?;
+    validate::validate_capabilities(&capabilities).map_err(|e| e.to_string())?;
+
+    let id =
+        db::register_agent(conn, agent_id, agent_type, &capabilities).map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "registered": true,
+        "id": id,
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+        "capabilities": capabilities,
+    }))
+}
+
+fn handle_agent_list(conn: &rusqlite::Connection) -> Result<Value, String> {
+    let agents = db::list_agents(conn).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "count": agents.len(),
+        "agents": agents,
+    }))
+}
+
 fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).expect("u64 as usize");
@@ -1647,6 +1706,8 @@ fn handle_request(
                 "memory_namespace_clear_standard" => {
                     handle_namespace_clear_standard(conn, arguments)
                 }
+                "memory_agent_register" => handle_agent_register(conn, arguments),
+                "memory_agent_list" => handle_agent_list(conn),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -1961,10 +2022,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_26_tools() {
+    fn tool_definitions_returns_28_tools() {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 26);
+        assert_eq!(tools.len(), 28);
+    }
+
+    #[test]
+    fn tool_definitions_include_agent_register_and_list() {
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"memory_agent_register"));
+        assert!(names.contains(&"memory_agent_list"));
     }
 
     #[test]
