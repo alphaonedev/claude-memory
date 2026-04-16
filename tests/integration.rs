@@ -215,23 +215,37 @@ fn test_gc_removes_expired() {
 
 #[test]
 fn test_content_size_limit() {
+    use std::io::Write;
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-size-test-{}.db", uuid::Uuid::new_v4()));
 
     let huge_content = "x".repeat(70_000);
-    let output = cmd(binary)
+    // Pipe huge content via stdin (-c -) to avoid Windows' ~8191-char argv
+    // limit on CreateProcess (ERROR_FILENAME_EXCED_RANGE / code 206).
+    let mut child = cmd(binary)
         .args([
             "--db",
             db_path.to_str().unwrap(),
             "store",
             "-T",
             "too big",
-            "--content",
-            &huge_content,
+            "-c",
+            "-",
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(huge_content.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success(), "should reject oversized content");
 
     let _ = std::fs::remove_file(&db_path);
@@ -390,23 +404,36 @@ fn test_reject_bad_namespace() {
 
 #[test]
 fn test_reject_oversized_content() {
+    use std::io::Write;
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-val-size-{}.db", uuid::Uuid::new_v4()));
 
     let huge = "x".repeat(70_000);
-    let output = cmd(binary)
+    // Pipe via stdin (-c -) for Windows argv-length compatibility.
+    let mut child = cmd(binary)
         .args([
             "--db",
             db_path.to_str().unwrap(),
             "store",
             "-T",
             "huge",
-            "--content",
-            &huge,
+            "-c",
+            "-",
         ])
-        .output()
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .unwrap();
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(huge.as_bytes())
+        .unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
     assert!(!output.status.success(), "should reject oversized content");
 
     let _ = std::fs::remove_file(&db_path);
