@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0-alpha.0] — Unreleased — Phase 1 integration train
+## [0.6.0-alpha.1] — 2026-04-16 — Phase 1 Track A complete
 
 First cut of the v0.6.0 release train. Integration branch for Phase 1 tasks 1.3–1.12
 plus the already-landed foundation work (1.1, 1.2). Pre-release; API is not yet stable.
