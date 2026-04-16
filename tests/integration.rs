@@ -3460,3 +3460,83 @@ fn test_agentid_validator_rejects_bad_input() {
     assert!(!out.status.success(), "expected rejection for whitespace");
     let _ = std::fs::remove_file(&db_path);
 }
+
+/// Regression test for a red-team finding (T-3 from the 2026-04-16 assessment):
+/// the MCP `memory_update` tool accepted a metadata object that overwrote
+/// `metadata.agent_id`, letting any caller rewrite the recorded author of an
+/// existing memory — bypassing the immutability invariant documented in the
+/// NHI design. Verified fixed by wiring `identity::preserve_agent_id` into
+/// `mcp::handle_update` alongside the existing store/dedup/HTTP paths.
+#[test]
+fn test_mcp_update_preserves_agent_id() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let db_path = fresh_db();
+
+    // 1. CLI store with alice as author
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-id",
+            "alice",
+            "--json",
+            "store",
+            "-T",
+            "mcp-update-preserve",
+            "-c",
+            "v1",
+        ])
+        .output()
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = stored["id"].as_str().unwrap().to_string();
+    assert_eq!(agent_id_of(&stored), "alice");
+
+    // 2. MCP memory_update with metadata including a hostile agent_id
+    let req1 = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+    let req2 = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_update","arguments":{{"id":"{id}","metadata":{{"agent_id":"attacker","side_field":"ok"}}}}}}}}"#,
+    );
+
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, "{req1}").ok();
+                writeln!(stdin, "{req2}").ok();
+            }
+            drop(child.stdin.take());
+            child.wait_with_output()
+        })
+        .expect("failed to run mcp");
+
+    // 3. Parse the MCP response and assert provenance held.
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let last_line = stdout.trim().lines().last().unwrap();
+    let resp: serde_json::Value = serde_json::from_str(last_line).unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    let data: serde_json::Value = serde_json::from_str(text).unwrap();
+    let returned_meta = &data["memory"]["metadata"];
+
+    assert_eq!(
+        returned_meta["agent_id"], "alice",
+        "agent_id must be preserved across MCP update, got: {returned_meta}"
+    );
+    assert_eq!(
+        returned_meta["side_field"], "ok",
+        "other metadata fields must still be writable"
+    );
+
+    let _ = std::fs::remove_file(&db_path);
+}

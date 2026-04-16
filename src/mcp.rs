@@ -1085,7 +1085,12 @@ fn handle_update(
     let metadata = if params["metadata"].is_object() {
         let m = params["metadata"].clone();
         validate::validate_metadata(&m).map_err(|e| e.to_string())?;
-        Some(m)
+        // Preserve existing metadata.agent_id — provenance is immutable.
+        // Without this, any MCP caller could rewrite the author of any memory.
+        let existing = db::get(conn, &resolved_id)
+            .map_err(|e| e.to_string())?
+            .map_or_else(|| serde_json::json!({}), |m| m.metadata);
+        Some(crate::identity::preserve_agent_id(&existing, &m))
     } else {
         None
     };
