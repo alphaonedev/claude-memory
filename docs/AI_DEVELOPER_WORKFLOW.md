@@ -326,6 +326,35 @@ Closes #<n>  (or "Refs #<n>")
 - If a new push invalidates a prior approval (`main` is configured for stale-review
   dismissal — `develop` may not be), re-request review explicitly.
 
+### 8.5 Merge path — single, by policy
+
+**AI-authored PRs to `develop` always merge via the §3.4 NHI Merge SOP.** There is
+no alternate review path for AI-authored PRs in this project.
+
+Why: per [`AI_DEVELOPER_GOVERNANCE.md` §5.4](AI_DEVELOPER_GOVERNANCE.md), only
+`@alphaonedev` may approve PRs whose commits carry the AI `Co-Authored-By:`
+trailer. Combined with GitHub's hardcoded rule that a PR's author cannot
+self-approve, every AI-authored PR satisfies §3.4.1 pre-condition (3) by
+construction and the SOP is the only available merge mechanism.
+
+Identification of an AI-authored PR is by the presence of the `Co-Authored-By:`
+trailer on **any** commit in the PR (Governance §5.4 #5).
+
+| PR class | Identifying signal | Merge path |
+|----------|-------------------|------------|
+| AI-authored | Any commit has `Co-Authored-By: <agent>` trailer | §3.4 NHI Merge SOP (always, no alternate) |
+| Human-authored | No AI `Co-Authored-By:` trailer on any commit | Normal review (maintainer or any qualified CODEOWNER approves in GitHub UI; merger clicks **Squash and merge**) |
+
+The §3.4 SOP is the standard, codified procedure — not an exception. It does not
+weaken any quality gate: signatures, status checks, code-owner rules, and
+last-push-approval all remain active throughout the window. Only the
+admin-enforcement bit is transiently toggled. See
+[`AI_DEVELOPER_GOVERNANCE.md` §3.4](AI_DEVELOPER_GOVERNANCE.md) for full
+pre-conditions, procedure, window discipline, and audit-memory template.
+
+If you, as the agent, cannot verify that all §3.4.1 pre-conditions are met, do
+**not** invoke the SOP. Stop and hand back to the accountable human.
+
 ---
 
 ## 9. Handoff & Closure
