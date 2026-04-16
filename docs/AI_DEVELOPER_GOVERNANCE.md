@@ -47,11 +47,50 @@ regardless of where the agent runs (developer workstation, CI, hosted IDE, serve
 | IDE-resident assistants | Cursor, Copilot, Continue.dev, Windsurf | Approved |
 | MCP-only clients | OpenClaw, custom MCP clients | Approved |
 | Local model agents | Ollama-driven agents using this repo's MCP server | Approved |
-| Autonomous off-host agents | Background agents with no human in the loop on commit | **Not approved** without prior written maintainer approval |
+| **Supervised off-host agents** | OpenClaw / Hermes / similar instances running on a remote host (VPS, cloud VM, dedicated server) on behalf of an accountable human, with the §2.1.1 pre-conditions satisfied | **Approved** under §2.1.1 |
+| Autonomous off-host agents | Background agents with no human in the loop on commit and no §2.1.1 supervision controls | **Not approved** without prior written maintainer approval |
 
 The list of approved agent **classes** is maintained here. Specific model versions
 (e.g., Claude Opus 4.6) do not require separate approval — the human driving the agent
 is responsible for ensuring the model is fit for purpose.
+
+#### 2.1.1 Pre-conditions for the Supervised off-host agents class
+
+A supervised off-host agent is **approved** to operate on this repository if **all**
+of the following hold continuously while the agent is running:
+
+1. **Named accountable human.** Exactly one accountable human (per §2.3) is on
+   record for the instance. The instance's identity (machine name, region, agent
+   type, model, version) is stored in a `long`-tier ai-memory entry tagged
+   `agent-registry,supervised-off-host` in namespace `ai-memory-mcp`. Updates to
+   the registry are themselves PRs and follow normal review.
+2. **Heartbeat.** The instance posts a heartbeat to ai-memory at least every 15
+   minutes (`memory_store` short-tier, namespace `ai-memory-mcp`, tag
+   `heartbeat,<instance-name>`). Three consecutive missed heartbeats trigger an
+   automatic stop (the instance must self-shutdown if it cannot post).
+3. **Dead-man's switch.** A separate watchdog (CI cron, external monitor, or
+   second AI-NHI session) checks heartbeat freshness every 15 minutes and pages
+   the accountable human if heartbeats stop or if §2.1.1 #4 (rate limit) is
+   exceeded.
+4. **Hard rate limit on PR creation.** Default: max 10 PRs/day per instance. May
+   be raised only via PR amending §2.1.1 (Sensitive class). The instance must
+   self-throttle and refuse to open PR #11 in a 24-hour rolling window.
+5. **Human-pingable on stall.** If the instance encounters a §11 stop condition
+   from `AI_DEVELOPER_WORKFLOW.md`, it must (a) post the stop reason as a
+   `mid`-tier ai-memory entry tagged `stall,<instance-name>`, (b) page the
+   accountable human within 5 minutes, and (c) make no further repository
+   actions until the human acknowledges in chat or in a PR comment.
+6. **No source modification while §3.4 SOP window is open by another agent.**
+   See §3.4.3.1 (concurrency lock) and §3.5 (multi-agent coordination).
+7. **Identifiable in commits and PRs.** Every commit and PR carries an
+   instance-disambiguating identifier in the `Co-Authored-By:` trailer or PR
+   description (e.g., `Co-Authored-By: Claude Opus 4.6 via OpenClaw [vps-east-1]
+   <noreply@anthropic.com>`).
+
+If any of #1–#7 fails, the instance is no longer in the **Supervised off-host
+agents** class — it is in the **Autonomous off-host agents** class and is
+therefore **Not approved**. The instance must self-stop until the failed
+pre-condition is restored.
 
 ### 2.2 Identification
 
@@ -213,6 +252,61 @@ error, network failure), the agent must (a) attempt to re-enable `enforce_admins
 immediately, and (b) escalate to the accountable human with a clear status before
 any further action.
 
+##### 3.4.3.1 Concurrency lock (multi-agent operation)
+
+The "no concurrent windows" rule (single-agent operation) is enforced
+operationally by the **§3.4.3.1 concurrency lock primitive**. Required for any
+deployment with more than one agent (human-driven CLI session OR supervised
+off-host instance) capable of opening a §3.4 SOP window against the same repo.
+
+**Lock primitive:** A single `short`-tier ai-memory entry with a fixed,
+canonical title acts as the lock. Every agent acquires the lock before opening
+the window and releases it after re-enabling `enforce_admins`.
+
+| Field | Value |
+|-------|-------|
+| `tier` | `short` (TTL ~15 min, matching the §3.4.3 window cap) |
+| `title` | `LOCK: §3.4 SOP window — <owner>/<repo>` (exact, canonical) |
+| `namespace` | `ai-memory-mcp` (or the repo's namespace standard) |
+| `tags` | `lock,sop-window,<instance-name>` |
+| `priority` | `9` |
+| `content` | JSON: `{"holder": "<instance-name>", "agent": "<model id>", "human": "@<login>", "pr": <N>, "opened_at": "<ISO-8601>"}` |
+
+**Acquire procedure (every SOP invocation):**
+
+1. Search ai-memory: `memory_search "LOCK: §3.4 SOP window — <owner>/<repo>"`
+2. If a non-expired entry exists with a different `holder`:
+   - **Wait** (poll every 30 sec, max wait = 20 min) until the entry expires or
+     is deleted
+   - If wait timeout exceeded, **hard-fail**: do not open the window; surface a
+     `mid`-tier memory tagged `sop-collision,<instance-name>` and escalate to
+     the accountable human
+3. If no non-expired entry exists, **store** the lock entry (per the table above)
+4. **Re-read** the lock to confirm your `holder` value won. If a different
+   holder won the race, go back to step 2 (loser yields).
+5. Proceed to §3.4.2 step 3 (disable `enforce_admins`).
+
+**Release procedure (every SOP invocation, success or failure):**
+
+1. After §3.4.2 step 8 (`enforce_admins.enabled == true` confirmed), or after a
+   hard-fail rollback, **delete** the lock entry: `memory_delete <id>`
+2. Verify deletion. If deletion fails, do NOT retry indefinitely — the lock
+   will expire on TTL (≤15 min). Escalate to the human and proceed.
+
+**Stale lock handling:** A lock entry with `opened_at` older than 15 minutes is
+**stale** by definition (window cap exceeded). Any agent encountering a stale
+lock should:
+
+1. Page the accountable human listed in the lock content
+2. Verify the lock-holder's branch protection state (was `enforce_admins`
+   restored?)
+3. If branch protection is in a broken state, the human (not the agent) restores
+   it manually
+4. Once the human confirms cleanup, the agent may delete the stale lock and
+   proceed
+
+Stale lock encounters are themselves §9.2 event-driven review triggers.
+
 #### 3.4.4 Audit memory (mandatory artifact)
 
 Every SOP invocation produces exactly one `ai-memory` entry. Without this entry,
@@ -229,6 +323,32 @@ Required fields:
 | `tags` | must include `governance,event-review,nhi-sop` |
 | `title` | `Governance event-review: NHI Merge SOP invocation on <branch> (<YYYY-MM-DD>)` |
 | `content` | the full audit record per the template in §3.4.5 |
+
+##### 3.4.4.1 Retention policy
+
+Audit memories are **immutable, non-consolidatable, append-only records**. The
+following retention rules apply for the lifetime of this repository:
+
+| Constraint | Rule |
+|------------|------|
+| Auto-consolidation | **Forbidden.** Any entry tagged `governance,event-review,nhi-sop` (in any combination) is excluded from `auto-consolidate` and from any future autonomous-tier consolidation logic. The autonomous tier MUST honor this exclusion. |
+| Auto-tagging mutation | Forbidden. Tags on these entries may not be removed or rewritten by any agent (human or AI). New tags may be appended. |
+| Hard delete (`memory_delete`) | **Restricted** under §3.2 #6. Only the accountable human may hard-delete an audit memory, and only as part of a documented audit-record correction (which itself becomes a §9.2 event-driven review trigger). |
+| Archive (TTL-driven) | These entries are `long`-tier with no expiry; they are never GC'd, never archived, and never aged out automatically. |
+| Update (`memory_update`) | The `content` field is **append-only**. Corrections take the form of a new `governance,event-review,correction` entry that links to the original via `memory_link related_to`. The original is never edited in place. |
+| Per-window summary | A `mid`-tier weekly summary entry tagged `governance,weekly-summary` may be auto-generated (consolidates count of windows, total duration, PRs merged). The summary does NOT replace the per-invocation entries. |
+| Quarterly summary | A `long`-tier quarterly summary entry tagged `governance,quarterly-summary` is generated as part of §9.1 quarterly review. It does NOT replace per-invocation entries. |
+
+##### 3.4.4.2 Volume control at scale
+
+A 24/7 supervised off-host agent operating at the §2.1.1 #4 default rate limit
+(10 PRs/day) generates ~3,650 audit memories/year. Each is on the order of 1–4
+KB. Annual storage growth: ~10 MB/instance. Acceptable for the SQLite backend
+without further mitigation.
+
+If multi-agent operation grows beyond ~5 instances OR rate limits are raised
+beyond 50 PRs/day/instance, an additional tracking issue must be opened to
+revisit the storage model and the §9.1 quarterly review sampling strategy.
 
 #### 3.4.5 Audit memory template
 
@@ -316,6 +436,149 @@ event-driven review — it does not additionally trigger one. A *failed* or
 §3.4.1 pre-condition violated) **does** trigger a §9.2 event-driven review and
 must be surfaced to the accountable human immediately.
 
+### 3.5 Multi-Agent Coordination
+
+This section governs operation when **more than one agent** (any combination of
+human-driven CLI sessions and supervised off-host instances per §2.1.1) is
+capable of performing repository actions concurrently against the same repo.
+
+#### 3.5.1 Branch ownership
+
+Every active branch (other than `main` and `develop`) has exactly one **owning
+agent** at a time. Ownership is established by:
+
+1. The agent that created the branch (via `git checkout -b … origin/develop`)
+   is the initial owner.
+2. Ownership is recorded as a `mid`-tier ai-memory entry tagged
+   `branch-ownership,<branch-name>`. Required content fields: `holder`,
+   `human`, `created_at`, `purpose` (1-line scope).
+3. Ownership transfers via §3.5.2 handoff. Without a handoff, no other agent
+   may push to or modify a branch it does not own.
+
+`main` and `develop` are protected branches with no per-agent ownership; they
+are the merge targets only.
+
+#### 3.5.2 Handoff between agents
+
+A handoff transfers branch ownership from one agent to another. Both agents
+must be active and reachable (or the source agent's accountable human must be
+reachable on the target's behalf).
+
+Handoff procedure:
+
+1. Source agent commits and pushes any in-flight work, leaving the working
+   tree clean.
+2. Source agent updates the `branch-ownership,<branch-name>` memory:
+   - Append `transferred_from: <source-instance>, transferred_to:
+     <target-instance>, transferred_at: <ISO-8601>` to the content.
+   - Add tag `handoff-pending`.
+3. Target agent acknowledges by:
+   - Reading the updated memory
+   - Pulling the latest branch state
+   - Updating the memory: `holder: <target-instance>`, remove tag
+     `handoff-pending`, add tag `handoff-completed`.
+4. Until step 3 completes, the branch is in a **handoff-pending** state.
+   Neither agent may push during this state.
+
+If the target agent does not acknowledge within 1 hour, the handoff is
+considered failed. The source agent reverts ownership (step 2 in reverse) and
+escalates to the accountable human.
+
+#### 3.5.3 Stale-branch GC
+
+A branch is **stale** if:
+
+- No commits have been pushed to it for 14 days, AND
+- The `branch-ownership,<branch-name>` memory has not been touched (recall,
+  update) for 14 days, AND
+- No open PR references the branch as its head
+
+Stale-branch GC procedure (any agent may initiate):
+
+1. Verify all three staleness criteria above.
+2. Open a `mid`-tier ai-memory entry tagged `stale-branch-candidate,<branch>`
+   listing the branch, its owner, and last-touch timestamps.
+3. Page the owner's accountable human.
+4. Wait 7 days for response. If the human confirms abandonment OR does not
+   respond, the agent may:
+   - Open a PR titled `chore: delete stale branch <branch>` against `develop`
+     that simply documents the deletion in CHANGELOG.md
+   - Following normal §3.4 SOP merge for that PR
+   - After merge, delete the branch via `git push origin --delete <branch>`
+5. If the human responds with "keep", the agent updates the
+   `branch-ownership` memory to refresh the timestamp (effectively renewing
+   the lease).
+
+Branch deletion is otherwise **Restricted** under §3.2 #3 — this is the
+narrow carve-out for stale-branch GC, and only after the explicit 7-day human
+confirmation window.
+
+#### 3.5.4 Conflict resolution between agents
+
+If two agents have produced conflicting work (overlapping branches, conflicting
+PRs targeting the same files, conflicting memories), the conflict is **NOT**
+reconciled silently by either agent. Procedure:
+
+1. The agent that detects the conflict opens a `long`-tier ai-memory entry
+   tagged `inter-agent-conflict,<branch1>-vs-<branch2>` with full context.
+2. The detecting agent opens an issue tagged
+   `governance,inter-agent-conflict` (per §8.3) referencing the memory.
+3. Both agents (or their drivers) pause work on the affected branches.
+4. The accountable human(s) decide the resolution.
+5. Resolution is recorded as a `long`-tier memory linked to the conflict
+   memory via `supersedes`.
+
+Inter-agent conflicts are §9.2 event-driven review triggers regardless of
+resolution outcome.
+
+#### 3.5.5 §3.4 SOP serialization across agents
+
+The §3.4.3.1 concurrency lock is the **mandatory** serialization mechanism for
+multi-agent SOP invocations. Operationally:
+
+- At most one §3.4 SOP window may be open across **all** agents touching this
+  repository at any moment in time.
+- Lock acquisition is via the `LOCK: §3.4 SOP window — <owner>/<repo>`
+  memory entry per §3.4.3.1.
+- Lock release is mandatory (per §3.4.3.1 release procedure) — orphaned locks
+  are cleaned up via the §3.4.3.1 stale-lock procedure with human escalation.
+- An agent that holds the lock and is then signaled to stop (heartbeat
+  failure, accountable human paged, etc.) must release the lock before
+  stopping if at all possible. If the agent cannot release, the human must
+  clean up.
+
+#### 3.5.6 Operational handoff between humans-in-CLI and supervised off-host
+
+When humans (driving Claude Code, Cursor, etc.) are active in the same repo as
+a supervised off-host agent (per §2.1.1):
+
+- The supervised off-host agent **defers** to human sessions whenever the
+  concurrency lock is contested (loser yields per §3.4.3.1 step 4).
+- The supervised off-host agent does **not** modify branches owned by an
+  active human session (humans may modify their own branches without §3.5.1
+  ownership memory; the supervised agent must respect "human-owned" branches
+  conservatively — if in doubt, don't touch).
+- If the supervised off-host agent observes a human session push to `develop`
+  via PR merge, the supervised agent must `git fetch` and rebase its in-flight
+  branches before resuming work.
+
+#### 3.5.7 Single-agent operation (default)
+
+When only one agent is active (e.g., a single human in CLI, or only the
+supervised off-host instance running with all humans offline), the §3.5
+multi-agent rules still apply but most are no-ops:
+
+- §3.5.1 branch ownership is single-trivial
+- §3.5.2 handoff doesn't fire
+- §3.5.3 stale-branch GC still applies (background hygiene)
+- §3.5.4 inter-agent conflict doesn't fire
+- §3.5.5 SOP serialization still applies (lock is acquired and released, but
+  never contested)
+- §3.5.6 deferral doesn't fire
+
+Single-agent operation is the **operational default** until the §2.1.1
+supervised off-host agent is registered and live.
+
 ---
 
 ## 4. Attribution & Traceability
@@ -391,9 +654,23 @@ single approver designated in §5.4.
 ### 5.4 Sole approver for AI-authored PRs
 
 **Only `@alphaonedev` may approve PRs whose commits carry the AI agent
-`Co-Authored-By:` trailer (per §4.1).** This is project policy, set by the
-accountable human (§2.3), and is binding regardless of GitHub branch-protection
-configuration, CODEOWNERS state, or the write-access roles of other collaborators.
+`Co-Authored-By:` trailer (per §4.1), regardless of which approved agent class
+(per §2.1) authored the PR.** This is project policy, set by the accountable
+human (§2.3), and is binding regardless of GitHub branch-protection
+configuration, CODEOWNERS state, or the write-access roles of other
+collaborators. The policy applies uniformly to:
+
+- Hosted assistant CLIs (Claude Code, Codex CLI, Gemini CLI, Grok CLI)
+- IDE-resident assistants (Cursor, Copilot, Continue.dev, Windsurf)
+- MCP-only clients (OpenClaw, custom MCP clients)
+- Local model agents (Ollama-driven)
+- **Supervised off-host agents** (per §2.1.1 — including OpenClaw / Hermes
+  instances running on a remote host)
+
+The agent's hosting model, runtime location, autonomy level, or relationship to
+the accountable human (driving in real time vs. running unattended on a VPS)
+does **not** change the approval requirement. Every AI-authored PR, from any
+class, requires `@alphaonedev` approval and merges via §3.4 SOP.
 
 Concretely:
 

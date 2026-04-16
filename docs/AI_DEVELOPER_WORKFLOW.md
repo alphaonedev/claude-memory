@@ -355,6 +355,34 @@ pre-conditions, procedure, window discipline, and audit-memory template.
 If you, as the agent, cannot verify that all §3.4.1 pre-conditions are met, do
 **not** invoke the SOP. Stop and hand back to the accountable human.
 
+#### 8.5.1 Multi-agent operation
+
+When more than one agent is active against this repository (e.g., 3 humans in
+Claude Code CLI sessions plus a supervised off-host OpenClaw instance), the
+§3.4 SOP must be **serialized** via the §3.4.3.1 concurrency lock. See
+[`AI_DEVELOPER_GOVERNANCE.md` §3.5](AI_DEVELOPER_GOVERNANCE.md) for the full
+multi-agent coordination rules:
+
+- §3.5.1 — Branch ownership (memory-recorded)
+- §3.5.2 — Handoff procedure between agents
+- §3.5.3 — Stale-branch GC (with mandatory 7-day human confirmation window)
+- §3.5.4 — Inter-agent conflict resolution (humans decide; never silently
+  reconciled)
+- §3.5.5 — §3.4 SOP serialization across agents (concurrency lock)
+- §3.5.6 — Operational handoff between humans-in-CLI and supervised off-host
+  agents (off-host defers to humans on contention)
+- §3.5.7 — Single-agent operation default (most rules become no-ops)
+
+Before invoking §3.4 SOP, every agent must:
+
+1. Acquire the §3.4.3.1 lock (search-then-store, with race-loser-yields)
+2. Verify it owns the lock before proceeding to disable `enforce_admins`
+3. Release the lock after re-enabling `enforce_admins` (or via TTL fallback)
+
+In the current default state (single-agent operation), the lock is always
+acquired uncontested. Once the supervised off-host agent class is registered
+and live (per §2.1.1), the lock becomes the operational hot path.
+
 ---
 
 ## 9. Handoff & Closure
