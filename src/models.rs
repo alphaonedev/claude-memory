@@ -504,6 +504,59 @@ pub struct AgentRegistration {
     pub last_seen_at: String,
 }
 
+/// Phase 3 foundation (issue #224): vector clock tracking the latest
+/// `updated_at` this peer has seen from each known remote peer.
+///
+/// Entries are populated lazily — both on HTTP `/sync/push` (receiver
+/// records the sender's latest `updated_at`) and on HTTP `/sync/since`
+/// (sender advances `last_pulled_at`). Full CRDT-lite merge rules using
+/// the clock are **not** in the v0.6.0 GA foundation; they land in a
+/// follow-up PR under issue #224 Task 3a.1. The foundation ships the
+/// wire format so adding the merge semantics later does not force a
+/// schema migration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct VectorClock {
+    /// Map of peer `agent_id` -> latest RFC3339 `updated_at` seen from
+    /// that peer. A peer absent from the map is equivalent to
+    /// "never-seen-anything." Encoded as a JSON object on the wire.
+    #[serde(default)]
+    pub entries: std::collections::BTreeMap<String, String>,
+}
+
+impl VectorClock {
+    /// Advance this clock to include `peer_id`'s latest seen timestamp.
+    /// Monotonic — an older timestamp never overwrites a newer one.
+    #[allow(dead_code)] // Consumed by Task 3a.1 CRDT-lite merge (issue #224).
+    pub fn observe(&mut self, peer_id: &str, at: &str) {
+        self.entries
+            .entry(peer_id.to_string())
+            .and_modify(|existing| {
+                if at > existing.as_str() {
+                    *existing = at.to_string();
+                }
+            })
+            .or_insert_with(|| at.to_string());
+    }
+
+    /// Look up the latest timestamp this clock has from `peer_id`.
+    #[must_use]
+    #[allow(dead_code)] // Consumed by Task 3a.1 CRDT-lite merge (issue #224).
+    pub fn latest_from(&self, peer_id: &str) -> Option<&str> {
+        self.entries.get(peer_id).map(String::as_str)
+    }
+}
+
+/// Phase 3 foundation: one row of the `sync_state` table serialised for
+/// diagnostic / API responses.
+#[allow(dead_code)] // Consumed by Task 3b.2 sync diagnostics API (issue #224).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStateEntry {
+    pub agent_id: String,
+    pub peer_id: String,
+    pub last_seen_at: String,
+    pub last_pulled_at: String,
+}
+
 pub const MAX_CONTENT_SIZE: usize = 65_536;
 
 /// Maximum number of path segments in a hierarchical namespace (Task 1.4).

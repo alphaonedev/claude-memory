@@ -7653,3 +7653,118 @@ fn test_hier_recall_touches_only_ancestor_matches() {
     assert_eq!(outsider["access_count"], 0);
     let _ = std::fs::remove_file(&db);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 foundation (issue #224) — CLI `sync --dry-run` end-to-end
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_cli_sync_dry_run_writes_nothing() {
+    // v0.6.0 GA Phase 3 foundation: --dry-run must classify new/update/noop
+    // and NOT mutate either side of the sync. Uses today's timestamp-aware
+    // merge semantics; the richer CRDT-lite preview lands with Task 3a.1.
+    let dir = std::env::temp_dir();
+    let local_db = dir.join(format!("ai-memory-sync-local-{}.db", uuid::Uuid::new_v4()));
+    let remote_db = dir.join(format!("ai-memory-sync-remote-{}.db", uuid::Uuid::new_v4()));
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Seed local with one memory.
+    let out = cmd(bin)
+        .args([
+            "--db",
+            local_db.to_str().unwrap(),
+            "--json",
+            "store",
+            "-n",
+            "sync-dry",
+            "-T",
+            "local-only",
+            "-c",
+            "only exists locally",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Seed remote with a different memory.
+    let out = cmd(bin)
+        .args([
+            "--db",
+            remote_db.to_str().unwrap(),
+            "--json",
+            "store",
+            "-n",
+            "sync-dry",
+            "-T",
+            "remote-only",
+            "-c",
+            "only exists remotely",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+
+    // Dry-run merge should report 1 would-pull-new and 1 would-push-new.
+    let out = cmd(bin)
+        .args([
+            "--db",
+            local_db.to_str().unwrap(),
+            "--json",
+            "sync",
+            remote_db.to_str().unwrap(),
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "sync --dry-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["dry_run"], true);
+    assert_eq!(
+        v["pull"]["new"], 1,
+        "remote-only memory should be classified as would-pull-new; got: {v}"
+    );
+    assert_eq!(
+        v["push"]["new"], 1,
+        "local-only memory should be classified as would-push-new; got: {v}"
+    );
+
+    // Critical: neither side was mutated. Each DB should still hold only
+    // its seeded memory.
+    for (db_path, expected_title) in [(&local_db, "local-only"), (&remote_db, "remote-only")] {
+        let list = cmd(bin)
+            .args([
+                "--db",
+                db_path.to_str().unwrap(),
+                "--json",
+                "list",
+                "-n",
+                "sync-dry",
+            ])
+            .output()
+            .unwrap();
+        let lv: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+        let titles: Vec<String> = lv["memories"]
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .filter_map(|m| m["title"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(
+            titles,
+            vec![expected_title.to_string()],
+            "dry-run must not write; {:?}",
+            db_path
+        );
+    }
+
+    let _ = std::fs::remove_file(&local_db);
+    let _ = std::fs::remove_file(&remote_db);
+}

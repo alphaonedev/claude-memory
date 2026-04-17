@@ -442,6 +442,12 @@ struct SyncArgs {
     /// Only use this when syncing between databases you fully control (e.g., your own backup).
     #[arg(long, default_value_t = false)]
     trust_source: bool,
+    /// Phase 3 foundation (issue #224): preview what would change without
+    /// writing anything. Counts new / updated / unchanged memories and
+    /// links in each direction. Uses today's timestamp-aware merge
+    /// semantics; CRDT-lite field-level diagnostics land with #224 Task 3a.1.
+    #[arg(long, default_value_t = false)]
+    dry_run: bool,
 }
 
 #[derive(Args)]
@@ -796,6 +802,11 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             "/api/v1/pending/{id}/reject",
             post(handlers::reject_pending),
         )
+        // Phase 3 foundation (issue #224) — peer-to-peer sync endpoints.
+        // Skeletons running today's timestamp-aware merge; field-level CRDT
+        // and streaming land in v0.8.0.
+        .route("/api/v1/sync/push", post(handlers::sync_push))
+        .route("/api/v1/sync/since", get(handlers::sync_since))
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             handlers::api_key_auth,
@@ -2061,6 +2072,44 @@ fn restamp_agent_id(mem: &mut models::Memory, caller_id: &str) {
 }
 
 #[allow(clippy::too_many_lines)]
+/// Phase 3 foundation (issue #224): preview counters for `sync --dry-run`.
+/// Classified against today's timestamp-aware merge semantics. Future work
+/// (Task 3a.1 CRDT-lite) will replace this with field-level diagnostics.
+#[allow(clippy::struct_field_names)] // naming mirrors the JSON response keys
+#[derive(Default)]
+struct SyncPreview {
+    would_pull_new: usize,
+    would_pull_update: usize,
+    would_pull_noop: usize,
+    would_push_new: usize,
+    would_push_update: usize,
+    would_push_noop: usize,
+    would_pull_links: usize,
+    would_push_links: usize,
+}
+
+impl SyncPreview {
+    fn classify(local: Option<&models::Memory>, remote: &models::Memory) -> MergeOutcome {
+        match local {
+            None => MergeOutcome::New,
+            Some(existing) => {
+                if remote.updated_at > existing.updated_at {
+                    MergeOutcome::Update
+                } else {
+                    MergeOutcome::Noop
+                }
+            }
+        }
+    }
+}
+
+enum MergeOutcome {
+    New,
+    Update,
+    Noop,
+}
+
+#[allow(clippy::too_many_lines)] // pull/push/merge variants kept inline for locality
 fn cmd_sync(
     db_path: &Path,
     args: &SyncArgs,
@@ -2073,6 +2122,11 @@ fn cmd_sync(
     // memories with the caller's id so an attacker-controlled remote DB can't
     // inject arbitrary agent_ids into the local store (and vice versa on push).
     let caller_id = identity::resolve_agent_id(cli_agent_id, None)?;
+
+    if args.dry_run {
+        return cmd_sync_dry_run(&local_conn, &remote_conn, &args.direction, json_out);
+    }
+
     match args.direction.as_str() {
         "pull" => {
             let mems = db::export_all(&remote_conn)?;
@@ -2216,6 +2270,99 @@ fn cmd_sync(
             "invalid direction: {} (use pull, push, merge)",
             args.direction
         ),
+    }
+    Ok(())
+}
+
+/// Phase 3 foundation (issue #224) — `sync --dry-run` implementation.
+///
+/// Classifies what WOULD happen without writing anything. Uses today's
+/// timestamp-aware merge rules (`updated_at > existing.updated_at → update`,
+/// otherwise no-op). The richer field-level CRDT preview lands with
+/// #224 Task 3a.1.
+fn cmd_sync_dry_run(
+    local_conn: &rusqlite::Connection,
+    remote_conn: &rusqlite::Connection,
+    direction: &str,
+    json_out: bool,
+) -> Result<()> {
+    let l_mems = db::export_all(local_conn)?;
+    let r_mems = db::export_all(remote_conn)?;
+    let l_links = db::export_links(local_conn)?;
+    let r_links = db::export_links(remote_conn)?;
+
+    let local_by_id: std::collections::HashMap<&str, &models::Memory> =
+        l_mems.iter().map(|m| (m.id.as_str(), m)).collect();
+    let remote_by_id: std::collections::HashMap<&str, &models::Memory> =
+        r_mems.iter().map(|m| (m.id.as_str(), m)).collect();
+
+    let mut preview = SyncPreview::default();
+
+    let classify_pull = direction != "push";
+    let classify_push = direction != "pull";
+
+    if classify_pull {
+        for mem in &r_mems {
+            match SyncPreview::classify(local_by_id.get(mem.id.as_str()).copied(), mem) {
+                MergeOutcome::New => preview.would_pull_new += 1,
+                MergeOutcome::Update => preview.would_pull_update += 1,
+                MergeOutcome::Noop => preview.would_pull_noop += 1,
+            }
+        }
+        preview.would_pull_links = r_links.len();
+    }
+
+    if classify_push {
+        for mem in &l_mems {
+            match SyncPreview::classify(remote_by_id.get(mem.id.as_str()).copied(), mem) {
+                MergeOutcome::New => preview.would_push_new += 1,
+                MergeOutcome::Update => preview.would_push_update += 1,
+                MergeOutcome::Noop => preview.would_push_noop += 1,
+            }
+        }
+        preview.would_push_links = l_links.len();
+    }
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "dry_run": true,
+                "direction": direction,
+                "pull": {
+                    "new": preview.would_pull_new,
+                    "update": preview.would_pull_update,
+                    "noop": preview.would_pull_noop,
+                    "links": preview.would_pull_links,
+                },
+                "push": {
+                    "new": preview.would_push_new,
+                    "update": preview.would_push_update,
+                    "noop": preview.would_push_noop,
+                    "links": preview.would_push_links,
+                }
+            })
+        );
+    } else {
+        println!("DRY RUN — no changes written. Direction: {direction}");
+        if classify_pull {
+            println!(
+                "  pull: {} new, {} update, {} noop, {} links",
+                preview.would_pull_new,
+                preview.would_pull_update,
+                preview.would_pull_noop,
+                preview.would_pull_links
+            );
+        }
+        if classify_push {
+            println!(
+                "  push: {} new, {} update, {} noop, {} links",
+                preview.would_push_new,
+                preview.would_push_update,
+                preview.would_push_noop,
+                preview.would_push_links
+            );
+        }
     }
     Ok(())
 }
