@@ -16,6 +16,12 @@ mod mcp;
 mod mine;
 mod models;
 mod reranker;
+// v0.7 SAL proposal skeleton (issue #221). Not wired into any call path
+// yet — every method is dead code until the extraction phase. Silence the
+// dead-code warnings at the module boundary so we do not need to sprinkle
+// #[allow(dead_code)] on every field in the design sketch.
+#[allow(dead_code)]
+mod store;
 mod toon;
 mod validate;
 

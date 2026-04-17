@@ -29,6 +29,10 @@ uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 gethostname = "0.5"
 
+# v0.7 SAL proposal skeleton (issue #221) — async trait object + capability flags
+async-trait = "0.1"
+bitflags = "2"
+
 # Semantic embedding support
 candle-core = "0.10"
 candle-nn = "0.10"
