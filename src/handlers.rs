@@ -1537,6 +1537,175 @@ pub async fn archive_stats(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3 foundation (issue #224) — HTTP sync endpoints.
+//
+// These ship in v0.6.0 GA as SKELETONS running today's timestamp-aware merge
+// (`db::insert_if_newer`). Field-level CRDT-lite merge rules, streaming,
+// resume-on-interrupt, and per-peer auth tokens are v0.8.0 targets.
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v1/sync/push`.
+#[derive(Deserialize)]
+pub struct SyncPushBody {
+    /// Claimed `agent_id` of the peer pushing data. Recorded in
+    /// `sync_state` for vector clock advancement. Treated as identity
+    /// only (not attestation) — same NHI model as every other write.
+    pub sender_agent_id: String,
+    /// Vector clock the sender had at push time. Foundation accepts it
+    /// and stores the latest-seen timestamp; full clock reconciliation
+    /// lands with Task 3a.1.
+    #[serde(default)]
+    #[allow(dead_code)] // Consumed by Task 3a.1 CRDT-lite; shipped now for wire compat.
+    pub sender_clock: crate::models::VectorClock,
+    /// Memories the sender is offering. Applied via the existing
+    /// timestamp-aware merge (`insert_if_newer`).
+    pub memories: Vec<Memory>,
+    /// Preview mode — classify and count, do not write.
+    #[serde(default)]
+    pub dry_run: bool,
+}
+
+#[derive(Deserialize)]
+pub struct SyncSinceQuery {
+    /// Return memories with `updated_at > since`. Absent = full snapshot.
+    pub since: Option<String>,
+    /// Pagination cap. Defaults to 500.
+    pub limit: Option<usize>,
+    /// Caller's claimed `agent_id`; optional but recorded in `sync_state`
+    /// so the caller can later push incremental updates.
+    pub peer: Option<String>,
+}
+
+pub async fn sync_push(
+    State(state): State<Db>,
+    headers: HeaderMap,
+    Json(body): Json<SyncPushBody>,
+) -> impl IntoResponse {
+    if let Err(e) = validate::validate_agent_id(&body.sender_agent_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid sender_agent_id: {e}")})),
+        )
+            .into_response();
+    }
+    // Receiver's local identity — default to the caller-supplied header,
+    // fall back to the anonymous placeholder. Recorded in sync_state rows.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let local_agent_id = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+        Ok(id) => id,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid x-agent-id: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    let lock = state.lock().await;
+    let mut applied = 0usize;
+    let mut noop = 0usize;
+    let mut skipped = 0usize;
+    let mut latest_seen: Option<String> = None;
+
+    for mem in &body.memories {
+        if validate::validate_memory(mem).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if latest_seen
+            .as_deref()
+            .is_none_or(|current| mem.updated_at.as_str() > current)
+        {
+            latest_seen = Some(mem.updated_at.clone());
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::insert_if_newer(&lock.0, mem) {
+            Ok(_id) => applied += 1,
+            Err(e) => {
+                tracing::warn!("sync_push: insert_if_newer failed for {}: {e}", mem.id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // Advance the vector clock with the highest `updated_at` we observed.
+    // Skipped in dry-run mode since the caller is only previewing.
+    if !body.dry_run
+        && let Some(at) = latest_seen.as_deref()
+        && let Err(e) = db::sync_state_observe(&lock.0, &local_agent_id, &body.sender_agent_id, at)
+    {
+        tracing::warn!("sync_push: sync_state_observe failed: {e}");
+    }
+
+    // Receiver's current clock, returned so the sender can learn which
+    // peers the receiver has seen. Phase 3 Task 3a.1 will use this to
+    // short-circuit redundant pushes.
+    let receiver_clock = db::sync_state_load(&lock.0, &local_agent_id)
+        .unwrap_or_else(|_| crate::models::VectorClock::default());
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "applied": applied,
+            "noop": noop,
+            "skipped": skipped,
+            "dry_run": body.dry_run,
+            "receiver_agent_id": local_agent_id,
+            "receiver_clock": receiver_clock,
+        })),
+    )
+        .into_response()
+}
+
+pub async fn sync_since(
+    State(state): State<Db>,
+    headers: HeaderMap,
+    Query(q): Query<SyncSinceQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(500).min(10_000);
+    let lock = state.lock().await;
+    let mems = match db::memories_updated_since(&lock.0, q.since.as_deref(), limit) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("sync_since: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Record the puller as a peer so subsequent incremental push/pull
+    // pairs have a durable clock entry. Best-effort; don't fail the
+    // response if the side-effect write fails.
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    if let (Some(peer), Ok(local_agent_id)) = (
+        q.peer.as_deref(),
+        crate::identity::resolve_http_agent_id(None, header_agent_id),
+    ) && validate::validate_agent_id(peer).is_ok()
+        && let Some(last) = mems.last()
+        && let Err(e) = db::sync_state_observe(&lock.0, &local_agent_id, peer, &last.updated_at)
+    {
+        tracing::debug!("sync_since: sync_state_observe failed: {e}");
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "count": mems.len(),
+            "limit": limit,
+            "memories": mems,
+        })),
+    )
+        .into_response()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1825,6 +1994,214 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // --- Phase 3 foundation HTTP sync tests (issue #224) ---
+
+    #[tokio::test]
+    async fn http_sync_push_applies_and_advances_clock() {
+        // Smoke test for POST /api/v1/sync/push — memories land in the
+        // receiver's DB and the vector clock records the sender's latest
+        // `updated_at`. Full CRDT semantics are the v0.8.0 follow-up.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(state.clone());
+
+        let now = Utc::now().to_rfc3339();
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-alice",
+            "sender_clock": {"entries": {}},
+            "memories": [{
+                "id": Uuid::new_v4().to_string(),
+                "tier": "long",
+                "namespace": "sync-smoke",
+                "title": "From peer",
+                "content": "Pushed via HTTP sync endpoint.",
+                "tags": [],
+                "priority": 5,
+                "confidence": 1.0,
+                "source": "api",
+                "access_count": 0,
+                "created_at": now,
+                "updated_at": now,
+                "last_accessed_at": null,
+                "expires_at": null,
+                "metadata": {"agent_id": "peer-alice"}
+            }],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "local-receiver")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Row landed.
+        let lock = state.lock().await;
+        let rows = db::list(
+            &lock.0,
+            Some("sync-smoke"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        // Clock advanced — peer-alice registered against local-receiver.
+        let clock = db::sync_state_load(&lock.0, "local-receiver").unwrap();
+        assert!(
+            clock.latest_from("peer-alice").is_some(),
+            "push must record sender in sync_state; got: {:?}",
+            clock.entries
+        );
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_dry_run_applies_nothing() {
+        // Phase 3 — dry_run=true must not write.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(state.clone());
+
+        let now = Utc::now().to_rfc3339();
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-bob",
+            "sender_clock": {"entries": {}},
+            "memories": [{
+                "id": Uuid::new_v4().to_string(),
+                "tier": "long",
+                "namespace": "sync-dryrun",
+                "title": "Must not land",
+                "content": "Preview only.",
+                "tags": [],
+                "priority": 5,
+                "confidence": 1.0,
+                "source": "api",
+                "access_count": 0,
+                "created_at": now,
+                "updated_at": now,
+                "last_accessed_at": null,
+                "expires_at": null,
+                "metadata": {}
+            }],
+            "dry_run": true
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let lock = state.lock().await;
+        let rows = db::list(
+            &lock.0,
+            Some("sync-dryrun"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(rows.is_empty(), "dry_run must not write rows");
+    }
+
+    #[tokio::test]
+    async fn http_sync_since_streams_new_memories_only() {
+        // Phase 3 — GET /api/v1/sync/since?since=<ts> returns only memories
+        // with updated_at > ts.
+        let state = test_state();
+        // Seed one old + one new memory.
+        let old_ts = "2020-01-01T00:00:00+00:00";
+        let new_ts = Utc::now().to_rfc3339();
+        {
+            let lock = state.lock().await;
+            for (title, ts) in [("old-mem", old_ts), ("new-mem", new_ts.as_str())] {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Long,
+                    namespace: "since-test".into(),
+                    title: title.into(),
+                    content: "body".into(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "api".into(),
+                    access_count: 0,
+                    created_at: ts.to_string(),
+                    updated_at: ts.to_string(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+
+        let app = Router::new()
+            .route("/api/v1/sync/since", axum_get(sync_since))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/since?since=2020-06-01T00:00:00%2B00:00")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let titles: Vec<String> = v["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|m| m["title"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(titles, vec!["new-mem".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn sync_state_observe_is_monotonic() {
+        // Phase 3 — clock advancement must never go backwards.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let older = "2020-01-01T00:00:00+00:00";
+        let newer = "2026-04-17T00:00:00+00:00";
+
+        db::sync_state_observe(&conn, "local", "peer-a", newer).unwrap();
+        // A subsequent older observation must NOT overwrite.
+        db::sync_state_observe(&conn, "local", "peer-a", older).unwrap();
+        let clock = db::sync_state_load(&conn, "local").unwrap();
+        assert_eq!(clock.latest_from("peer-a"), Some(newer));
     }
 
     // --- API key auth middleware tests ---

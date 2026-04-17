@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -369,6 +369,28 @@ fn migrate(conn: &Connection) -> Result<()> {
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_memories_scope_idx ON memories(scope_idx)",
                 [],
+            )?;
+        }
+
+        if version < 11 {
+            // Phase 3 foundation (issue #224): vector-clock sync state.
+            // Stores the latest `updated_at` timestamp this peer has seen
+            // from each known remote peer. Used by the future CRDT-lite
+            // merge to skip memories the caller has already seen and to
+            // emit incremental `GET /api/v1/sync/since?...` responses.
+            //
+            // The table is additive — it does NOT change any existing
+            // sync behaviour in v0.6.0 GA. Entries are created lazily by
+            // the HTTP sync endpoints and by `sync --dry-run` telemetry.
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS sync_state (
+                    agent_id       TEXT NOT NULL,
+                    peer_id        TEXT NOT NULL,
+                    last_seen_at   TEXT NOT NULL,
+                    last_pulled_at TEXT NOT NULL,
+                    PRIMARY KEY (agent_id, peer_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_sync_state_agent ON sync_state(agent_id);",
             )?;
         }
 
@@ -2266,6 +2288,76 @@ pub fn recall_hybrid(
 pub fn checkpoint(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "wal_checkpoint", "TRUNCATE")?;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 foundation (issue #224) — sync_state helpers.
+//
+// These are additive: they do not change how the existing `ai-memory sync`
+// command behaves in v0.6.0 GA. They exist so HTTP sync endpoints and the
+// CRDT-lite merge follow-up can durably track "last updated_at seen from
+// peer X" per local agent.
+// ---------------------------------------------------------------------------
+
+/// Record the latest `updated_at` this local agent has observed from `peer_id`.
+/// Monotonic by timestamp — older writes do not overwrite newer ones.
+/// Lazily creates the row on first observation.
+pub fn sync_state_observe(
+    conn: &Connection,
+    agent_id: &str,
+    peer_id: &str,
+    seen_at: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO sync_state (agent_id, peer_id, last_seen_at, last_pulled_at) \
+         VALUES (?1, ?2, ?3, ?4) \
+         ON CONFLICT(agent_id, peer_id) DO UPDATE SET \
+            last_seen_at = CASE WHEN excluded.last_seen_at > last_seen_at \
+                                THEN excluded.last_seen_at \
+                                ELSE last_seen_at END, \
+            last_pulled_at = excluded.last_pulled_at",
+        params![agent_id, peer_id, seen_at, now],
+    )?;
+    Ok(())
+}
+
+/// Load the full vector clock for `agent_id` — the set of
+/// (`peer_id` -> `last_seen_at`) this local agent tracks.
+pub fn sync_state_load(conn: &Connection, agent_id: &str) -> Result<crate::models::VectorClock> {
+    let mut stmt =
+        conn.prepare("SELECT peer_id, last_seen_at FROM sync_state WHERE agent_id = ?1")?;
+    let rows = stmt.query_map(params![agent_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut clock = crate::models::VectorClock::default();
+    for row in rows {
+        let (peer, at) = row?;
+        clock.entries.insert(peer, at);
+    }
+    Ok(clock)
+}
+
+/// Return memories whose `updated_at > since`, ordered by `updated_at`
+/// ascending. Used by `GET /api/v1/sync/since` to stream incremental
+/// updates to a peer. Caps at `limit` rows (caller-chosen pagination).
+pub fn memories_updated_since(
+    conn: &Connection,
+    since: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Memory>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
+                source, access_count, created_at, updated_at, last_accessed_at, \
+                expires_at, metadata \
+         FROM memories \
+         WHERE (?1 IS NULL OR updated_at > ?1) \
+         ORDER BY updated_at ASC \
+         LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![since, limit], row_to_memory)?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 /// Deep health check — verifies DB is accessible and FTS is functional.
