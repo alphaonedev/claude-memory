@@ -40,6 +40,10 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 # `RustlsConfig::from_pem` so no separate rustls-pemfile dep (which
 # is flagged unmaintained in the 2026 advisory DB).
 rustls = { version = "0.23", features = ["ring"] }
+# mTLS cert fingerprint allowlist (Layer 2) needs SHA-256 over the
+# client cert DER. RustCrypto sha2 — same family as the HKDF we'll use
+# for Layer 3 E2E encryption (#228).
+sha2 = "0.10"
 
 # Semantic embedding support
 candle-core = "0.10"

@@ -8034,6 +8034,247 @@ fn test_serve_native_tls_health_probe() {
     let _ = std::fs::remove_file(&key_path);
 }
 
+/// Compute SHA-256 fingerprint of a PEM cert's DER body via `openssl`
+/// (same CLI available on all CI runners). Returns hex without `:`.
+fn cert_sha256_fingerprint(cert_path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("openssl")
+        .args([
+            "x509",
+            "-noout",
+            "-fingerprint",
+            "-sha256",
+            "-in",
+            cert_path.to_str().unwrap(),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    // openssl emits `SHA256 Fingerprint=AA:BB:...` — strip label, colons.
+    let hex: String = s
+        .split('=')
+        .nth(1)?
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect();
+    Some(hex.to_ascii_lowercase())
+}
+
+#[test]
+fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
+    // Layer 2 — mTLS with SHA-256 fingerprint allowlist.
+    // Peer B runs serve with an allowlist containing peer-A's cert
+    // fingerprint. The sync-daemon on peer A presents peer-A's cert and
+    // must succeed. A second daemon presenting an unknown cert must be
+    // rejected at the TLS handshake.
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_a = dir.join(format!("ai-memory-mtls-a-{}.db", uuid::Uuid::new_v4()));
+    let db_b = dir.join(format!("ai-memory-mtls-b-{}.db", uuid::Uuid::new_v4()));
+
+    // Generate three self-signed keypairs: server (peer B's TLS cert),
+    // peer-A (authorised client), and peer-C (unauthorised client).
+    let Some((server_cert, server_key)) = gen_self_signed_cert(&dir) else {
+        eprintln!("skipping: openssl not available on PATH");
+        return;
+    };
+    let Some((peer_a_cert, peer_a_key)) = gen_self_signed_cert(&dir) else {
+        eprintln!("skipping: openssl not available on PATH");
+        return;
+    };
+    let Some((peer_c_cert, peer_c_key)) = gen_self_signed_cert(&dir) else {
+        eprintln!("skipping: openssl not available on PATH");
+        return;
+    };
+
+    let allowlist_path = dir.join(format!("ai-memory-mtls-allow-{}.txt", uuid::Uuid::new_v4()));
+    let peer_a_fp =
+        cert_sha256_fingerprint(&peer_a_cert).expect("failed to fingerprint peer A cert");
+    std::fs::write(
+        &allowlist_path,
+        format!("# authorised mTLS peers\n{peer_a_fp}\n"),
+    )
+    .unwrap();
+
+    // Start peer B's serve with mTLS + allowlist.
+    let port_b = free_port();
+    let mut serve_b = cmd(bin)
+        .args([
+            "--db",
+            db_b.to_str().unwrap(),
+            "serve",
+            "--port",
+            &port_b.to_string(),
+            "--tls-cert",
+            server_cert.to_str().unwrap(),
+            "--tls-key",
+            server_key.to_str().unwrap(),
+            "--mtls-allowlist",
+            allowlist_path.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Wait for TLS bind. wait_for_health would fail here since curl
+    // without a client cert gets rejected; so we poll via curl+mTLS.
+    let mut ready = false;
+    for _ in 0..60 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let out = std::process::Command::new("curl")
+            .args([
+                "-sk",
+                "--cert",
+                peer_a_cert.to_str().unwrap(),
+                "--key",
+                peer_a_key.to_str().unwrap(),
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                &format!("https://127.0.0.1:{port_b}/api/v1/health"),
+            ])
+            .output();
+        if let Ok(o) = out
+            && String::from_utf8_lossy(&o.stdout) == "200"
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "mTLS serve never accepted peer A's cert for health");
+
+    // Seed a memory via mTLS POST.
+    let seed = serde_json::json!({
+        "tier": "long",
+        "namespace": "mtls-demo",
+        "title": "Peer B secret",
+        "content": "Only reachable via mTLS allowlist.",
+        "tags": ["mtls"],
+        "priority": 7,
+        "confidence": 1.0,
+        "source": "api",
+        "metadata": {},
+    });
+    let seed_out = std::process::Command::new("curl")
+        .args([
+            "-sk",
+            "--cert",
+            peer_a_cert.to_str().unwrap(),
+            "--key",
+            peer_a_key.to_str().unwrap(),
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            "x-agent-id: peer-b",
+            "-d",
+            &seed.to_string(),
+            &format!("https://127.0.0.1:{port_b}/api/v1/memories"),
+        ])
+        .output()
+        .unwrap();
+    assert!(seed_out.status.success());
+
+    // Start the sync-daemon on peer A with peer-A's client cert.
+    let mut daemon_ok = cmd(bin)
+        .args([
+            "--db",
+            db_a.to_str().unwrap(),
+            "--agent-id",
+            "peer-a",
+            "sync-daemon",
+            "--peers",
+            &format!("https://127.0.0.1:{port_b}"),
+            "--interval",
+            "1",
+            "--client-cert",
+            peer_a_cert.to_str().unwrap(),
+            "--client-key",
+            peer_a_key.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Positive case: memory should propagate to peer A.
+    let mut found = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let list = cmd(bin)
+            .args([
+                "--db",
+                db_a.to_str().unwrap(),
+                "--json",
+                "list",
+                "-n",
+                "mtls-demo",
+            ])
+            .output()
+            .unwrap();
+        if list.status.success() {
+            let v: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap_or_default();
+            if let Some(arr) = v["memories"].as_array()
+                && arr.iter().any(|m| m["title"] == "Peer B secret")
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+    let _ = daemon_ok.kill();
+    let _ = daemon_ok.wait();
+
+    assert!(
+        found,
+        "authorised peer-A cert failed to sync through mTLS allowlist"
+    );
+
+    // Negative case: curl with peer-C's cert must be rejected.
+    let neg = std::process::Command::new("curl")
+        .args([
+            "-sk",
+            "--cert",
+            peer_c_cert.to_str().unwrap(),
+            "--key",
+            peer_c_key.to_str().unwrap(),
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            &format!("https://127.0.0.1:{port_b}/api/v1/health"),
+        ])
+        .output()
+        .unwrap();
+    let code = String::from_utf8_lossy(&neg.stdout);
+    assert!(
+        code == "000" || code.starts_with('5') || code.is_empty(),
+        "unauthorised cert must be rejected; got HTTP {code}"
+    );
+
+    let _ = serve_b.kill();
+    let _ = serve_b.wait();
+
+    for p in [
+        &db_a,
+        &db_b,
+        &server_cert,
+        &server_key,
+        &peer_a_cert,
+        &peer_a_key,
+        &peer_c_cert,
+        &peer_c_key,
+        &allowlist_path,
+    ] {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
 #[test]
 fn test_serve_rejects_half_tls_config() {
     // Layer 1 — clap's `requires = "tls_key"` must reject `--tls-cert`
