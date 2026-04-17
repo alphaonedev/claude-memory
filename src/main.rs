@@ -354,6 +354,12 @@ struct DeleteArgs {
 #[derive(Args)]
 struct PromoteArgs {
     id: String,
+    /// Task 1.7: clone this memory into a hierarchical-ancestor namespace
+    /// (the original is untouched). Must be an ancestor of the memory's
+    /// current namespace. Skips the tier bump — vertical promotion is a
+    /// separate axis from tier promotion.
+    #[arg(long)]
+    to_namespace: Option<String>,
 }
 
 #[derive(Args)]
@@ -1240,6 +1246,9 @@ fn cmd_delete(db_path: &Path, args: &DeleteArgs, json_out: bool) -> Result<()> {
 
 fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()> {
     validate::validate_id(&args.id)?;
+    if let Some(ref to_ns) = args.to_namespace {
+        validate::validate_namespace(to_ns)?;
+    }
     let conn = db::open(db_path)?;
     // Resolve prefix if exact ID not found
     let resolved_id = if db::get(&conn, &args.id)?.is_some() {
@@ -1250,6 +1259,31 @@ fn cmd_promote(db_path: &Path, args: &PromoteArgs, json_out: bool) -> Result<()>
         eprintln!("not found: {}", args.id);
         std::process::exit(1);
     };
+    // Task 1.7: vertical (namespace) promotion when --to-namespace is set
+    if let Some(ref to_ns) = args.to_namespace {
+        let clone_id = db::promote_to_namespace(&conn, &resolved_id, to_ns)?;
+        if json_out {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "promoted": true,
+                    "mode": "vertical",
+                    "source_id": resolved_id,
+                    "clone_id": clone_id,
+                    "to_namespace": to_ns,
+                }))?
+            );
+        } else {
+            println!(
+                "promoted (vertical): {} → {} (clone: {})",
+                id_short(&resolved_id),
+                to_ns,
+                id_short(&clone_id),
+            );
+        }
+        return Ok(());
+    }
+
     let (found, _) = db::update(
         &conn,
         &resolved_id,
