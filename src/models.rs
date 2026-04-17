@@ -114,6 +114,10 @@ pub struct CreateMemory {
     /// via `crate::identity` (NHI-hardened precedence chain).
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Optional visibility scope (Task 1.5). One of `VALID_SCOPES`. When
+    /// unset, treated as `private` by the query layer.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 fn default_tier() -> Tier {
@@ -168,6 +172,10 @@ pub struct SearchQuery {
     /// Filter by `metadata.agent_id` (exact match).
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Task 1.5 visibility: the querying agent's namespace position.
+    /// When set, results are filtered per `metadata.scope` rules.
+    #[serde(default)]
+    pub as_agent: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -211,6 +219,9 @@ pub struct RecallQuery {
     pub since: Option<String>,
     #[serde(default)]
     pub until: Option<String>,
+    /// Task 1.5 visibility filtering.
+    #[serde(default)]
+    pub as_agent: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -231,6 +242,9 @@ pub struct RecallBody {
     pub since: Option<String>,
     #[serde(default)]
     pub until: Option<String>,
+    /// Task 1.5 visibility filtering.
+    #[serde(default)]
+    pub as_agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,6 +293,11 @@ pub struct NamespaceCount {
 
 /// Namespace reserved for agent registrations (Task 1.3).
 pub const AGENTS_NAMESPACE: &str = "_agents";
+
+/// Closed set of visibility scopes stamped into `metadata.scope` (Task 1.5).
+/// Controls which agents can see a memory via hierarchical namespace matching.
+/// Memories without a `scope` field are treated as `private` by the query layer.
+pub const VALID_SCOPES: &[&str] = &["private", "team", "unit", "org", "collective"];
 
 /// Closed set of agent types. Extend carefully — values are persisted.
 pub const VALID_AGENT_TYPES: &[&str] = &[

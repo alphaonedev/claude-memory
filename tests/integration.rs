@@ -4652,3 +4652,356 @@ fn test_199_toon_compact_surfaces_agent_id() {
     );
     let _ = std::fs::remove_file(&db_path);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.5 — Visibility Rules (scope-based filtering)
+// ---------------------------------------------------------------------------
+
+fn fresh_scope_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-scope-{}.db", uuid::Uuid::new_v4()))
+}
+
+/// Seed a memory with an explicit scope + namespace.
+fn seed_scoped(binary: &str, db_path: &std::path::Path, namespace: &str, title: &str, scope: &str) {
+    let out = cmd(binary)
+        .env_remove("AI_MEMORY_AGENT_ID")
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--agent-id",
+            "seed",
+            "--json",
+            "store",
+            "-n",
+            namespace,
+            "-T",
+            title,
+            "-c",
+            "content",
+            "-t",
+            "long",
+            "--scope",
+            scope,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "seed failed for {title}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn recall_as_agent(
+    binary: &str,
+    db_path: &std::path::Path,
+    as_agent: &str,
+    context: &str,
+) -> Vec<String> {
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "recall",
+            context,
+            "--as-agent",
+            as_agent,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "recall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["memories"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|m| m["title"].as_str().map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn test_scope_private_visible_only_in_exact_namespace() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/platform/agent-1",
+        "priv-self",
+        "private",
+    );
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/platform/agent-2",
+        "priv-sibling",
+        "private",
+    );
+    seed_scoped(bin, &db, "alphaone/eng/platform", "priv-parent", "private");
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "priv");
+    assert!(titles.contains(&"priv-self".to_string()));
+    assert!(!titles.contains(&"priv-sibling".to_string()));
+    assert!(!titles.contains(&"priv-parent".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_team_visible_in_parent_subtree() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "alphaone/eng/platform", "team-at-parent", "team");
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/platform/agent-5",
+        "team-sibling",
+        "team",
+    );
+    seed_scoped(bin, &db, "alphaone/eng/ops", "team-other-team", "team");
+    seed_scoped(bin, &db, "other-org/eng/platform", "team-other-org", "team");
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "team");
+    assert!(titles.contains(&"team-at-parent".to_string()));
+    assert!(titles.contains(&"team-sibling".to_string()));
+    assert!(!titles.contains(&"team-other-team".to_string()));
+    assert!(!titles.contains(&"team-other-org".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_unit_visible_in_grandparent_subtree() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "alphaone/eng", "unit-at-grand", "unit");
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/ops/agent-7",
+        "unit-other-team",
+        "unit",
+    );
+    seed_scoped(bin, &db, "alphaone/sales", "unit-other-unit", "unit");
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "unit");
+    assert!(titles.contains(&"unit-at-grand".to_string()));
+    assert!(titles.contains(&"unit-other-team".to_string()));
+    assert!(!titles.contains(&"unit-other-unit".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_org_visible_across_whole_org() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "alphaone", "org-at-root", "org");
+    seed_scoped(bin, &db, "alphaone/sales/xyz", "org-other-branch", "org");
+    seed_scoped(bin, &db, "other-corp", "org-outsider", "org");
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "org");
+    assert!(titles.contains(&"org-at-root".to_string()));
+    assert!(titles.contains(&"org-other-branch".to_string()));
+    assert!(!titles.contains(&"org-outsider".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_collective_always_visible() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(
+        bin,
+        &db,
+        "completely-unrelated-ns",
+        "coll-anywhere",
+        "collective",
+    );
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "coll");
+    assert!(titles.contains(&"coll-anywhere".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_missing_treated_as_private() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    // seed WITHOUT scope (legacy-style)
+    cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "store",
+            "-n",
+            "alphaone/eng/platform/agent-1",
+            "-T",
+            "legacy-at-self",
+            "-c",
+            "legacy",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+    cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "store",
+            "-n",
+            "alphaone/eng/platform/agent-2",
+            "-T",
+            "legacy-at-sibling",
+            "-c",
+            "legacy",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+
+    let titles = recall_as_agent(bin, &db, "alphaone/eng/platform/agent-1", "legacy");
+    assert!(titles.contains(&"legacy-at-self".to_string()));
+    assert!(!titles.contains(&"legacy-at-sibling".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_no_as_agent_returns_all() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "alphaone/eng/platform", "all-1", "private");
+    seed_scoped(bin, &db, "other/ns", "all-2", "team");
+    seed_scoped(bin, &db, "yet-another", "all-3", "collective");
+
+    // No --as-agent: visibility filtering disabled, all 3 visible
+    let out = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "recall", "all"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let titles: Vec<String> = v["memories"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|m| m["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(titles.contains(&"all-1".to_string()));
+    assert!(titles.contains(&"all-2".to_string()));
+    assert!(titles.contains(&"all-3".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_search_respects_as_agent() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/platform/agent-1",
+        "search-my",
+        "private",
+    );
+    seed_scoped(
+        bin,
+        &db,
+        "alphaone/eng/platform/agent-2",
+        "search-neighbor",
+        "private",
+    );
+
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+            "search",
+            "search",
+            "--as-agent",
+            "alphaone/eng/platform/agent-1",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let titles: Vec<String> = v["results"]
+        .as_array()
+        .unwrap_or(&Vec::new())
+        .iter()
+        .filter_map(|m| m["title"].as_str().map(str::to_string))
+        .collect();
+    assert!(titles.contains(&"search-my".to_string()));
+    assert!(!titles.contains(&"search-neighbor".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_flat_namespace_only_sees_exact_match_plus_collective() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "global", "flat-private", "private");
+    seed_scoped(bin, &db, "other", "flat-elsewhere", "private");
+    seed_scoped(bin, &db, "global", "flat-team-at-self", "team");
+    seed_scoped(bin, &db, "shared", "flat-collective", "collective");
+
+    let titles = recall_as_agent(bin, &db, "global", "flat");
+    assert!(titles.contains(&"flat-private".to_string()));
+    assert!(!titles.contains(&"flat-elsewhere".to_string()));
+    assert!(titles.contains(&"flat-collective".to_string()));
+    // Flat agent has no parent; team-scope with no team_prefix → invisible
+    assert!(!titles.contains(&"flat-team-at-self".to_string()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_invalid_rejected_at_store() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "store",
+            "-T",
+            "bad-scope",
+            "-c",
+            "x",
+            "--scope",
+            "public",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "invalid --scope must be rejected");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("invalid scope"),
+        "expected validator message, got: {err}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_scope_invalid_as_agent_rejected() {
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "recall",
+            "x",
+            "--as-agent",
+            "has space",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "invalid --as-agent must be rejected");
+    let _ = std::fs::remove_file(&db);
+}

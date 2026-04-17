@@ -122,6 +122,20 @@ pub async fn create_memory(
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
     }
+    // #151 scope: validate + merge into metadata if supplied at the top level
+    // (inline metadata.scope still works; top-level is a shortcut)
+    if let Some(ref s) = body.scope {
+        if let Err(e) = validate::validate_scope(s) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
+        }
+    }
 
     let now = Utc::now();
     let lock = state.lock().await;
@@ -553,6 +567,16 @@ pub async fn search_memories(
         )
             .into_response();
     }
+    // #151 visibility: validate --as-agent namespace if supplied
+    if let Some(ref a) = p.as_agent
+        && let Err(e) = validate::validate_namespace(a)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid as_agent: {e}")})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
     let limit = p.limit.unwrap_or(20).min(200);
     match db::search(
@@ -566,6 +590,7 @@ pub async fn search_memories(
         p.until.as_deref(),
         p.tags.as_deref(),
         p.agent_id.as_deref(),
+        p.as_agent.as_deref(),
     ) {
         Ok(r) => Json(json!({"results": r, "count": r.len(), "query": p.q})).into_response(),
         Err(e) => {
@@ -591,6 +616,15 @@ pub async fn recall_memories_get(
         )
             .into_response();
     }
+    if let Some(ref a) = p.as_agent
+        && let Err(e) = validate::validate_namespace(a)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid as_agent: {e}")})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
     let limit = p.limit.unwrap_or(10).min(50);
     match db::recall(
@@ -603,6 +637,7 @@ pub async fn recall_memories_get(
         p.until.as_deref(),
         lock.2.short_extend_secs,
         lock.2.mid_extend_secs,
+        p.as_agent.as_deref(),
     ) {
         Ok(r) => {
             let scored: Vec<serde_json::Value> = r
@@ -639,6 +674,15 @@ pub async fn recall_memories_post(
         )
             .into_response();
     }
+    if let Some(ref a) = body.as_agent
+        && let Err(e) = validate::validate_namespace(a)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid as_agent: {e}")})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
     let limit = body.limit.unwrap_or(10).min(50);
     match db::recall(
@@ -651,6 +695,7 @@ pub async fn recall_memories_post(
         body.until.as_deref(),
         lock.2.short_extend_secs,
         lock.2.mid_extend_secs,
+        body.as_agent.as_deref(),
     ) {
         Ok(r) => {
             let scored: Vec<serde_json::Value> = r
@@ -1147,6 +1192,7 @@ mod tests {
             None,
             crate::models::SHORT_TTL_EXTEND_SECS,
             crate::models::MID_TTL_EXTEND_SECS,
+            None,
         )
         .unwrap();
         assert!(!results.is_empty());

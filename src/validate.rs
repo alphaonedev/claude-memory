@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::models::{
     CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, UpdateMemory, VALID_AGENT_TYPES,
+    VALID_SCOPES,
 };
 
 const MAX_TITLE_LEN: usize = 512;
@@ -185,6 +186,24 @@ pub fn validate_agent_id(agent_id: &str) -> Result<()> {
         if !(c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '@' | '.' | '/')) {
             bail!("agent_id contains invalid character '{c}' (allowed: alphanumeric, _-:@./)");
         }
+    }
+    Ok(())
+}
+
+/// Validate a visibility scope against the closed `VALID_SCOPES` set
+/// (Task 1.5). Enforced on write paths that accept an explicit `scope`
+/// parameter. Memories with no `scope` metadata are treated as `private`
+/// by the query layer without needing explicit validation here.
+pub fn validate_scope(scope: &str) -> Result<()> {
+    if scope.is_empty() {
+        bail!("scope cannot be empty");
+    }
+    if !VALID_SCOPES.contains(&scope) {
+        bail!(
+            "invalid scope '{}' — must be one of: {}",
+            scope,
+            VALID_SCOPES.join(", ")
+        );
     }
     Ok(())
 }
@@ -615,6 +634,21 @@ mod tests {
         assert!(validate_agent_id("alice\\bs").is_err());
         assert!(validate_agent_id("alice?q").is_err());
         assert!(validate_agent_id("alice*glob").is_err());
+    }
+
+    #[test]
+    fn test_valid_scope() {
+        for s in ["private", "team", "unit", "org", "collective"] {
+            assert!(validate_scope(s).is_ok(), "{s} must be valid");
+        }
+    }
+
+    #[test]
+    fn test_invalid_scope() {
+        assert!(validate_scope("").is_err());
+        assert!(validate_scope("public").is_err());
+        assert!(validate_scope("PRIVATE").is_err());
+        assert!(validate_scope("personal").is_err());
     }
 
     #[test]

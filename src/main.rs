@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+#![recursion_limit = "256"]
+
 mod color;
 mod config;
 mod db;
@@ -241,6 +243,11 @@ struct StoreArgs {
     /// TTL in seconds. Overrides tier default.
     #[arg(long)]
     ttl_secs: Option<i64>,
+    /// Task 1.5 visibility scope: private (default) / team / unit / org / collective.
+    /// Stored as `metadata.scope`; affects which agents can recall this memory
+    /// when queries use `--as-agent`.
+    #[arg(long)]
+    scope: Option<String>,
 }
 
 #[derive(Args)]
@@ -282,6 +289,10 @@ struct RecallArgs {
     /// Feature tier for recall: keyword, semantic, smart, autonomous
     #[arg(long, short = 'T')]
     tier: Option<String>,
+    /// Task 1.5: querying agent's namespace position. Enables scope-based
+    /// visibility filtering (private/team/unit/org/collective).
+    #[arg(long)]
+    as_agent: Option<String>,
 }
 
 #[derive(Args)]
@@ -303,6 +314,10 @@ struct SearchArgs {
     /// Filter by `metadata.agent_id` (exact match)
     #[arg(long)]
     agent_id: Option<String>,
+    /// Task 1.5: querying agent's namespace position for scope-based
+    /// visibility filtering.
+    #[arg(long)]
+    as_agent: Option<String>,
 }
 
 #[derive(Args)]
@@ -726,6 +741,13 @@ fn cmd_store(
     if let Some(obj) = metadata.as_object_mut() {
         obj.insert("agent_id".to_string(), serde_json::Value::String(agent_id));
     }
+    // #151 scope: validate + merge into metadata
+    if let Some(ref s) = args.scope {
+        validate::validate_scope(s)?;
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
+        }
+    }
 
     let mem = models::Memory {
         id: uuid::Uuid::new_v4().to_string(),
@@ -858,6 +880,10 @@ fn cmd_recall(
     json_out: bool,
     app_config: &config::AppConfig,
 ) -> Result<()> {
+    // #151: validate --as-agent namespace
+    if let Some(ref a) = args.as_agent {
+        validate::validate_namespace(a)?;
+    }
     let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
 
@@ -952,6 +978,7 @@ fn cmd_recall(
                     vector_index.as_ref(),
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
+                    args.as_agent.as_deref(),
                 )?;
                 if let Some(ref ce) = reranker {
                     (ce.rerank(&args.context, results), "hybrid+rerank")
@@ -971,6 +998,7 @@ fn cmd_recall(
                     args.until.as_deref(),
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
+                    args.as_agent.as_deref(),
                 )?;
                 (results, "keyword")
             }
@@ -986,6 +1014,7 @@ fn cmd_recall(
             args.until.as_deref(),
             resolved_ttl.short_extend_secs,
             resolved_ttl.mid_extend_secs,
+            args.as_agent.as_deref(),
         )?;
         (results, "keyword")
     };
@@ -1054,6 +1083,10 @@ fn cmd_search(
     if let Some(ref aid) = args.agent_id {
         validate::validate_agent_id(aid)?;
     }
+    // #151: validate --as-agent namespace
+    if let Some(ref a) = args.as_agent {
+        validate::validate_namespace(a)?;
+    }
     let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
     let tier = args.tier.as_deref().and_then(Tier::from_str);
@@ -1068,6 +1101,7 @@ fn cmd_search(
         args.until.as_deref(),
         args.tags.as_deref(),
         args.agent_id.as_deref(),
+        args.as_agent.as_deref(),
     )?;
     if json_out {
         println!(
@@ -1559,6 +1593,7 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
                     None,
                     models::SHORT_TTL_EXTEND_SECS,
                     models::MID_TTL_EXTEND_SECS,
+                    None,
                 ) {
                     Ok(results) => {
                         for (mem, score) in &results {
@@ -1583,7 +1618,9 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
                     eprintln!("usage: search <query>");
                     continue;
                 }
-                match db::search(&conn, &q, None, None, 20, None, None, None, None, None) {
+                match db::search(
+                    &conn, &q, None, None, 20, None, None, None, None, None, None,
+                ) {
                     Ok(results) => {
                         for mem in &results {
                             println!(

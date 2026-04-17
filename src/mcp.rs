@@ -91,7 +91,8 @@ fn tool_definitions() -> Value {
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
                         "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"},
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
-                        "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."}
+                        "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
+                        "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."}
                     },
                     "required": ["title", "content"]
                 }
@@ -108,6 +109,7 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "string", "description": "Filter by tag"},
                         "since": {"type": "string", "description": "Only memories created after this RFC3339 timestamp"},
                         "until": {"type": "string", "description": "Only memories created before this RFC3339 timestamp"},
+                        "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5). Enables scope-based visibility filtering — results include private memories at this namespace, team/unit/org memories at ancestor subtrees, and collective memories globally."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]
@@ -124,6 +126,7 @@ fn tool_definitions() -> Value {
                         "tier": {"type": "string", "enum": ["short", "mid", "long"]},
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
                         "agent_id": {"type": "string", "description": "Filter by metadata.agent_id (exact match)."},
+                        "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5) for scope-based visibility filtering."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     },
                     "required": ["query"]
@@ -551,6 +554,17 @@ fn handle_store(
             serde_json::Value::String(agent_id.clone()),
         );
     }
+    // #151 scope: top-level `scope` param OR inline metadata.scope
+    let explicit_scope = params["scope"]
+        .as_str()
+        .or_else(|| metadata.get("scope").and_then(serde_json::Value::as_str))
+        .map(str::to_string);
+    if let Some(ref s) = explicit_scope {
+        validate::validate_scope(s).map_err(|e| e.to_string())?;
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
+        }
+    }
     validate::validate_metadata(&metadata).map_err(|e| e.to_string())?;
 
     let now = chrono::Utc::now();
@@ -781,6 +795,11 @@ fn handle_recall(
     let tags = params["tags"].as_str();
     let since = params["since"].as_str();
     let until = params["until"].as_str();
+    // #151 visibility
+    let as_agent = params["as_agent"].as_str();
+    if let Some(a) = as_agent {
+        validate::validate_namespace(a).map_err(|e| e.to_string())?;
+    }
 
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
@@ -798,6 +817,7 @@ fn handle_recall(
                     vector_index,
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
+                    as_agent,
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -833,6 +853,7 @@ fn handle_recall(
         until,
         resolved_ttl.short_extend_secs,
         resolved_ttl.mid_extend_secs,
+        as_agent,
     )
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
@@ -939,6 +960,10 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     if let Some(aid) = agent_id {
         validate::validate_agent_id(aid).map_err(|e| e.to_string())?;
     }
+    let as_agent = params["as_agent"].as_str();
+    if let Some(a) = as_agent {
+        validate::validate_namespace(a).map_err(|e| e.to_string())?;
+    }
     let results = db::search(
         conn,
         query,
@@ -950,6 +975,7 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
         None,
         None,
         agent_id,
+        as_agent,
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"results": results, "count": results.len()}))

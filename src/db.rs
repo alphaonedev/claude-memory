@@ -9,8 +9,82 @@ use std::path::Path;
 
 use crate::models::{
     AGENTS_NAMESPACE, AgentRegistration, Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD,
-    Stats, Tier, TierCount,
+    Stats, Tier, TierCount, namespace_ancestors,
 };
+
+/// Computed 4-tuple of visibility prefixes for an agent position (Task 1.5).
+/// Index 0 = agent's own namespace (private), 1 = parent (team),
+/// 2 = grandparent (unit), 3 = great-grandparent (org). Missing = `None`.
+type VisibilityPrefixes = (
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
+fn compute_visibility_prefixes(as_agent: Option<&str>) -> VisibilityPrefixes {
+    let Some(ns) = as_agent else {
+        return (None, None, None, None);
+    };
+    let ancestors = namespace_ancestors(ns);
+    let p = ancestors.first().cloned();
+    let t = ancestors.get(1).cloned();
+    let u = ancestors.get(2).cloned();
+    let o = ancestors.get(3).cloned();
+    (p, t, u, o)
+}
+
+/// Rust-side visibility check for paths that can't easily attach SQL
+/// visibility (the HNSW branch of `recall_hybrid` iterates memories loaded
+/// via `get()`). Returns `true` when `as_agent` is unset (no filter) or
+/// when the memory's scope + namespace grant visibility to the caller.
+fn is_visible(mem: &Memory, prefixes: &VisibilityPrefixes) -> bool {
+    let (p, t, u, o) = prefixes;
+    if p.is_none() {
+        return true;
+    }
+    let scope = mem
+        .metadata
+        .get("scope")
+        .and_then(|v| v.as_str())
+        .unwrap_or("private");
+    match scope {
+        "collective" => true,
+        "private" => p.as_ref().is_some_and(|ns| &mem.namespace == ns),
+        "team" => matches_subtree(&mem.namespace, t.as_deref()),
+        "unit" => matches_subtree(&mem.namespace, u.as_deref()),
+        "org" => matches_subtree(&mem.namespace, o.as_deref()),
+        _ => false,
+    }
+}
+
+fn matches_subtree(namespace: &str, prefix: Option<&str>) -> bool {
+    match prefix {
+        None => false,
+        Some(p) => namespace == p || namespace.starts_with(&format!("{p}/")),
+    }
+}
+
+/// Generate the visibility WHERE-clause fragment starting at placeholder `start`.
+/// Uses placeholders `?start .. ?start+3` for private/team/unit/org prefixes.
+/// See `compute_visibility_prefixes` for the bind order.
+fn visibility_clause(start: usize, table_alias: &str) -> String {
+    let private_ph = start;
+    let team_ph = start + 1;
+    let unit_ph = start + 2;
+    let org_ph = start + 3;
+    let ta = table_alias;
+    format!(
+        "AND (\
+            ?{private_ph} IS NULL \
+            OR COALESCE(json_extract({ta}.metadata, '$.scope'), 'private') = 'collective' \
+            OR (COALESCE(json_extract({ta}.metadata, '$.scope'), 'private') = 'private' AND {ta}.namespace = ?{private_ph}) \
+            OR (json_extract({ta}.metadata, '$.scope') = 'team' AND ?{team_ph} IS NOT NULL AND ({ta}.namespace = ?{team_ph} OR {ta}.namespace LIKE ?{team_ph} || '/%')) \
+            OR (json_extract({ta}.metadata, '$.scope') = 'unit' AND ?{unit_ph} IS NOT NULL AND ({ta}.namespace = ?{unit_ph} OR {ta}.namespace LIKE ?{unit_ph} || '/%')) \
+            OR (json_extract({ta}.metadata, '$.scope') = 'org'  AND ?{org_ph}  IS NOT NULL AND ({ta}.namespace = ?{org_ph}  OR {ta}.namespace LIKE ?{org_ph}  || '/%'))\
+        )"
+    )
+}
 
 const SCHEMA: &str = r"
 CREATE TABLE IF NOT EXISTS memories (
@@ -662,12 +736,14 @@ pub fn search(
     until: Option<&str>,
     tags_filter: Option<&str>,
     agent_id: Option<&str>,
+    as_agent: Option<&str>,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let fts_query = sanitize_fts_query(query, false);
+    let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
 
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata
@@ -682,6 +758,7 @@ pub fn search(
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
            AND (?10 IS NULL OR json_extract(m.metadata, '$.agent_id') = ?10)
+           {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
            + (MIN(m.access_count, 50) * 0.1)
@@ -689,7 +766,9 @@ pub fn search(
            + (1.0 / (1.0 + (julianday('now') - julianday(m.updated_at)) * 0.1))
            DESC
          LIMIT ?9",
-    )?;
+        vis = visibility_clause(11, "m"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params![
             fts_query,
@@ -702,6 +781,10 @@ pub fn search(
             tags_filter,
             limit,
             agent_id,
+            vis_p,
+            vis_t,
+            vis_u,
+            vis_o,
         ],
         row_to_memory,
     )?;
@@ -721,11 +804,13 @@ pub fn recall(
     until: Option<&str>,
     short_extend: i64,
     mid_extend: i64,
+    as_agent: Option<&str>,
 ) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
+    let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
 
-    let mut stmt = conn.prepare(
+    let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata,
@@ -744,11 +829,26 @@ pub fn recall(
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
            AND (?5 IS NULL OR m.created_at >= ?5)
            AND (?6 IS NULL OR m.created_at <= ?6)
+           {vis}
          ORDER BY score DESC
          LIMIT ?7",
-    )?;
+        vis = visibility_clause(8, "m"),
+    );
+    let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
-        params![fts_query, namespace, now, tags_filter, since, until, limit],
+        params![
+            fts_query,
+            namespace,
+            now,
+            tags_filter,
+            since,
+            until,
+            limit,
+            vis_p,
+            vis_t,
+            vis_u,
+            vis_o
+        ],
         |row| {
             let mem = row_to_memory(row)?;
             let score: f64 = row.get(15)?;
@@ -1636,13 +1736,16 @@ pub fn recall_hybrid(
     vector_index: Option<&crate::hnsw::VectorIndex>,
     short_extend: i64,
     mid_extend: i64,
+    as_agent: Option<&str>,
 ) -> Result<Vec<(Memory, f64)>> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
+    let prefixes = compute_visibility_prefixes(as_agent);
+    let (vis_p, vis_t, vis_u, vis_o) = prefixes.clone();
 
     // Step 1: Get FTS candidates (up to 3x limit to have a good pool)
     let fts_limit = (limit * 3).max(30);
-    let mut fts_stmt = conn.prepare(
+    let fts_sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata, m.embedding,
@@ -1659,12 +1762,15 @@ pub fn recall_hybrid(
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
            AND (?5 IS NULL OR m.created_at >= ?5)
            AND (?6 IS NULL OR m.created_at <= ?6)
+           {vis}
          ORDER BY fts_score DESC
          LIMIT ?7",
-    )?;
+        vis = visibility_clause(8, "m"),
+    );
+    let mut fts_stmt = conn.prepare(&fts_sql)?;
 
     // Step 2: Get semantic candidates — all memories with embeddings
-    let mut sem_stmt = conn.prepare(
+    let sem_sql = format!(
         "SELECT id, tier, namespace, title, content, tags, priority,
                 confidence, source, access_count, created_at, updated_at,
                 last_accessed_at, expires_at, metadata, embedding
@@ -1674,8 +1780,11 @@ pub fn recall_hybrid(
            AND (expires_at IS NULL OR expires_at > ?2)
            AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?3))
            AND (?4 IS NULL OR created_at >= ?4)
-           AND (?5 IS NULL OR created_at <= ?5)",
-    )?;
+           AND (?5 IS NULL OR created_at <= ?5)
+           {vis}",
+        vis = visibility_clause(6, "memories"),
+    );
+    let mut sem_stmt = conn.prepare(&sem_sql)?;
 
     // Collect FTS results with scores
     let mut scored: HashMap<String, (Memory, f64, f64)> = HashMap::new(); // id -> (memory, fts_score, cosine_score)
@@ -1689,6 +1798,10 @@ pub fn recall_hybrid(
             since,
             until,
             fts_limit,
+            vis_p,
+            vis_t,
+            vis_u,
+            vis_o,
         ],
         |row| {
             let mem = row_to_memory(row)?;
@@ -1753,17 +1866,33 @@ pub fn recall_hybrid(
                 {
                     continue;
                 }
+                // #151 visibility filter (HNSW branch)
+                if !is_visible(&mem, &prefixes) {
+                    continue;
+                }
                 scored.insert(mem.id.clone(), (mem, 0.0, cosine));
             }
         }
     } else {
         // Fallback: linear scan over all embeddings
-        let sem_rows =
-            sem_stmt.query_map(params![namespace, now, tags_filter, since, until], |row| {
+        let sem_rows = sem_stmt.query_map(
+            params![
+                namespace,
+                now,
+                tags_filter,
+                since,
+                until,
+                vis_p,
+                vis_t,
+                vis_u,
+                vis_o
+            ],
+            |row| {
                 let mem = row_to_memory(row)?;
                 let emb_bytes: Option<Vec<u8>> = row.get(15)?;
                 Ok((mem, emb_bytes))
-            })?;
+            },
+        )?;
 
         for row in sem_rows {
             let (mem, emb_bytes) = row?;
@@ -2282,6 +2411,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(results.len(), 1);
@@ -2298,6 +2428,7 @@ mod tests {
             None,
             None,
             10,
+            None,
             None,
             None,
             None,
@@ -2332,6 +2463,7 @@ mod tests {
             None,
             SHORT_TTL_EXTEND_SECS,
             MID_TTL_EXTEND_SECS,
+            None,
         )
         .unwrap();
         assert!(!results.is_empty());
@@ -2356,6 +2488,7 @@ mod tests {
             None,
             SHORT_TTL_EXTEND_SECS,
             MID_TTL_EXTEND_SECS,
+            None,
         );
         // May return empty or error, both acceptable
         assert!(results.is_ok() || results.is_err());
@@ -2871,6 +3004,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         assert_eq!(results.len(), 1);
@@ -2894,6 +3028,7 @@ mod tests {
             None,
             3600,
             86400,
+            None,
         )
         .unwrap();
         assert!(!results.is_empty());
