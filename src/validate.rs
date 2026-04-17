@@ -208,6 +208,40 @@ pub fn validate_scope(scope: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a [`GovernancePolicy`] (Task 1.8). Closed-set tag checks are
+/// already handled by serde on deserialization; this adds semantic bounds:
+/// consensus quorum must be ≥ 1, Agent references must pass
+/// `validate_agent_id`, and the policy as a whole must not use
+/// `GovernanceLevel::Approve` without a meaningful approver.
+pub fn validate_governance_policy(policy: &crate::models::GovernancePolicy) -> Result<()> {
+    use crate::models::{ApproverType, GovernanceLevel};
+    // Approver-specific constraints
+    match &policy.approver {
+        ApproverType::Human => {}
+        ApproverType::Agent(id) => {
+            validate_agent_id(id)?;
+        }
+        ApproverType::Consensus(n) => {
+            if *n == 0 {
+                bail!("governance.approver.consensus quorum must be >= 1");
+            }
+        }
+    }
+    // `Approve` level is meaningless without a configured approver. The
+    // `Human` default is always valid, but a `Consensus(0)` or bad-id agent
+    // would have been caught above.
+    let uses_approve = matches!(policy.write, GovernanceLevel::Approve)
+        || matches!(policy.promote, GovernanceLevel::Approve)
+        || matches!(policy.delete, GovernanceLevel::Approve);
+    if uses_approve
+        && let ApproverType::Consensus(n) = &policy.approver
+        && *n == 0
+    {
+        bail!("governance uses 'approve' level but approver consensus is 0");
+    }
+    Ok(())
+}
+
 /// Validate an agent type against the closed `VALID_AGENT_TYPES` set.
 pub fn validate_agent_type(agent_type: &str) -> Result<()> {
     if agent_type.is_empty() {
@@ -634,6 +668,44 @@ mod tests {
         assert!(validate_agent_id("alice\\bs").is_err());
         assert!(validate_agent_id("alice?q").is_err());
         assert!(validate_agent_id("alice*glob").is_err());
+    }
+
+    #[test]
+    fn test_validate_governance_policy_default_ok() {
+        let p = crate::models::GovernancePolicy::default();
+        assert!(validate_governance_policy(&p).is_ok());
+    }
+
+    #[test]
+    fn test_validate_governance_consensus_zero_rejected() {
+        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+        let p = GovernancePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Consensus(0),
+        };
+        assert!(validate_governance_policy(&p).is_err());
+    }
+
+    #[test]
+    fn test_validate_governance_agent_id_checked() {
+        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+        let bad = GovernancePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Agent("has space".to_string()),
+        };
+        assert!(validate_governance_policy(&bad).is_err());
+
+        let good = GovernancePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Agent("alice".to_string()),
+        };
+        assert!(validate_governance_policy(&good).is_ok());
     }
 
     #[test]

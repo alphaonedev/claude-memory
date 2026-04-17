@@ -294,6 +294,112 @@ pub struct NamespaceCount {
 /// Namespace reserved for agent registrations (Task 1.3).
 pub const AGENTS_NAMESPACE: &str = "_agents";
 
+// ---------------------------------------------------------------------------
+// Task 1.8 — Governance Metadata
+// ---------------------------------------------------------------------------
+
+/// Who is permitted to perform a governed action.
+///
+/// Stored inside a namespace standard's `metadata.governance` and consulted
+/// by Task 1.9 (enforcement) + Task 1.10 (approver types). Task 1.8 only
+/// defines the shape + validation — no runtime enforcement yet.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GovernanceLevel {
+    /// Any caller may perform the action (no gate).
+    Any,
+    /// Caller must be a registered agent (see Task 1.3 `_agents` namespace).
+    Registered,
+    /// Only the memory's original `metadata.agent_id` owner may perform the action.
+    Owner,
+    /// Action requires explicit approval by an `ApproverType` (handled in 1.9 + 1.10).
+    Approve,
+}
+
+impl GovernanceLevel {
+    /// Human-readable tag used by logs and error messages.
+    /// Consumed by Task 1.9 enforcement path.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Registered => "registered",
+            Self::Owner => "owner",
+            Self::Approve => "approve",
+        }
+    }
+}
+
+/// Who approves actions gated by [`GovernanceLevel::Approve`].
+///
+/// Serialized representation (externally-tagged, `snake_case`):
+///
+/// - [`Self::Human`] → `"human"`
+/// - [`Self::Agent`] → `{"agent": "alice"}`
+/// - [`Self::Consensus`] → `{"consensus": 3}`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ApproverType {
+    /// Human approval required (interactive or out-of-band).
+    Human,
+    /// Specific registered agent must approve, identified by `agent_id`.
+    Agent(String),
+    /// Consensus of N approvers (any mix of human/agent registrations).
+    Consensus(u32),
+}
+
+impl ApproverType {
+    /// Discriminator tag for logs / telemetry.
+    /// Consumed by Task 1.10 approver-types path.
+    #[allow(dead_code)]
+    #[must_use]
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Human => "human",
+            Self::Agent(_) => "agent",
+            Self::Consensus(_) => "consensus",
+        }
+    }
+}
+
+/// Governance policy attached to a namespace's standard memory
+/// (stored in `metadata.governance`).
+///
+/// Default policy when a standard has no `metadata.governance`:
+/// `{ write: Any, promote: Any, delete: Owner, approver: Human }`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GovernancePolicy {
+    pub write: GovernanceLevel,
+    pub promote: GovernanceLevel,
+    pub delete: GovernanceLevel,
+    pub approver: ApproverType,
+}
+
+impl Default for GovernancePolicy {
+    fn default() -> Self {
+        Self {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+        }
+    }
+}
+
+impl GovernancePolicy {
+    /// Parse a policy out of a `metadata.governance` JSON value. Returns
+    /// `None` when the field is missing/null. Parse errors propagate so
+    /// callers can surface them to the user instead of silently defaulting.
+    pub fn from_metadata(metadata: &Value) -> Option<Result<Self, serde_json::Error>> {
+        let gov = metadata.get("governance")?;
+        if gov.is_null() {
+            return None;
+        }
+        Some(serde_json::from_value(gov.clone()))
+    }
+}
+
 /// Closed set of visibility scopes stamped into `metadata.scope` (Task 1.5).
 /// Controls which agents can see a memory via hierarchical namespace matching.
 /// Memories without a `scope` field are treated as `private` by the query layer.
@@ -557,5 +663,113 @@ mod tests {
         assert_eq!(a.len(), 8);
         assert_eq!(a[0], "a/b/c/d/e/f/g/h");
         assert_eq!(a[7], "a");
+    }
+
+    // Task 1.8 — governance types ---------------------------------------
+
+    #[test]
+    fn governance_default_policy() {
+        let p = GovernancePolicy::default();
+        assert_eq!(p.write, GovernanceLevel::Any);
+        assert_eq!(p.promote, GovernanceLevel::Any);
+        assert_eq!(p.delete, GovernanceLevel::Owner);
+        assert_eq!(p.approver, ApproverType::Human);
+    }
+
+    #[test]
+    fn governance_level_serde_snake_case() {
+        // Serialize each level as a lowercase JSON string
+        for (level, expected) in [
+            (GovernanceLevel::Any, "any"),
+            (GovernanceLevel::Registered, "registered"),
+            (GovernanceLevel::Owner, "owner"),
+            (GovernanceLevel::Approve, "approve"),
+        ] {
+            let json = serde_json::to_string(&level).unwrap();
+            assert_eq!(json, format!("\"{expected}\""));
+            // Roundtrip
+            let back: GovernanceLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, level);
+        }
+    }
+
+    #[test]
+    fn approver_type_serde_shapes() {
+        // Human → unit variant serializes as bare string
+        let json = serde_json::to_string(&ApproverType::Human).unwrap();
+        assert_eq!(json, "\"human\"");
+
+        // Agent(s) → externally tagged
+        let a = ApproverType::Agent("alice".to_string());
+        let json = serde_json::to_string(&a).unwrap();
+        assert_eq!(json, r#"{"agent":"alice"}"#);
+        let back: ApproverType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, a);
+
+        // Consensus(n) → externally tagged, numeric payload
+        let c = ApproverType::Consensus(3);
+        let json = serde_json::to_string(&c).unwrap();
+        assert_eq!(json, r#"{"consensus":3}"#);
+        let back: ApproverType = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, c);
+    }
+
+    #[test]
+    fn governance_policy_full_roundtrip() {
+        let p = GovernancePolicy {
+            write: GovernanceLevel::Registered,
+            promote: GovernanceLevel::Approve,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Agent("maintainer".to_string()),
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        let back: GovernancePolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn governance_from_metadata_missing() {
+        let meta = serde_json::json!({"agent_id": "alice"});
+        assert!(GovernancePolicy::from_metadata(&meta).is_none());
+    }
+
+    #[test]
+    fn governance_from_metadata_null() {
+        let meta = serde_json::json!({"governance": null});
+        assert!(GovernancePolicy::from_metadata(&meta).is_none());
+    }
+
+    #[test]
+    fn governance_from_metadata_default_shape() {
+        let default = GovernancePolicy::default();
+        let meta = serde_json::json!({"governance": serde_json::to_value(&default).unwrap()});
+        let parsed = GovernancePolicy::from_metadata(&meta)
+            .expect("present")
+            .expect("valid");
+        assert_eq!(parsed, default);
+    }
+
+    #[test]
+    fn governance_from_metadata_invalid_returns_err() {
+        let meta = serde_json::json!({
+            "governance": {"write": "bogus", "promote": "any", "delete": "any", "approver": "human"}
+        });
+        let result = GovernancePolicy::from_metadata(&meta).expect("present");
+        assert!(result.is_err(), "unknown enum value must fail deserialize");
+    }
+
+    #[test]
+    fn governance_level_as_str_tags() {
+        assert_eq!(GovernanceLevel::Any.as_str(), "any");
+        assert_eq!(GovernanceLevel::Registered.as_str(), "registered");
+        assert_eq!(GovernanceLevel::Owner.as_str(), "owner");
+        assert_eq!(GovernanceLevel::Approve.as_str(), "approve");
+    }
+
+    #[test]
+    fn approver_type_kind_tags() {
+        assert_eq!(ApproverType::Human.kind(), "human");
+        assert_eq!(ApproverType::Agent("a".into()).kind(), "agent");
+        assert_eq!(ApproverType::Consensus(3).kind(), "consensus");
     }
 }

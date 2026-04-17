@@ -5628,3 +5628,329 @@ fn test_vpromote_flat_namespace_cannot_promote() {
     assert!(!out.status.success(), "flat namespace cannot be promoted");
     let _ = std::fs::remove_file(&db);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.8 — Governance Metadata
+// ---------------------------------------------------------------------------
+
+fn fresh_gov_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-gov-{}.db", uuid::Uuid::new_v4()))
+}
+
+fn store_std_mem(binary: &str, db_path: &std::path::Path, namespace: &str, title: &str) -> String {
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-n",
+            namespace,
+            "-T",
+            title,
+            "-c",
+            "policy-body",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+fn mcp_call(
+    binary: &str,
+    db_path: &std::path::Path,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    use std::io::Write;
+    let mut child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    let resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let text = resp["result"]["content"][0]["text"].as_str().unwrap();
+    serde_json::from_str(text).unwrap()
+}
+
+#[test]
+fn test_governance_set_and_get_roundtrip() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let sid = store_std_mem(bin, &db, "alphaone/eng", "eng-policy");
+
+    let gov = serde_json::json!({
+        "write": "registered",
+        "promote": "approve",
+        "delete": "owner",
+        "approver": {"agent": "maintainer"}
+    });
+    let set_resp = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({
+            "namespace": "alphaone/eng",
+            "id": sid,
+            "governance": gov.clone(),
+        }),
+    );
+    assert_eq!(set_resp["set"], true);
+    assert_eq!(set_resp["governance"], gov);
+
+    let get_resp = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_get_standard",
+        serde_json::json!({"namespace": "alphaone/eng"}),
+    );
+    assert_eq!(get_resp["governance"]["write"], "registered");
+    assert_eq!(get_resp["governance"]["promote"], "approve");
+    assert_eq!(get_resp["governance"]["delete"], "owner");
+    assert_eq!(get_resp["governance"]["approver"]["agent"], "maintainer");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_governance_default_returned_when_unset() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let sid = store_std_mem(bin, &db, "plain", "plain-policy");
+
+    let _ = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({"namespace": "plain", "id": sid}),
+    );
+    let get_resp = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_get_standard",
+        serde_json::json!({"namespace": "plain"}),
+    );
+    let gov = &get_resp["governance"];
+    assert_eq!(gov["write"], "any");
+    assert_eq!(gov["promote"], "any");
+    assert_eq!(gov["delete"], "owner");
+    assert_eq!(gov["approver"], "human");
+    let _ = std::fs::remove_file(&db);
+}
+
+/// Invoke a tool and return the raw MCP response envelope — preserves
+/// `isError` + content-text for rejection tests where the content[0].text
+/// is an error string, not parseable JSON.
+fn mcp_call_raw(
+    binary: &str,
+    db_path: &std::path::Path,
+    name: &str,
+    args: serde_json::Value,
+) -> serde_json::Value {
+    use std::io::Write;
+    let mut child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--tier",
+            "keyword",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":2,"method":"tools/call",
+            "params":{"name": name, "arguments": args}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    serde_json::from_str(lines[1]).unwrap()
+}
+
+#[test]
+fn test_governance_invalid_rejected() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let sid = store_std_mem(bin, &db, "alphaone/eng", "bogus-policy");
+
+    let resp = mcp_call_raw(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({
+            "namespace": "alphaone/eng",
+            "id": sid,
+            "governance": {
+                "write": "open-to-all",
+                "promote": "any",
+                "delete": "any",
+                "approver": "human"
+            }
+        }),
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "bogus level must return isError=true; got {resp}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_governance_consensus_quorum_rejected() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let sid = store_std_mem(bin, &db, "alphaone", "cons-policy");
+
+    let resp = mcp_call_raw(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({
+            "namespace": "alphaone",
+            "id": sid,
+            "governance": {
+                "write": "approve",
+                "promote": "any",
+                "delete": "owner",
+                "approver": {"consensus": 0}
+            }
+        }),
+    );
+    assert_eq!(
+        resp["result"]["isError"], true,
+        "consensus(0) must return isError=true; got {resp}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_governance_inherit_path_surfaces_per_level() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    let org_id = store_std_mem(bin, &db, "alphaone", "org-pol");
+    let team_id = store_std_mem(bin, &db, "alphaone/eng", "team-pol");
+
+    let _ = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({
+            "namespace": "alphaone",
+            "id": org_id,
+            "governance": {
+                "write": "any", "promote": "any", "delete": "owner",
+                "approver": "human"
+            }
+        }),
+    );
+    let _ = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({
+            "namespace": "alphaone/eng",
+            "id": team_id,
+            "governance": {
+                "write": "registered", "promote": "owner", "delete": "approve",
+                "approver": {"consensus": 2}
+            }
+        }),
+    );
+
+    let resp = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_get_standard",
+        serde_json::json!({"namespace": "alphaone/eng", "inherit": true}),
+    );
+    let standards = resp["standards"].as_array().unwrap();
+    assert!(standards.len() >= 2);
+    let org = standards
+        .iter()
+        .find(|s| s["namespace"] == "alphaone")
+        .unwrap();
+    let team = standards
+        .iter()
+        .find(|s| s["namespace"] == "alphaone/eng")
+        .unwrap();
+    assert_eq!(org["governance"]["write"], "any");
+    assert_eq!(team["governance"]["write"], "registered");
+    assert_eq!(team["governance"]["approver"]["consensus"], 2);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_governance_legacy_memory_defaults_not_mutated() {
+    let db = fresh_gov_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let sid = store_std_mem(bin, &db, "legacy", "legacy-policy");
+
+    let _ = mcp_call(
+        bin,
+        &db,
+        "memory_namespace_set_standard",
+        serde_json::json!({"namespace": "legacy", "id": sid}),
+    );
+    let out = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "get", &sid])
+        .output()
+        .unwrap();
+    let mem_val: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let metadata = &mem_val["memory"]["metadata"];
+    assert!(
+        metadata.get("governance").is_none(),
+        "no governance param must not inject a policy; got metadata={metadata}"
+    );
+    let _ = std::fs::remove_file(&db);
+}

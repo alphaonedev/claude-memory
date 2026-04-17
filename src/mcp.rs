@@ -15,7 +15,7 @@ use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::{Memory, Tier};
+use crate::models::{GovernancePolicy, Memory, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -360,13 +360,23 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_namespace_set_standard",
-                "description": "Set a memory as the standard/policy for a namespace. Auto-prepended to recall and session_start. Supports rule layering: set a parent namespace to inherit its standard too (global '*' + parent + namespace).",
+                "description": "Set a memory as the standard/policy for a namespace. Auto-prepended to recall and session_start. Supports rule layering (global '*' + parent chain + namespace). Task 1.8: accepts optional `governance` policy object merged into the standard memory's metadata.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "namespace": {"type": "string", "description": "Namespace to set the standard for"},
                         "id": {"type": "string", "description": "Memory ID to use as the standard"},
-                        "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"}
+                        "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"},
+                        "governance": {
+                            "type": "object",
+                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types.",
+                            "properties": {
+                                "write":    {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
+                                "promote":  {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
+                                "delete":   {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
+                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"}
+                            }
+                        }
                     },
                     "required": ["namespace", "id"]
                 }
@@ -1442,10 +1452,57 @@ fn handle_namespace_set_standard(
     if let Some(p) = parent {
         validate::validate_namespace(p).map_err(|e| e.to_string())?;
     }
+
+    // Task 1.8: optional governance policy merged into the standard memory's
+    // metadata.governance. Policy is deserialized + validated before write.
+    let governance_val = params.get("governance").filter(|v| !v.is_null());
+    if let Some(g) = governance_val {
+        let policy: crate::models::GovernancePolicy =
+            serde_json::from_value(g.clone()).map_err(|e| format!("invalid governance: {e}"))?;
+        validate::validate_governance_policy(&policy).map_err(|e| e.to_string())?;
+
+        // Load the standard memory, merge metadata.governance, write back.
+        let mut mem = db::get(conn, id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("memory not found: {id}"))?;
+        let mut metadata = if mem.metadata.is_object() {
+            mem.metadata.clone()
+        } else {
+            serde_json::json!({})
+        };
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).map_err(|e| e.to_string())?,
+            );
+        }
+        let (found, _) = db::update(
+            conn,
+            &mem.id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&metadata),
+        )
+        .map_err(|e| e.to_string())?;
+        if !found {
+            return Err(format!("memory not found during governance merge: {id}"));
+        }
+        mem.metadata = metadata;
+    }
+
     db::set_namespace_standard(conn, namespace, id, parent).map_err(|e| e.to_string())?;
     let mut resp = json!({"set": true, "namespace": namespace, "standard_id": id});
     if let Some(p) = parent {
         resp["parent"] = json!(p);
+    }
+    if let Some(g) = governance_val {
+        resp["governance"] = g.clone();
     }
     Ok(resp)
 }
@@ -1466,12 +1523,14 @@ fn handle_namespace_get_standard(
         let mut standards: Vec<Value> = Vec::new();
         for link in &chain {
             if let Some(std) = lookup_namespace_standard(conn, link) {
+                let gov = extract_governance(&std);
                 let entry = json!({
                     "namespace": link,
                     "standard_id": std["id"].clone(),
                     "title": std["title"].clone(),
                     "content": std["content"].clone(),
                     "priority": std["priority"].clone(),
+                    "governance": gov,
                 });
                 standards.push(entry);
             }
@@ -1489,19 +1548,40 @@ fn handle_namespace_get_standard(
         Some(id) => {
             let mem = db::get(conn, &id).map_err(|e| e.to_string())?;
             match mem {
-                Some(m) => Ok(json!({
-                    "namespace": namespace,
-                    "standard_id": id,
-                    "title": m.title,
-                    "content": m.content,
-                    "priority": m.priority
-                })),
+                Some(m) => {
+                    // Task 1.8: surface metadata.governance (or default policy).
+                    let gov = GovernancePolicy::from_metadata(&m.metadata)
+                        .map(Result::unwrap_or_default)
+                        .unwrap_or_default();
+                    Ok(json!({
+                        "namespace": namespace,
+                        "standard_id": id,
+                        "title": m.title,
+                        "content": m.content,
+                        "priority": m.priority,
+                        "governance": gov,
+                    }))
+                }
                 None => Ok(
                     json!({"namespace": namespace, "standard_id": id, "warning": "standard memory not found — may have been deleted"}),
                 ),
             }
         }
         None => Ok(json!({"namespace": namespace, "standard_id": null})),
+    }
+}
+
+/// Task 1.8 — extract metadata.governance from a serialized memory value,
+/// resolving to the default policy when missing or invalid. Used by the
+/// `--inherit` get-standard path and tool responses.
+fn extract_governance(mem_val: &Value) -> Value {
+    let default = serde_json::to_value(GovernancePolicy::default()).unwrap_or(Value::Null);
+    let Some(meta) = mem_val.get("metadata") else {
+        return default;
+    };
+    match GovernancePolicy::from_metadata(meta) {
+        Some(Ok(p)) => serde_json::to_value(&p).unwrap_or(default),
+        _ => default,
     }
 }
 
