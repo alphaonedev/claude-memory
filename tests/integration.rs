@@ -7768,3 +7768,168 @@ fn test_cli_sync_dry_run_writes_nothing() {
     let _ = std::fs::remove_file(&local_db);
     let _ = std::fs::remove_file(&remote_db);
 }
+
+// ---------------------------------------------------------------------------
+// Phase 3 Task 3b.1 (issue #224) — sync-daemon end-to-end mesh.
+//
+// The defining grand-slam test: one peer's memory ends up on the other
+// within a couple of daemon cycles, no cloud, no login, no manual sync.
+// ---------------------------------------------------------------------------
+
+/// Find a free localhost TCP port by binding to :0 and dropping.
+fn free_port() -> u16 {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    drop(l);
+    port
+}
+
+/// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~5s.
+fn wait_for_health(port: u16) -> bool {
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(out) = std::process::Command::new("curl")
+            .args([
+                "-s",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                &format!("http://127.0.0.1:{port}/api/v1/health"),
+            ])
+            .output()
+            && String::from_utf8_lossy(&out.stdout) == "200"
+        {
+            return true;
+        }
+    }
+    false
+}
+
+#[test]
+fn test_sync_daemon_mesh_propagates_memory_between_peers() {
+    // Phase 3 Task 3b.1 — the grand slam.
+    //
+    // Topology:
+    //   DB A  <— sync-daemon —>  HTTP serve B  —  DB B
+    //
+    // 1. Start `serve B` on a free port against db_B.
+    // 2. Seed a memory into db_B via HTTP POST /api/v1/memories.
+    // 3. Start `sync-daemon` pointed at serve-B's URL, syncing db_A.
+    // 4. Within a few cycles (interval=1s), db_A should contain a copy of
+    //    the memory. This is the cross-machine / no-cloud knowledge mesh.
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_a = dir.join(format!("ai-memory-mesh-a-{}.db", uuid::Uuid::new_v4()));
+    let db_b = dir.join(format!("ai-memory-mesh-b-{}.db", uuid::Uuid::new_v4()));
+
+    // 1. Serve B.
+    let port_b = free_port();
+    let mut serve_b = cmd(bin)
+        .args([
+            "--db",
+            db_b.to_str().unwrap(),
+            "serve",
+            "--port",
+            &port_b.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        wait_for_health(port_b),
+        "serve B health probe never returned 200"
+    );
+
+    // 2. Seed memory into db_B via HTTP.
+    let seed_body = serde_json::json!({
+        "tier": "long",
+        "namespace": "mesh-demo",
+        "title": "Live mesh memory",
+        "content": "Written to peer B; must reach peer A via sync-daemon.",
+        "tags": ["mesh"],
+        "priority": 7,
+        "confidence": 1.0,
+        "source": "api",
+        "metadata": {},
+    });
+    let seed_out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "-H",
+            "x-agent-id: peer-b",
+            "-d",
+            &seed_body.to_string(),
+            &format!("http://127.0.0.1:{port_b}/api/v1/memories"),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        seed_out.status.success(),
+        "seed POST failed: {}",
+        String::from_utf8_lossy(&seed_out.stderr)
+    );
+
+    // 3. Start the sync-daemon — tight 1-second cycle, 30-second cap.
+    let mut daemon = cmd(bin)
+        .args([
+            "--db",
+            db_a.to_str().unwrap(),
+            "--agent-id",
+            "peer-a",
+            "sync-daemon",
+            "--peers",
+            &format!("http://127.0.0.1:{port_b}"),
+            "--interval",
+            "1",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // 4. Poll db_A via CLI until the memory appears (or timeout).
+    let mut found = false;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let list = cmd(bin)
+            .args([
+                "--db",
+                db_a.to_str().unwrap(),
+                "--json",
+                "list",
+                "-n",
+                "mesh-demo",
+            ])
+            .output()
+            .unwrap();
+        if list.status.success() {
+            let v: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap_or_default();
+            if let Some(arr) = v["memories"].as_array()
+                && arr.iter().any(|m| m["title"] == "Live mesh memory")
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    // Teardown daemons.
+    let _ = daemon.kill();
+    let _ = daemon.wait();
+    let _ = serve_b.kill();
+    let _ = serve_b.wait();
+
+    assert!(
+        found,
+        "sync-daemon failed to mesh memory from peer B → peer A within 15s"
+    );
+
+    let _ = std::fs::remove_file(&db_a);
+    let _ = std::fs::remove_file(&db_b);
+}

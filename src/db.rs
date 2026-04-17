@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 11;
+const CURRENT_SCHEMA_VERSION: i64 = 12;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -392,6 +392,19 @@ fn migrate(conn: &Connection) -> Result<()> {
                 );
                 CREATE INDEX IF NOT EXISTS idx_sync_state_agent ON sync_state(agent_id);",
             )?;
+        }
+
+        if version < 12 {
+            // Phase 3 Task 3b.1 (issue #224): track the high-watermark of
+            // local memories this agent has successfully pushed to each
+            // peer. The daemon uses it to stream only deltas on the next
+            // push cycle. Null for rows from v11 that predate this column.
+            let has_last_pushed: bool = conn
+                .prepare("SELECT last_pushed_at FROM sync_state LIMIT 0")
+                .is_ok();
+            if !has_last_pushed {
+                conn.execute("ALTER TABLE sync_state ADD COLUMN last_pushed_at TEXT", [])?;
+            }
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -2336,6 +2349,43 @@ pub fn sync_state_load(conn: &Connection, agent_id: &str) -> Result<crate::model
         clock.entries.insert(peer, at);
     }
     Ok(clock)
+}
+
+/// Look up this peer's last-push watermark for `peer_id`. Returns `None`
+/// if we've never successfully pushed to them (foundation-era rows also
+/// return `None` because the column was added in schema v12).
+#[must_use]
+pub fn sync_state_last_pushed(conn: &Connection, agent_id: &str, peer_id: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT last_pushed_at FROM sync_state WHERE agent_id = ?1 AND peer_id = ?2",
+        params![agent_id, peer_id],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// Record that local memories up to `updated_at = pushed_at` have been
+/// accepted by `peer_id`. Creates the row if it doesn't exist; monotonic.
+pub fn sync_state_record_push(
+    conn: &Connection,
+    agent_id: &str,
+    peer_id: &str,
+    pushed_at: &str,
+) -> Result<()> {
+    let now = Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO sync_state (agent_id, peer_id, last_seen_at, last_pulled_at, last_pushed_at) \
+         VALUES (?1, ?2, ?3, ?3, ?4) \
+         ON CONFLICT(agent_id, peer_id) DO UPDATE SET \
+            last_pushed_at = CASE \
+                WHEN excluded.last_pushed_at IS NULL THEN last_pushed_at \
+                WHEN last_pushed_at IS NULL THEN excluded.last_pushed_at \
+                WHEN excluded.last_pushed_at > last_pushed_at THEN excluded.last_pushed_at \
+                ELSE last_pushed_at END",
+        params![agent_id, peer_id, now, pushed_at],
+    )?;
+    Ok(())
 }
 
 /// Return memories whose `updated_at > since`, ordered by `updated_at`

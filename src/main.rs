@@ -123,6 +123,11 @@ enum Command {
     Shell,
     /// Sync memories between two database files
     Sync(SyncArgs),
+    /// Run the peer-to-peer sync daemon — continuously exchange memories
+    /// with one or more HTTP peers (Phase 3 Task 3b.1). The defining
+    /// grand-slam capability: two agents on two machines form a live
+    /// knowledge mesh with no cloud, no login, no `SaaS`.
+    SyncDaemon(SyncDaemonArgs),
     /// Auto-consolidate short-term memories by namespace
     AutoConsolidate(AutoConsolidateArgs),
     /// Generate shell completions
@@ -432,6 +437,33 @@ struct ResolveArgs {
 }
 
 #[derive(Args)]
+struct SyncDaemonArgs {
+    /// Comma-separated list of peer HTTP endpoints to mesh with.
+    /// Each URL must point at another `ai-memory serve` instance —
+    /// e.g. `http://laptop-b:9077,http://laptop-c:9077`. The local
+    /// daemon polls each peer's `/api/v1/sync/since` for new memories
+    /// and pushes local deltas via `/api/v1/sync/push`.
+    #[arg(long, value_delimiter = ',')]
+    peers: Vec<String>,
+    /// Seconds between sync cycles. Each cycle does one pull and one
+    /// push per peer. Defaults to 10 seconds — the "agent-A learns it,
+    /// agent-B knows it in 10 seconds" demo rhythm. Minimum 1.
+    #[arg(long, default_value_t = 10)]
+    interval: u64,
+    /// Optional `X-API-Key` to present to peers that have api-key auth
+    /// enabled. Same key is sent to every peer in this invocation; use
+    /// separate daemons if peers need distinct keys. Future work
+    /// (Task 3b.2): per-peer auth tokens.
+    #[arg(long)]
+    api_key: Option<String>,
+    /// Cap on the number of memories transferred per peer per cycle.
+    /// Prevents an initial cold-start sync from hogging one cycle;
+    /// subsequent cycles pick up the remainder. Defaults to 500.
+    #[arg(long, default_value_t = 500)]
+    batch_size: usize,
+}
+
+#[derive(Args)]
 struct SyncArgs {
     /// Path to the remote database to sync with
     remote_db: PathBuf,
@@ -551,6 +583,7 @@ async fn main() -> Result<()> {
             | Command::Consolidate(_)
             | Command::Resolve(_)
             | Command::Sync(_)
+            | Command::SyncDaemon(_)
             | Command::Import(_)
             | Command::AutoConsolidate(_)
             | Command::Gc
@@ -582,6 +615,7 @@ async fn main() -> Result<()> {
         Command::Resolve(a) => cmd_resolve(&db_path, &a, j),
         Command::Shell => cmd_shell(&db_path),
         Command::Sync(a) => cmd_sync(&db_path, &a, j, cli_agent_id.as_deref()),
+        Command::SyncDaemon(a) => cmd_sync_daemon(&db_path, a, cli_agent_id.as_deref()).await,
         Command::AutoConsolidate(a) => {
             cmd_auto_consolidate(&db_path, &a, j, cli_agent_id.as_deref())
         }
@@ -2365,6 +2399,209 @@ fn cmd_sync_dry_run(
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 Task 3b.1 (issue #224) — auto background sync daemon.
+//
+// Continuous peer-to-peer knowledge mesh. Two laptops running
+// `ai-memory sync-daemon --peers <other>` form a live memory exchange:
+// - every `interval` seconds, pull each peer's memories newer than the
+//   last-seen watermark (GET /api/v1/sync/since)
+// - push local memories newer than the last-pushed watermark
+//   (POST /api/v1/sync/push)
+// - advance sync_state watermarks atomically
+//
+// Zero cloud. Zero login. Zero SaaS. This is the capability that takes
+// ai-memory from "persistent memory store" to "distributed fleet brain."
+// ---------------------------------------------------------------------------
+
+async fn cmd_sync_daemon(
+    db_path: &Path,
+    args: SyncDaemonArgs,
+    cli_agent_id: Option<&str>,
+) -> Result<()> {
+    if args.peers.is_empty() {
+        anyhow::bail!("at least one --peers URL is required");
+    }
+    let interval = args.interval.max(1);
+    let batch_size = args.batch_size.max(1);
+    let local_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
+
+    // Tracing subscriber — same config as `serve`. Only init once; if we
+    // were launched after another tokio command already initialised it,
+    // the second init is a harmless no-op.
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            EnvFilter::from_default_env()
+                .add_directive("ai_memory=info".parse()?)
+                .add_directive("tower_http=info".parse()?),
+        )
+        .try_init();
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()?;
+
+    tracing::info!(
+        "sync-daemon: local_agent_id={local_agent_id} peers={peers:?} interval={interval}s",
+        peers = args.peers
+    );
+
+    // Graceful shutdown: ctrl_c wakes up the loop.
+    let mut shutdown = Box::pin(tokio::signal::ctrl_c());
+
+    loop {
+        for peer_url in &args.peers {
+            if let Err(e) = sync_cycle_once(
+                &client,
+                db_path,
+                &local_agent_id,
+                peer_url,
+                args.api_key.as_deref(),
+                batch_size,
+            )
+            .await
+            {
+                tracing::warn!("sync-daemon: peer {peer_url} cycle failed: {e}");
+            }
+        }
+
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}
+            _ = &mut shutdown => {
+                tracing::info!("sync-daemon: shutdown signal received");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// One pull+push cycle against a single peer. Writes local db updates
+/// synchronously via a fresh connection (avoid holding open connections
+/// across await points). Any per-cycle failure is logged and the caller
+/// moves to the next peer — we never crash the daemon on a transient
+/// network error.
+async fn sync_cycle_once(
+    client: &reqwest::Client,
+    db_path: &Path,
+    local_agent_id: &str,
+    peer_url: &str,
+    api_key: Option<&str>,
+    batch_size: usize,
+) -> Result<()> {
+    let peer_url = peer_url.trim_end_matches('/');
+
+    // --- PULL --------------------------------------------------------
+    let since = {
+        let conn = db::open(db_path)?;
+        db::sync_state_load(&conn, local_agent_id)?
+            .entries
+            .get(peer_url)
+            .cloned()
+    };
+
+    let mut pull_url = format!(
+        "{peer_url}/api/v1/sync/since?limit={batch_size}&peer={}",
+        urlencoding_minimal(local_agent_id)
+    );
+    if let Some(ref s) = since {
+        pull_url.push_str("&since=");
+        pull_url.push_str(&urlencoding_minimal(s));
+    }
+
+    let mut req = client.get(&pull_url).header("x-agent-id", local_agent_id);
+    if let Some(key) = api_key {
+        req = req.header("x-api-key", key);
+    }
+    let resp = req.send().await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("sync-daemon: pull status {}", resp.status());
+    }
+    let pulled: SyncSinceResponse = resp.json().await?;
+    let pull_count = pulled.memories.len();
+    let latest_pulled = pulled.memories.last().map(|m| m.updated_at.clone());
+
+    {
+        let conn = db::open(db_path)?;
+        for mem in &pulled.memories {
+            if validate::validate_memory(mem).is_ok() {
+                let _ = db::insert_if_newer(&conn, mem);
+            }
+        }
+        if let Some(ref at) = latest_pulled {
+            db::sync_state_observe(&conn, local_agent_id, peer_url, at)?;
+        }
+    }
+
+    // --- PUSH --------------------------------------------------------
+    let last_pushed = {
+        let conn = db::open(db_path)?;
+        db::sync_state_last_pushed(&conn, local_agent_id, peer_url)
+    };
+    let outgoing = {
+        let conn = db::open(db_path)?;
+        db::memories_updated_since(&conn, last_pushed.as_deref(), batch_size)?
+    };
+    let push_count = outgoing.len();
+    let latest_pushed = outgoing.last().map(|m| m.updated_at.clone());
+
+    if !outgoing.is_empty() {
+        let body = serde_json::json!({
+            "sender_agent_id": local_agent_id,
+            "sender_clock": { "entries": {} },
+            "memories": outgoing,
+            "dry_run": false,
+        });
+        let mut req = client
+            .post(format!("{peer_url}/api/v1/sync/push"))
+            .header("x-agent-id", local_agent_id)
+            .header("content-type", "application/json")
+            .json(&body);
+        if let Some(key) = api_key {
+            req = req.header("x-api-key", key);
+        }
+        let resp = req.send().await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("sync-daemon: push status {}", resp.status());
+        }
+        if let Some(at) = latest_pushed {
+            let conn = db::open(db_path)?;
+            db::sync_state_record_push(&conn, local_agent_id, peer_url, &at)?;
+        }
+    }
+
+    tracing::info!("sync-daemon: peer={peer_url} pulled={pull_count} pushed={push_count}");
+    Ok(())
+}
+
+/// Minimal URL-component encoder — only the characters the sync-daemon
+/// queries actually emit (RFC3339 timestamps with `:` and `+`, and
+/// agent ids with `:`/`@`/`/`). Avoids pulling in a whole URL crate for
+/// a dozen callsites.
+fn urlencoding_minimal(s: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
+#[derive(serde::Deserialize)]
+struct SyncSinceResponse {
+    #[allow(dead_code)]
+    count: usize,
+    #[allow(dead_code)]
+    limit: usize,
+    memories: Vec<models::Memory>,
 }
 
 #[allow(clippy::too_many_lines)]
