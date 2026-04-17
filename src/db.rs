@@ -69,6 +69,17 @@ fn matches_subtree(namespace: &str, prefix: Option<&str>) -> bool {
 /// Generate the visibility WHERE-clause fragment starting at placeholder `start`.
 /// Uses placeholders `?start .. ?start+3` for private/team/unit/org prefixes.
 /// See `compute_visibility_prefixes` for the bind order.
+///
+/// Security (issue #217): the team/unit/org branches use `LIKE` to expand a
+/// prefix into its sub-tree. Without escaping, a caller who can influence the
+/// prefix could inject SQL `LIKE` meta-characters (`%`, `_`) and broaden the
+/// match across unrelated namespaces. We neutralise this at SQL evaluation
+/// time by `replace()`-escaping `%` and `_` in the bound prefix and pairing
+/// the LIKE with `ESCAPE '\'`. `validate_namespace` already rejects backslash,
+/// so `\` cannot appear in the bound prefix and the escape sentinel is safe.
+/// The `=` equality side is unaffected by LIKE wildcards and binds the raw
+/// value so that legitimate namespaces containing `_` (e.g. `under_score`)
+/// continue to match exactly.
 fn visibility_clause(start: usize, table_alias: &str) -> String {
     let private_ph = start;
     let team_ph = start + 1;
@@ -80,9 +91,9 @@ fn visibility_clause(start: usize, table_alias: &str) -> String {
             ?{private_ph} IS NULL \
             OR COALESCE(json_extract({ta}.metadata, '$.scope'), 'private') = 'collective' \
             OR (COALESCE(json_extract({ta}.metadata, '$.scope'), 'private') = 'private' AND {ta}.namespace = ?{private_ph}) \
-            OR (json_extract({ta}.metadata, '$.scope') = 'team' AND ?{team_ph} IS NOT NULL AND ({ta}.namespace = ?{team_ph} OR {ta}.namespace LIKE ?{team_ph} || '/%')) \
-            OR (json_extract({ta}.metadata, '$.scope') = 'unit' AND ?{unit_ph} IS NOT NULL AND ({ta}.namespace = ?{unit_ph} OR {ta}.namespace LIKE ?{unit_ph} || '/%')) \
-            OR (json_extract({ta}.metadata, '$.scope') = 'org'  AND ?{org_ph}  IS NOT NULL AND ({ta}.namespace = ?{org_ph}  OR {ta}.namespace LIKE ?{org_ph}  || '/%'))\
+            OR (json_extract({ta}.metadata, '$.scope') = 'team' AND ?{team_ph} IS NOT NULL AND ({ta}.namespace = ?{team_ph} OR {ta}.namespace LIKE replace(replace(?{team_ph}, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\')) \
+            OR (json_extract({ta}.metadata, '$.scope') = 'unit' AND ?{unit_ph} IS NOT NULL AND ({ta}.namespace = ?{unit_ph} OR {ta}.namespace LIKE replace(replace(?{unit_ph}, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\')) \
+            OR (json_extract({ta}.metadata, '$.scope') = 'org'  AND ?{org_ph}  IS NOT NULL AND ({ta}.namespace = ?{org_ph}  OR {ta}.namespace LIKE replace(replace(?{org_ph}, '%', '\\%'), '_', '\\_') || '/%' ESCAPE '\\'))\
         )"
     )
 }
@@ -2611,15 +2622,35 @@ pub fn approve_with_approver_type(
             }
         }
         ApproverType::Consensus(quorum) => {
+            // Issue #216: a single caller could previously satisfy any
+            // Consensus(n) quorum by varying the unauthenticated `agent_id`
+            // (`alice`, `bob`, `Alice`/`alice` were three distinct votes).
+            // Two changes harden the path:
+            //   1. Require each voter to be a registered agent — raises the
+            //      bar from "claim any string" to "operator pre-registered
+            //      this id". Combined with auth on the approve endpoint
+            //      (operator-deployed) this gives a real multi-party gate.
+            //   2. Canonicalize the agent_id to lowercase for both the
+            //      duplicate-vote check and storage so case-variants of the
+            //      same id collapse to a single vote.
+            if !is_registered_agent(conn, approver_agent_id) {
+                return Ok(ApproveOutcome::Rejected(format!(
+                    "consensus voter '{approver_agent_id}' is not a registered agent"
+                )));
+            }
+            let canonical_id = approver_agent_id.to_ascii_lowercase();
             let mut approvals = pa.approvals.clone();
-            if approvals.iter().any(|a| a.agent_id == approver_agent_id) {
+            if approvals
+                .iter()
+                .any(|a| a.agent_id.eq_ignore_ascii_case(&canonical_id))
+            {
                 return Ok(ApproveOutcome::Pending {
                     votes: approvals.len(),
                     quorum,
                 });
             }
             approvals.push(Approval {
-                agent_id: approver_agent_id.to_string(),
+                agent_id: canonical_id.clone(),
                 approved_at: Utc::now().to_rfc3339(),
             });
             let approvals_json = serde_json::to_string(&approvals)?;
@@ -2630,7 +2661,7 @@ pub fn approve_with_approver_type(
             let votes = approvals.len();
             if u32::try_from(votes).unwrap_or(u32::MAX) >= quorum {
                 // Threshold met — transition status so the caller can replay.
-                let ok = decide_pending_action(conn, pending_id, true, approver_agent_id)?;
+                let ok = decide_pending_action(conn, pending_id, true, &canonical_id)?;
                 if ok {
                     return Ok(ApproveOutcome::Approved);
                 }

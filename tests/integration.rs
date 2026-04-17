@@ -6668,6 +6668,28 @@ fn approve(
         .unwrap()
 }
 
+/// Register an agent so it can satisfy `Consensus(n)` voting (issue #216).
+fn register_voter(binary: &str, db_path: &std::path::Path, agent_id: &str) {
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "agents",
+            "register",
+            "--agent-id",
+            agent_id,
+            "--agent-type",
+            "ai:claude-opus-4.7",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "register voter '{agent_id}' failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 #[test]
 fn test_approver_human_any_approver_accepted() {
     let db = fresh_approver_db();
@@ -6752,6 +6774,8 @@ fn test_approver_consensus_below_threshold_pending() {
         "owner",
     );
     let pid = queue_store(bin, &db, "alphaone", "cons-target", "alice");
+    register_voter(bin, &db, "approver-1");
+    register_voter(bin, &db, "approver-2");
 
     let v1 = approve(bin, &db, &pid, "approver-1");
     assert!(v1.status.success());
@@ -6792,6 +6816,8 @@ fn test_approver_consensus_threshold_auto_executes() {
         "owner",
     );
     let pid = queue_store(bin, &db, "alphaone", "cons-exec", "alice");
+    register_voter(bin, &db, "a1");
+    register_voter(bin, &db, "a2");
 
     let v1 = approve(bin, &db, &pid, "a1");
     assert_eq!(
@@ -6849,6 +6875,8 @@ fn test_approver_consensus_same_agent_does_not_double_count() {
         "owner",
     );
     let pid = queue_store(bin, &db, "alphaone", "cons-dup", "alice");
+    register_voter(bin, &db, "a1");
+    register_voter(bin, &db, "a2");
 
     let v1a = approve(bin, &db, &pid, "a1");
     let v1b = approve(bin, &db, &pid, "a1");
@@ -6947,6 +6975,8 @@ fn test_approver_delete_consensus_executes_delete() {
     assert_eq!(jd["status"], "pending");
     let pid = jd["pending_id"].as_str().unwrap().to_string();
 
+    register_voter(bin, &db, "v1");
+    register_voter(bin, &db, "v2");
     let _ = approve(bin, &db, &pid, "v1");
     let v2 = approve(bin, &db, &pid, "v2");
     let j2: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
@@ -6960,6 +6990,171 @@ fn test_approver_delete_consensus_executes_delete() {
     assert!(
         !get.status.success(),
         "memory must be deleted after consensus"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+// ---------------------------------------------------------------------------
+// Security regression tests — issue #216 (Consensus voter hardening) and
+// issue #217 (LIKE-wildcard smuggling in visibility filter).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_consensus_unregistered_voter_rejected() {
+    // Issue #216: an unregistered agent_id can no longer satisfy a Consensus
+    // vote. Operators must pre-register voters via `agents register`.
+    let db = fresh_approver_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    set_governance(
+        bin,
+        &db,
+        "alphaone",
+        serde_json::json!({
+            "write":"approve","promote":"any","delete":"owner",
+            "approver":{"consensus":2}
+        }),
+        "owner",
+    );
+    let pid = queue_store(bin, &db, "alphaone", "needs-2", "alice");
+    register_voter(bin, &db, "approver-1");
+    // Only approver-1 is registered; approver-2 is not.
+
+    let v1 = approve(bin, &db, &pid, "approver-1");
+    assert!(v1.status.success(), "registered voter must succeed");
+    let j1: serde_json::Value = serde_json::from_slice(&v1.stdout).unwrap();
+    assert_eq!(j1["votes"], 1);
+
+    let v2 = approve(bin, &db, &pid, "approver-2");
+    assert!(
+        !v2.status.success(),
+        "unregistered voter must be rejected; stdout={}",
+        String::from_utf8_lossy(&v2.stdout)
+    );
+
+    // Quorum must not have been reached.
+    let list = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "pending", "list"])
+        .output()
+        .unwrap();
+    let lv: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(lv["pending"][0]["status"], "pending");
+    assert_eq!(lv["pending"][0]["approvals"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_consensus_case_variant_rejected_if_only_lowercase_registered() {
+    // Issue #216: a single caller cannot satisfy Consensus(2) by submitting
+    // {"alice","Alice"} when only "alice" was registered. The case-variant
+    // is treated as a distinct (and therefore unregistered) id.
+    let db = fresh_approver_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    set_governance(
+        bin,
+        &db,
+        "alphaone",
+        serde_json::json!({
+            "write":"approve","promote":"any","delete":"owner",
+            "approver":{"consensus":2}
+        }),
+        "owner",
+    );
+    let pid = queue_store(bin, &db, "alphaone", "case-attack", "alice");
+    register_voter(bin, &db, "alice");
+
+    let v1 = approve(bin, &db, &pid, "alice");
+    assert!(v1.status.success());
+    let v2 = approve(bin, &db, &pid, "Alice");
+    assert!(
+        !v2.status.success(),
+        "case-variant of registered id must not satisfy quorum"
+    );
+
+    let list = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "pending", "list"])
+        .output()
+        .unwrap();
+    let lv: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(lv["pending"][0]["status"], "pending");
+    assert_eq!(lv["pending"][0]["approvals"].as_array().unwrap().len(), 1);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_consensus_case_insensitive_dedup_when_variants_registered() {
+    // Issue #216: even if an operator registers both "alice" and "Alice"
+    // (operational mistake — they are distinct rows), the consensus dedup
+    // must collapse them so the attacker still only gets one vote.
+    let db = fresh_approver_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    set_governance(
+        bin,
+        &db,
+        "alphaone",
+        serde_json::json!({
+            "write":"approve","promote":"any","delete":"owner",
+            "approver":{"consensus":2}
+        }),
+        "owner",
+    );
+    let pid = queue_store(bin, &db, "alphaone", "case-dedup", "alice");
+    register_voter(bin, &db, "alice");
+    register_voter(bin, &db, "Alice");
+
+    let v1 = approve(bin, &db, &pid, "alice");
+    let j1: serde_json::Value = serde_json::from_slice(&v1.stdout).unwrap();
+    assert_eq!(j1["votes"], 1);
+
+    let v2 = approve(bin, &db, &pid, "Alice");
+    let j2: serde_json::Value = serde_json::from_slice(&v2.stdout).unwrap();
+    assert_eq!(
+        j2["votes"], 1,
+        "case-variant of an existing voter must not double-count"
+    );
+
+    let list = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "pending", "list"])
+        .output()
+        .unwrap();
+    let lv: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    assert_eq!(lv["pending"][0]["status"], "pending");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_visibility_wildcard_percent_smuggling_blocked() {
+    // Issue #217: as_agent="%/y" used to expand the team-scope LIKE pattern
+    // to "%/%", matching every hierarchical namespace and exposing
+    // unrelated tenants' team-scoped memories. The fix escapes the bound
+    // prefix at SQL evaluation time.
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "alphaone/eng", "team-secret-alphaone", "team");
+    seed_scoped(bin, &db, "acme/legal", "team-secret-acme", "team");
+    seed_scoped(bin, &db, "competitor/hr", "team-secret-competitor", "team");
+
+    let titles = recall_as_agent(bin, &db, "%/y", "team");
+    assert!(
+        titles.is_empty(),
+        "wildcard smuggling must not expose any team-scoped memory; got: {titles:?}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_visibility_wildcard_underscore_smuggling_blocked() {
+    // Issue #217: as_agent="_/y" used to expand the team-scope LIKE pattern
+    // to "_/%", matching every namespace whose first segment is a single
+    // character. The fix neutralises `_` in the bound prefix.
+    let db = fresh_scope_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    seed_scoped(bin, &db, "a/x", "team-secret-a", "team");
+    seed_scoped(bin, &db, "b/y", "team-secret-b", "team");
+
+    let titles = recall_as_agent(bin, &db, "_/q", "team");
+    assert!(
+        titles.is_empty(),
+        "underscore-wildcard smuggling must not expose any team-scoped memory; got: {titles:?}"
     );
     let _ = std::fs::remove_file(&db);
 }
