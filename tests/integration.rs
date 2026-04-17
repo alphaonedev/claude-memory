@@ -5400,3 +5400,231 @@ fn test_inherit_default_omits_chain() {
     assert_eq!(body["title"], "org-only");
     let _ = std::fs::remove_file(&db);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.7 — Vertical Memory Promotion
+// ---------------------------------------------------------------------------
+
+fn fresh_vpromote_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-vpromote-{}.db", uuid::Uuid::new_v4()))
+}
+
+fn seed_memory_at(binary: &str, db_path: &std::path::Path, namespace: &str, title: &str) -> String {
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-n",
+            namespace,
+            "-T",
+            title,
+            "-c",
+            "content",
+            "-t",
+            "long",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "seed failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    v["id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn test_vpromote_clones_to_ancestor_and_links() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let src_id = seed_memory_at(bin, &db, "alphaone/eng/platform/agent-1", "runbook");
+
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+            "promote",
+            &src_id,
+            "--to-namespace",
+            "alphaone/eng",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "vpromote failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "vertical");
+    assert_eq!(v["to_namespace"], "alphaone/eng");
+    let clone_id = v["clone_id"].as_str().unwrap().to_string();
+    assert_ne!(clone_id, src_id, "clone must have distinct ID");
+
+    let src = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "get", &src_id])
+        .output()
+        .unwrap();
+    let src_v: serde_json::Value = serde_json::from_slice(&src.stdout).unwrap();
+    assert_eq!(
+        src_v["memory"]["namespace"],
+        "alphaone/eng/platform/agent-1"
+    );
+
+    let clone = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "get", &clone_id])
+        .output()
+        .unwrap();
+    let clone_v: serde_json::Value = serde_json::from_slice(&clone.stdout).unwrap();
+    assert_eq!(clone_v["memory"]["namespace"], "alphaone/eng");
+    assert_eq!(clone_v["memory"]["title"], "runbook");
+
+    let links = clone_v["links"].as_array().expect("links array");
+    assert!(
+        links.iter().any(|l| {
+            l["source_id"].as_str() == Some(&clone_id)
+                && l["target_id"].as_str() == Some(&src_id)
+                && l["relation"] == "derived_from"
+        }),
+        "clone must link derived_from → source; got: {links:?}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_vpromote_rejects_non_ancestor() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let src_id = seed_memory_at(bin, &db, "alphaone/eng/platform", "runbook");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "promote",
+            &src_id,
+            "--to-namespace",
+            "other-org",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "promote to non-ancestor must fail");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.to_lowercase().contains("ancestor") || err.to_lowercase().contains("not"),
+        "expected ancestry error, got: {err}"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_vpromote_rejects_self_namespace() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let src_id = seed_memory_at(bin, &db, "alphaone/eng", "runbook");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "promote",
+            &src_id,
+            "--to-namespace",
+            "alphaone/eng",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "promote to self-namespace must fail (no-op)"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_vpromote_without_flag_preserves_tier_behavior() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+            "store",
+            "-n",
+            "alphaone/eng",
+            "-T",
+            "to-bump",
+            "-c",
+            "x",
+            "-t",
+            "mid",
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = v["id"].as_str().unwrap().to_string();
+
+    let out = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "promote", &id])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["promoted"], true);
+    assert_eq!(v["tier"], "long");
+
+    let get_out = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "get", &id])
+        .output()
+        .unwrap();
+    let g: serde_json::Value = serde_json::from_slice(&get_out.stdout).unwrap();
+    assert_eq!(g["memory"]["tier"], "long");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_vpromote_to_root_ancestor() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let src_id = seed_memory_at(bin, &db, "alphaone/eng/platform/agent-1", "root-promo");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "--json",
+            "promote",
+            &src_id,
+            "--to-namespace",
+            "alphaone",
+        ])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["mode"], "vertical");
+    assert_eq!(v["to_namespace"], "alphaone");
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_vpromote_flat_namespace_cannot_promote() {
+    let db = fresh_vpromote_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let src_id = seed_memory_at(bin, &db, "global", "flat");
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "promote",
+            &src_id,
+            "--to-namespace",
+            "some-other-ns",
+        ])
+        .output()
+        .unwrap();
+    assert!(!out.status.success(), "flat namespace cannot be promoted");
+    let _ = std::fs::remove_file(&db);
+}

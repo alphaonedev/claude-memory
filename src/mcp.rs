@@ -159,11 +159,12 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_promote",
-                "description": "Promote a memory to long-term (permanent).",
+                "description": "Promote a memory. Default: bump tier to long-term (permanent, clears expiry). Task 1.7: when 'to_namespace' is supplied, clone the memory to a hierarchical-ancestor namespace and link clone → source with 'derived_from'. Original is untouched.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string"}
+                        "id": {"type": "string"},
+                        "to_namespace": {"type": "string", "description": "Task 1.7: hierarchical-ancestor namespace to clone this memory into. Must be a proper ancestor (per namespace_ancestors()). Original memory stays put; a new memory with derived_from link is created at the target namespace."}
                     },
                     "required": ["id"]
                 }
@@ -1088,6 +1089,25 @@ fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, 
     } else {
         return Err("memory not found".into());
     };
+
+    // Task 1.7: optional vertical promotion to an ancestor namespace.
+    // When `to_namespace` is supplied, clone (don't move) the memory to the
+    // target and link clone → source with `derived_from`. Original is
+    // untouched; tier is NOT changed by this path.
+    if let Some(to_ns) = params["to_namespace"].as_str() {
+        validate::validate_namespace(to_ns).map_err(|e| e.to_string())?;
+        let clone_id =
+            db::promote_to_namespace(conn, &resolved_id, to_ns).map_err(|e| e.to_string())?;
+        return Ok(json!({
+            "promoted": true,
+            "mode": "vertical",
+            "source_id": resolved_id,
+            "clone_id": clone_id,
+            "to_namespace": to_ns,
+        }));
+    }
+
+    // Default: tier promotion to long (historical behavior).
     let (found, _) = db::update(
         conn,
         &resolved_id,
@@ -1105,7 +1125,7 @@ fn handle_promote(conn: &rusqlite::Connection, params: &Value) -> Result<Value, 
     if !found {
         return Err("memory not found".into());
     }
-    Ok(json!({"promoted": true, "id": resolved_id, "tier": "long"}))
+    Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": "long"}))
 }
 
 fn handle_forget(

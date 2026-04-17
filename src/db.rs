@@ -866,6 +866,69 @@ pub fn recall(
     Ok(results)
 }
 
+/// Task 1.7 — vertical memory promotion.
+///
+/// Clones `source_id` into `to_namespace`, which must be a proper `/`-derived
+/// ancestor of the memory's current namespace. The original memory is
+/// **untouched** (vertical promotion is a fan-out, not a move). A
+/// `derived_from` link is created from the new clone back to the source so
+/// the promotion trail is queryable.
+///
+/// Returns the clone's new ID.
+///
+/// Errors when:
+/// - source doesn't exist
+/// - `to_namespace` is empty, equal to the source namespace, or not an
+///   ancestor of it (see `namespace_ancestors`)
+pub fn promote_to_namespace(
+    conn: &Connection,
+    source_id: &str,
+    to_namespace: &str,
+) -> Result<String> {
+    if to_namespace.is_empty() {
+        anyhow::bail!("to_namespace cannot be empty");
+    }
+    let source = get(conn, source_id)?
+        .ok_or_else(|| anyhow::anyhow!("source memory not found: {source_id}"))?;
+    if to_namespace == source.namespace {
+        anyhow::bail!(
+            "to_namespace must be a proper ancestor of the memory's namespace (got self: {})",
+            source.namespace
+        );
+    }
+    let ancestors = namespace_ancestors(&source.namespace);
+    if !ancestors.iter().any(|a| a == to_namespace) {
+        anyhow::bail!(
+            "to_namespace '{to_namespace}' is not an ancestor of '{}' (ancestors: {ancestors:?})",
+            source.namespace
+        );
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let clone = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier: source.tier.clone(),
+        namespace: to_namespace.to_string(),
+        title: source.title.clone(),
+        content: source.content.clone(),
+        tags: source.tags.clone(),
+        priority: source.priority,
+        confidence: source.confidence,
+        source: source.source.clone(),
+        access_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        last_accessed_at: None,
+        expires_at: source.expires_at.clone(),
+        metadata: source.metadata.clone(),
+    };
+    let actual_id = insert(conn, &clone)?;
+    // Clone → source: derived_from. Safe to ignore if the link layer
+    // short-circuits on self-link (impossible here — distinct IDs).
+    create_link(conn, &actual_id, source_id, "derived_from")?;
+    Ok(actual_id)
+}
+
 /// Detect potential contradictions: memories in same namespace with similar titles.
 pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> Result<Vec<Memory>> {
     let fts_query = sanitize_fts_query(title, true);
