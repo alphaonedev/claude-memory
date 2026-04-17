@@ -29,6 +29,18 @@ uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 gethostname = "0.5"
 
+# Native TLS for `serve` (Layer 1 — issue to be filed). axum-server
+# + rustls. Accepts PEM cert + key from --tls-cert / --tls-key. No
+# OpenSSL dep; rustls matches reqwest's rustls-tls choice already in
+# use for the sync-daemon's outbound HTTPS.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# rustls 0.23 requires an explicit CryptoProvider — `ring` matches
+# reqwest's default for the sync-daemon, keeping a single provider
+# across the process. PEM parsing is handled by
+# `RustlsConfig::from_pem` so no separate rustls-pemfile dep (which
+# is flagged unmaintained in the 2026 advisory DB).
+rustls = { version = "0.23", features = ["ring"] }
+
 # Semantic embedding support
 candle-core = "0.10"
 candle-nn = "0.10"

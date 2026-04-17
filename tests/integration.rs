@@ -7933,3 +7933,129 @@ fn test_sync_daemon_mesh_propagates_memory_between_peers() {
     let _ = std::fs::remove_file(&db_a);
     let _ = std::fs::remove_file(&db_b);
 }
+
+// ---------------------------------------------------------------------------
+// Native TLS tests (Layer 1) — `ai-memory serve --tls-cert/--tls-key`
+// ---------------------------------------------------------------------------
+
+/// Generate a self-signed PEM cert + key pair at the given paths. Returns
+/// the (cert_path, key_path) tuple. Skips the test if openssl isn't on
+/// the PATH (rare on CI runners, but this keeps local-dev friendly).
+fn gen_self_signed_cert(dir: &std::path::Path) -> Option<(std::path::PathBuf, std::path::PathBuf)> {
+    let cert = dir.join(format!("ai-memory-test-cert-{}.pem", uuid::Uuid::new_v4()));
+    let key = dir.join(format!("ai-memory-test-key-{}.pem", uuid::Uuid::new_v4()));
+    let status = std::process::Command::new("openssl")
+        .args([
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            key.to_str().unwrap(),
+            "-out",
+            cert.to_str().unwrap(),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=localhost",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    if let Ok(s) = status
+        && s.success()
+    {
+        return Some((cert, key));
+    }
+    None
+}
+
+#[test]
+fn test_serve_native_tls_health_probe() {
+    // Layer 1 — `ai-memory serve --tls-cert ... --tls-key ...` must serve
+    // the health endpoint over HTTPS (self-signed cert, --insecure probe).
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db = dir.join(format!("ai-memory-tls-{}.db", uuid::Uuid::new_v4()));
+    let Some((cert_path, key_path)) = gen_self_signed_cert(&dir) else {
+        eprintln!("skipping: openssl not available on PATH");
+        return;
+    };
+
+    let port = free_port();
+    let mut child = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+            "--tls-cert",
+            cert_path.to_str().unwrap(),
+            "--tls-key",
+            key_path.to_str().unwrap(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+
+    // Poll HTTPS health endpoint — curl --insecure against the self-signed cert.
+    let mut ok = false;
+    for _ in 0..50 {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        if let Ok(out) = std::process::Command::new("curl")
+            .args([
+                "-sk",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                &format!("https://127.0.0.1:{port}/api/v1/health"),
+            ])
+            .output()
+            && String::from_utf8_lossy(&out.stdout) == "200"
+        {
+            ok = true;
+            break;
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert!(
+        ok,
+        "HTTPS health endpoint never returned 200; is axum-server bound?"
+    );
+
+    let _ = std::fs::remove_file(&db);
+    let _ = std::fs::remove_file(&cert_path);
+    let _ = std::fs::remove_file(&key_path);
+}
+
+#[test]
+fn test_serve_rejects_half_tls_config() {
+    // Layer 1 — clap's `requires = "tls_key"` must reject `--tls-cert`
+    // without `--tls-key` at arg-parse time.
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db = dir.join(format!("ai-memory-tls-half-{}.db", uuid::Uuid::new_v4()));
+    let out = cmd(bin)
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "serve",
+            "--port",
+            &free_port().to_string(),
+            "--tls-cert",
+            "/nonexistent/cert.pem",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "half-configured TLS must be rejected"
+    );
+    let _ = std::fs::remove_file(&db);
+}

@@ -19,7 +19,7 @@ mod reranker;
 mod toon;
 mod validate;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -245,6 +245,15 @@ struct ServeArgs {
     host: String,
     #[arg(long, default_value_t = DEFAULT_PORT)]
     port: u16,
+    /// Path to PEM-encoded TLS certificate (may include the full chain).
+    /// Passing both `--tls-cert` and `--tls-key` switches `serve` to
+    /// HTTPS. rustls under the hood — no OpenSSL dep. Absent both
+    /// flags = plain HTTP (same as every previous release).
+    #[arg(long, requires = "tls_key")]
+    tls_cert: Option<PathBuf>,
+    /// Path to PEM-encoded TLS private key (PKCS#8 or RSA).
+    #[arg(long, requires = "tls_cert")]
+    tls_key: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -851,14 +860,64 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .with_state(app_state);
 
     let addr = format!("{}:{}", args.host, args.port);
-    tracing::info!("ai-memory listening on {addr}");
     tracing::info!("database: {}", db_path.display());
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown)
-        .await?;
+    // Native TLS (Layer 1): if both --tls-cert and --tls-key are provided,
+    // bind via axum-server + rustls. Plain HTTP otherwise — backward
+    // compatible with every prior release. The `requires = …` clap
+    // attributes prevent the half-configured case.
+    if let (Some(cert), Some(key)) = (&args.tls_cert, &args.tls_key) {
+        tracing::info!("ai-memory listening on https://{addr}");
+        // rustls 0.23 needs an explicit CryptoProvider; install ring
+        // before any TLS setup. Idempotent — second install is a
+        // harmless no-op via ignore.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let tls_config = load_rustls_config(cert, key).await?;
+        let socket_addr: std::net::SocketAddr = addr.parse()?;
+        // axum-server doesn't have a direct graceful-shutdown on the
+        // TLS builder yet; spawn the signal listener on the Handle
+        // instead so ctrl_c triggers a graceful shutdown.
+        let handle = axum_server::Handle::new();
+        let handle_clone = handle.clone();
+        tokio::spawn(async move {
+            shutdown.await;
+            handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+        });
+        axum_server::bind_rustls(socket_addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        tracing::info!("ai-memory listening on http://{addr}");
+        let listener = tokio::net::TcpListener::bind(&addr).await?;
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown)
+            .await?;
+    }
     Ok(())
+}
+
+/// Load a PEM cert + PEM key (PKCS#8 or RSA) into an `axum-server`
+/// rustls config. Returns an error with a specific message for the
+/// operator rather than letting rustls' wrapped IO error bubble up —
+/// TLS misconfigurations are the #1 new-deploy footgun.
+async fn load_rustls_config(
+    cert_path: &Path,
+    key_path: &Path,
+) -> Result<axum_server::tls_rustls::RustlsConfig> {
+    let cert = tokio::fs::read(cert_path)
+        .await
+        .with_context(|| format!("failed to read TLS cert from {}", cert_path.display()))?;
+    let key = tokio::fs::read(key_path)
+        .await
+        .with_context(|| format!("failed to read TLS key from {}", key_path.display()))?;
+    let config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
+        .await
+        .context(
+            "failed to parse TLS cert/key — ensure PEM-encoded (cert may be fullchain; \
+                 key must be PKCS#8 or RSA)",
+        )?;
+    Ok(config)
 }
 
 // --- CLI ---
