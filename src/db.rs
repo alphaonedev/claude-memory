@@ -824,7 +824,43 @@ pub fn search(
         .map_err(Into::into)
 }
 
+/// Task 1.11 — rough token estimate for a memory. Uses the "~4 chars per
+/// token" heuristic on `title + content`. Deliberately byte-length-based:
+/// fast, deterministic, and correct enough for budget gating.
+#[must_use]
+pub fn estimate_memory_tokens(mem: &Memory) -> usize {
+    (mem.title.len() + mem.content.len()) / 4
+}
+
+/// Task 1.11 — truncate a scored recall list to fit within an optional
+/// token budget. Iterates in rank order; stops at the first memory whose
+/// inclusion would exceed the budget. Returns `(truncated, tokens_used)`.
+/// When `budget_tokens` is `None` the list is returned untouched, still
+/// with an accurate `tokens_used` tally so callers can surface it in
+/// response metadata.
+#[must_use]
+pub fn apply_token_budget(
+    scored: Vec<(Memory, f64)>,
+    budget_tokens: Option<usize>,
+) -> (Vec<(Memory, f64)>, usize) {
+    let mut used: usize = 0;
+    let mut out = Vec::with_capacity(scored.len());
+    for (mem, score) in scored {
+        let cost = estimate_memory_tokens(&mem);
+        if let Some(budget) = budget_tokens
+            && used.saturating_add(cost) > budget
+        {
+            break;
+        }
+        used = used.saturating_add(cost);
+        out.push((mem, score));
+    }
+    (out, used)
+}
+
 /// Recall — fuzzy OR search + touch + auto-promote + TTL extension.
+/// Task 1.11: after ranking, applies optional `budget_tokens` cap.
+/// Returns `(truncated_list, tokens_used)`.
 #[allow(clippy::too_many_arguments)]
 pub fn recall(
     conn: &Connection,
@@ -837,7 +873,8 @@ pub fn recall(
     short_extend: i64,
     mid_extend: i64,
     as_agent: Option<&str>,
-) -> Result<Vec<(Memory, f64)>> {
+    budget_tokens: Option<usize>,
+) -> Result<(Vec<(Memory, f64)>, usize)> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
     let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
@@ -889,13 +926,17 @@ pub fn recall(
     )?;
     let results: Vec<(Memory, f64)> = rows.collect::<rusqlite::Result<Vec<_>>>()?;
 
-    // Touch all recalled memories (bumps access, extends TTL, auto-promotes)
-    for (mem, _) in &results {
+    // Task 1.11: apply optional token budget in rank order.
+    let (budgeted, tokens_used) = apply_token_budget(results, budget_tokens);
+
+    // Touch all recalled memories that SURVIVED the budget cut — no sense
+    // bumping access counts on memories the caller will never see.
+    for (mem, _) in &budgeted {
         if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
     }
-    Ok(results)
+    Ok((budgeted, tokens_used))
 }
 
 /// Task 1.7 — vertical memory promotion.
@@ -1832,7 +1873,8 @@ pub fn recall_hybrid(
     short_extend: i64,
     mid_extend: i64,
     as_agent: Option<&str>,
-) -> Result<Vec<(Memory, f64)>> {
+    budget_tokens: Option<usize>,
+) -> Result<(Vec<(Memory, f64)>, usize)> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
     let prefixes = compute_visibility_prefixes(as_agent);
@@ -2041,14 +2083,17 @@ pub fn recall_hybrid(
     results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
     results.truncate(limit);
 
-    // Touch all recalled memories
-    for (mem, _) in &results {
+    // Task 1.11: apply token budget in rank order.
+    let (budgeted, tokens_used) = apply_token_budget(results, budget_tokens);
+
+    // Touch surviving memories only.
+    for (mem, _) in &budgeted {
         if let Err(e) = touch(conn, &mem.id, short_extend, mid_extend) {
             tracing::warn!("touch failed for memory {}: {}", &mem.id, e);
         }
     }
 
-    Ok(results)
+    Ok((budgeted, tokens_used))
 }
 
 /// Checkpoint WAL for clean shutdown.
@@ -2941,7 +2986,7 @@ mod tests {
         )
         .unwrap();
 
-        let results = recall(
+        let (results, _tokens) = recall(
             &conn,
             "Rust programming",
             None,
@@ -2951,6 +2996,7 @@ mod tests {
             None,
             SHORT_TTL_EXTEND_SECS,
             MID_TTL_EXTEND_SECS,
+            None,
             None,
         )
         .unwrap();
@@ -2976,6 +3022,7 @@ mod tests {
             None,
             SHORT_TTL_EXTEND_SECS,
             MID_TTL_EXTEND_SECS,
+            None,
             None,
         );
         // May return empty or error, both acceptable
@@ -3506,7 +3553,7 @@ mod tests {
         mem.metadata = serde_json::json!({"context": "test-recall"});
         insert(&conn, &mem).unwrap();
 
-        let results = recall(
+        let (results, _tokens) = recall(
             &conn,
             "Recallable",
             Some("test"),
@@ -3516,6 +3563,7 @@ mod tests {
             None,
             3600,
             86400,
+            None,
             None,
         )
         .unwrap();

@@ -222,6 +222,11 @@ pub struct RecallQuery {
     /// Task 1.5 visibility filtering.
     #[serde(default)]
     pub as_agent: Option<String>,
+    /// Task 1.11 — context-budget-aware recall. When set, return the
+    /// top-scored memories whose cumulative estimated tokens fit within
+    /// this budget.
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -245,6 +250,9 @@ pub struct RecallBody {
     /// Task 1.5 visibility filtering.
     #[serde(default)]
     pub as_agent: Option<String>,
+    /// Task 1.11 — context-budget-aware recall.
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]

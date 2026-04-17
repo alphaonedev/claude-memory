@@ -110,6 +110,7 @@ fn tool_definitions() -> Value {
                         "since": {"type": "string", "description": "Only memories created after this RFC3339 timestamp"},
                         "until": {"type": "string", "description": "Only memories created before this RFC3339 timestamp"},
                         "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5). Enables scope-based visibility filtering — results include private memories at this namespace, team/unit/org memories at ancestor subtrees, and collective memories globally."},
+                        "budget_tokens": {"type": "integer", "minimum": 1, "description": "Task 1.11 — context-budget-aware recall. Return the top-ranked memories whose cumulative estimated tokens (title+content, ~4 chars/token) fit in N. Response includes tokens_used + budget_tokens."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]
@@ -916,12 +917,24 @@ fn handle_recall(
     if let Some(a) = as_agent {
         validate::validate_namespace(a).map_err(|e| e.to_string())?;
     }
+    // Task 1.11: optional token budget.
+    let budget_tokens = params["budget_tokens"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
+
+    // Helper: tack tokens_used / budget_tokens onto the response metadata.
+    let decorate_budget = |resp: &mut Value, tokens_used: usize| {
+        resp["tokens_used"] = json!(tokens_used);
+        if let Some(b) = budget_tokens {
+            resp["budget_tokens"] = json!(b);
+        }
+    };
 
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
         match emb.embed(context) {
             Ok(query_emb) => {
-                let results = db::recall_hybrid(
+                let (results, tokens_used) = db::recall_hybrid(
                     conn,
                     context,
                     &query_emb,
@@ -934,6 +947,7 @@ fn handle_recall(
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
                     as_agent,
+                    budget_tokens,
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -942,6 +956,7 @@ fn handle_recall(
                     let ce_reranked = ce.rerank(context, results);
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
+                    decorate_budget(&mut resp, tokens_used);
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
                 }
@@ -949,6 +964,7 @@ fn handle_recall(
                 let memories = scored_memories(results);
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
+                decorate_budget(&mut resp, tokens_used);
                 inject_namespace_standard(conn, namespace, &mut resp);
                 return Ok(resp);
             }
@@ -959,7 +975,7 @@ fn handle_recall(
     }
 
     // Fallback to keyword-only recall
-    let results = db::recall(
+    let (results, tokens_used) = db::recall(
         conn,
         context,
         namespace,
@@ -970,10 +986,12 @@ fn handle_recall(
         resolved_ttl.short_extend_secs,
         resolved_ttl.mid_extend_secs,
         as_agent,
+        budget_tokens,
     )
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
+    decorate_budget(&mut resp, tokens_used);
     inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
 }

@@ -72,6 +72,13 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
     if let Some(mode) = response.get("mode").and_then(|v| v.as_str()) {
         meta.push(format!("mode:{mode}"));
     }
+    // Task 1.11: surface token budget info in the meta line when present.
+    if let Some(used) = response.get("tokens_used") {
+        meta.push(format!("tokens_used:{used}"));
+    }
+    if let Some(budget) = response.get("budget_tokens") {
+        meta.push(format!("budget_tokens:{budget}"));
+    }
     if !meta.is_empty() {
         out.push_str(&meta.join("|"));
         out.push('\n');

@@ -316,6 +316,11 @@ struct RecallArgs {
     /// visibility filtering (private/team/unit/org/collective).
     #[arg(long)]
     as_agent: Option<String>,
+    /// Task 1.11: context-budget-aware recall. Return the top-ranked
+    /// memories whose cumulative estimated tokens fit within N. Omit
+    /// for unlimited (limit-based only).
+    #[arg(long)]
+    budget_tokens: Option<usize>,
 }
 
 #[derive(Args)]
@@ -1049,10 +1054,10 @@ fn cmd_recall(
     let resolved_ttl = app_config.effective_ttl();
 
     // Perform recall: hybrid if embedder available, keyword otherwise
-    let (results, mode) = if let Some(ref emb) = embedder {
+    let (results, tokens_used, mode) = if let Some(ref emb) = embedder {
         match emb.embed(&args.context) {
             Ok(query_emb) => {
-                let results = db::recall_hybrid(
+                let (results, tokens_used) = db::recall_hybrid(
                     &conn,
                     &args.context,
                     &query_emb,
@@ -1065,16 +1070,21 @@ fn cmd_recall(
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
                     args.as_agent.as_deref(),
+                    args.budget_tokens,
                 )?;
                 if let Some(ref ce) = reranker {
-                    (ce.rerank(&args.context, results), "hybrid+rerank")
+                    (
+                        ce.rerank(&args.context, results),
+                        tokens_used,
+                        "hybrid+rerank",
+                    )
                 } else {
-                    (results, "hybrid")
+                    (results, tokens_used, "hybrid")
                 }
             }
             Err(e) => {
                 eprintln!("ai-memory: embedding query failed: {e}, falling back to keyword");
-                let results = db::recall(
+                let (results, tokens_used) = db::recall(
                     &conn,
                     &args.context,
                     args.namespace.as_deref(),
@@ -1085,12 +1095,13 @@ fn cmd_recall(
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
                     args.as_agent.as_deref(),
+                    args.budget_tokens,
                 )?;
-                (results, "keyword")
+                (results, tokens_used, "keyword")
             }
         }
     } else {
-        let results = db::recall(
+        let (results, tokens_used) = db::recall(
             &conn,
             &args.context,
             args.namespace.as_deref(),
@@ -1101,8 +1112,9 @@ fn cmd_recall(
             resolved_ttl.short_extend_secs,
             resolved_ttl.mid_extend_secs,
             args.as_agent.as_deref(),
+            args.budget_tokens,
         )?;
-        (results, "keyword")
+        (results, tokens_used, "keyword")
     };
 
     if json_out {
@@ -1119,12 +1131,16 @@ fn cmd_recall(
                 v
             })
             .collect();
-        println!(
-            "{}",
-            serde_json::to_string(
-                &serde_json::json!({"memories": scored, "count": results.len(), "mode": mode})
-            )?
-        );
+        let mut body = serde_json::json!({
+            "memories": scored,
+            "count": results.len(),
+            "mode": mode,
+            "tokens_used": tokens_used,
+        });
+        if let Some(b) = args.budget_tokens {
+            body["budget_tokens"] = serde_json::json!(b);
+        }
+        println!("{}", serde_json::to_string(&body)?);
         return Ok(());
     }
     if results.is_empty() {
@@ -1814,8 +1830,9 @@ fn cmd_shell(db_path: &Path) -> Result<()> {
                     models::SHORT_TTL_EXTEND_SECS,
                     models::MID_TTL_EXTEND_SECS,
                     None,
+                    None,
                 ) {
-                    Ok(results) => {
+                    Ok((results, _tokens_used)) => {
                         for (mem, score) in &results {
                             println!(
                                 "  [{}] {} {} score={:.2}",

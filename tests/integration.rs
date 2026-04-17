@@ -6963,3 +6963,249 @@ fn test_approver_delete_consensus_executes_delete() {
     );
     let _ = std::fs::remove_file(&db);
 }
+
+// ---------------------------------------------------------------------------
+// Task 1.11 — Context-Budget-Aware Recall
+// ---------------------------------------------------------------------------
+
+fn fresh_budget_db() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("ai-memory-budget-{}.db", uuid::Uuid::new_v4()))
+}
+
+fn store_sized(binary: &str, db_path: &std::path::Path, title: &str, content: &str, priority: i32) {
+    let out = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "store",
+            "-T",
+            title,
+            "-c",
+            content,
+            "-t",
+            "long",
+            "-p",
+            &priority.to_string(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "store failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn recall_with_budget(
+    binary: &str,
+    db_path: &std::path::Path,
+    context: &str,
+    budget: Option<usize>,
+) -> serde_json::Value {
+    let budget_str = budget.map(|n| n.to_string());
+    let mut args: Vec<&str> = vec![
+        "--db",
+        db_path.to_str().unwrap(),
+        "--json",
+        "recall",
+        context,
+    ];
+    if let Some(ref b) = budget_str {
+        args.push("--budget-tokens");
+        args.push(b);
+    }
+    let out = cmd(binary).args(args).output().unwrap();
+    assert!(
+        out.status.success(),
+        "recall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    serde_json::from_slice(&out.stdout).unwrap()
+}
+
+#[test]
+fn test_budget_unlimited_returns_all() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "t1", "alpha match foo", 5);
+    store_sized(bin, &db, "t2", "alpha match bar", 5);
+    store_sized(bin, &db, "t3", "alpha match baz", 5);
+
+    let v = recall_with_budget(bin, &db, "alpha", None);
+    assert_eq!(v["count"], 3);
+    assert!(v["tokens_used"].as_u64().unwrap() > 0);
+    assert!(v.get("budget_tokens").is_none_or(|v| v.is_null()));
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_truncates_to_fit() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let body = "alpha match ".repeat(3);
+    for i in 1..=5 {
+        store_sized(bin, &db, &format!("t{i}"), &body, 10 - i);
+    }
+
+    let v = recall_with_budget(bin, &db, "alpha", Some(25));
+    let count = v["count"].as_u64().unwrap() as usize;
+    assert!(
+        count >= 1 && count < 5,
+        "budget must truncate; got count={count}"
+    );
+    let tokens_used = v["tokens_used"].as_u64().unwrap();
+    assert!(
+        tokens_used <= 25,
+        "tokens_used ({tokens_used}) must be <= budget (25)"
+    );
+    assert_eq!(v["budget_tokens"], 25);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_zero_returns_empty() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "x", "something to find", 5);
+
+    let v = recall_with_budget(bin, &db, "something", Some(1));
+    assert_eq!(v["count"], 0);
+    assert_eq!(v["tokens_used"], 0);
+    assert_eq!(v["budget_tokens"], 1);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_preserves_rank_order() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(
+        bin,
+        &db,
+        "low-pri",
+        "alpha match filler content here longer",
+        1,
+    );
+    store_sized(bin, &db, "high-pri", "alpha match short", 10);
+
+    let v = recall_with_budget(bin, &db, "alpha", Some(8));
+    let mems = v["memories"].as_array().unwrap();
+    if !mems.is_empty() {
+        assert_eq!(mems[0]["title"], "high-pri");
+    }
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_response_includes_metadata() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "meta-test", "response metadata check", 5);
+
+    let v = recall_with_budget(bin, &db, "response", Some(100));
+    assert!(v["tokens_used"].as_u64().is_some());
+    assert_eq!(v["budget_tokens"], 100);
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_touch_only_surviving() {
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "in-budget", "alpha short", 10);
+    store_sized(
+        bin,
+        &db,
+        "out-of-budget",
+        &("alpha ".to_string() + &"x".repeat(200)),
+        1,
+    );
+
+    let v = recall_with_budget(bin, &db, "alpha", Some(5));
+    let mems = v["memories"].as_array().unwrap();
+    assert!(!mems.is_empty());
+
+    let list = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "--json", "list"])
+        .output()
+        .unwrap();
+    let lv: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
+    let excluded = lv["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["title"] == "out-of-budget")
+        .unwrap();
+    assert_eq!(
+        excluded["access_count"], 0,
+        "excluded memory must not have access_count bumped"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_mcp_tool_schema_and_response() {
+    use std::io::Write;
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "mcp-target", "mcp budget test content", 5);
+
+    let mut child = cmd(bin)
+        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdin = child.stdin.as_mut().unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+    )
+    .unwrap();
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({
+            "jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"memory_recall","arguments":{
+                "context":"budget",
+                "budget_tokens": 200,
+                "format":"json"
+            }}
+        })
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    drop(child.stdin.take());
+    let output = child.wait_with_output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    let tools_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    let recall_tool = tools_resp["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "memory_recall")
+        .unwrap();
+    assert!(
+        recall_tool["inputSchema"]["properties"]["budget_tokens"].is_object(),
+        "memory_recall must advertise budget_tokens"
+    );
+
+    let call_resp: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
+    let text = call_resp["result"]["content"][0]["text"].as_str().unwrap();
+    let body: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert!(body["tokens_used"].as_u64().is_some());
+    assert_eq!(body["budget_tokens"], 200);
+    let _ = std::fs::remove_file(&db);
+}

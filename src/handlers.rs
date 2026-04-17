@@ -957,8 +957,9 @@ pub async fn recall_memories_get(
         lock.2.short_extend_secs,
         lock.2.mid_extend_secs,
         p.as_agent.as_deref(),
+        p.budget_tokens,
     ) {
-        Ok(r) => {
+        Ok((r, tokens_used)) => {
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {
@@ -969,7 +970,15 @@ pub async fn recall_memories_get(
                     v
                 })
                 .collect();
-            Json(json!({"memories": scored, "count": scored.len()})).into_response()
+            let mut resp = json!({
+                "memories": scored,
+                "count": scored.len(),
+                "tokens_used": tokens_used,
+            });
+            if let Some(b) = p.budget_tokens {
+                resp["budget_tokens"] = json!(b);
+            }
+            Json(resp).into_response()
         }
         Err(e) => {
             tracing::error!("handler error: {e}");
@@ -1015,8 +1024,9 @@ pub async fn recall_memories_post(
         lock.2.short_extend_secs,
         lock.2.mid_extend_secs,
         body.as_agent.as_deref(),
+        body.budget_tokens,
     ) {
-        Ok(r) => {
+        Ok((r, tokens_used)) => {
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {
@@ -1027,7 +1037,15 @@ pub async fn recall_memories_post(
                     v
                 })
                 .collect();
-            Json(json!({"memories": scored, "count": scored.len()})).into_response()
+            let mut resp = json!({
+                "memories": scored,
+                "count": scored.len(),
+                "tokens_used": tokens_used,
+            });
+            if let Some(b) = body.budget_tokens {
+                resp["budget_tokens"] = json!(b);
+            }
+            Json(resp).into_response()
         }
         Err(e) => {
             tracing::error!("handler error: {e}");
@@ -1501,7 +1519,7 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         db::insert(&lock.0, &mem).unwrap();
-        let results = db::recall(
+        let (results, _tokens) = db::recall(
             &lock.0,
             "recall handler",
             Some("test"),
@@ -1511,6 +1529,7 @@ mod tests {
             None,
             crate::models::SHORT_TTL_EXTEND_SECS,
             crate::models::MID_TTL_EXTEND_SECS,
+            None,
             None,
         )
         .unwrap();
