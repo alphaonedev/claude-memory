@@ -626,12 +626,64 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
     let resolved_ttl = app_config.effective_ttl();
     let archive_on_gc = app_config.effective_archive_on_gc();
     let conn = db::open(&db_path)?;
-    let state: handlers::Db = Arc::new(Mutex::new((
+
+    // Issue #219: build the embedder + HNSW index up front so HTTP write
+    // paths can populate them. Previously the daemon never constructed an
+    // embedder, silently excluding every HTTP-authored memory from semantic
+    // recall. Build only when the configured feature tier enables it —
+    // keyword-only deployments keep their zero-dep, zero-RAM profile.
+    // Daemon has no per-invocation tier override; honour the config tier.
+    let feature_tier = app_config.effective_tier(None);
+    let tier_config = feature_tier.config();
+    // The HF-Hub sync API and candle model-load are blocking CPU work that
+    // internally spin their own tokio runtime. Running them directly in this
+    // async context panics with "Cannot drop a runtime in a context where
+    // blocking is not allowed." Move the whole construction onto the blocking
+    // pool so the inner runtime is owned by a dedicated thread.
+    let embedder: Option<embeddings::Embedder> =
+        if let Some(emb_model) = tier_config.embedding_model {
+            let embed_url = app_config.effective_embed_url().to_string();
+            let build = tokio::task::spawn_blocking(move || {
+                let embed_client = llm::OllamaClient::new_with_url(&embed_url, "nomic-embed-text")
+                    .ok()
+                    .map(Arc::new);
+                embeddings::Embedder::for_model(emb_model, embed_client)
+            })
+            .await?;
+            match build {
+                Ok(emb) => {
+                    tracing::info!("embedder loaded ({})", emb.model_description());
+                    Some(emb)
+                }
+                Err(e) => {
+                    tracing::warn!("embedder failed to load: {e}; daemon runs keyword-only");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+    let vector_index = if embedder.is_some() {
+        match db::get_all_embeddings(&conn) {
+            Ok(entries) if !entries.is_empty() => Some(hnsw::VectorIndex::build(entries)),
+            _ => Some(hnsw::VectorIndex::empty()),
+        }
+    } else {
+        None
+    };
+
+    let db_state: handlers::Db = Arc::new(Mutex::new((
         conn,
         db_path.clone(),
         resolved_ttl,
         archive_on_gc,
     )));
+    let app_state = handlers::AppState {
+        db: db_state.clone(),
+        embedder: Arc::new(embedder),
+        vector_index: Arc::new(Mutex::new(vector_index)),
+    };
+    let state = db_state;
 
     // Automatic GC
     let gc_state = state.clone();
@@ -717,7 +769,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB default (bulk/import bodies capped at MAX_BULK_SIZE * per-memory limit)
         .layer(CorsLayer::new())
-        .with_state(state);
+        .with_state(app_state);
 
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("ai-memory listening on {addr}");

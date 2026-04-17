@@ -3,7 +3,7 @@
 
 use axum::{
     Json,
-    extract::{Path, Query, Request, State},
+    extract::{FromRef, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::IntoResponse,
@@ -17,6 +17,8 @@ use uuid::Uuid;
 
 use crate::config::ResolvedTtl;
 use crate::db;
+use crate::embeddings::Embedder;
+use crate::hnsw::VectorIndex;
 use crate::models::{
     CreateMemory, ForgetQuery, LinkBody, ListQuery, Memory, MemoryLink, RecallBody, RecallQuery,
     RegisterAgentBody, SearchQuery, Tier, UpdateMemory,
@@ -24,6 +26,28 @@ use crate::models::{
 use crate::validate;
 
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;
+
+/// Composite daemon state (issue #219/v0.7 prep).
+///
+/// Previously the Axum router held only `Db`. Closing the HTTP embedding gap
+/// (semantic recall silently missed HTTP-stored memories because the daemon
+/// never generated embeddings) requires the embedder and the in-memory HNSW
+/// index to be reachable from write handlers. We introduce `AppState` and
+/// use `FromRef` so every existing `State<Db>` handler keeps working
+/// unchanged — only the write paths opt into `State<AppState>` to pick up
+/// the embedder and vector index.
+#[derive(Clone)]
+pub struct AppState {
+    pub db: Db,
+    pub embedder: Arc<Option<Embedder>>,
+    pub vector_index: Arc<Mutex<Option<VectorIndex>>>,
+}
+
+impl FromRef<AppState> for Db {
+    fn from_ref(app: &AppState) -> Self {
+        app.db.clone()
+    }
+}
 
 const MAX_BULK_SIZE: usize = 1000;
 
@@ -94,10 +118,11 @@ pub async fn health(State(state): State<Db>) -> impl IntoResponse {
 
 #[allow(clippy::too_many_lines)]
 pub async fn create_memory(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<CreateMemory>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     if let Err(e) = validate::validate_create(&body) {
         return (
             StatusCode::BAD_REQUEST,
@@ -137,6 +162,22 @@ pub async fn create_memory(
             obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
         }
     }
+
+    // Issue #219: generate the embedding BEFORE taking the DB lock. Embedding
+    // (MiniLM ONNX / nomic via Ollama) is 10-200ms of work we do not want
+    // holding the single `Mutex<Connection>` on a multi-agent daemon.
+    let embedding_text = format!("{} {}", body.title, body.content);
+    let embedding: Option<Vec<f32>> =
+        app.embedder
+            .as_ref()
+            .as_ref()
+            .and_then(|emb| match emb.embed(&embedding_text) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("embedding generation failed: {e}");
+                    None
+                }
+            });
 
     let now = Utc::now();
     let lock = state.lock().await;
@@ -225,6 +266,23 @@ pub async fn create_memory(
 
     match db::insert(&lock.0, &mem) {
         Ok(actual_id) => {
+            // Issue #219: persist the embedding and warm the HNSW index so
+            // semantic recall can find this memory. Previously the HTTP path
+            // stored the row but never called `set_embedding`, silently
+            // excluding every HTTP-authored memory from semantic search.
+            if let Some(ref vec) = embedding
+                && let Err(e) = db::set_embedding(&lock.0, &actual_id, vec)
+            {
+                tracing::warn!("failed to store embedding for {actual_id}: {e}");
+            }
+            // Drop the DB lock before taking the vector index lock.
+            drop(lock);
+            if let Some(vec) = embedding {
+                let mut idx_lock = app.vector_index.lock().await;
+                if let Some(idx) = idx_lock.as_mut() {
+                    idx.insert(actual_id.clone(), vec);
+                }
+            }
             // #196: echo the resolved agent_id so callers don't need a follow-up get.
             let resolved_agent_id = mem
                 .metadata
@@ -507,10 +565,11 @@ pub async fn get_memory(State(state): State<Db>, Path(id): Path<String>) -> impl
 }
 
 pub async fn update_memory(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Path(id): Path<String>,
     Json(body): Json<UpdateMemory>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -569,6 +628,33 @@ pub async fn update_memory(
     ) {
         Ok((true, _)) => {
             let mem = db::get(&lock.0, &resolved_id).ok().flatten();
+            // Issue #219: regenerate the embedding when the searchable text
+            // (title/content) changed. Without this, the semantic index keeps
+            // pointing at the old vector and stale semantic recall results
+            // linger even after the row is updated.
+            let content_changed = body.title.is_some() || body.content.is_some();
+            if content_changed && let Some(ref m) = mem {
+                let text = format!("{} {}", m.title, m.content);
+                if let Some(emb) = app.embedder.as_ref().as_ref() {
+                    match emb.embed(&text) {
+                        Ok(vec) => {
+                            if let Err(e) = db::set_embedding(&lock.0, &resolved_id, &vec) {
+                                tracing::warn!(
+                                    "failed to refresh embedding for {resolved_id}: {e}"
+                                );
+                            }
+                            // Drop DB lock before touching vector index.
+                            drop(lock);
+                            let mut idx_lock = app.vector_index.lock().await;
+                            if let Some(idx) = idx_lock.as_mut() {
+                                idx.remove(&resolved_id);
+                                idx.insert(resolved_id.clone(), vec);
+                            }
+                        }
+                        Err(e) => tracing::warn!("embedding regeneration failed: {e}"),
+                    }
+                }
+            }
             Json(json!(mem)).into_response()
         }
         Ok((false, _)) => {
@@ -1627,10 +1713,121 @@ mod tests {
         assert_eq!(got.metadata["updated_by"], "handler");
     }
 
-    // --- API key auth middleware tests ---
+    // --- AppState wiring tests (issue #219) ---
 
-    use axum::{Router, body::Body, routing::get as axum_get};
+    use axum::{Router, body::Body, routing::get as axum_get, routing::post as axum_post};
     use tower::ServiceExt as _;
+
+    fn test_app_state(db: Db) -> AppState {
+        AppState {
+            db,
+            embedder: Arc::new(None),
+            vector_index: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    #[tokio::test]
+    async fn http_create_memory_uses_appstate_and_persists() {
+        // Issue #219 regression — HTTP write path must reach `create_memory`
+        // via `State<AppState>` and return 201 CREATED. Previously the daemon
+        // held only `Db` and had no path to the embedder/vector index.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/memories", axum_post(create_memory))
+            .with_state(test_app_state(state.clone()));
+
+        let body = serde_json::json!({
+            "tier": "long",
+            "namespace": "http-embed-test",
+            "title": "Semantic-ready via HTTP",
+            "content": "HTTP-authored memories must now participate in semantic recall.",
+            "tags": ["issue-219"],
+            "priority": 7,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "alice")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // And the row is present in the DB.
+        let lock = state.lock().await;
+        let rows = db::list(
+            &lock.0,
+            Some("http-embed-test"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(!rows.is_empty(), "HTTP-authored memory must be persisted");
+        assert_eq!(rows[0].title, "Semantic-ready via HTTP");
+    }
+
+    #[tokio::test]
+    async fn http_update_memory_uses_appstate() {
+        // Issue #219 — update path must also route via `AppState` so the
+        // embedder and vector index are reachable for content-change refresh.
+        let state = test_state();
+        let now = Utc::now();
+        let id = {
+            let lock = state.lock().await;
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "http-embed-test".into(),
+                title: "Before update".into(),
+                content: "Original content.".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+
+        let app = Router::new()
+            .route("/api/v1/memories/{id}", axum::routing::put(update_memory))
+            .with_state(test_app_state(state.clone()));
+
+        let patch = serde_json::json!({"content": "Updated content for semantic refresh."});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/memories/{id}"))
+                    .method("PUT")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&patch).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    // --- API key auth middleware tests ---
 
     async fn dummy_handler() -> impl IntoResponse {
         (StatusCode::OK, "ok")
