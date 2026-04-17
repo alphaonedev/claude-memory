@@ -308,6 +308,90 @@ pub struct AgentRegistration {
 }
 
 pub const MAX_CONTENT_SIZE: usize = 65_536;
+
+/// Maximum number of path segments in a hierarchical namespace (Task 1.4).
+/// `alphaone/engineering/platform/team/squad/pod/role/agent` = 8 levels.
+pub const MAX_NAMESPACE_DEPTH: usize = 8;
+
+/// Number of `/`-delimited segments in a namespace path.
+///
+/// Flat namespaces (`"global"`, `"ai-memory"`) return `1`. An empty string
+/// returns `0`.
+///
+/// # Examples
+/// ```
+/// # use ai_memory::models::namespace_depth;
+/// assert_eq!(namespace_depth("global"), 1);
+/// assert_eq!(namespace_depth("alphaone/engineering"), 2);
+/// assert_eq!(namespace_depth("alphaone/engineering/platform"), 3);
+/// ```
+#[must_use]
+pub fn namespace_depth(ns: &str) -> usize {
+    if ns.is_empty() {
+        return 0;
+    }
+    ns.split('/').filter(|s| !s.is_empty()).count()
+}
+
+/// Parent of a hierarchical namespace, or `None` for flat / empty inputs.
+///
+/// Part of the Task 1.4 hierarchical-namespace API. Consumed by Tasks 1.5
+/// (visibility rules), 1.6 (N-level inheritance), 1.7 (vertical promotion),
+/// and 1.12 (hierarchy-aware recall).
+#[allow(dead_code)]
+///
+/// Parent of `"a/b/c"` is `"a/b"`. Parent of `"flat"` is `None` (a flat
+/// namespace has no parent). Parent of `""` is `None`.
+///
+/// # Examples
+/// ```
+/// # use ai_memory::models::namespace_parent;
+/// assert_eq!(namespace_parent("alphaone/engineering/platform"), Some("alphaone/engineering".to_string()));
+/// assert_eq!(namespace_parent("alphaone"), None);
+/// assert_eq!(namespace_parent(""), None);
+/// ```
+#[must_use]
+pub fn namespace_parent(ns: &str) -> Option<String> {
+    ns.rsplit_once('/').map(|(parent, _)| parent.to_string())
+}
+
+/// Ancestors of a namespace, ordered most-specific-first (including the
+/// namespace itself as the first element).
+///
+/// Part of the Task 1.4 hierarchical-namespace API. Consumed by Tasks 1.6
+/// (N-level rule inheritance) and 1.12 (hierarchy-aware recall scoring).
+#[allow(dead_code)]
+///
+/// For `"a/b/c"` returns `["a/b/c", "a/b", "a"]`. For a flat namespace
+/// returns a single-element vec containing the namespace. For an empty
+/// input returns an empty vec.
+///
+/// # Examples
+/// ```
+/// # use ai_memory::models::namespace_ancestors;
+/// assert_eq!(
+///     namespace_ancestors("alphaone/engineering/platform"),
+///     vec!["alphaone/engineering/platform", "alphaone/engineering", "alphaone"]
+/// );
+/// assert_eq!(namespace_ancestors("global"), vec!["global"]);
+/// assert!(namespace_ancestors("").is_empty());
+/// ```
+#[must_use]
+pub fn namespace_ancestors(ns: &str) -> Vec<String> {
+    if ns.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(namespace_depth(ns));
+    let mut current = ns.to_string();
+    loop {
+        out.push(current.clone());
+        match namespace_parent(&current) {
+            Some(p) if !p.is_empty() => current = p,
+            _ => break,
+        }
+    }
+    out
+}
 pub const PROMOTION_THRESHOLD: i64 = 5;
 /// How much to extend TTL on access (1 hour for short, 1 day for mid)
 pub const SHORT_TTL_EXTEND_SECS: i64 = 3600;
@@ -368,5 +452,91 @@ mod tests {
         assert_eq!(Tier::Short.rank(), 0);
         assert_eq!(Tier::Mid.rank(), 1);
         assert_eq!(Tier::Long.rank(), 2);
+    }
+
+    // Task 1.4 — hierarchical namespace helpers --------------------------------
+
+    #[test]
+    fn depth_flat_namespace() {
+        assert_eq!(namespace_depth("global"), 1);
+        assert_eq!(namespace_depth("ai-memory"), 1);
+        assert_eq!(namespace_depth("under_score"), 1);
+    }
+
+    #[test]
+    fn depth_hierarchical() {
+        assert_eq!(namespace_depth("a/b"), 2);
+        assert_eq!(namespace_depth("alphaone/engineering"), 2);
+        assert_eq!(namespace_depth("alphaone/engineering/platform"), 3);
+        assert_eq!(
+            namespace_depth("a/b/c/d/e/f/g/h"),
+            8,
+            "max depth of 8 counts each segment"
+        );
+    }
+
+    #[test]
+    fn depth_empty_is_zero() {
+        assert_eq!(namespace_depth(""), 0);
+    }
+
+    #[test]
+    fn parent_hierarchical() {
+        assert_eq!(
+            namespace_parent("alphaone/engineering/platform"),
+            Some("alphaone/engineering".to_string())
+        );
+        assert_eq!(
+            namespace_parent("alphaone/engineering"),
+            Some("alphaone".to_string())
+        );
+    }
+
+    #[test]
+    fn parent_flat_is_none() {
+        assert_eq!(namespace_parent("global"), None);
+        assert_eq!(namespace_parent("ai-memory"), None);
+        assert_eq!(namespace_parent(""), None);
+    }
+
+    #[test]
+    fn ancestors_three_levels() {
+        let a = namespace_ancestors("alphaone/engineering/platform");
+        assert_eq!(
+            a,
+            vec![
+                "alphaone/engineering/platform".to_string(),
+                "alphaone/engineering".to_string(),
+                "alphaone".to_string(),
+            ],
+            "ancestors ordered most-specific-first"
+        );
+    }
+
+    #[test]
+    fn ancestors_flat_namespace() {
+        assert_eq!(namespace_ancestors("global"), vec!["global".to_string()]);
+        assert_eq!(
+            namespace_ancestors("ai-memory"),
+            vec!["ai-memory".to_string()]
+        );
+    }
+
+    #[test]
+    fn ancestors_empty_input() {
+        assert!(namespace_ancestors("").is_empty());
+    }
+
+    #[test]
+    fn ancestors_single_level() {
+        assert_eq!(namespace_ancestors("a"), vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn ancestors_max_depth() {
+        let a = namespace_ancestors("a/b/c/d/e/f/g/h");
+        assert_eq!(a.len(), 8);
+        assert_eq!(a[0], "a/b/c/d/e/f/g/h");
+        assert_eq!(a[7], "a");
     }
 }

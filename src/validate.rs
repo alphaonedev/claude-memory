@@ -3,10 +3,15 @@
 
 use anyhow::{Result, bail};
 
-use crate::models::{CreateMemory, MAX_CONTENT_SIZE, Memory, UpdateMemory, VALID_AGENT_TYPES};
+use crate::models::{
+    CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, UpdateMemory, VALID_AGENT_TYPES,
+};
 
 const MAX_TITLE_LEN: usize = 512;
-const MAX_NAMESPACE_LEN: usize = 128;
+/// Max characters in a namespace string (post-Task 1.4).
+/// Flat namespaces still fit in the historical 128 budget; 512 is the ceiling
+/// for hierarchical paths like `a/b/c/…` up to 8 levels deep.
+const MAX_NAMESPACE_LEN: usize = 512;
 const MAX_SOURCE_LEN: usize = 64;
 const MAX_TAG_LEN: usize = 128;
 const MAX_TAGS_COUNT: usize = 50;
@@ -63,6 +68,26 @@ pub fn validate_content(content: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a namespace (flat or hierarchical, Task 1.4).
+///
+/// Flat namespaces (`"global"`, `"ai-memory"`) remain fully valid — hierarchy
+/// is opt-in. Hierarchical paths use `/` as the segment delimiter:
+///
+/// ```text
+/// alphaone/engineering/platform
+/// ```
+///
+/// Rules:
+/// - **Not empty**, no leading/trailing whitespace
+/// - Length ≤ [`MAX_NAMESPACE_LEN`] (512 chars)
+/// - Depth (segment count) ≤ [`MAX_NAMESPACE_DEPTH`] (8)
+/// - Backslashes, null bytes, control chars, and spaces are forbidden
+/// - Leading and trailing `/` are forbidden (normalize input via
+///   [`normalize_namespace`] before validating)
+/// - Empty segments (consecutive `//`) are forbidden
+/// - Each segment is non-empty; no further character restriction beyond
+///   the whole-string checks above (preserving historical flexibility
+///   for existing flat namespaces like `ai-memory-mcp-dev`)
 pub fn validate_namespace(ns: &str) -> Result<()> {
     let trimmed = ns.trim();
     if trimmed.is_empty() {
@@ -71,13 +96,56 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
     if trimmed.chars().count() > MAX_NAMESPACE_LEN {
         bail!("namespace exceeds max length of {MAX_NAMESPACE_LEN} characters");
     }
-    if trimmed.contains('/') || trimmed.contains('\\') || trimmed.contains('\0') {
-        bail!("namespace cannot contain slashes or null bytes");
+    if trimmed.contains('\\') || trimmed.contains('\0') {
+        bail!("namespace cannot contain backslashes or null bytes");
     }
     if trimmed.contains(' ') {
         bail!("namespace cannot contain spaces (use hyphens or underscores)");
     }
+    if !is_clean_string(trimmed) {
+        bail!("namespace contains invalid control characters");
+    }
+    // Task 1.4 — hierarchical paths. '/' is permitted as a delimiter, but
+    // leading/trailing/empty segments are rejected to force callers to
+    // normalize input first (ambiguity between "foo" and "foo/" is not
+    // something we want to paper over at match time).
+    if trimmed.starts_with('/') {
+        bail!("namespace cannot start with '/' (normalize input first)");
+    }
+    if trimmed.ends_with('/') {
+        bail!("namespace cannot end with '/' (normalize input first)");
+    }
+    if trimmed.split('/').any(str::is_empty) {
+        bail!("namespace cannot contain empty segments (e.g. '//')");
+    }
+    let depth = crate::models::namespace_depth(trimmed);
+    if depth > MAX_NAMESPACE_DEPTH {
+        bail!("namespace depth {depth} exceeds max of {MAX_NAMESPACE_DEPTH}");
+    }
     Ok(())
+}
+
+/// Normalize a namespace input to the canonical form accepted by
+/// [`validate_namespace`]. Not called by write paths (would lowercase
+/// existing flat namespaces and break their lookup keys); instead exposed
+/// as a helper that callers opt into, and used by Task 1.5+ when accepting
+/// user-typed hierarchical paths.
+///
+/// - Trim leading/trailing whitespace
+/// - Strip leading/trailing `/`
+/// - Collapse consecutive `/` into a single separator
+/// - Lowercase the result
+///
+/// This is a pure helper; the write path does **not** auto-apply it so that
+/// callers retain control over case sensitivity on existing flat namespaces.
+/// Use it when you need to accept loose user input and produce a matchable
+/// canonical key.
+#[allow(dead_code)]
+#[must_use]
+pub fn normalize_namespace(input: &str) -> String {
+    let trimmed = input.trim();
+    let collapsed: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+    collapsed.join("/").to_lowercase()
 }
 
 pub fn validate_source(source: &str) -> Result<()> {
@@ -401,14 +469,99 @@ mod tests {
     }
 
     #[test]
-    fn test_valid_namespace() {
+    fn test_valid_namespace_flat_backwards_compat() {
+        // Task 1.4: flat namespaces must still validate exactly as before.
         assert!(validate_namespace("my-project").is_ok());
         assert!(validate_namespace("global").is_ok());
         assert!(validate_namespace("under_score").is_ok());
+        assert!(validate_namespace("ai-memory-mcp-dev").is_ok());
+        assert!(validate_namespace("_agents").is_ok());
+    }
+
+    #[test]
+    fn test_valid_namespace_rejections_preserved() {
         assert!(validate_namespace("").is_err());
+        assert!(validate_namespace("   ").is_err());
         assert!(validate_namespace("has space").is_err());
-        assert!(validate_namespace("has/slash").is_err());
-        assert!(validate_namespace(&"x".repeat(129)).is_err());
+        assert!(validate_namespace("has\\backslash").is_err());
+        assert!(validate_namespace("has\0null").is_err());
+        assert!(validate_namespace("has\x07bell").is_err());
+    }
+
+    #[test]
+    fn test_namespace_length_bumped_to_512() {
+        // Historical 128-char budget is a floor; 512 is the new max for paths.
+        assert!(validate_namespace(&"x".repeat(128)).is_ok());
+        assert!(validate_namespace(&"x".repeat(512)).is_ok());
+        assert!(validate_namespace(&"x".repeat(513)).is_err());
+    }
+
+    // Task 1.4 — hierarchical paths ---------------------------------------
+
+    #[test]
+    fn test_hierarchical_paths_accepted() {
+        assert!(validate_namespace("alphaone/engineering").is_ok());
+        assert!(validate_namespace("alphaone/engineering/platform").is_ok());
+        assert!(validate_namespace("a/b/c/d/e/f/g/h").is_ok(), "8 levels OK");
+    }
+
+    #[test]
+    fn test_hierarchical_depth_cap() {
+        // 9 levels exceeds MAX_NAMESPACE_DEPTH (8)
+        assert!(validate_namespace("a/b/c/d/e/f/g/h/i").is_err());
+    }
+
+    #[test]
+    fn test_hierarchical_rejects_leading_slash() {
+        assert!(validate_namespace("/alphaone/engineering").is_err());
+    }
+
+    #[test]
+    fn test_hierarchical_rejects_trailing_slash() {
+        assert!(validate_namespace("alphaone/engineering/").is_err());
+    }
+
+    #[test]
+    fn test_hierarchical_rejects_empty_segments() {
+        assert!(validate_namespace("alphaone//engineering").is_err());
+        assert!(validate_namespace("a///b").is_err());
+    }
+
+    #[test]
+    fn test_hierarchical_rejects_control_chars() {
+        assert!(validate_namespace("a/b\x07c").is_err());
+        assert!(validate_namespace("a/b\0c").is_err());
+    }
+
+    #[test]
+    fn test_normalize_namespace_strips_slashes() {
+        assert_eq!(
+            normalize_namespace("/alphaone/engineering/"),
+            "alphaone/engineering"
+        );
+        assert_eq!(normalize_namespace("///a///b///"), "a/b");
+    }
+
+    #[test]
+    fn test_normalize_namespace_lowercases() {
+        assert_eq!(
+            normalize_namespace("AlphaOne/Engineering"),
+            "alphaone/engineering"
+        );
+        assert_eq!(normalize_namespace("MYAPP"), "myapp");
+    }
+
+    #[test]
+    fn test_normalize_namespace_trims_whitespace() {
+        assert_eq!(normalize_namespace("  alphaone/eng  "), "alphaone/eng");
+    }
+
+    #[test]
+    fn test_normalize_then_validate_roundtrip() {
+        let raw = "/AlphaOne//Engineering/Platform/";
+        let norm = normalize_namespace(raw);
+        assert_eq!(norm, "alphaone/engineering/platform");
+        assert!(validate_namespace(&norm).is_ok());
     }
 
     #[test]
