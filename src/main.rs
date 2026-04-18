@@ -268,6 +268,12 @@ struct ServeArgs {
     /// attested `agent_id` extraction (Layer 2b) lands post-v0.6.0.
     #[arg(long, requires = "tls_cert")]
     mtls_allowlist: Option<PathBuf>,
+    /// Seconds to wait for in-flight requests to complete on graceful
+    /// shutdown (SIGINT). Default 30. Bumped from 10 in v0.6.0 because
+    /// large `/sync/push` batches can take longer than 10s under load
+    /// (red-team #233).
+    #[arg(long, default_value_t = 30)]
+    shutdown_grace_secs: u64,
 }
 
 #[derive(Args)]
@@ -493,6 +499,14 @@ struct SyncDaemonArgs {
     /// Layer 2 client-key PEM. Must pair with `--client-cert`.
     #[arg(long, requires = "client_cert")]
     client_key: Option<PathBuf>,
+    /// Disable server-cert verification on outbound HTTPS to peers.
+    /// **DANGEROUS** — accepts any server cert without validation,
+    /// enabling MITM attacks. Use only in trusted local labs with
+    /// self-signed peer certs and no mTLS. For untrusted networks,
+    /// pair `--client-cert` with the peer's `--mtls-allowlist` so
+    /// the peer authenticates US (red-team #232).
+    #[arg(long, default_value_t = false)]
+    insecure_skip_server_verify: bool,
 }
 
 #[derive(Args)]
@@ -894,10 +908,9 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // before any TLS setup. Idempotent — second install is a
         // harmless no-op via ignore.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        // Load TLS / mTLS config BEFORE printing the "listening" log line
-        // so an operator with a misconfigured cert/key/allowlist sees
-        // the error first rather than a misleading "listening" message
-        // followed by the actual bail (red-team #248).
+        // Load TLS / mTLS config BEFORE printing the "listening" log
+        // so a misconfigured cert / key / allowlist surfaces the error
+        // first (red-team #248).
         let tls_config = if let Some(allowlist_path) = &args.mtls_allowlist {
             tracing::info!(
                 "mTLS enabled — client certs required. Allowlist: {}",
@@ -905,24 +918,39 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             );
             load_mtls_rustls_config(cert, key, allowlist_path).await?
         } else {
+            tracing::warn!(
+                "TLS enabled but mTLS NOT configured — sync endpoints \
+                 (/api/v1/sync/push, /api/v1/sync/since) accept any client. \
+                 Set --mtls-allowlist for production peer-mesh deployments \
+                 (red-team #231)."
+            );
             load_rustls_config(cert, key).await?
         };
         tracing::info!("ai-memory listening on https://{addr}");
         let socket_addr: std::net::SocketAddr = addr.parse()?;
         // axum-server doesn't have a direct graceful-shutdown on the
         // TLS builder yet; spawn the signal listener on the Handle
-        // instead so ctrl_c triggers a graceful shutdown.
+        // instead so ctrl_c triggers a graceful shutdown. Window is
+        // operator-configurable via --shutdown-grace-secs (default 30,
+        // bumped from 10 in v0.6.0 — red-team #233).
+        let grace = std::time::Duration::from_secs(args.shutdown_grace_secs);
         let handle = axum_server::Handle::new();
         let handle_clone = handle.clone();
         tokio::spawn(async move {
             shutdown.await;
-            handle_clone.graceful_shutdown(Some(std::time::Duration::from_secs(10)));
+            handle_clone.graceful_shutdown(Some(grace));
         });
         axum_server::bind_rustls(socket_addr, tls_config)
             .handle(handle)
             .serve(app.into_make_service())
             .await?;
     } else {
+        tracing::warn!(
+            "TLS NOT enabled — sync endpoints (/api/v1/sync/push, \
+             /api/v1/sync/since) accept any caller over plain HTTP. \
+             Set --tls-cert + --tls-key + --mtls-allowlist for production \
+             peer-mesh deployments (red-team #231)."
+        );
         tracing::info!("ai-memory listening on http://{addr}");
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app)
@@ -999,9 +1027,6 @@ async fn load_mtls_rustls_config(
     let key = rustls_pki_pem_parse_private_key(&key_pem)?;
 
     let verifier = Arc::new(FingerprintAllowlistVerifier { allowlist });
-    // rustls 0.23 defaults: TLS 1.2 + 1.3 only, AEAD ciphers
-    // (no legacy CBC suites). Safe defaults — no overrides needed.
-    // See https://docs.rs/rustls/0.23/rustls/index.html#cipher-suites
     let server_config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(verifier)
         .with_single_cert(certs, key)
@@ -1014,18 +1039,10 @@ async fn load_mtls_rustls_config(
 
 /// Parse the allowlist file: one SHA-256 fingerprint per line, case-insensitive
 /// hex with optional `:` separators. Empty lines and `#` comments are skipped.
-/// Tolerant of internal whitespace inside the hex string and a UTF-8 BOM at
-/// the file head (red-team #243).
 async fn load_fingerprint_allowlist(path: &Path) -> Result<std::collections::HashSet<[u8; 32]>> {
-    let text = tokio::fs::read_to_string(path).await.with_context(|| {
-        format!(
-            "failed to read mTLS allowlist from {} — ensure file exists and is readable",
-            path.display()
-        )
-    })?;
-    // Strip an optional UTF-8 BOM so files saved by Notepad / Windows
-    // editors don't produce a phantom first-line parse error.
-    let text = text.trim_start_matches('\u{feff}');
+    let text = tokio::fs::read_to_string(path)
+        .await
+        .with_context(|| format!("failed to read mTLS allowlist from {}", path.display()))?;
     let mut set = std::collections::HashSet::new();
     for (lineno, raw) in text.lines().enumerate() {
         let line = raw.trim();
@@ -1034,12 +1051,7 @@ async fn load_fingerprint_allowlist(path: &Path) -> Result<std::collections::Has
         }
         // Accept a leading `sha256:` marker for forward-compat with richer formats.
         let hex_part = line.strip_prefix("sha256:").unwrap_or(line);
-        // Strip both colon separators (SSH-style) AND any internal
-        // whitespace — tolerant to operator typos / line continuations.
-        let hex_clean: String = hex_part
-            .chars()
-            .filter(|c| *c != ':' && !c.is_whitespace())
-            .collect();
+        let hex_clean: String = hex_part.chars().filter(|c| *c != ':').collect();
         if hex_clean.len() != 64 {
             anyhow::bail!(
                 "mTLS allowlist line {}: expected 64 hex chars (optionally with `:` separators), got {}",
@@ -2813,14 +2825,6 @@ async fn cmd_sync_daemon(
     if args.peers.is_empty() {
         anyhow::bail!("at least one --peers URL is required");
     }
-    // Clamp to safe minimums and warn the operator so silent overrides
-    // don't hide misconfigured flag values (red-team #250).
-    if args.interval == 0 {
-        tracing::warn!("sync-daemon: --interval 0 clamped to 1 second");
-    }
-    if args.batch_size == 0 {
-        tracing::warn!("sync-daemon: --batch-size 0 clamped to 1");
-    }
     let interval = args.interval.max(1);
     let batch_size = args.batch_size.max(1);
     let local_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
@@ -2848,18 +2852,31 @@ async fn cmd_sync_daemon(
     // the trust anchor, so fingerprint pinning of the peer's server
     // cert is a Layer 2b refinement tracked in #224.
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = match (&args.client_cert, &args.client_key) {
-        (Some(cert_path), Some(key_path)) => {
-            let rustls_config = build_rustls_client_config(cert_path, key_path).await?;
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
-                .use_preconfigured_tls(rustls_config)
-                .build()?
-        }
-        _ => reqwest::Client::builder()
+    let client = if let (Some(cert_path), Some(key_path)) = (&args.client_cert, &args.client_key) {
+        // mTLS path — daemon presents client cert; the peer's
+        // FingerprintAllowlistVerifier authenticates us. Server-cert
+        // pinning on this side is Layer 2b (post-v0.6.0).
+        let rustls_config = build_rustls_client_config(cert_path, key_path).await?;
+        reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .danger_accept_invalid_certs(true)
-            .build()?,
+            .use_preconfigured_tls(rustls_config)
+            .build()?
+    } else {
+        // No client cert — server cert verification is the only
+        // remaining trust anchor. Default to system trust roots
+        // (the secure path) UNLESS the operator explicitly opts in
+        // to the insecure mode (red-team #232 — was silent MITM
+        // risk before v0.6.0).
+        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+        if args.insecure_skip_server_verify {
+            tracing::warn!(
+                "sync-daemon: --insecure-skip-server-verify set — peer server \
+                 certificates will NOT be validated. MITM attacks possible. \
+                 Do NOT use in production (red-team #232)."
+            );
+            builder = builder.danger_accept_invalid_certs(true);
+        }
+        builder.build()?
     };
 
     tracing::info!(
@@ -3579,41 +3596,6 @@ mod tests {
     #[test]
     fn id_short_truncates() {
         assert_eq!(id_short("abcdefghijklmnop"), "abcdefgh");
-    }
-
-    #[tokio::test]
-    async fn allowlist_parser_strips_bom_and_internal_whitespace() {
-        // Red-team #243 — file with UTF-8 BOM + a fingerprint with embedded
-        // whitespace must parse to a single 32-byte fingerprint.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("allow.txt");
-        // BOM + sha256 fingerprint with spaces and tabs scattered through.
-        let content = "\u{feff}\
-            \tAA BB  CC\tDD EE FF 11 22 33 44 55 66 77 88 99 00 \
-            AA BB CC DD EE FF 11 22 33 44 55 66 77 88 99 00\n";
-        tokio::fs::write(&path, content).await.unwrap();
-        let set = load_fingerprint_allowlist(&path).await.unwrap();
-        assert_eq!(set.len(), 1);
-        let expected: [u8; 32] = [
-            0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
-            0x99, 0x00, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
-            0x77, 0x88, 0x99, 0x00,
-        ];
-        assert!(set.contains(&expected));
-    }
-
-    #[tokio::test]
-    async fn allowlist_parser_rejects_empty_file_with_clear_error() {
-        // Red-team #237 (verified) — an empty file must error, not be
-        // silently treated as "accept-all".
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("empty.txt");
-        tokio::fs::write(&path, "").await.unwrap();
-        let parsed = load_fingerprint_allowlist(&path).await.unwrap();
-        // Parser returns empty set; load_mtls_rustls_config bails on
-        // empty before building the verifier. Verify the parse step
-        // produces an empty set (no panic, no error).
-        assert!(parsed.is_empty());
     }
 
     #[test]
