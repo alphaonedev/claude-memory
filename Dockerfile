@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-FROM rust:1.87-slim AS builder
+FROM rust:1.94-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -21,7 +21,7 @@ FROM debian:bookworm-slim
 
 LABEL org.opencontainers.image.title="ai-memory" \
       org.opencontainers.image.description="AI-agnostic persistent memory system — MCP server, HTTP API, and CLI" \
-      org.opencontainers.image.version="0.5.2" \
+      org.opencontainers.image.version="0.5.4-patch.6" \
       org.opencontainers.image.source="https://github.com/alphaonedev/ai-memory-mcp" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.vendor="AlphaOne LLC" \
