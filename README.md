@@ -5,6 +5,13 @@
 <h1 align="center">ai-memory&trade;</h1>
 <p align="center"><em>universal AI memory</em></p>
 
+<p align="center">
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/"><strong>📖 Documentation</strong></a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/user/quickstart">Quickstart</a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/admin/deployment">Admin guide</a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/developer/architecture">Developer guide</a>
+</p>
+
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
