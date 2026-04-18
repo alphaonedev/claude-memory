@@ -119,6 +119,14 @@ pub fn validate_namespace(ns: &str) -> Result<()> {
     if trimmed.split('/').any(str::is_empty) {
         bail!("namespace cannot contain empty segments (e.g. '//')");
     }
+    // Reject `..` and `.` segments — they look like path traversal to
+    // human readers and silently confuse hierarchy semantics. Visibility
+    // prefix matching with LIKE 'foo/%' would let memories at
+    // `foo/../malicious` appear under `foo`'s team-scope queries
+    // (red-team #240).
+    if trimmed.split('/').any(|s| s == ".." || s == ".") {
+        bail!("namespace segments '.' and '..' are not allowed");
+    }
     let depth = crate::models::namespace_depth(trimmed);
     if depth > MAX_NAMESPACE_DEPTH {
         bail!("namespace depth {depth} exceeds max of {MAX_NAMESPACE_DEPTH}");
@@ -539,6 +547,21 @@ mod tests {
         assert!(validate_namespace("has\\backslash").is_err());
         assert!(validate_namespace("has\0null").is_err());
         assert!(validate_namespace("has\x07bell").is_err());
+    }
+
+    #[test]
+    fn test_namespace_rejects_dot_segments_redteam_240() {
+        // Red-team #240 — `..` and `.` segments must be rejected to
+        // prevent hierarchy confusion / visibility prefix-match games.
+        assert!(validate_namespace("acme/../other").is_err());
+        assert!(validate_namespace("acme/./other").is_err());
+        assert!(validate_namespace("..").is_err());
+        assert!(validate_namespace(".").is_err());
+        assert!(validate_namespace("acme/team/..").is_err());
+        assert!(validate_namespace("../acme").is_err());
+        // But two dots inside a name is fine — only standalone segments are blocked.
+        assert!(validate_namespace("acme/team..special").is_ok());
+        assert!(validate_namespace("acme/.dotfile").is_ok());
     }
 
     #[test]

@@ -1589,6 +1589,18 @@ pub async fn sync_push(
         )
             .into_response();
     }
+    // Cap memories per push, matching the bulk-create limit. Without
+    // this a malicious peer with a valid mTLS cert could flood the
+    // receiver and bottleneck the shared SQLite Mutex (red-team #242).
+    if body.memories.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("sync_push limited to {} memories per request", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
     // Receiver's local identity — default to the caller-supplied header,
     // fall back to the anonymous placeholder. Recorded in sync_state rows.
     let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
@@ -2083,6 +2095,58 @@ mod tests {
             "push must record sender in sync_state; got: {:?}",
             clock.entries
         );
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_rejects_oversized_batch_redteam_242() {
+        // Red-team #242 — sync_push must cap memories per request, matching
+        // bulk-create's MAX_BULK_SIZE. Without this a malicious peer can
+        // flood the receiver and bottleneck the SQLite Mutex.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(state);
+        let now = Utc::now().to_rfc3339();
+        // Build MAX_BULK_SIZE + 1 entries (1001).
+        let mems: Vec<serde_json::Value> = (0..=MAX_BULK_SIZE)
+            .map(|i| {
+                serde_json::json!({
+                    "id": Uuid::new_v4().to_string(),
+                    "tier": "long",
+                    "namespace": "oversize",
+                    "title": format!("m{i}"),
+                    "content": "x",
+                    "tags": [],
+                    "priority": 5,
+                    "confidence": 1.0,
+                    "source": "api",
+                    "access_count": 0,
+                    "created_at": now,
+                    "updated_at": now,
+                    "last_accessed_at": null,
+                    "expires_at": null,
+                    "metadata": {}
+                })
+            })
+            .collect();
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-flood",
+            "sender_clock": {"entries": {}},
+            "memories": mems,
+            "dry_run": false,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
