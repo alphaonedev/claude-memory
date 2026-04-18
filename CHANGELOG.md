@@ -5,6 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.0 GA disclosures
+
+The following items are **MANDATORY DISCLOSURES** for the v0.6.0 GA release.
+Operators upgrading from v0.5.4.x MUST read this section before deploying.
+
+### Breaking changes
+
+- **Consensus governance now requires agent pre-registration** (issue #234).
+  The fix for security issue #216 (one caller satisfying `Consensus(N)` with
+  N spoofed agent_ids) added an `is_registered_agent()` gate. Existing
+  `consensus:N` policies become **indefinitely-locked** unless approver
+  agents are registered first via `ai-memory agents register --agent-id <id>
+  --agent-type <type>`.
+
+  Migration: register all consensus approvers before upgrading. Example:
+
+  ```bash
+  ai-memory agents register --agent-id alice --agent-type human
+  ai-memory agents register --agent-id bob   --agent-type human
+  ai-memory agents register --agent-id carol --agent-type human
+  ```
+
+### Security disclosures (peer-mesh sync)
+
+- **Sync endpoints are unauthenticated when TLS is not enabled** (issue #231).
+  `POST /api/v1/sync/push` and `GET /api/v1/sync/since` accept all callers
+  when `serve` runs without `--tls-cert + --tls-key`. Production peer-mesh
+  deployments **MUST** set `--tls-cert + --tls-key + --mtls-allowlist`.
+  See `docs/ADMIN_GUIDE.md` § Peer-mesh security.
+
+- **sync-daemon does no server-cert verification without --client-cert**
+  (issue #232). The daemon uses `danger_accept_invalid_certs(true)` when
+  `--client-cert` is not provided — any server cert is accepted. For
+  untrusted networks, ALWAYS use mTLS in both directions.
+
+- **Any valid mTLS peer can dump the full database** (issue #239). By design,
+  the trust boundary is the mTLS cert. Sync endpoints bypass per-memory
+  visibility filtering. **Allowlist only peers you fully trust.** Per-namespace
+  / per-scope sync filtering is a Phase 5 feature.
+
+- **Body-claimed `sender_agent_id` is not yet attested to the cert CN/SAN**
+  (issue #238). mTLS gates network access but the receiving handler accepts
+  `sender_agent_id` from the body without checking the cert identity. A peer
+  with a valid cert can claim any agent_id. Tracked as Layer 2b for v0.7.
+
+### Schema migration
+
+- v0.5.4.6 → v0.6.0 runs six additive migrations (v7 through v12). All are
+  idempotent, transactional, and default-safe. Worst-case lock on a 10M-row
+  database: 1–3 seconds during v10 (scope_idx index build). Schedule a brief
+  maintenance window for large databases.
+
+### Surface gaps tracked for v0.6.1
+
+- Namespace standards / governance config is currently **MCP-only** (issue
+  #236). HTTP and CLI surfaces will land in v0.6.1.
+- `--agent-type` accepts only 6 hardcoded values (issue #235). Workaround:
+  use `system` for custom agents, or wait for v0.6.1.
+
 ## [0.6.0-alpha.2] — 2026-04-16 — Phase 1 Track A complete + release-plumbing reconciliation
 
 Supersedes **0.6.0-alpha.1** (2026-04-16, same day — partial publish). alpha.1

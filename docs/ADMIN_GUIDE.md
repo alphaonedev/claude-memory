@@ -644,35 +644,89 @@ The MCP server communicates over stdio only -- no network exposure.
 
 ### CORS
 
-The HTTP server uses `CorsLayer::permissive()` -- any origin can make requests. For production, use a reverse proxy with restrictive CORS headers.
+The HTTP server uses `CorsLayer::new()` (deny-by-default) since v0.5.4-patch.6. Cross-origin requests are rejected unless explicitly configured. For production, use a reverse proxy with restrictive CORS headers if you need to allow specific origins.
 
-### No Authentication
+### Authentication
 
-There is no authentication mechanism. This is by design -- the daemon is intended for localhost access only by your AI client (Claude AI, ChatGPT, Grok, Llama, or any other). If you expose it to a network, you are responsible for adding a reverse proxy with authentication.
+There is no API-key or token authentication mechanism for the standard MCP / HTTP / CLI surface. This is by design — the daemon is intended for localhost access only by your AI client.
+
+For the **peer-to-peer sync mesh** (v0.6.0+), authentication is provided by mTLS fingerprint pinning — see "Peer-mesh security" above. Sync endpoints WITHOUT mTLS are unauthenticated and MUST NOT be exposed to untrusted networks.
 
 ### Multi-User Warning
 
 ai-memory is a single-user tool. Namespaces do not provide access control. If multiple users share a database, any user can read/write any namespace.
 
-### TLS / Reverse Proxy
+### TLS / HTTPS (v0.6.0+)
 
-ai-memory does not support TLS natively. For HTTPS, terminate TLS at a reverse proxy. Minimal nginx example:
+**ai-memory now supports native TLS** via `--tls-cert <pem>` + `--tls-key <pem>` on `serve`. rustls under the hood — no OpenSSL dep, no reverse proxy required:
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name memory.example.com;
-
-    ssl_certificate     /etc/ssl/certs/memory.pem;
-    ssl_certificate_key /etc/ssl/private/memory.key;
-
-    location / {
-        proxy_pass http://127.0.0.1:9077;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+```bash
+ai-memory serve --tls-cert server.pem --tls-key server.key
 ```
+
+Reverse proxy termination still works if you prefer it (nginx / Caddy / Traefik). For most deployments, the native TLS path removes a moving part.
+
+### Peer-mesh security (v0.6.0+) — MUST READ before deploying sync
+
+The peer-to-peer sync mesh introduces new trust assumptions. Disclosed gaps and required mitigations:
+
+#### Sync endpoints are unauthenticated without TLS (issue #231)
+
+`POST /api/v1/sync/push` and `GET /api/v1/sync/since` accept connections from any caller when `serve` runs without `--tls-cert + --tls-key`. The handler accepts `sender_agent_id` from the request body without cryptographic proof.
+
+**Production deployments MUST set `--tls-cert + --tls-key + --mtls-allowlist`** for the peer mesh. Without all three, any network-positioned attacker can push spoofed memories or pull the entire database.
+
+#### sync-daemon does no server-cert verification without --client-cert (issue #232)
+
+When `sync-daemon` is invoked without `--client-cert`, the underlying reqwest client uses `danger_accept_invalid_certs(true)` — it accepts ANY server cert, no validation against system trust roots, no peer-cert pinning.
+
+**For untrusted networks, ALWAYS use mTLS in both directions.** Set `--client-cert` + `--client-key` on the daemon and `--mtls-allowlist` on the peer's `serve`.
+
+#### Any valid mTLS peer can dump the full database (issue #239)
+
+`GET /api/v1/sync/since?since=<old-ts>` paginates the entire database. By design — the trust boundary IS the mTLS cert — but the implication is that **a compromised peer cert grants access to every memory**, including `scope: private` memories from other agents' namespaces. Sync endpoints bypass the per-memory visibility filtering used by `/recall`.
+
+**Allowlist only peers you fully trust.** Per-namespace / per-scope sync filtering is a Phase 5 feature (post-v0.6.0).
+
+#### Body-claimed sender_agent_id is not yet attested (issue #238)
+
+mTLS gates network access but the receiving handler accepts `sender_agent_id` from the body without checking it matches the cert's CN/SAN. A peer with a valid cert can claim any agent_id. Tracked as Layer 2b for v0.7.
+
+### mTLS setup recipe
+
+1. Generate cert pairs (or reuse existing X.509 keypairs):
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout server.key -out server.pem \
+  -days 365 -nodes -subj "/CN=peer-a.local"
+openssl req -x509 -newkey rsa:2048 -keyout client.key -out client.pem \
+  -days 365 -nodes -subj "/CN=peer-a.client"
+```
+
+2. Compute and exchange SHA-256 fingerprints:
+
+```bash
+openssl x509 -in client.pem -outform DER | sha256sum
+```
+
+3. Build the allowlist file (one fingerprint per line; `sha256:` prefix and `:` separators are optional):
+
+```
+# peer A's client cert
+sha256:25ab790783dbe969f994063db0412f1930e187e5e1e6c7d79bb76224a76b7bb7
+```
+
+4. Run with all three flags:
+
+```bash
+ai-memory serve --tls-cert server.pem --tls-key server.key \
+  --mtls-allowlist ./peers.allow
+
+ai-memory sync-daemon --peers https://peer-b:9077 \
+  --client-cert client.pem --client-key client.key
+```
+
+A peer without an allowlisted cert is rejected at the **TLS handshake** — well before any HTTP request reaches the application.
 
 ### Data at Rest
 
