@@ -5,7 +5,53 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.0 GA disclosures
+## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint (cloud-agentic foundation)
+
+Phase 1 baseline (Tasks 1.1–1.12 from alpha train) plus the v0.6.0.0 sprint
+additions that push autonomy, multi-agent primitives, ops, and SDK coverage
+further into the cloud-agentic end-state.
+
+### Added — v0.6.0.0 sprint (autonomy + ops + SDKs)
+
+- **Time-decay half-life on recall scoring** — per-tier exponential decay
+  multiplier on the hybrid-recall score blend. Default half-lives: short
+  7 d, mid 30 d, long 365 d. Configurable via `[scoring]` in `config.toml`;
+  `legacy_scoring = true` disables decay for A/B comparison and regression
+  rollback. Half-lives clamped to `[0.1, 36500]` days.
+- **Contextual recall (conversation-token bias)** — `memory_recall` accepts
+  an optional `context_tokens: array<string>`. When supplied, the primary
+  query embedding is fused 70/30 with an embedding of the joined context
+  tokens, biasing recall toward memories that match both the explicit
+  query AND nearby conversation topics. CLI: `--context-tokens tok1,tok2`.
+  Fusion is caller-side; `db::recall_hybrid` signature is unchanged beyond
+  the new `&ResolvedScoring` argument.
+- **Post-store LLM autonomy hooks** — opt-in synchronous hooks that fire
+  `llm::auto_tag` + `llm::detect_contradiction` on every successful
+  `memory_store`. Results persist into `metadata.auto_tags` and
+  `metadata.confirmed_contradictions`. Enabled via
+  `AI_MEMORY_AUTONOMOUS_HOOKS=1` env var or `autonomous_hooks = true` in
+  config. Off by default (adds Ollama round-trip latency). Skipped for
+  content under 50 bytes, when no LLM is wired, and for `_`-prefixed
+  internal namespaces.
+- **TypeScript SDK scaffold** under `sdk/typescript/` — `@alphaone/ai-memory`
+  (v0.6.0-alpha.0), strict TS, undici-based fetch, covers all current +
+  v0.6.0.0 target endpoints (14+ methods), Jest tests guarded by
+  `AI_MEMORY_TEST_DAEMON` env var. Not yet published to npm.
+- **Python SDK scaffold** under `sdk/python/` — `ai-memory` (v0.6.0-alpha.0),
+  sync (`AiMemoryClient`) + async (`AsyncAiMemoryClient`) clients via
+  `httpx`, Pydantic v2 models (15/15 Memory fields), exception hierarchy,
+  HMAC-SHA256 webhook verifier. Not yet published to PyPI.
+- **Hardened systemd units** under `packaging/systemd/` — `ai-memory.service`,
+  `ai-memory-sync.service`, `ai-memory-backup.service`, `ai-memory-backup.timer`
+  with README. Full sandbox (`ProtectSystem=strict`,
+  `MemoryDenyWriteExecute=yes`, `SystemCallFilter=@system-service`,
+  `CapabilityBoundingSet=` empty, `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`).
+  Target `systemd-analyze security` exposure score <5.0.
+
+### v0.6.0 GA disclosures (unchanged from pre-sprint baseline)
+
+The following items are **MANDATORY DISCLOSURES** for the v0.6.0 release.
+Operators upgrading from v0.5.4.x MUST read this section before deploying.
 
 The following items are **MANDATORY DISCLOSURES** for the v0.6.0 GA release.
 Operators upgrading from v0.5.4.x MUST read this section before deploying.
