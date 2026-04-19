@@ -16,6 +16,8 @@ mod identity;
 mod llm;
 mod mcp;
 mod metrics;
+#[cfg(feature = "sal")]
+mod migrate;
 mod mine;
 mod models;
 mod replication;
@@ -173,6 +175,12 @@ enum Command {
     /// between cycles. Auto-tags memories without tags and flags
     /// contradictions against nearby siblings in the same namespace.
     Curator(CuratorArgs),
+    /// v0.7: migrate memories between SAL backends. Gated behind
+    /// `--features sal`. Reads pages via `MemoryStore::list`, writes
+    /// via `MemoryStore::store`. Idempotent: source ids are preserved
+    /// and both adapters upsert on id.
+    #[cfg(feature = "sal")]
+    Migrate(MigrateArgs),
 }
 
 #[derive(Args)]
@@ -212,6 +220,30 @@ struct CuratorArgs {
     /// instead of a single id.
     #[arg(long)]
     rollback_last: Option<usize>,
+}
+
+#[cfg(feature = "sal")]
+#[derive(Args)]
+struct MigrateArgs {
+    /// Source URL. `sqlite:///path/to/file.db` or
+    /// `postgres://user:pass@host:port/dbname`.
+    #[arg(long)]
+    from: String,
+    /// Destination URL. Same URL shape as `--from`.
+    #[arg(long)]
+    to: String,
+    /// Page size. Clamped to [1, 10000]. Default 1000.
+    #[arg(long, default_value_t = 1000)]
+    batch: usize,
+    /// Only migrate memories in this namespace.
+    #[arg(long)]
+    namespace: Option<String>,
+    /// Emit the report but do NOT write to the destination.
+    #[arg(long)]
+    dry_run: bool,
+    /// Emit the report as JSON rather than human-readable text.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -703,6 +735,7 @@ fn human_age(iso: &str) -> String {
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<()> {
     color::init();
     let app_config = config::AppConfig::load();
@@ -807,6 +840,8 @@ async fn main() -> Result<()> {
         Command::Backup(a) => cmd_backup(&db_path, &a, j),
         Command::Restore(a) => cmd_restore(&db_path, &a, j),
         Command::Curator(a) => cmd_curator(&db_path, &a, &app_config).await,
+        #[cfg(feature = "sal")]
+        Command::Migrate(a) => cmd_migrate(&a).await,
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -4127,6 +4162,52 @@ fn print_curator_report(r: &curator::CuratorReport) {
     for e in &r.errors {
         println!("    - {e}");
     }
+}
+
+#[cfg(feature = "sal")]
+async fn cmd_migrate(args: &MigrateArgs) -> Result<()> {
+    let src = migrate::open_store(&args.from)
+        .await
+        .context("open source store")?;
+    let dst = migrate::open_store(&args.to)
+        .await
+        .context("open destination store")?;
+    let report = migrate::migrate(
+        src.as_ref(),
+        dst.as_ref(),
+        args.batch,
+        args.namespace.clone(),
+        args.dry_run,
+    )
+    .await;
+    if args.json {
+        let value = serde_json::json!({
+            "from_url": args.from,
+            "to_url": args.to,
+            "memories_read": report.memories_read,
+            "memories_written": report.memories_written,
+            "batches": report.batches,
+            "errors": report.errors,
+            "dry_run": report.dry_run,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else {
+        println!("migration report");
+        println!("  from:              {}", args.from);
+        println!("  to:                {}", args.to);
+        println!("  memories_read:     {}", report.memories_read);
+        println!("  memories_written:  {}", report.memories_written);
+        println!("  batches:           {}", report.batches);
+        println!("  dry_run:           {}", report.dry_run);
+        println!("  errors:            {}", report.errors.len());
+        for e in &report.errors {
+            println!("    - {e}");
+        }
+    }
+    if !report.errors.is_empty() {
+        anyhow::bail!("migration completed with {} error(s)", report.errors.len());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
