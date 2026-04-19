@@ -142,6 +142,38 @@ enum Command {
     Agents(AgentsArgs),
     /// List / approve / reject governance-pending actions (Task 1.9)
     Pending(PendingArgs),
+    /// v0.6.0.0: snapshot the `SQLite` database to a timestamped backup
+    /// file. Uses `SQLite` `VACUUM INTO` which is hot-backup safe (no daemon
+    /// stop required). Writes a `manifest.json` alongside (sha256 + version).
+    Backup(BackupArgs),
+    /// v0.6.0.0: restore the `SQLite` database from a backup file written
+    /// by `ai-memory backup`. Verifies the manifest sha256 before
+    /// replacing the current DB. The current DB is moved aside as a safety
+    /// net before the replacement.
+    Restore(RestoreArgs),
+}
+
+#[derive(Args)]
+struct BackupArgs {
+    /// Directory where the snapshot and manifest are written. Created if
+    /// missing.
+    #[arg(long, default_value = "./backups")]
+    to: PathBuf,
+    /// Retention: after writing a new snapshot, delete the oldest
+    /// snapshots so that at most this many remain. 0 disables rotation.
+    #[arg(long, default_value_t = 48)]
+    keep: usize,
+}
+
+#[derive(Args)]
+struct RestoreArgs {
+    /// Path to a snapshot file OR a backup directory. When a directory is
+    /// supplied, the most recent snapshot is used.
+    #[arg(long)]
+    from: PathBuf,
+    /// Skip sha256 verification against the manifest. Not recommended.
+    #[arg(long)]
+    skip_verify: bool,
 }
 
 #[derive(Args)]
@@ -689,6 +721,8 @@ async fn main() -> Result<()> {
         Command::Archive(a) => cmd_archive(&db_path, a, j),
         Command::Agents(a) => cmd_agents(&db_path, a, j),
         Command::Pending(a) => cmd_pending(&db_path, a, j, cli_agent_id.as_deref()),
+        Command::Backup(a) => cmd_backup(&db_path, &a, j),
+        Command::Restore(a) => cmd_restore(&db_path, &a, j),
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -3586,6 +3620,235 @@ fn cmd_mine(
         println!("Namespace: {namespace}, Tier: {tier}");
     }
 
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v0.6.0.0 — backup / restore
+// ---------------------------------------------------------------------------
+
+/// Timestamp format used for snapshot filenames. RFC3339-compatible but
+/// filesystem-safe: no colons, no slashes.
+const BACKUP_TS_FMT: &str = "%Y-%m-%dT%H%M%SZ";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct BackupManifest {
+    snapshot: String,
+    sha256: String,
+    bytes: u64,
+    source_db: String,
+    version: String,
+    created_at: String,
+}
+
+fn cmd_backup(db_path: &Path, args: &BackupArgs, json_out: bool) -> Result<()> {
+    use std::io::Read;
+    std::fs::create_dir_all(&args.to)
+        .with_context(|| format!("creating backup dir {}", args.to.display()))?;
+    // SQLite VACUUM INTO is hot-backup-safe and produces a defragmented
+    // file. Equivalent to `sqlite3 source '.backup dest'` in effect but
+    // runs in-process via our existing connection.
+    let conn = db::open(db_path).context("opening source DB for backup")?;
+    let ts = chrono::Utc::now().format(BACKUP_TS_FMT).to_string();
+    let snapshot_name = format!("ai-memory-{ts}.db");
+    let snapshot_path = args.to.join(&snapshot_name);
+    if snapshot_path.exists() {
+        anyhow::bail!(
+            "refusing to overwrite existing snapshot {}",
+            snapshot_path.display()
+        );
+    }
+    conn.execute(
+        "VACUUM INTO ?1",
+        rusqlite::params![snapshot_path.to_string_lossy()],
+    )
+    .context("VACUUM INTO failed")?;
+    drop(conn);
+
+    let bytes = std::fs::metadata(&snapshot_path)?.len();
+    let sha = {
+        use sha2::Digest;
+        let mut hasher = sha2::Sha256::new();
+        let mut f = std::fs::File::open(&snapshot_path)?;
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = f.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+        }
+        format!("{:x}", hasher.finalize())
+    };
+
+    let manifest = BackupManifest {
+        snapshot: snapshot_name.clone(),
+        sha256: sha.clone(),
+        bytes,
+        source_db: db_path.to_string_lossy().into_owned(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let manifest_path = args.to.join(format!("ai-memory-{ts}.manifest.json"));
+    let manifest_text = serde_json::to_string_pretty(&manifest)?;
+    std::fs::write(&manifest_path, manifest_text.as_bytes())?;
+
+    // Rotation — newest-first listing, drop everything past `keep`.
+    if args.keep > 0 {
+        prune_old_snapshots(&args.to, args.keep)?;
+    }
+
+    if json_out {
+        println!("{}", serde_json::to_string(&manifest)?);
+    } else {
+        println!("Snapshot: {}", snapshot_path.display());
+        println!("Manifest: {}", manifest_path.display());
+        println!("SHA-256 : {sha}");
+        println!("Bytes   : {bytes}");
+    }
+    Ok(())
+}
+
+/// Enumerate existing `ai-memory-*.db` snapshot files newest-first and
+/// delete everything past `keep`. Also deletes the matching manifest
+/// for each removed snapshot.
+fn prune_old_snapshots(dir: &Path, keep: usize) -> Result<()> {
+    let mut snaps: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(dir)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = path.file_name()?.to_str()?.to_owned();
+            let is_snapshot = name.starts_with("ai-memory-")
+                && path
+                    .extension()
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("db"));
+            if is_snapshot {
+                let mtime = entry.metadata().ok()?.modified().ok()?;
+                Some((mtime, path))
+            } else {
+                None
+            }
+        })
+        .collect();
+    snaps.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, path) in snaps.into_iter().skip(keep) {
+        let _ = std::fs::remove_file(&path);
+        // Matching manifest (same stem, .manifest.json extension pattern)
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let manifest = dir.join(format!("{stem}.manifest.json"));
+            let _ = std::fs::remove_file(manifest);
+        }
+    }
+    Ok(())
+}
+
+fn cmd_restore(db_path: &Path, args: &RestoreArgs, json_out: bool) -> Result<()> {
+    use std::io::Read;
+    let (snapshot_path, manifest_path) = if args.from.is_dir() {
+        // Pick the newest snapshot in the directory.
+        let mut snaps: Vec<(std::time::SystemTime, PathBuf)> = std::fs::read_dir(&args.from)?
+            .filter_map(std::result::Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                let name = path.file_name()?.to_str()?.to_owned();
+                let is_snapshot = name.starts_with("ai-memory-")
+                    && path
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("db"));
+                if is_snapshot {
+                    let mtime = entry.metadata().ok()?.modified().ok()?;
+                    Some((mtime, path))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        snaps.sort_by(|a, b| b.0.cmp(&a.0));
+        let snap = snaps
+            .into_iter()
+            .next()
+            .map(|(_, p)| p)
+            .ok_or_else(|| anyhow::anyhow!("no snapshots found in {}", args.from.display()))?;
+        let stem = snap.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let manifest = args.from.join(format!("{stem}.manifest.json"));
+        (snap, manifest)
+    } else {
+        // File path supplied directly.
+        let snap = args.from.clone();
+        let stem = snap.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        let parent = snap.parent().unwrap_or_else(|| Path::new("."));
+        let manifest = parent.join(format!("{stem}.manifest.json"));
+        (snap, manifest)
+    };
+
+    if !snapshot_path.exists() {
+        anyhow::bail!("snapshot {} does not exist", snapshot_path.display());
+    }
+
+    // SHA-256 verification against manifest.
+    if !args.skip_verify {
+        if !manifest_path.exists() {
+            anyhow::bail!(
+                "manifest {} not found; pass --skip-verify to restore anyway",
+                manifest_path.display()
+            );
+        }
+        let manifest_text = std::fs::read_to_string(&manifest_path)?;
+        let manifest: BackupManifest = serde_json::from_str(&manifest_text)
+            .with_context(|| format!("parsing manifest {}", manifest_path.display()))?;
+        let observed = {
+            use sha2::Digest;
+            let mut hasher = sha2::Sha256::new();
+            let mut f = std::fs::File::open(&snapshot_path)?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
+            }
+            format!("{:x}", hasher.finalize())
+        };
+        if observed != manifest.sha256 {
+            anyhow::bail!(
+                "sha256 mismatch — manifest says {}, snapshot is {}",
+                manifest.sha256,
+                observed
+            );
+        }
+    }
+
+    // Move current DB aside as a safety net (only if it exists).
+    if db_path.exists() {
+        let ts = chrono::Utc::now().format(BACKUP_TS_FMT).to_string();
+        let aside = db_path.with_extension(format!("pre-restore-{ts}.db"));
+        std::fs::rename(db_path, &aside)
+            .with_context(|| format!("moving current DB aside to {}", aside.display()))?;
+        if !json_out {
+            println!("Previous DB moved to {}", aside.display());
+        }
+    }
+
+    std::fs::copy(&snapshot_path, db_path)
+        .with_context(|| format!("copying snapshot to {}", db_path.display()))?;
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "status": "restored",
+                "from": snapshot_path.to_string_lossy(),
+                "to": db_path.to_string_lossy(),
+            })
+        );
+    } else {
+        println!(
+            "Restored {} → {}",
+            snapshot_path.display(),
+            db_path.display()
+        );
+    }
     Ok(())
 }
 
