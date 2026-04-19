@@ -5,6 +5,8 @@
 
 mod autonomy;
 mod color;
+#[cfg(feature = "turboquant")]
+mod compress;
 mod config;
 mod curator;
 mod db;

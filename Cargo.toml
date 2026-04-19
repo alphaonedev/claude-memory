@@ -79,6 +79,15 @@ thiserror = { version = "2", optional = true }
 sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
 pgvector = { version = "0.4", optional = true, features = ["sqlx"] }
 
+# v0.7 — TurboQuant extreme embedding compression (Google Research,
+# abdelstark/turboquant). Reduces a 384-dim f32 embedding (1536 bytes)
+# to tens of bytes at 4 bits/dim while preserving cosine-similarity
+# ranking. Gated behind the `turboquant` feature — pulls a heavy
+# transitive tree (ort, tokenizers, safetensors, burn) so default
+# builds stay unchanged.
+turboquant = { version = "0.1", optional = true }
+bincode = { version = "2", optional = true, features = ["serde"] }
+
 # v0.6.0.0 — SQLite variant selection. Default builds the standard
 # bundled SQLite (matching pre-v0.6.0.0 behavior byte-for-byte). The
 # `sqlcipher` feature swaps the underlying DB to SQLCipher (SQLite +
@@ -94,6 +103,10 @@ sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 # adapter. `sal-postgres` layers on the Postgres/pgvector backend.
 sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
 sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
+# v0.7 — TurboQuant extreme embedding compression. Opt-in; ships the
+# EmbeddingCodec module under `src/compress.rs`. Wiring into the store
+# path lands in the follow-up PR (v0.7.1).
+turboquant = ["dep:turboquant", "dep:bincode"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
