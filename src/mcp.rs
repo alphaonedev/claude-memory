@@ -458,6 +458,33 @@ fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "memory_notify",
+                "description": "v0.6.0.0 — send a message from the caller to another agent. Stored as a memory in the reserved `_messages/<target>` namespace with sender metadata. The sender is the caller's resolved agent_id. Target agent reads via `memory_inbox`. Payload is a free-form string.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "target_agent_id": {"type": "string", "description": "Recipient agent_id (same validation as metadata.agent_id)"},
+                        "title": {"type": "string", "description": "Short subject (≤ 200 chars, required)"},
+                        "payload": {"type": "string", "description": "Message body (required)"},
+                        "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                        "tier": {"type": "string", "enum": ["short", "mid", "long"], "default": "mid", "description": "short TTL default = 6h, mid = 7d, long = no expiry"}
+                    },
+                    "required": ["target_agent_id", "title", "payload"]
+                }
+            },
+            {
+                "name": "memory_inbox",
+                "description": "v0.6.0.0 — list messages sent to an agent via memory_notify. Reads the reserved `_messages/<agent_id>` namespace. `access_count == 0` is the conventional unread marker; recalling/reading a memory increments access_count via the normal touch path.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "Recipient agent_id. Defaults to the caller's resolved agent_id."},
+                        "unread_only": {"type": "boolean", "default": false, "description": "When true, return only messages with access_count == 0."},
+                        "limit": {"type": "integer", "default": 50, "maximum": 500}
+                    }
+                }
             }
         ]
     })
@@ -1862,6 +1889,143 @@ fn handle_agent_list(conn: &rusqlite::Connection) -> Result<Value, String> {
     }))
 }
 
+// --- v0.6.0.0 agent notify / inbox -----------------------------------------
+
+/// Compose the canonical inbox namespace for a given `agent_id`.
+///
+/// Reuses the same sanitization regex that `validate_namespace` enforces
+/// on writes, so any `agent_id` that passes `validate::validate_agent_id`
+/// produces an acceptable namespace here.
+fn messages_namespace_for(agent_id: &str) -> String {
+    format!("_messages/{agent_id}")
+}
+
+fn handle_notify(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    resolved_ttl: &crate::config::ResolvedTtl,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    let target = params["target_agent_id"]
+        .as_str()
+        .ok_or("target_agent_id is required")?;
+    let title = params["title"].as_str().ok_or("title is required")?;
+    let payload = params["payload"].as_str().ok_or("payload is required")?;
+    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5))
+        .expect("i64 as i32")
+        .clamp(1, 10);
+    let tier_str = params["tier"].as_str().unwrap_or("mid");
+    let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
+
+    validate::validate_agent_id(target).map_err(|e| e.to_string())?;
+    validate::validate_title(title).map_err(|e| e.to_string())?;
+    validate::validate_content(payload).map_err(|e| e.to_string())?;
+
+    let sender = crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
+    let namespace = messages_namespace_for(target);
+
+    let now = chrono::Utc::now();
+    let expires_at = resolved_ttl
+        .ttl_for_tier(&tier)
+        .map(|s| (now + chrono::Duration::seconds(s)).to_rfc3339());
+
+    let metadata = json!({
+        "agent_id": sender.clone(),
+        "recipient_agent_id": target,
+        "message_kind": "notify",
+    });
+
+    let mem = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier,
+        namespace: namespace.clone(),
+        title: title.to_string(),
+        content: payload.to_string(),
+        tags: vec!["_message".to_string()],
+        priority,
+        confidence: 1.0,
+        source: "notify".to_string(),
+        access_count: 0,
+        created_at: now.to_rfc3339(),
+        updated_at: now.to_rfc3339(),
+        last_accessed_at: None,
+        expires_at,
+        metadata,
+    };
+    let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "id": actual_id,
+        "from": sender,
+        "to": target,
+        "namespace": namespace,
+        "tier": mem.tier,
+        "delivered_at": mem.created_at,
+    }))
+}
+
+fn handle_inbox(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    // Caller identity is the default inbox owner — agents read their own
+    // inbox unless an explicit agent_id is supplied.
+    let explicit = params["agent_id"].as_str();
+    let owner =
+        crate::identity::resolve_agent_id(explicit, mcp_client).map_err(|e| e.to_string())?;
+    let unread_only = params["unread_only"].as_bool().unwrap_or(false);
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50))
+        .expect("u64 as usize")
+        .min(500);
+    let namespace = messages_namespace_for(&owner);
+    let items = db::list(
+        conn,
+        Some(&namespace),
+        None,
+        limit,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .map_err(|e| e.to_string())?;
+    let filtered: Vec<&Memory> = items
+        .iter()
+        .filter(|m| !unread_only || m.access_count == 0)
+        .collect();
+    let messages: Vec<Value> = filtered
+        .iter()
+        .map(|m| {
+            let sender = m
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            json!({
+                "id": m.id,
+                "from": sender,
+                "title": m.title,
+                "payload": m.content,
+                "priority": m.priority,
+                "tier": m.tier,
+                "created_at": m.created_at,
+                "read": m.access_count > 0,
+                "access_count": m.access_count,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "agent_id": owner,
+        "namespace": namespace,
+        "count": messages.len(),
+        "unread_only": unread_only,
+        "messages": messages,
+    }))
+}
+
 fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let status = params["status"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
@@ -2149,6 +2313,8 @@ fn handle_request(
                 }
                 "memory_agent_register" => handle_agent_register(conn, arguments),
                 "memory_agent_list" => handle_agent_list(conn),
+                "memory_notify" => handle_notify(conn, arguments, resolved_ttl, mcp_client),
+                "memory_inbox" => handle_inbox(conn, arguments, mcp_client),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -2463,10 +2629,11 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_31_tools() {
+    fn tool_definitions_returns_33_tools() {
+        // v0.6.0.0 added memory_notify + memory_inbox (was 31 in v0.6.0).
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 31);
+        assert_eq!(tools.len(), 33);
     }
 
     #[test]
@@ -2480,6 +2647,32 @@ mod tests {
             .collect();
         assert!(names.contains(&"memory_agent_register"));
         assert!(names.contains(&"memory_agent_list"));
+    }
+
+    #[test]
+    fn tool_definitions_include_notify_and_inbox() {
+        // v0.6.0.0 agent-to-agent messaging primitive.
+        let defs = tool_definitions();
+        let names: Vec<&str> = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t["name"].as_str())
+            .collect();
+        assert!(names.contains(&"memory_notify"));
+        assert!(names.contains(&"memory_inbox"));
+    }
+
+    #[test]
+    fn messages_namespace_is_prefixed() {
+        assert_eq!(
+            super::messages_namespace_for("alice"),
+            "_messages/alice"
+        );
+        assert_eq!(
+            super::messages_namespace_for("ai:claude-opus-4.7"),
+            "_messages/ai:claude-opus-4.7"
+        );
     }
 
     #[test]
