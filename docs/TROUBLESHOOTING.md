@@ -264,10 +264,9 @@ index.
 **Fix**:
 
 - Aggressive `gc` + reduce retention on `short` tier.
-- Switch to `--features turboquant` for 4× embedding compression
-  (v0.7, opt-in).
 - Move to Postgres + pgvector for out-of-process index
-  (`--features sal-postgres`, v0.7).
+  (`--features sal-postgres`, v0.7) — the canonical answer at
+  100k+ memory scale.
 
 ## Governance
 

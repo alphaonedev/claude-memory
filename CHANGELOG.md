@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### Removed — TurboQuant embedding compression scrapped
+
+TurboQuant (Google Research, arXiv 2504.19874) was evaluated as an
+embedding-compression path for ai-memory (PRs #284 and #287). Both
+closed unmerged. The `alphaonedev/turboquant` fork was archived.
+Decision rationale: the ~2× embedding storage reduction at 4
+bit-width is irrelevant at ai-memory's target scale (<100k memories
+per deployment); beyond that, Postgres + pgvector (#279) is the right
+answer. The fork-maintenance + heavy-transitive-deps burden (ort,
+tokenizers, safetensors, burn) was not justified by the marginal
+gain. Real compression wins live elsewhere: Ollama KV compression
+(#288 runbook) for inference memory, Postgres + pgvector for native
+vector storage at scale, SQLCipher at rest (shipped) for data-at-rest
+protection.
+
 ### Added — world-class documentation sprint
 
 Seven new authoritative docs close the reference-material gaps in
@@ -24,8 +39,8 @@ the existing `docs/` tree:
   exposes, with payload shapes, query params, status codes, and
   `curl` recipes. 24+ endpoints.
 - **`docs/GLOSSARY.md`** — every concept (agent, tier, scope,
-  curator, quorum, SAL, TurboQuant, …) with single-paragraph
-  definitions and links to authoritative docs.
+  curator, quorum, SAL, …) with single-paragraph definitions and
+  links to authoritative docs.
 - **`docs/TROUBLESHOOTING.md`** — common errors (startup, MCP,
   autonomy, HTTP, sync, performance, governance) with root-cause
   analysis and fixes.

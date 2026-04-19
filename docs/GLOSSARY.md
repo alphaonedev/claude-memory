@@ -235,14 +235,6 @@ Token-efficient JSON alternative format (`toon.rs` module). 40–60%
 smaller than JSON for the same payload. Used optionally in MCP tool
 responses when `format: "toon"` or `"toon_compact"` is requested.
 
-## TurboQuant (v0.7)
-
-Extreme embedding compression algorithm from Google Research (arXiv
-2504.19874). Reduces 384-dim f32 embeddings from ~1.5 KB to tens of
-bytes at 4 bits/dim. Integrated via our maintained fork
-`alphaonedev/turboquant` behind `--features turboquant`. See
-`src/compress.rs` and the fork's `GAPS.md`.
-
 ## TTL (Time-To-Live)
 
 Seconds until a memory expires. Set by tier default or explicitly via
