@@ -495,6 +495,12 @@ pub struct AppConfig {
     /// Recall scoring — per-tier half-life for time-decay, and `legacy_scoring`
     /// kill switch (v0.6.0.0).
     pub scoring: Option<RecallScoringConfig>,
+    /// v0.6.0.0: when true, fire LLM autonomy hooks (`auto_tag` +
+    /// `detect_contradiction`) synchronously on every successful
+    /// `memory_store`. Off by default — the hook blocks store latency
+    /// behind an Ollama round-trip. `AI_MEMORY_AUTONOMOUS_HOOKS=1`
+    /// env var overrides the config file.
+    pub autonomous_hooks: Option<bool>,
 }
 
 /// Identity-resolution configuration (Task 1.2 follow-up #198).
@@ -588,6 +594,24 @@ impl AppConfig {
     /// Whether to archive memories before GC deletion (default: true).
     pub fn effective_archive_on_gc(&self) -> bool {
         self.archive_on_gc.unwrap_or(true)
+    }
+
+    /// Whether post-store autonomy hooks (`auto_tag` + `detect_contradiction`)
+    /// fire on every successful `memory_store`. v0.6.0.0.
+    /// Precedence: `AI_MEMORY_AUTONOMOUS_HOOKS=1` env var (truthy) >
+    /// config file > default false. `AI_MEMORY_AUTONOMOUS_HOOKS=0` also
+    /// honored for explicit-off.
+    pub fn effective_autonomous_hooks(&self) -> bool {
+        if let Ok(v) = std::env::var("AI_MEMORY_AUTONOMOUS_HOOKS") {
+            let v = v.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+            if matches!(v.as_str(), "0" | "false" | "no" | "off" | "") {
+                return false;
+            }
+        }
+        self.autonomous_hooks.unwrap_or(false)
     }
 
     /// Whether to anonymize the default `agent_id` fallback (Task 1.2 #198).

@@ -544,13 +544,21 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
 
 // --- Tool handlers ---
 
+/// Minimum content length (bytes) before the post-store autonomy hook
+/// will invoke LLM `auto_tag` / `detect_contradiction`. Below this the
+/// LLM round-trip cost exceeds the informational payoff.
+const AUTONOMY_MIN_CONTENT_LEN: usize = 50;
+
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn handle_store(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,
+    llm: Option<&OllamaClient>,
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,
+    autonomous_hooks: bool,
     mcp_client: Option<&str>,
 ) -> Result<Value, String> {
     let title = params["title"].as_str().ok_or("title is required")?;
@@ -747,6 +755,89 @@ fn handle_store(
         }
     }
 
+    // v0.6.0.0 post-store autonomy hooks. When enabled via
+    // `AI_MEMORY_AUTONOMOUS_HOOKS=1` or `autonomous_hooks = true` in
+    // config.toml AND an LLM is wired AND the content is long enough
+    // to be meaningfully taggable, fire `auto_tag` + `detect_contradiction`
+    // synchronously and persist the results into the memory's metadata.
+    // Best-effort: any LLM error is logged and does not fail the store.
+    // Skipped for internal/system namespaces to avoid feedback loops.
+    let mut auto_tags: Vec<String> = Vec::new();
+    let mut confirmed_contradictions: Vec<String> = Vec::new();
+    let hooks_skipped_reason: Option<&'static str> = if !autonomous_hooks {
+        Some("disabled")
+    } else if llm.is_none() {
+        Some("no_llm")
+    } else if mem.content.len() < AUTONOMY_MIN_CONTENT_LEN {
+        Some("content_too_short")
+    } else if mem.namespace.starts_with('_') {
+        Some("internal_namespace")
+    } else {
+        None
+    };
+    if hooks_skipped_reason.is_none()
+        && let Some(llm_client) = llm
+    {
+        match llm_client.auto_tag(&mem.title, &mem.content) {
+            Ok(tags) => {
+                auto_tags = tags.into_iter().take(8).collect();
+            }
+            Err(e) => {
+                tracing::warn!("auto_tag hook failed for {}: {}", &actual_id, e);
+            }
+        }
+        for cand in &existing {
+            if cand.id == actual_id || cand.id == mem.id {
+                continue;
+            }
+            match llm_client.detect_contradiction(&mem.content, &cand.content) {
+                Ok(true) => confirmed_contradictions.push(cand.id.clone()),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::warn!(
+                        "detect_contradiction hook failed ({actual_id} vs {}): {e}",
+                        cand.id
+                    );
+                }
+            }
+        }
+        // Persist hook results into metadata. Best-effort — a failed update
+        // here does not fail the store (the memory is already committed).
+        if !auto_tags.is_empty() || !confirmed_contradictions.is_empty() {
+            let mut updated_metadata = mem.metadata.clone();
+            if let Some(obj) = updated_metadata.as_object_mut() {
+                if !auto_tags.is_empty() {
+                    obj.insert("auto_tags".to_string(), json!(auto_tags));
+                }
+                if !confirmed_contradictions.is_empty() {
+                    obj.insert(
+                        "confirmed_contradictions".to_string(),
+                        json!(confirmed_contradictions),
+                    );
+                }
+            }
+            if let Err(e) = db::update(
+                conn,
+                &actual_id,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(&updated_metadata),
+            ) {
+                tracing::warn!(
+                    "autonomy-hook metadata update failed for {}: {}",
+                    &actual_id,
+                    e
+                );
+            }
+        }
+    }
+
     // #196: echo the resolved agent_id
     let mut response = json!({
         "id": actual_id,
@@ -757,6 +848,17 @@ fn handle_store(
     });
     if !contradiction_ids.is_empty() {
         response["potential_contradictions"] = json!(contradiction_ids);
+    }
+    if !auto_tags.is_empty() {
+        response["auto_tags"] = json!(auto_tags);
+    }
+    if !confirmed_contradictions.is_empty() {
+        response["confirmed_contradictions"] = json!(confirmed_contradictions);
+    }
+    if let Some(reason) = hooks_skipped_reason
+        && autonomous_hooks
+    {
+        response["autonomy_hook_skipped"] = json!(reason);
     }
     Ok(response)
 }
@@ -2052,6 +2154,7 @@ fn handle_request(
     resolved_ttl: &crate::config::ResolvedTtl,
     resolved_scoring: &crate::config::ResolvedScoring,
     archive_on_gc: bool,
+    autonomous_hooks: bool,
     mcp_client: Option<&str>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
@@ -2107,8 +2210,10 @@ fn handle_request(
                     conn,
                     arguments,
                     embedder,
+                    llm,
                     vector_index,
                     resolved_ttl,
+                    autonomous_hooks,
                     mcp_client,
                 ),
                 "memory_recall" => handle_recall(
@@ -2440,6 +2545,7 @@ pub fn run_mcp_server(
         let resolved_ttl = app_config.effective_ttl();
         let resolved_scoring = app_config.effective_scoring();
         let archive_on_gc = app_config.effective_archive_on_gc();
+        let autonomous_hooks = app_config.effective_autonomous_hooks();
         let resp = handle_request(
             &conn,
             db_path,
@@ -2452,6 +2558,7 @@ pub fn run_mcp_server(
             &resolved_ttl,
             &resolved_scoring,
             archive_on_gc,
+            autonomous_hooks,
             mcp_client_name.as_deref(),
         );
         let out = serde_json::to_string(&resp)?;
