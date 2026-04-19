@@ -2665,10 +2665,7 @@ mod tests {
 
     #[test]
     fn messages_namespace_is_prefixed() {
-        assert_eq!(
-            super::messages_namespace_for("alice"),
-            "_messages/alice"
-        );
+        assert_eq!(super::messages_namespace_for("alice"), "_messages/alice");
         assert_eq!(
             super::messages_namespace_for("ai:claude-opus-4.7"),
             "_messages/ai:claude-opus-4.7"
