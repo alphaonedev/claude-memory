@@ -36,8 +36,10 @@ name = "ai-memory"
 version = "0.6.0-alpha.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "axum-server",
+ "bitflags",
  "candle-core",
  "candle-nn",
  "candle-transformers",
@@ -57,6 +59,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
  "tokenizers",
  "tokio",
  "toml",
@@ -151,6 +154,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a3a1fd6f75306b68087b831f025c712524bcb19aad54e557b1129cfa0a2b207"
 dependencies = [
  "rustversion",
+]
+
+[[package]]
+name = "async-trait"
+version = "0.1.89"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

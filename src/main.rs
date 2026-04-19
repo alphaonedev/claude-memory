@@ -16,6 +16,8 @@ mod mcp;
 mod mine;
 mod models;
 mod reranker;
+#[cfg(feature = "sal")]
+mod store;
 mod toon;
 mod validate;
 

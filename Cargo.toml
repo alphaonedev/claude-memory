@@ -55,6 +55,23 @@ instant-distance = "0.6"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "native-tls"] }
 toml = "0.8"
 
+# v0.6.0.0 — Storage Abstraction Layer (SAL) deps. Gated behind the
+# `sal` feature so default builds don't pull them. `async-trait` is the
+# standard bridge for async methods on traits until stable Rust native
+# AFIT is adopted across the codebase. `bitflags` is the ecosystem
+# standard for `Capabilities`-style bitmask types. Both crates are
+# small, pure-Rust, MIT/Apache dual-licensed.
+async-trait = { version = "0.1", optional = true }
+bitflags = { version = "2", optional = true }
+thiserror = { version = "2", optional = true }
+
+# v0.6.0.0 — Storage Abstraction Layer feature gate. Off by default so
+# normal builds stay identical. `sal` pulls `async-trait` + `bitflags`
+# and compiles the `src/store/*` module tree. Future Postgres / LanceDB
+# adapters will layer on additional features (`sal-postgres`, etc.).
+[features]
+sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
+
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4"] }
