@@ -245,6 +245,19 @@ Still honest caveats:
 - Full suite on default features: 289 unit + 158 integration tests
   still green. fmt + clippy pedantic green.
 
+### Added — LadybugDB roadmap
+
+- **`docs/ROADMAP-ladybug.md`** — authoritative plan for integrating
+  LadybugDB (the `lbug` Rust crate) as a new `MemoryStore` SAL
+  adapter alongside `SqliteStore` and `PostgresStore`. Deliberately
+  **not** a 100% transition — the document explains why (AI-agnostic
+  value prop, SAL trait is the right seam, ~4000 LOC rewrite is
+  wrong shape). Phased plan: scaffold → migration tool support →
+  benchmark matrix → promotion decision gated on 6 hard
+  prerequisites. Maintenance posture (pinned SHA, monthly rebase,
+  upstream-first policy, scrap criteria) informed by the TurboQuant
+  scrap. Not shipping in v0.6.0.0; v0.7.1+ track.
+
 ### Added — Ollama KV-cache tuning runbook
 
 - **`docs/RUNBOOK-ollama-kv-tuning.md`** — operator-facing runbook
