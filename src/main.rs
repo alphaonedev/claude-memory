@@ -18,6 +18,7 @@ mod mcp;
 mod metrics;
 mod mine;
 mod models;
+mod replication;
 mod reranker;
 mod subscriptions;
 mod toon;

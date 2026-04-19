@@ -5,7 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.1 track
+## [Unreleased] — v0.6.1 + v0.7 tracks
+
+### Added — v0.7 quorum replication primitives (Track C PR 1)
+
+- **ADR-0001 — Quorum replication + chaos-testing methodology**
+  (`docs/ADR-0001-quorum-replication.md`). Full design doc covering the
+  W-of-N write-quorum model, failure modes, chaos-fault classes, and
+  the implementation phasing. Explicitly states that v0.7 will NOT
+  publish a "<0.01% loss" probability — instead it will publish a
+  convergence-bound report per chaos campaign.
+- **Quorum-write primitives** (`src/replication.rs`) — `QuorumPolicy`
+  (N / W / deadlines / clock-skew threshold), `AckTracker` (collects
+  local commit + peer acks, surfaces timeouts + id-drift), typed
+  `QuorumError`. Pure-logic, I/O-free so unit tests don't need a live
+  peer mesh.
+- **12 unit tests** covering: single-node degenerate case,
+  majority-default, W clamping, peer ack deduplication, deadline
+  expiry reporting Unreachable vs Timeout, id-drift handling,
+  Error trait participation.
+
+### Added — v0.6.1 curator daemon (Track A)
 
 ### Added
 - **Autonomous curator daemon** — new `ai-memory curator` subcommand with
