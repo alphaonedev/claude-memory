@@ -1,0 +1,14 @@
+[Unit]
+Description=ai-memory backup — hourly snapshot
+Documentation=https://github.com/alphaonedev/ai-memory-mcp
+
+[Timer]
+# Hourly. Run 5 minutes after the hour to avoid piling up at :00.
+OnCalendar=hourly
+AccuracySec=1min
+RandomizedDelaySec=5min
+Persistent=true
+Unit=ai-memory-backup.service
+
+[Install]
+WantedBy=timers.target

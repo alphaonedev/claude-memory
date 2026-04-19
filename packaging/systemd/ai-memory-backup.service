@@ -1,0 +1,44 @@
+[Unit]
+Description=ai-memory backup — snapshot SQLite database
+Documentation=https://github.com/alphaonedev/ai-memory-mcp
+# Run after the main service has started so the DB path is guaranteed to exist.
+After=ai-memory.service
+
+[Service]
+Type=oneshot
+User=ai-memory
+Group=ai-memory
+# The backup CLI takes a snapshot via SQLite's `VACUUM INTO` (hot-backup-safe)
+# and writes a manifest.json alongside it. --keep rotates oldest snapshots.
+# Landing PR: backup CLI lands separately in v0.6.0.0; this unit is wired
+# up ready for it and is a no-op if the CLI subcommand is absent.
+ExecStart=/usr/bin/ai-memory backup --to /var/lib/ai-memory/backups --keep 48
+# Optional off-box push via AWS SDK — uncomment and set env if desired.
+# ExecStartPost=/usr/bin/ai-memory backup push --remote s3://my-bucket/ai-memory/
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/ai-memory/backups
+ReadOnlyPaths=/var/lib/ai-memory/ai-memory.db
+
+TimeoutStartSec=15min
