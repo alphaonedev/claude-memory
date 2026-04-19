@@ -66,6 +66,9 @@ authoritative for its topic; this page is just the map.
   W-of-N quorum write model + chaos-testing methodology.
 - **[PHASE-1.md](PHASE-1.md)** — upcoming memory schema / hierarchy
   changes, governance roadmap.
+- **[ROADMAP-ladybug.md](ROADMAP-ladybug.md)** — LadybugDB as a
+  v0.7.1+ SAL adapter (deliberately not a 100% transition). Phased
+  plan with a benchmark-gated promotion decision.
 
 ## SDKs
 
