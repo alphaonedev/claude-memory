@@ -27,6 +27,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ai_memory_curator_operations_total{kind,result}`,
   `ai_memory_curator_cycle_duration_seconds{dry_run}`.
 
+### Added — full autonomy loop (earning the "100% autonomous" claim)
+
+Builds on Track A's curator with the four passes required to make the
+"100% autonomous" claim honest:
+
+- **Autonomous consolidation** — the curator scans each namespace for
+  near-duplicate memories (Jaccard keyword overlap ≥ 0.55 on a
+  token-length-≥3 bag), clusters up to 8 members per group, calls
+  `LLM.summarize_memories`, and commits the consolidated memory via
+  the existing `db::consolidate` transaction. Source memories are
+  archived, not lost.
+- **Autonomous forgetting of superseded memories** — when a memory's
+  `metadata.confirmed_contradictions` points at a newer, equal- or
+  higher-confidence memory, the curator archives the stale one.
+  Confidence + freshness BOTH required — never forgets on detection
+  alone.
+- **Priority feedback** — memories with `access_count ≥ 10` and a
+  recall in the last 7 days get priority +1 (cap 10); memories cold
+  for 30+ days drop priority -1 (floor 1). Arithmetic only; no LLM.
+- **Rollback log** — every autonomous action (consolidate, forget,
+  priority-adjust) writes a `RollbackEntry` memory into
+  `_curator/rollback/<ts>` carrying the pre-action snapshot. Reversible
+  via `ai-memory curator --rollback <id>` or `--rollback-last N`.
+  Once reversed, the log memory is tagged `_reversed` — the history
+  itself is preserved as an audit trail.
+- **Self-report** — at the end of every cycle the curator writes its
+  own `CuratorReport` as a memory in `_curator/reports/<ts>`. Agents
+  can recall "what did the curator do yesterday" using the ordinary
+  `memory_recall` path.
+
+### Testing — end-to-end autonomy coverage
+
+- `AutonomyLlm` trait introduced as the narrow LLM surface the passes
+  need; `OllamaClient` impls it in prod, `StubLlm` stubs it in tests.
+- 10 unit tests in `src/autonomy.rs` including a full
+  `full_autonomy_cycle_end_to_end` that seeds duplicates + a
+  superseded pair, runs `run_autonomy_passes`, and asserts that
+  clusters were formed, memories forgotten, rollback entries written,
+  and the rollback-log namespace populated.
+- `reverse_consolidation_restores_originals` verifies the undo path
+  by consolidating two memories, rolling back, and asserting both
+  originals are back and the merged memory is gone.
+
+### Honest-claim note
+
+v0.6.1 earns the **"fully-autonomous curator loop"** claim: the
+system can tag, consolidate, forget, rebalance priority, report on
+itself, and reverse any of its own actions — without human input.
+It does **not** yet claim multi-agent autonomy across a federation
+(that's Track C) or cross-backend autonomy (that's Track B).
+"100% autonomous" without those caveats would still be overclaiming.
+
 ## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint
 
 Phase 1 baseline (Tasks 1.1–1.12 from alpha train) plus the v0.6.0.0 sprint

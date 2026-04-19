@@ -73,7 +73,7 @@ impl Default for CuratorConfig {
 /// Structured report produced by a single curator cycle. Serialises
 /// cleanly to JSON for CLI output, systemd journald, or Prometheus
 /// text-format conversion.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CuratorReport {
     pub started_at: String,
     pub completed_at: String,
@@ -84,6 +84,11 @@ pub struct CuratorReport {
     pub contradictions_found: usize,
     pub operations_attempted: usize,
     pub operations_skipped_cap: usize,
+    /// v0.6.1 autonomy passes — consolidation, forget-superseded,
+    /// priority feedback, rollback-log. All zero when autonomy is not
+    /// enabled or not reached for this cycle.
+    #[serde(default)]
+    pub autonomy: crate::autonomy::AutonomyPassReport,
     pub errors: Vec<String>,
     pub dry_run: bool,
 }
@@ -94,15 +99,8 @@ impl CuratorReport {
         Self {
             started_at: now.clone(),
             completed_at: now,
-            cycle_duration_ms: 0,
-            memories_scanned: 0,
-            memories_eligible: 0,
-            auto_tagged: 0,
-            contradictions_found: 0,
-            operations_attempted: 0,
-            operations_skipped_cap: 0,
-            errors: Vec::new(),
             dry_run,
+            ..Self::default()
         }
     }
 }
@@ -190,8 +188,38 @@ pub fn run_once(
         }
     }
 
+    // v0.6.1 autonomy passes — consolidate, forget-superseded, priority
+    // feedback, rollback-log. Only run when the LLM is available
+    // (otherwise run_once would have early-returned already).
+    let autonomy_candidates: Vec<crate::models::Memory> = candidates
+        .iter()
+        .filter(|m| needs_curation(m, cfg))
+        .cloned()
+        .collect();
+    let pass_report =
+        crate::autonomy::run_autonomy_passes(conn, llm_client, &autonomy_candidates, cfg.dry_run);
+    report.errors.extend(pass_report.errors.clone());
+    report.autonomy = pass_report;
+
     report.completed_at = chrono::Utc::now().to_rfc3339();
     report.cycle_duration_ms = started.elapsed().as_millis();
+
+    // Self-report: write the cycle's outcome as a memory in
+    // _curator/reports. Never runs in dry-run (we must not touch the
+    // DB there). Best-effort — a failure here gets logged but does
+    // not fail the cycle.
+    if !cfg.dry_run
+        && let Err(e) = crate::autonomy::persist_self_report(
+            conn,
+            report.cycle_duration_ms,
+            &report.autonomy,
+            report.auto_tagged,
+            report.contradictions_found,
+            report.errors.len(),
+        )
+    {
+        tracing::warn!("self-report persist failed: {e}");
+    }
 
     crate::metrics::curator_cycle_completed(
         report.operations_attempted,

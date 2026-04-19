@@ -3,6 +3,7 @@
 
 #![recursion_limit = "256"]
 
+mod autonomy;
 mod color;
 mod config;
 mod curator;
@@ -199,6 +200,15 @@ struct CuratorArgs {
     /// Print the report as JSON rather than a human-readable summary.
     #[arg(long)]
     json: bool,
+    /// Reverse rollback-log entries instead of running a sweep. Accepts
+    /// a specific rollback-memory id, or `--last N` for the most recent.
+    /// Mutually exclusive with `--once` and `--daemon`.
+    #[arg(long, conflicts_with_all = ["once", "daemon"])]
+    rollback: Option<String>,
+    /// With `--rollback`, reverse the N most recent rollback-log entries
+    /// instead of a single id.
+    #[arg(long)]
+    rollback_last: Option<usize>,
 }
 
 #[derive(Args)]
@@ -3955,8 +3965,12 @@ async fn cmd_curator(
     args: &CuratorArgs,
     app_config: &config::AppConfig,
 ) -> Result<()> {
+    if args.rollback.is_some() || args.rollback_last.is_some() {
+        return cmd_curator_rollback(db_path, args);
+    }
+
     if !args.once && !args.daemon {
-        anyhow::bail!("curator requires either --once or --daemon");
+        anyhow::bail!("curator requires --once, --daemon, --rollback <id>, or --rollback-last N");
     }
 
     let cfg = curator::CuratorConfig {
@@ -3999,6 +4013,90 @@ async fn cmd_curator(
     .await
     .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
     Ok(())
+}
+
+fn cmd_curator_rollback(db_path: &Path, args: &CuratorArgs) -> Result<()> {
+    let conn = db::open(db_path)?;
+
+    if let Some(id) = &args.rollback {
+        let Some(mem) = db::get(&conn, id)? else {
+            anyhow::bail!("rollback entry {id} not found");
+        };
+        let entry: autonomy::RollbackEntry = serde_json::from_str(&mem.content)
+            .context("rollback entry content is not a valid RollbackEntry JSON")?;
+        let applied = autonomy::reverse_rollback_entry(&conn, &entry)?;
+        // Mark the log entry as reversed by appending a tag. We don't
+        // delete the log memory — its history is the audit trail.
+        let mut tags = mem.tags.clone();
+        if !tags.iter().any(|t| t == "_reversed") {
+            tags.push("_reversed".to_string());
+            db::update(
+                &conn,
+                &mem.id,
+                None,
+                None,
+                None,
+                None,
+                Some(&tags),
+                None,
+                None,
+                None,
+                None,
+            )?;
+        }
+        println!(
+            "rollback {id}: {}",
+            if applied { "applied" } else { "no-op" }
+        );
+        return Ok(());
+    }
+
+    if let Some(n) = args.rollback_last {
+        let log = db::list(
+            &conn,
+            Some("_curator/rollback"),
+            None,
+            n.max(1),
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )?;
+        let mut reversed = 0usize;
+        for mem in &log {
+            if mem.tags.iter().any(|t| t == "_reversed") {
+                continue;
+            }
+            let Ok(entry) = serde_json::from_str::<autonomy::RollbackEntry>(&mem.content) else {
+                continue;
+            };
+            let applied = autonomy::reverse_rollback_entry(&conn, &entry)?;
+            if applied {
+                reversed += 1;
+                let mut tags = mem.tags.clone();
+                tags.push("_reversed".to_string());
+                db::update(
+                    &conn,
+                    &mem.id,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(&tags),
+                    None,
+                    None,
+                    None,
+                    None,
+                )?;
+            }
+        }
+        println!("reversed {reversed} rollback entries");
+        return Ok(());
+    }
+
+    unreachable!("cmd_curator_rollback entered without --rollback or --rollback-last");
 }
 
 fn build_curator_llm(tier: config::FeatureTier) -> Option<llm::OllamaClient> {
