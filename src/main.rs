@@ -20,6 +20,8 @@ mod mine;
 mod models;
 mod replication;
 mod reranker;
+#[cfg(feature = "sal")]
+mod store;
 mod subscriptions;
 mod toon;
 mod validate;

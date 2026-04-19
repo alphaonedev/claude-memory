@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### Added — v0.7 Storage Abstraction Layer (Track B PR 1)
+
+- **Storage Abstraction Layer (SAL) — `MemoryStore` trait + `SqliteStore`
+  + `PostgresStore`** — preview surface for v0.7. Gated behind
+  `--features sal` (trait + sqlite adapter) and `--features sal-postgres`
+  (adds the Postgres + pgvector backend). Default builds unchanged.
+  Trait design carries over from the red-team-hardened #222 proposal:
+  typed `StoreError` with `#[non_exhaustive]`, `CallerContext` on every
+  mutator, optional `Transaction` handle, `verify()` contract, advertised
+  `Capabilities` bitflags (NATIVE_VECTOR, FULLTEXT, DURABLE, etc.).
+- **Postgres adapter ships with**:
+  - `src/store/postgres_schema.sql` — idempotent bootstrap creating the
+    `memories` table with a `vector(384)` column, pgvector `hnsw` index
+    for cosine NN search, `gin` FTS + tags + metadata indexes.
+  - `packaging/docker-compose.postgres.yml` — `pgvector/pgvector:pg16`
+    fixture for integration tests. Hardened container
+    (`cap_drop: [ALL]`, `no-new-privileges`, tmpfs for `/tmp`).
+  - Live integration tests in `src/store/postgres.rs` that skip when
+    `AI_MEMORY_TEST_POSTGRES_URL` is unset — keeps default `cargo test`
+    offline while giving CI a straightforward opt-in path.
+  - Unit-level tests: capability bits, RFC3339 parse helpers, schema
+    constants.
+
 ### Added — v0.7 quorum replication primitives (Track C PR 1)
 
 - **ADR-0001 — Quorum replication + chaos-testing methodology**

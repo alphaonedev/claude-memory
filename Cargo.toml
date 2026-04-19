@@ -61,6 +61,24 @@ toml = "0.8"
 # text/plain`). Per sprint authorization #260.
 prometheus = { version = "0.13", default-features = false }
 
+# v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
+# feature so default builds don't pull them. `async-trait` is the
+# standard bridge for async methods on traits until stable Rust native
+# AFIT is adopted across the codebase. `bitflags` is the ecosystem
+# standard for `Capabilities`-style bitmask types. `thiserror` gives
+# us the typed `StoreError` the red-team asked for on #222. All three
+# are small, pure-Rust, MIT/Apache dual-licensed.
+async-trait = { version = "0.1", optional = true }
+bitflags = { version = "2", optional = true }
+thiserror = { version = "2", optional = true }
+
+# v0.7 — PostgresStore adapter deps. Gated behind `sal-postgres` which
+# depends on the base `sal` feature. `sqlx` is the async Postgres driver
+# (native rustls, no OpenSSL). `pgvector` is the official binding for
+# the `vector` type used by the hybrid-recall path.
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+pgvector = { version = "0.4", optional = true, features = ["sqlx"] }
+
 # v0.6.0.0 — SQLite variant selection. Default builds the standard
 # bundled SQLite (matching pre-v0.6.0.0 behavior byte-for-byte). The
 # `sqlcipher` feature swaps the underlying DB to SQLCipher (SQLite +
@@ -72,6 +90,10 @@ prometheus = { version = "0.13", default-features = false }
 default = ["sqlite-bundled"]
 sqlite-bundled = ["rusqlite/bundled"]
 sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+# v0.7 — Storage Abstraction Layer. `sal` brings in the trait + SqliteStore
+# adapter. `sal-postgres` layers on the Postgres/pgvector backend.
+sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
+sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
