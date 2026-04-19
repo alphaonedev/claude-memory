@@ -1,5 +1,5 @@
 Name:           ai-memory
-Version:        0.5.4.4
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        AI-agnostic persistent memory system — MCP server, HTTP API, and CLI
 ExclusiveArch:  x86_64 aarch64
@@ -36,6 +36,20 @@ install -m 0755 ai-memory %{buildroot}%{_bindir}/ai-memory
 %{_bindir}/ai-memory
 
 %changelog
+* Sun Apr 19 2026 AlphaOne LLC <alphaonedev@users.noreply.github.com> - 0.6.0-1
+- Phase 1 complete: schema metadata, agent identity (NHI),
+  agent registration, scope-based visibility, namespace standards,
+  vertical promotion, horizontal forget, governance + consensus,
+  pending-action approvals, budget-aware recall, hierarchy-aware recall
+- Peer-mesh sync-daemon with vector clocks
+- Native TLS + mTLS allowlist (Layer 1 + 2)
+- v0.6.0.0 sprint: time-decay half-life, contextual recall,
+  post-store LLM autonomy hooks, TS + Python SDK scaffolds,
+  hardened systemd units
+- 23 MCP tools, 24+ HTTP endpoints, 26+ CLI commands
+- Mandatory disclosures (CHANGELOG.md): consensus breaking change (#234),
+  sync-endpoint TLS requirement (#231), mTLS trust boundary (#239)
+
 * Sun Apr 13 2026 AlphaOne LLC <alphaonedev@users.noreply.github.com> - 0.5.4.4-1
 - Three-level rule layering (global + parent + namespace)
 - License migrated from MIT to Apache-2.0

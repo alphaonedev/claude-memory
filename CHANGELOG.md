@@ -5,7 +5,106 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.0 GA disclosures
+## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint
+
+Phase 1 baseline (Tasks 1.1–1.12 from alpha train) plus the v0.6.0.0 sprint
+additions covering opt-in LLM autonomy hooks, decay-aware recall, multi-agent
+messaging primitives, at-rest encryption, ops surfaces, and SDK scaffolds.
+
+Defer-outs from this release (not shipped in 0.6.0):
+
+- **Autonomous curator daemon** — continuous background consolidation / GC
+  driven by LLM decisions. Deferred to v0.6.1. v0.6.0 ships only the
+  opt-in post-store hooks (synchronous, store path only).
+- **Multi-node replication + chaos testing** — durability claims beyond
+  single-node VACUUM INTO snapshots + optional peer sync are out of scope
+  for v0.6.0. No loss-probability target is published.
+- **Storage abstraction layer (Postgres / pgvector adapter)** — remains a
+  v0.7 track. v0.6.0 is SQLite-only; the SAL preview on `feat/sal-trait-redesign`
+  stays private/feature-gated until v0.7 extraction.
+
+### Added — v0.6.0.0 sprint (autonomy hooks + multi-agent + at-rest + ops + SDKs)
+
+**Autonomy / recall**
+- **Time-decay half-life on recall scoring** — per-tier exponential decay
+  multiplier on the hybrid-recall score blend. Default half-lives: short
+  7 d, mid 30 d, long 365 d. Configurable via `[scoring]` in `config.toml`;
+  `legacy_scoring = true` disables decay for A/B comparison and regression
+  rollback. Half-lives clamped to `[0.1, 36500]` days.
+- **Contextual recall (conversation-token bias)** — `memory_recall` accepts
+  an optional `context_tokens: array<string>`. When supplied, the primary
+  query embedding is fused 70/30 with an embedding of the joined context
+  tokens, biasing recall toward memories that match both the explicit
+  query AND nearby conversation topics. CLI: `--context-tokens tok1,tok2`.
+- **Post-store LLM autonomy hooks** — opt-in synchronous hooks that fire
+  `llm::auto_tag` + `llm::detect_contradiction` on every successful
+  `memory_store`. Results persist into `metadata.auto_tags` and
+  `metadata.confirmed_contradictions`. Enabled via
+  `AI_MEMORY_AUTONOMOUS_HOOKS=1` env var or `autonomous_hooks = true` in
+  config. Off by default (adds Ollama round-trip latency). Skipped for
+  content under 50 bytes, when no LLM is wired, and for `_`-prefixed
+  internal namespaces.
+**Multi-agent primitives**
+- **Agent-to-agent notify + inbox** — `memory_notify(target, title, payload)`
+  + `memory_inbox([agent_id, unread_only])` MCP tools. Messages are
+  ordinary memories in the reserved `_messages/<target>` namespace;
+  sender identity stamped in metadata; `access_count == 0` is the
+  conventional unread marker. No new schema.
+- **Webhook subscribe / unsubscribe / list** — `memory_subscribe` +
+  `memory_unsubscribe` + `memory_list_subscriptions` MCP tools. Events
+  fire on `memory_store` (v0.6.1 extends to delete/promote/link) and
+  POST an HMAC-SHA256-signed JSON payload to subscriber URLs
+  (`X-Ai-Memory-Signature: sha256=<hex>`). SSRF-hardened — private-range
+  IPs rejected, https required for non-loopback hosts. Migration v13
+  adds the `subscriptions` table.
+**At-rest encryption**
+- **Optional SQLCipher encryption at rest** — new cargo feature
+  `sqlcipher` swaps `rusqlite` to the
+  `bundled-sqlcipher-vendored-openssl` feature. Default builds are
+  byte-for-byte unchanged. Operators who want encryption build with
+  `cargo build --no-default-features --features sqlcipher` and supply
+  `--db-passphrase-file <path>` at startup. Passphrase never appears
+  in the process list or shell history.
+
+**Ops**
+- **Prometheus `/metrics` endpoint** (and `/api/v1/metrics`) exposes
+  `ai_memory_store_total`, `ai_memory_recall_total`,
+  `ai_memory_recall_latency_seconds`, `ai_memory_autonomy_hook_total`,
+  `ai_memory_contradiction_detected_total`,
+  `ai_memory_webhook_dispatched_total`,
+  `ai_memory_webhook_failed_total`, `ai_memory_memories`,
+  `ai_memory_hnsw_size`, `ai_memory_subscriptions_active`. Pure Rust,
+  no new transitive C deps.
+- **Hardened systemd units** under `packaging/systemd/` —
+  `ai-memory.service`, `ai-memory-sync.service`,
+  `ai-memory-backup.service`, `ai-memory-backup.timer` with README.
+  Full sandbox (`ProtectSystem=strict`, `MemoryDenyWriteExecute=yes`,
+  `SystemCallFilter=@system-service`, `CapabilityBoundingSet=` empty,
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`). Target
+  `systemd-analyze security` exposure score <5.0.
+- **Backup / restore CLI** — `ai-memory backup --to <dir> [--keep N]`
+  writes a hot-backup-safe SQLite `VACUUM INTO` snapshot plus a
+  sha256 manifest. `ai-memory restore --from <path>` verifies the
+  manifest before replacing the current DB; previous DB is moved
+  aside to `<db>.pre-restore-<ts>.db` as a safety net. Paired with
+  the hourly `ai-memory-backup.timer` systemd unit.
+
+**SDKs**
+- **TypeScript SDK scaffold** under `sdk/typescript/` —
+  `@alphaone/ai-memory` (v0.6.0-alpha.0), strict TS, undici-based
+  fetch, covers all current + v0.6.0.0 target endpoints (18+ methods),
+  Jest tests guarded by `AI_MEMORY_TEST_DAEMON` env var. Includes
+  HMAC-SHA256 webhook verifier. Not yet published to npm.
+- **Python SDK scaffold** under `sdk/python/` — `ai-memory`
+  (v0.6.0-alpha.0), sync (`AiMemoryClient`) + async
+  (`AsyncAiMemoryClient`) clients via `httpx`, Pydantic v2 models
+  (15/15 Memory fields), exception hierarchy, HMAC-SHA256 webhook
+  verifier. Not yet published to PyPI.
+
+### v0.6.0 GA disclosures (unchanged from pre-sprint baseline)
+
+The following items are **MANDATORY DISCLOSURES** for the v0.6.0 release.
+Operators upgrading from v0.5.4.x MUST read this section before deploying.
 
 The following items are **MANDATORY DISCLOSURES** for the v0.6.0 GA release.
 Operators upgrading from v0.5.4.x MUST read this section before deploying.
