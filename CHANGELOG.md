@@ -168,6 +168,17 @@ Still honest caveats:
   you still need to stop writes on the source, migrate, and restart
   against the destination — documented in the module docblock.
 
+## [Unreleased] — Ollama KV-cache tuning runbook
+
+### Added
+
+- **`docs/RUNBOOK-ollama-kv-tuning.md`** — operator-facing runbook
+  for enabling `OLLAMA_KV_CACHE_TYPE=q4_0` + `OLLAMA_FLASH_ATTENTION=1`
+  on Ollama. Delivers 2–4× KV-cache memory reduction on every
+  ai-memory LLM path with near-lossless quality. Zero ai-memory
+  code changes. Distinct from the TurboQuant embedding-compression
+  path (see `#287` / `src/compress.rs`).
+
 ## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint
 
 Phase 1 baseline (Tasks 1.1–1.12 from alpha train) plus the v0.6.0.0 sprint
