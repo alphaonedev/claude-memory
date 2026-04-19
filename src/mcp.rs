@@ -486,6 +486,40 @@ fn tool_definitions() -> Value {
                         "limit": {"type": "integer", "default": 50, "maximum": 500}
                     }
                 }
+            },
+            {
+                "name": "memory_subscribe",
+                "description": "v0.6.0.0 — register a webhook subscription. Events fire on memory_store today and additional events in v0.6.1+. Payload is a JSON body signed with HMAC-SHA256 when a secret is supplied (header: X-Ai-Memory-Signature: sha256=<hex>). URL must be https unless the host is a loopback address. The shared secret is stored hashed only; the plaintext the operator supplies is what they verify signatures with.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "url": {"type": "string", "description": "https:// endpoint (or http:// for loopback). SSRF guard rejects private-range IPs."},
+                        "events": {"type": "string", "default": "*", "description": "Comma-separated event whitelist or `*` for all. Known events: memory_store, memory_delete, memory_promote."},
+                        "secret": {"type": "string", "description": "Optional shared secret for HMAC signing. If omitted, payload is unsigned."},
+                        "namespace_filter": {"type": "string", "description": "Optional exact namespace match."},
+                        "agent_filter": {"type": "string", "description": "Optional agent_id filter — only events whose stored agent_id matches this value will fire."}
+                    },
+                    "required": ["url"]
+                }
+            },
+            {
+                "name": "memory_unsubscribe",
+                "description": "v0.6.0.0 — delete a subscription by id.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"}
+                    },
+                    "required": ["id"]
+                }
+            },
+            {
+                "name": "memory_list_subscriptions",
+                "description": "v0.6.0.0 — list active webhook subscriptions. Secrets are not exposed; only `secret_hash` is stored and even that is not returned.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
             }
         ]
     })
@@ -581,6 +615,7 @@ const AUTONOMY_MIN_CONTENT_LEN: usize = 50;
 #[allow(clippy::too_many_arguments)]
 fn handle_store(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     embedder: Option<&Embedder>,
     llm: Option<&OllamaClient>,
@@ -865,6 +900,18 @@ fn handle_store(
             }
         }
     }
+
+    // v0.6.0.0: fire webhook subscribers on successful store. Best-effort
+    // fire-and-forget — each subscriber gets its own OS thread; the
+    // response here does not wait on any webhook dispatch.
+    crate::subscriptions::dispatch_event(
+        conn,
+        "memory_store",
+        &actual_id,
+        &mem.namespace,
+        Some(&agent_id),
+        db_path,
+    );
 
     // #196: echo the resolved agent_id
     let mut response = json!({
@@ -2159,6 +2206,57 @@ fn handle_inbox(
     }))
 }
 
+// --- v0.6.0.0 webhook subscriptions ---------------------------------------
+
+fn handle_subscribe(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    let url = params["url"].as_str().ok_or("url is required")?;
+    let events = params["events"].as_str().unwrap_or("*");
+    let secret = params["secret"].as_str();
+    let namespace_filter = params["namespace_filter"].as_str();
+    let agent_filter = params["agent_filter"].as_str();
+    let created_by =
+        crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
+
+    crate::subscriptions::validate_url(url).map_err(|e| e.to_string())?;
+
+    let id = crate::subscriptions::insert(
+        conn,
+        &crate::subscriptions::NewSubscription {
+            url,
+            events,
+            secret,
+            namespace_filter,
+            agent_filter,
+            created_by: Some(&created_by),
+        },
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "id": id,
+        "url": url,
+        "events": events,
+        "namespace_filter": namespace_filter,
+        "agent_filter": agent_filter,
+        "created_by": created_by,
+    }))
+}
+
+fn handle_unsubscribe(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let id = params["id"].as_str().ok_or("id is required")?;
+    let removed = crate::subscriptions::delete(conn, id).map_err(|e| e.to_string())?;
+    Ok(json!({"id": id, "removed": removed}))
+}
+
+fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
+    let subs = crate::subscriptions::list(conn).map_err(|e| e.to_string())?;
+    Ok(json!({"count": subs.len(), "subscriptions": subs}))
+}
+
 fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let status = params["status"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
@@ -2400,6 +2498,7 @@ fn handle_request(
             let result = match tool_name {
                 "memory_store" => handle_store(
                     conn,
+                    db_path,
                     arguments,
                     embedder,
                     llm,
@@ -2453,6 +2552,9 @@ fn handle_request(
                 "memory_agent_list" => handle_agent_list(conn),
                 "memory_notify" => handle_notify(conn, arguments, resolved_ttl, mcp_client),
                 "memory_inbox" => handle_inbox(conn, arguments, mcp_client),
+                "memory_subscribe" => handle_subscribe(conn, arguments, mcp_client),
+                "memory_unsubscribe" => handle_unsubscribe(conn, arguments),
+                "memory_list_subscriptions" => handle_list_subscriptions(conn),
                 _ => Err(format!("unknown tool: {tool_name}")),
             };
 
@@ -2771,11 +2873,13 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_33_tools() {
-        // v0.6.0.0 added memory_notify + memory_inbox (was 31 in v0.6.0).
+    fn tool_definitions_returns_36_tools() {
+        // v0.6.0.0 adds memory_notify + memory_inbox + memory_subscribe
+        // + memory_unsubscribe + memory_list_subscriptions on top of the
+        // 31 baseline.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 33);
+        assert_eq!(tools.len(), 36);
     }
 
     #[test]

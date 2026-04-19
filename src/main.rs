@@ -17,6 +17,7 @@ mod metrics;
 mod mine;
 mod models;
 mod reranker;
+mod subscriptions;
 mod toon;
 mod validate;
 

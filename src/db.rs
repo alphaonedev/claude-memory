@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 12;
+const CURRENT_SCHEMA_VERSION: i64 = 13;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -443,6 +443,35 @@ fn migrate(conn: &Connection) -> Result<()> {
             if !has_last_pushed {
                 conn.execute("ALTER TABLE sync_state ADD COLUMN last_pushed_at TEXT", [])?;
             }
+        }
+
+        if version < 13 {
+            // v0.6.0.0 — webhook subscriptions. Events fire on memory_store
+            // (and, in v0.6.1, delete/promote/link) and are dispatched as
+            // HMAC-SHA256-signed POSTs to subscriber URLs. `events` is a
+            // comma-separated whitelist; `*` = all current + future events.
+            // `secret_hash` stores a SHA-256 of the operator-supplied
+            // shared secret — the plaintext never lands in the DB.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS subscriptions (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    events TEXT NOT NULL DEFAULT '*',
+                    secret_hash TEXT,
+                    namespace_filter TEXT,
+                    agent_filter TEXT,
+                    created_by TEXT,
+                    created_at TEXT NOT NULL,
+                    last_dispatched_at TEXT,
+                    dispatch_count INTEGER NOT NULL DEFAULT 0,
+                    failure_count INTEGER NOT NULL DEFAULT 0
+                )",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_subscriptions_url ON subscriptions(url)",
+                [],
+            )?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
