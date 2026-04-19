@@ -122,6 +122,52 @@ It does **not** yet claim multi-agent autonomy across a federation
 (that's Track C) or cross-backend autonomy (that's Track B).
 "100% autonomous" without those caveats would still be overclaiming.
 
+### Added — cross-backend migration (Track B PR 2)
+
+- **`ai-memory migrate --from <url> --to <url>`** CLI subcommand,
+  gated behind `--features sal`. Supported URL shapes:
+  - `sqlite:///absolute/path.db` / `sqlite://./relative.db` → `SqliteStore`
+  - `postgres://user:pass@host:port/db` → `PostgresStore`
+    (only under `--features sal-postgres`)
+- Reads pages via `MemoryStore::list`, writes via `MemoryStore::store`.
+  **Idempotent on re-run** — source ids are preserved verbatim and
+  both adapters upsert on id.
+- `--batch N` (1..10 000, default 1000), `--namespace <ns>` filter,
+  `--dry-run`, `--json` for machine-readable reports.
+- **6 unit tests**: sqlite URL parsing, unknown-scheme rejection,
+  sqlite→sqlite full-roundtrip, dry-run writes nothing, idempotent
+  re-run, namespace filter.
+- Pagination strategy: slides `until` window backwards with dedup by
+  id — handles identical `created_at` timestamps that break naïve
+  `since`-cursor paging on SQLite.
+
+### What's still out of scope for v0.7-alpha
+
+Explicitly deferred to v0.7.1 (noted in `src/migrate.rs` docblock):
+
+- **Daemon-level adapter selection** (`ai-memory serve --store-url
+  postgres://…`) — requires refactoring `handlers.rs` from
+  `crate::db::` free functions to dispatch through
+  `Box<dyn MemoryStore>`. That's a big change and belongs in its
+  own PR.
+- **Live dual-write** — reverse migration (pg → sqlite) works using
+  the same command but there is no always-on replication between
+  heterogenous backends yet.
+- **Schema rewriting** — both adapters currently agree on the
+  `Memory` shape so no field mapping is needed.
+
+### Cross-backend-autonomy claim now earned
+
+v0.7-alpha earns: **"one-shot migration between SQLite and
+Postgres/pgvector, bidirectional, idempotent"**.
+
+Still honest caveats:
+- A production deployment running `ai-memory serve` against Postgres
+  as the live store needs v0.7.1's adapter-selection refactor.
+- The migration is file-level point-in-time. For zero-downtime cutover
+  you still need to stop writes on the source, migrate, and restart
+  against the destination — documented in the module docblock.
+
 ## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint
 
 Phase 1 baseline (Tasks 1.1–1.12 from alpha train) plus the v0.6.0.0 sprint
