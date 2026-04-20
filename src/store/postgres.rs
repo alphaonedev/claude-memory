@@ -15,36 +15,19 @@
 //! `vector(768)` (tooling for that will land with the migration helper
 //! in a follow-up).
 //!
-//! ```sql
-//! CREATE EXTENSION IF NOT EXISTS vector;
+//! The full schema — parity with the SQLite backend including
+//! memories, memory_links, archived_memories, namespace_meta,
+//! pending_actions, sync_state, subscriptions — lives at
+//! `src/store/postgres_schema.sql`.
 //!
-//! CREATE TABLE IF NOT EXISTS memories (
-//!     id            TEXT PRIMARY KEY,
-//!     tier          TEXT NOT NULL,
-//!     namespace     TEXT NOT NULL,
-//!     title         TEXT NOT NULL,
-//!     content       TEXT NOT NULL,
-//!     tags          JSONB NOT NULL DEFAULT '[]'::jsonb,
-//!     priority      INTEGER NOT NULL DEFAULT 5,
-//!     confidence    DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-//!     source        TEXT NOT NULL,
-//!     access_count  BIGINT NOT NULL DEFAULT 0,
-//!     created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//!     updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-//!     last_accessed_at TIMESTAMPTZ,
-//!     expires_at    TIMESTAMPTZ,
-//!     metadata      JSONB NOT NULL DEFAULT '{}'::jsonb,
-//!     embedding     vector(384)
-//! );
-//!
-//! CREATE INDEX IF NOT EXISTS memories_namespace_idx ON memories (namespace);
-//! CREATE INDEX IF NOT EXISTS memories_tier_idx ON memories (tier);
-//! CREATE INDEX IF NOT EXISTS memories_tags_gin ON memories USING gin (tags);
-//! CREATE INDEX IF NOT EXISTS memories_content_fts ON memories
-//!     USING gin (to_tsvector('english', title || ' ' || content));
-//! CREATE INDEX IF NOT EXISTS memories_embedding_hnsw ON memories
-//!     USING hnsw (embedding vector_cosine_ops);
-//! ```
+//! Key semantic choices at the SQL layer (matching SQLite):
+//! - Upsert contract is `ON CONFLICT (title, namespace)`
+//!   (UNIQUE INDEX `memories_title_ns_uidx`).
+//! - `metadata.agent_id` is immutable across UPSERT and UPDATE via
+//!   `jsonb_set` preserving the original agent_id when present.
+//! - Tier never downgrades: UPSERT and UPDATE apply `tier_rank()`
+//!   precedence so `Long → *` and `Mid → Short` are refused at the
+//!   SQL layer.
 //!
 //! # Capabilities
 //!
@@ -231,22 +214,44 @@ impl MemoryStore for PostgresStore {
                 detail: format!("serialize tags: {e}"),
             })?;
 
+        // Upsert contract matches SQLite: `ON CONFLICT (title, namespace)`.
+        // Backed by the UNIQUE INDEX `memories_title_ns_uidx` in
+        // postgres_schema.sql. Fix for blocker #294.
+        //
+        // Agent-id immutability (blocker #295): on conflict we preserve
+        // the ORIGINAL `metadata.agent_id` via `jsonb_set`, mirroring the
+        // SQLite `json_set` CASE clause in `src/db.rs::insert`. The
+        // caller-supplied metadata otherwise wins.
+        //
+        // Tier never downgrades (blocker #296 / SQLite parity): on
+        // conflict tier takes max of existing vs new via rank mapping.
         sqlx::query(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
                 expires_at, metadata
             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-            ON CONFLICT (id) DO UPDATE SET
-                title = EXCLUDED.title,
+            ON CONFLICT (title, namespace) DO UPDATE SET
                 content = EXCLUDED.content,
-                tier = EXCLUDED.tier,
-                namespace = EXCLUDED.namespace,
+                tier = CASE
+                    WHEN tier_rank(EXCLUDED.tier) >= tier_rank(memories.tier)
+                        THEN EXCLUDED.tier
+                    ELSE memories.tier
+                END,
                 tags = EXCLUDED.tags,
                 priority = EXCLUDED.priority,
                 confidence = EXCLUDED.confidence,
                 updated_at = EXCLUDED.updated_at,
-                metadata = EXCLUDED.metadata",
+                metadata = CASE
+                    WHEN memories.metadata ? 'agent_id'
+                        THEN jsonb_set(
+                            EXCLUDED.metadata,
+                            '{agent_id}',
+                            memories.metadata -> 'agent_id'
+                        )
+                    ELSE EXCLUDED.metadata
+                END
+            RETURNING id",
         )
         .bind(&memory.id)
         .bind(memory.tier.as_str())
@@ -263,11 +268,11 @@ impl MemoryStore for PostgresStore {
         .bind(last_accessed_at)
         .bind(expires_at)
         .bind(&memory.metadata)
-        .execute(&self.pool)
+        .fetch_one(&self.pool)
         .await
-        .map_err(|e| to_store_err("insert memory", e))?;
-
-        Ok(memory.id.clone())
+        .map_err(|e| to_store_err("insert memory", e))?
+        .try_get::<String, _>("id")
+        .map_err(|e| to_store_err("read returned id", e))
     }
 
     async fn get(&self, _ctx: &CallerContext, id: &str) -> StoreResult<Memory> {
@@ -284,18 +289,37 @@ impl MemoryStore for PostgresStore {
 
     async fn update(&self, _ctx: &CallerContext, id: &str, patch: UpdatePatch) -> StoreResult<()> {
         // One-shot COALESCE update — each patch field overrides only if
-        // Some, otherwise falls through to the existing value. Avoids a
-        // read-modify-write round trip.
+        // Some, otherwise falls through to the existing value.
+        //
+        // Blocker #296: tier never downgrades. When a patch proposes a
+        // tier of lower rank than the current row's tier, the DB keeps
+        // the higher tier via `GREATEST(tier_rank(...))`.
+        //
+        // Blocker #295: `metadata.agent_id` is SQL-layer-immutable. If
+        // the current row has an agent_id we preserve it against any
+        // patch; otherwise the patch's metadata (if provided) wins.
         let rows_affected = sqlx::query(
             "UPDATE memories SET
                 title = COALESCE($2, title),
                 content = COALESCE($3, content),
-                tier = COALESCE($4, tier),
+                tier = CASE
+                    WHEN $4::TEXT IS NULL THEN tier
+                    WHEN tier_rank($4::TEXT) >= tier_rank(tier) THEN $4::TEXT
+                    ELSE tier
+                END,
                 namespace = COALESCE($5, namespace),
                 tags = COALESCE($6, tags),
                 priority = COALESCE($7, priority),
                 confidence = COALESCE($8, confidence),
-                metadata = COALESCE($9, metadata),
+                metadata = CASE
+                    WHEN $9::JSONB IS NULL THEN metadata
+                    WHEN metadata ? 'agent_id' THEN jsonb_set(
+                        $9::JSONB,
+                        '{agent_id}',
+                        metadata -> 'agent_id'
+                    )
+                    ELSE $9::JSONB
+                END,
                 updated_at = NOW()
              WHERE id = $1",
         )
@@ -589,5 +613,97 @@ mod tests {
             StoreError::NotFound { id: missing } => assert_eq!(missing, id),
             other => panic!("expected NotFound, got {other:?}"),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for v0.6.0 blockers #294, #295, #296.
+    // ------------------------------------------------------------------
+
+    /// Blocker #294 — upsert on (title, namespace) matches SQLite.
+    ///
+    /// Two stores with identical (title, namespace) but different ids
+    /// must collapse into one row on Postgres (keyed by the existing
+    /// row's id) rather than producing two rows.
+    #[tokio::test]
+    async fn upserts_by_title_namespace_not_id() {
+        let Some(url) = postgres_url() else {
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let ctx = CallerContext::for_agent("ai:sal-test");
+        let ns = format!("sal-upsert-{}", uuid::Uuid::new_v4());
+        let first = sample_memory("upsert-a", &ns, "shared title", "first body");
+        let second = sample_memory("upsert-b", &ns, "shared title", "second body");
+        let id_first = store.store(&ctx, &first).await.unwrap();
+        let id_second = store.store(&ctx, &second).await.unwrap();
+        assert_eq!(id_first, id_second, "upsert should return the same id");
+        // Namespace list must contain exactly one row with the shared title.
+        let filter = Filter {
+            namespace: Some(ns.clone()),
+            limit: 10,
+            ..Filter::default()
+        };
+        let listed = store.list(&ctx, &filter).await.unwrap();
+        assert_eq!(listed.len(), 1, "expected single upserted row");
+        assert_eq!(listed[0].content, "second body");
+    }
+
+    /// Blocker #295 — metadata.agent_id is SQL-layer-immutable on UPSERT.
+    #[tokio::test]
+    async fn upsert_preserves_agent_id() {
+        let Some(url) = postgres_url() else {
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let ctx = CallerContext::for_agent("ai:sal-test");
+        let ns = format!("sal-agent-{}", uuid::Uuid::new_v4());
+
+        let mut first = sample_memory("agent-1", &ns, "owned-by-alice", "original");
+        first.metadata = serde_json::json!({"agent_id": "ai:alice"});
+        store.store(&ctx, &first).await.unwrap();
+
+        // Second store with the same (title, ns) but claims a different agent_id.
+        let mut second = sample_memory("agent-2", &ns, "owned-by-alice", "replayed");
+        second.metadata = serde_json::json!({"agent_id": "ai:attacker"});
+        store.store(&ctx, &second).await.unwrap();
+
+        let got = store
+            .get(&ctx, &store.store(&ctx, &second).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(
+            got.metadata.get("agent_id").and_then(|v| v.as_str()),
+            Some("ai:alice"),
+            "agent_id must be pinned to the original writer"
+        );
+    }
+
+    /// Blocker #296 — tier never downgrades on UPDATE.
+    #[tokio::test]
+    async fn update_refuses_tier_downgrade() {
+        let Some(url) = postgres_url() else {
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.unwrap();
+        let ctx = CallerContext::for_agent("ai:sal-test");
+
+        let id = format!("tier-test-{}", uuid::Uuid::new_v4());
+        let mut mem = sample_memory(&id, "sal-tier", "long-pinned", "must not downgrade");
+        mem.tier = Tier::Long;
+        store.store(&ctx, &mem).await.unwrap();
+
+        // Attempt to downgrade Long -> Short via update patch.
+        let patch = UpdatePatch {
+            tier: Some(Tier::Short),
+            ..UpdatePatch::default()
+        };
+        store.update(&ctx, &id, patch).await.unwrap();
+
+        let got = store.get(&ctx, &id).await.unwrap();
+        assert!(
+            matches!(got.tier, Tier::Long),
+            "tier must remain Long (got {:?})",
+            got.tier
+        );
     }
 }

@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### Fixed — v0.6.0 pre-tag SAL blocker punchlist (#293)
+
+Five correctness blockers surfaced by the v0.6.0 code-review (meta
+issue [#293](https://github.com/alphaonedev/ai-memory-mcp/issues/293)),
+all closed before the tag:
+
+- **[#294]** SAL upsert key mismatch — aligned Postgres adapter to
+  `ON CONFLICT (title, namespace)` matching SQLite's documented
+  contract. Added `UNIQUE INDEX memories_title_ns_uidx` to
+  `postgres_schema.sql`.
+- **[#295]** `metadata.agent_id` immutability — Postgres UPSERT and
+  UPDATE now preserve the original `agent_id` via `jsonb_set` CASE
+  clause, mirroring SQLite's `json_set` SQL-layer guard. Task 1.2
+  NHI invariant is now enforced on both adapters.
+- **[#296]** Tier-downgrade protection on Postgres UPDATE — added
+  `tier_rank()` SQL function and `GREATEST(tier_rank(...))`
+  precedence so `Long → *` and `Mid → Short` are refused at the
+  SQL layer, matching SQLite.
+- **[#297]** Postgres schema parity — added 6 tables + generated
+  `scope_idx` column (memory_links, archived_memories,
+  namespace_meta, pending_actions, sync_state, subscriptions) so
+  cross-backend migration is no longer lossy beyond the memories
+  table.
+- **[#298]** Migration cursor data loss — the prior
+  `created_at`-based pagination silently dropped low-priority
+  memories under `priority DESC` list ordering. Replaced with a
+  single-call `MAX_ROWS=1M` migrate that refuses loudly when
+  saturated. Streaming migrate for corpora >1M rows tracked for
+  v0.7 with `MemoryStore::list_all`.
+
+New regression tests (behind `AI_MEMORY_TEST_POSTGRES_URL`):
+`upserts_by_title_namespace_not_id`, `upsert_preserves_agent_id`,
+`update_refuses_tier_downgrade`. Plus `migrate_sqlite_to_sqlite_roundtrip`
+tightened to assert single-call semantics.
+
 ### Removed — TurboQuant embedding compression scrapped
 
 TurboQuant (Google Research, arXiv 2504.19874) was evaluated as an
