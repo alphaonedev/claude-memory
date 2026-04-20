@@ -89,9 +89,19 @@ impl FederationConfig {
             .iter()
             .enumerate()
             .map(|(i, raw)| {
+                // `id` is used as a Prometheus metric label; keep it
+                // low-cardinality. The full URL is logged separately.
+                // (#304 nit — prior form `peer-{i}:{url}` blew up the
+                // label space as deployment size grew.)
                 let trimmed = raw.trim_end_matches('/');
+                tracing::debug!(
+                    target = "federation",
+                    peer_index = i,
+                    url = trimmed,
+                    "registered peer"
+                );
                 PeerEndpoint {
-                    id: format!("peer-{i}:{trimmed}"),
+                    id: format!("peer-{i}"),
                     sync_push_url: format!("{trimmed}/api/v1/sync/push"),
                 }
             })

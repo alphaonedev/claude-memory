@@ -62,6 +62,21 @@ pub struct ApiKeyState {
     pub key: Option<String>,
 }
 
+/// Constant-time byte-slice equality. Doesn't short-circuit on the
+/// first mismatched byte, preventing timing-oracle leaks of secret
+/// material. Used for API-key comparison (#301 hardening item 3).
+#[inline]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Middleware: reject requests with 401 if `api_key` is configured and request
 /// doesn't provide a matching `X-API-Key` header or `?api_key=` query param.
 /// The `/api/v1/health` endpoint is exempt.
@@ -83,7 +98,7 @@ pub async fn api_key_auth(
     // Check X-API-Key header
     if let Some(header_val) = req.headers().get("x-api-key")
         && let Ok(val) = header_val.to_str()
-        && val == expected.as_str()
+        && constant_time_eq(val.as_bytes(), expected.as_bytes())
     {
         return next.run(req).await.into_response();
     }
@@ -92,7 +107,7 @@ pub async fn api_key_auth(
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some(val) = pair.strip_prefix("api_key=")
-                && val == expected.as_str()
+                && constant_time_eq(val.as_bytes(), expected.as_bytes())
             {
                 return next.run(req).await.into_response();
             }

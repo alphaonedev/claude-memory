@@ -106,6 +106,27 @@ impl PostgresStore {
                 detail: format!("init schema: {e}"),
             })?;
 
+        // Sanity-check pgvector version. We support 0.7.x–0.8.x; older
+        // versions have HNSW behaviour differences we haven't tested
+        // against. (#302 item 2 — prior code accepted any version.)
+        let extver: Option<(String,)> =
+            sqlx::query_as("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+                .fetch_optional(&pool)
+                .await
+                .map_err(|e| StoreError::BackendUnavailable {
+                    backend: "postgres".to_string(),
+                    detail: format!("read pgvector version: {e}"),
+                })?;
+        if let Some((ver,)) = extver
+            && !(ver.starts_with("0.7") || ver.starts_with("0.8"))
+        {
+            tracing::warn!(
+                target = "store::postgres",
+                version = %ver,
+                "pgvector version outside the tested range 0.7.x–0.8.x; HNSW recall may differ"
+            );
+        }
+
         Ok(Self { pool })
     }
 

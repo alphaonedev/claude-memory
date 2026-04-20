@@ -399,8 +399,13 @@ fn forget_if_superseded(
         }));
     }
 
-    // db::forget takes pattern-based args (namespace/tier/etc); we use
-    // the generic by-id path instead via db::delete which archives.
+    // IMPORTANT: `db::delete` hard-deletes (no archive row). Recovery
+    // for a forgotten memory relies on the RollbackEntry::Forget
+    // snapshot we return — the caller persists it in `_curator/rollback`
+    // with the full pre-forget memory embedded. That rollback entry
+    // is long-tier so it's not auto-GC'd; `ai-memory curator --rollback
+    // <id>` reverses the forget from that snapshot. (#300 item 1:
+    // comment previously claimed db::delete archives; it does not.)
     db::delete(conn, &mem.id)?;
 
     Ok(Some(RollbackEntry::Forget {
@@ -546,12 +551,24 @@ pub fn persist_self_report(
 /// Reverse a single rollback-log entry. Returns `true` if a reverse
 /// action was applied, `false` if the entry was already superseded
 /// (idempotent rollback).
+///
+/// Collision safety (#300 item 2): before re-inserting a snapshot we
+/// check whether another memory now owns the same
+/// `(title, namespace)` key. If it does, we refuse to overwrite —
+/// `db::insert` is an UPSERT on that key and would silently replace
+/// the unrelated memory's content. We return an error so the operator
+/// can resolve the conflict manually (delete the offender or rename
+/// one of them) rather than clobbering user data.
 pub fn reverse_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Result<bool> {
     match entry {
         RollbackEntry::Consolidate {
             originals,
             result_id,
         } => {
+            // Pre-flight: no title+ns collision against a different id?
+            for m in originals {
+                check_no_collision(conn, &m.title, &m.namespace, &m.id)?;
+            }
             // Delete the consolidated memory; re-insert the originals.
             let existed = db::delete(conn, result_id)?;
             for m in originals {
@@ -560,6 +577,7 @@ pub fn reverse_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Resul
             Ok(existed)
         }
         RollbackEntry::Forget { snapshot } => {
+            check_no_collision(conn, &snapshot.title, &snapshot.namespace, &snapshot.id)?;
             db::insert(conn, snapshot)?;
             Ok(true)
         }
@@ -584,6 +602,40 @@ pub fn reverse_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Resul
             Ok(true)
         }
     }
+}
+
+/// Refuse to overwrite a memory that took the (title, namespace) slot
+/// after the rollback target was forgotten/consolidated.
+fn check_no_collision(
+    conn: &Connection,
+    title: &str,
+    namespace: &str,
+    expected_id: &str,
+) -> Result<()> {
+    let rows = db::list(
+        conn,
+        Some(namespace),
+        None,
+        50,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )?;
+    for row in rows {
+        if row.namespace == namespace && row.title == title && row.id != expected_id {
+            anyhow::bail!(
+                "rollback aborted: memory {} now occupies (title={:?}, namespace={:?}) — \
+                 reverting would overwrite it. Resolve the conflict manually.",
+                row.id,
+                title,
+                namespace
+            );
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

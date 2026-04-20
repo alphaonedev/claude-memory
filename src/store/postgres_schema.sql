@@ -12,6 +12,13 @@
 -- expressed at the SQL layer so the two adapters have identical
 -- semantics.
 
+-- pgvector extension. Supported version range: 0.7.x–0.8.x. pgvector
+-- had breaking HNSW behaviour changes between 0.5 and 0.7 — if we
+-- widen the range we MUST re-test HNSW recall on the fixture corpus.
+-- Pin the minimum at adapter connect time rather than here; the
+-- schema is run against whatever version is available, and the
+-- adapter checks `SELECT extversion FROM pg_extension WHERE
+-- extname='vector'` afterwards (see PostgresStore::connect).
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Tier precedence — matches SQLite's Tier::rank() in src/models.rs.
