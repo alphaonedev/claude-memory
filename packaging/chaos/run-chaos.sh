@@ -122,6 +122,15 @@ inject_partition_minority() {
     sleep 0.5
     sudo iptables -D OUTPUT -p tcp --dport "$N1_PORT" -j DROP 2>/dev/null || true
     sudo iptables -D OUTPUT -p tcp --dport "$N2_PORT" -j DROP 2>/dev/null || true
+    # Post-heal drain. The Linux netfilter DROP path silently discards
+    # packets — no TCP RST is sent to the sender, so both ends still
+    # believe the connection is ESTABLISHED. After DELETE, there's a
+    # window where the kernel is still processing packets in queues
+    # that arrived during the partition. A 1 s settle here (combined
+    # with the federation client's 1 s tcp_keepalive and 5 s pool
+    # idle timeout) gives reqwest time to discover the dead pool
+    # entries before the next write batch tries to reuse them.
+    sleep 1
     echo "$ts"
 }
 
@@ -150,6 +159,18 @@ cycle() {
     local n="$1"
     local ns="chaos-c${n}"
     local pid0 pid1 pid2
+
+    # Defensive iptables cleanup at cycle start — previous cycle's
+    # inject_partition_minority runs INSERT then DELETE, but if the
+    # DELETE ever failed silently (iptables module issues, rule
+    # mismatch, signal interrupt mid-inject) the rule would persist
+    # into this cycle and suppress every write. Cheap to scrub the
+    # ports we know this campaign uses; ignore non-zero exits.
+    if command -v iptables >/dev/null 2>&1; then
+        while sudo iptables -D OUTPUT -p tcp --dport "$N1_PORT" -j DROP 2>/dev/null; do :; done
+        while sudo iptables -D OUTPUT -p tcp --dport "$N2_PORT" -j DROP 2>/dev/null; do :; done
+    fi
+
     pid0=$(spawn_node 0 "$N0_PORT" "$n")
     pid1=$(spawn_node 1 "$N1_PORT" "$n")
     pid2=$(spawn_node 2 "$N2_PORT" "$n")
