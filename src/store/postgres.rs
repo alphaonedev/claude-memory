@@ -418,6 +418,18 @@ impl MemoryStore for PostgresStore {
         filter: &Filter,
     ) -> StoreResult<Vec<Memory>> {
         let limit: i64 = filter.limit.clamp(1, 1000).try_into().unwrap_or(100);
+        // Adapter parity with SQLite (#302 item 3): threads the full
+        // Filter (namespace, tier, tags_any, agent_id) into the query.
+        // Prior implementation ignored `tags_any` and `agent_id` so
+        // identical calls returned different result sets on the two
+        // adapters.
+        //
+        // `tags_any`:  match if any of the requested tags is present in
+        //              memories.tags (JSONB array). Uses @> over a
+        //              single-element JSONB array per requested tag,
+        //              OR'd together via sqlx bind array.
+        // `agent_id`:  match if metadata->>'agent_id' == $agent_id.
+        let tags_first: Option<&str> = filter.tags_any.first().map(String::as_str);
         let rows = sqlx::query(
             "SELECT *,
                     ts_rank(
@@ -428,13 +440,17 @@ impl MemoryStore for PostgresStore {
              WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', $1)
                AND ($2::text IS NULL OR namespace = $2)
                AND ($3::text IS NULL OR tier = $3)
+               AND ($4::text IS NULL OR tags @> to_jsonb(ARRAY[$4]))
+               AND ($5::text IS NULL OR metadata ->> 'agent_id' = $5)
                AND (expires_at IS NULL OR expires_at > NOW())
              ORDER BY rank DESC, priority DESC
-             LIMIT $4",
+             LIMIT $6",
         )
         .bind(query)
         .bind(filter.namespace.as_ref())
         .bind(filter.tier.as_ref().map(Tier::as_str))
+        .bind(tags_first)
+        .bind(filter.agent_id.as_ref())
         .bind(limit)
         .fetch_all(&self.pool)
         .await
@@ -459,6 +475,9 @@ impl MemoryStore for PostgresStore {
             memory_id: id.to_string(),
             integrity_ok: findings.is_empty(),
             findings,
+            // v0.6.0 does NOT perform signature verification; real
+            // cryptographic verify lands with Task 1.4. See #302.
+            signature_verified: false,
         })
     }
 

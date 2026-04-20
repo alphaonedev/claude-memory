@@ -288,9 +288,17 @@ impl QuorumNotMetPayload {
                 error: "quorum_not_met",
                 got: *got,
                 needed: *needed,
+                // InFlight shouldn't surface in the HTTP payload — the
+                // broadcast loop waits until the deadline before
+                // calling finalise(). If a caller somehow gets it here,
+                // we map to "timeout" for the operator-facing 503 so
+                // we don't leak a transient internal state as a fourth
+                // public string.
                 reason: match reason {
                     QuorumFailureReason::Unreachable => "unreachable".to_string(),
-                    QuorumFailureReason::Timeout => "timeout".to_string(),
+                    QuorumFailureReason::Timeout | QuorumFailureReason::InFlight => {
+                        "timeout".to_string()
+                    }
                     QuorumFailureReason::IdDrift => "id_drift".to_string(),
                 },
             },

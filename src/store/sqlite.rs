@@ -181,6 +181,9 @@ impl MemoryStore for SqliteStore {
             memory_id: id.to_string(),
             integrity_ok: findings.is_empty(),
             findings,
+            // v0.6.0 does NOT perform signature verification; real
+            // cryptographic verify lands with Task 1.4. See #302.
+            signature_verified: false,
         })
     }
 
