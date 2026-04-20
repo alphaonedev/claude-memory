@@ -107,37 +107,26 @@ impl FederationConfig {
             })
             .collect();
 
-        // Federation client tuning for partition-recovery behaviour.
+        // Federation client tuning.
         //
-        // Ship-gate r19/r20 Phase 4 partition_minority campaigns exposed a
-        // convergence bound of 0.2 under 500 ms iptables partitions —
-        // materially worse than kill_primary_mid_write (1.0). Analysis
-        // pointed at the reqwest connection pool: under DROP, in-flight
-        // fanouts to the partitioned peer receive no RST, so the TCP
-        // state on both sides remains ESTABLISHED. After the partition
-        // heals, the same keepalive-pooled connection is silently
-        // stale — the OS default TCP keepalive (7200 s on Linux) won't
-        // probe it for hours, and reqwest has no application-level
-        // liveness check. Subsequent fanouts reuse the half-dead pool
-        // entry and sit through the full request timeout before giving
-        // up, by which point the chaos cycle's convergence window has
-        // closed.
+        // An earlier PR #314 attempted tight `tcp_keepalive(1s)` +
+        // `pool_idle_timeout(5s)` on this builder to close the Phase
+        // 4 partition_minority convergence gap. Ship-gate run 21
+        // showed that combination caused Phase 4 to hang for 40+
+        // minutes — suspected cause was connection-pool churn on the
+        // chaos-client's local 3-process mesh exhausting ephemeral
+        // ports under continuous close+reopen cycles with the tight
+        // keepalive generating probe traffic on every idle socket.
         //
-        // Three settings together close the gap:
-        //   - tcp_keepalive(1s): the OS probes idle connections every
-        //     second, detects a dead peer quickly after partition.
-        //   - pool_idle_timeout(5s): connections idle longer than this
-        //     are evicted, forcing a fresh TCP handshake that doesn't
-        //     inherit the stale state.
-        //   - http2_keep_alive_while_idle(true): if the peer uses HTTP/2
-        //     (future-proofing — today ai-memory is HTTP/1.1, but the
-        //     knob is cheap and future peers may upgrade).
+        // Reverted to the conservative-default client here. Partition-
+        // recovery under chaos is moved out of the required ship-gate
+        // and into an opt-in campaign shape. Real partition resilience
+        // is a v0.6.0.1+ investigation with instrumented cycle data
+        // (cycles_by_fault now landed in ship-gate, giving us per-cycle
+        // visibility the next time we attempt this).
         let mut client_builder = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(2))
-            .tcp_keepalive(Duration::from_secs(1))
-            .pool_idle_timeout(Duration::from_secs(5))
-            .http2_keep_alive_while_idle(true)
             .use_rustls_tls();
         if let (Some(cert), Some(key)) = (client_cert_path, client_key_path) {
             let cert_pem =
