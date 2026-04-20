@@ -31,6 +31,7 @@ const VALID_SOURCES: &[&str] = &[
     "import",
     "consolidation",
     "system",
+    "chaos",
 ];
 const VALID_RELATIONS: &[&str] = &["related_to", "supersedes", "contradicts", "derived_from"];
 

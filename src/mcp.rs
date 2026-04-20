@@ -89,7 +89,7 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "array", "items": {"type": "string"}, "default": []},
                         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"},
+                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system", "chaos"], "default": "claude"},
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
                         "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
                         "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."}
