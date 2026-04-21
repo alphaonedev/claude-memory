@@ -49,25 +49,26 @@ jobs:
         run: cargo build --release
 
   msrv:
-    name: MSRV (Rust 1.91 — Ubuntu 26.04 LTS floor)
+    name: MSRV (Rust 1.93 — Ubuntu 26.04 LTS floor)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Install Rust 1.91
+      - name: Install Rust 1.93
         # Ubuntu 26.04 LTS (resolute) ships rustc 1.91/1.92/1.93 with 1.93 as
-        # default. Our `rust-version = "1.91"` in Cargo.toml is the floor —
-        # Launchpad's PPA builders and anyone running `cargo install
-        # ai-memory` on a 1.91 toolchain must succeed. This job pins 1.91 so
+        # the `rust-defaults` package default. Our `rust-version = "1.93"` in
+        # Cargo.toml matches that default — Launchpad's PPA builders and
+        # anyone running `cargo install ai-memory` on a default 26.04
+        # toolchain must succeed. This job pins 1.93 so
         # a future stdlib-2026 or edition-2024-only API drift can't silently
         # break the MSRV claim.
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.91"
+          toolchain: "1.93"
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: msrv-1.91
+          key: msrv-1.93
 
       - name: Build under MSRV
         env:

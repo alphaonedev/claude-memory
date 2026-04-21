@@ -2,7 +2,7 @@
 name = "ai-memory"
 version = "0.6.1"
 edition = "2024"
-rust-version = "1.91"
+rust-version = "1.93"
 authors = ["AlphaOne LLC"]
 description = "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI for any AI platform"
 license = "Apache-2.0"
