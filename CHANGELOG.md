@@ -7,6 +7,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### Fixed — v0.6.0 pre-tag SAL blocker punchlist (#293)
+
+Five correctness blockers surfaced by the v0.6.0 code-review (meta
+issue [#293](https://github.com/alphaonedev/ai-memory-mcp/issues/293)),
+all closed before the tag:
+
+- **[#294]** SAL upsert key mismatch — aligned Postgres adapter to
+  `ON CONFLICT (title, namespace)` matching SQLite's documented
+  contract. Added `UNIQUE INDEX memories_title_ns_uidx` to
+  `postgres_schema.sql`.
+- **[#295]** `metadata.agent_id` immutability — Postgres UPSERT and
+  UPDATE now preserve the original `agent_id` via `jsonb_set` CASE
+  clause, mirroring SQLite's `json_set` SQL-layer guard. Task 1.2
+  NHI invariant is now enforced on both adapters.
+- **[#296]** Tier-downgrade protection on Postgres UPDATE — added
+  `tier_rank()` SQL function and `GREATEST(tier_rank(...))`
+  precedence so `Long → *` and `Mid → Short` are refused at the
+  SQL layer, matching SQLite.
+- **[#297]** Postgres schema parity — added 6 tables + generated
+  `scope_idx` column (memory_links, archived_memories,
+  namespace_meta, pending_actions, sync_state, subscriptions) so
+  cross-backend migration is no longer lossy beyond the memories
+  table.
+- **[#298]** Migration cursor data loss — the prior
+  `created_at`-based pagination silently dropped low-priority
+  memories under `priority DESC` list ordering. Replaced with a
+  single-call `MAX_ROWS=1M` migrate that refuses loudly when
+  saturated. Streaming migrate for corpora >1M rows tracked for
+  v0.7 with `MemoryStore::list_all`.
+
+New regression tests (behind `AI_MEMORY_TEST_POSTGRES_URL`):
+`upserts_by_title_namespace_not_id`, `upsert_preserves_agent_id`,
+`update_refuses_tier_downgrade`. Plus `migrate_sqlite_to_sqlite_roundtrip`
+tightened to assert single-call semantics.
+
+### Removed — TurboQuant embedding compression scrapped
+
+TurboQuant (Google Research, arXiv 2504.19874) was evaluated as an
+embedding-compression path for ai-memory (PRs #284 and #287). Both
+closed unmerged. The `alphaonedev/turboquant` fork was archived.
+Decision rationale: the ~2× embedding storage reduction at 4
+bit-width is irrelevant at ai-memory's target scale (<100k memories
+per deployment); beyond that, Postgres + pgvector (#279) is the right
+answer. The fork-maintenance + heavy-transitive-deps burden (ort,
+tokenizers, safetensors, burn) was not justified by the marginal
+gain. Real compression wins live elsewhere: Ollama KV compression
+(#288 runbook) for inference memory, Postgres + pgvector for native
+vector storage at scale, SQLCipher at rest (shipped) for data-at-rest
+protection.
+
+### Added — world-class documentation sprint
+
+Seven new authoritative docs close the reference-material gaps in
+the existing `docs/` tree:
+
+- **`docs/README.md`** — navigation hub grouping every doc by audience
+  (end users, admins, developers, design decisions, SDKs).
+- **`docs/QUICKSTART.md`** — first memory stored + recalled in under
+  5 minutes across three paths (CLI, MCP with Claude Code / Cursor /
+  Codex, HTTP daemon).
+- **`docs/CLI_REFERENCE.md`** — every subcommand, flag, and
+  environment variable the `ai-memory` binary exposes. Auto-synced
+  to `src/main.rs` clap definitions.
+- **`docs/API_REFERENCE.md`** — every HTTP endpoint the daemon
+  exposes, with payload shapes, query params, status codes, and
+  `curl` recipes. 24+ endpoints.
+- **`docs/GLOSSARY.md`** — every concept (agent, tier, scope,
+  curator, quorum, SAL, …) with single-paragraph definitions and
+  links to authoritative docs.
+- **`docs/TROUBLESHOOTING.md`** — common errors (startup, MCP,
+  autonomy, HTTP, sync, performance, governance) with root-cause
+  analysis and fixes.
+- **`docs/SECURITY.md`** — complete threat model, trust boundaries,
+  auth stack (API key + mTLS Layer 1/2/2b), SQLCipher at rest,
+  SSRF-hardened webhook dispatch, responsible disclosure process.
+
+Existing docs (`USER_GUIDE.md`, `ADMIN_GUIDE.md`, `DEVELOPER_GUIDE.md`,
+`INSTALL.md`, `PHASE-1.md`, `AI_DEVELOPER_*.md`, `ENGINEERING_STANDARDS.md`,
+`ARCHITECTURAL_LIMITS.md`, `ADR-0001-quorum-replication.md`,
+`RUNBOOK-*.md`) cross-linked from `docs/README.md` for discovery.
+
 ### Added — v0.7 Storage Abstraction Layer (Track B PR 1)
 
 - **Storage Abstraction Layer (SAL) — `MemoryStore` trait + `SqliteStore`
@@ -195,26 +276,52 @@ Still honest caveats:
 ### Testing
 
 - **7 async mock-peer integration tests** in `src/federation.rs`
-  using real ephemeral-port axum servers: happy path, partition
-  minority (W=3, N=3, two peers fail), majority quorum tolerating
-  one peer down (W=2, N=3), timeout on a hanging peer classified
-  correctly, `config_build` disabled cases for `W=0` and empty peers,
-  `QuorumNotMetPayload::from_err` serialisation.
+  using real ephemeral-port axum servers.
 - Full suite on default features: 289 unit + 158 integration tests
   still green. fmt + clippy pedantic green.
 
-### Federation-autonomy claim now earned
+### Added — LadybugDB roadmap
 
-v0.7-alpha earns **"opt-in multi-agent federation with
-W-of-N quorum writes"**. The "100% autonomous" claim in v0.6.1
-(Track A-2) extends to federation: autonomous curator + autonomous
-quorum fan-out + autonomous rollback. What STILL remains
-before a full-fat "fully-autonomous federated deployment" claim:
+- **`docs/ROADMAP-ladybug.md`** — authoritative plan for integrating
+  LadybugDB (the `lbug` Rust crate) as a new `MemoryStore` SAL
+  adapter alongside `SqliteStore` and `PostgresStore`. Deliberately
+  **not** a 100% transition — the document explains why (AI-agnostic
+  value prop, SAL trait is the right seam, ~4000 LOC rewrite is
+  wrong shape). Phased plan: scaffold → migration tool support →
+  benchmark matrix → promotion decision gated on 6 hard
+  prerequisites. Maintenance posture (pinned SHA, monthly rebase,
+  upstream-first policy, scrap criteria) informed by the TurboQuant
+  scrap. Not shipping in v0.6.0.0; v0.7.1+ track.
 
-- Real chaos campaigns run against a production-shaped deployment
-  (the harness ships; the campaign runs land in v0.7.0).
-- Per-namespace quorum policy (v0.7.1).
-- Attested `sender_agent_id` from mTLS cert identity (v0.7 Layer 2b).
+### Added — Ollama KV-cache tuning runbook
+
+- **`docs/RUNBOOK-ollama-kv-tuning.md`** — operator-facing runbook
+  for enabling `OLLAMA_KV_CACHE_TYPE=q4_0` + `OLLAMA_FLASH_ATTENTION=1`
+  on Ollama. Delivers 2–4× KV-cache memory reduction on every
+  ai-memory LLM path with near-lossless quality. Zero ai-memory
+  code changes.
+
+### "100% autonomous AI" claim earned
+
+Shipping together in v0.6.0.0:
+
+- Autonomous curator loop (tag / consolidate / forget / priority /
+  rollback / self-report) per Track A + A-2.
+- Multi-agent federation with W-of-N quorum writes per Track C + C-2.
+- Cross-backend portability (SQLite ↔ Postgres+pgvector) per Track
+  B + B-2.
+- Autonomous hooks firing on every successful `memory_store`.
+
+Remaining caveats (documented in runbooks, not overclaims):
+
+- Real chaos campaigns against a production-shaped deployment:
+  `docs/RUNBOOK-chaos-campaign.md`.
+- Week-long curator soak against a production corpus:
+  `docs/RUNBOOK-curator-soak.md`.
+- Daemon-level adapter selection (`serve --store-url postgres://…`):
+  `docs/RUNBOOK-adapter-selection.md` — v0.7.1 follow-up.
+- Attested `sender_agent_id` from mTLS cert identity — v0.7 Layer
+  2b primitives shipped (#285); handler wiring follow-up.
 
 ## [0.6.0] — 2026-04-19 — Phase 1 complete + v0.6.0.0 sprint
 

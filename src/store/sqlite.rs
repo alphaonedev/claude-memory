@@ -56,11 +56,14 @@ fn box_err<E: std::fmt::Display>(e: E) -> StoreError {
 #[async_trait::async_trait]
 impl MemoryStore for SqliteStore {
     fn capabilities(&self) -> Capabilities {
-        Capabilities::TRANSACTIONS
-            | Capabilities::FULLTEXT
-            | Capabilities::DURABLE
-            | Capabilities::STRONG_CONSISTENCY
-            | Capabilities::ATOMIC_MULTI_WRITE
+        // TRANSACTIONS + ATOMIC_MULTI_WRITE are NOT advertised because
+        // the adapter does not currently expose `begin_transaction()`
+        // — the trait default returns `UnsupportedCapability`. Honesty
+        // here matters: capability bits must match runtime behaviour
+        // (issue #302 item 6). Re-add these two flags once a real
+        // transaction handle is wired through the mutex-guarded
+        // `rusqlite::Connection`.
+        Capabilities::FULLTEXT | Capabilities::DURABLE | Capabilities::STRONG_CONSISTENCY
     }
 
     async fn store(&self, _ctx: &CallerContext, memory: &Memory) -> StoreResult<String> {
@@ -178,6 +181,9 @@ impl MemoryStore for SqliteStore {
             memory_id: id.to_string(),
             integrity_ok: findings.is_empty(),
             findings,
+            // v0.6.0 does NOT perform signature verification; real
+            // cryptographic verify lands with Task 1.4. See #302.
+            signature_verified: false,
         })
     }
 
@@ -289,6 +295,10 @@ mod tests {
         // happens above this layer via crate::hnsw, not inside the
         // adapter.
         assert!(!caps.contains(Capabilities::NATIVE_VECTOR));
+        // TRANSACTIONS + ATOMIC_MULTI_WRITE are NOT set — the adapter
+        // doesn't expose `begin_transaction()` (#302 item 6 fix).
+        assert!(!caps.contains(Capabilities::TRANSACTIONS));
+        assert!(!caps.contains(Capabilities::ATOMIC_MULTI_WRITE));
     }
 
     #[tokio::test]

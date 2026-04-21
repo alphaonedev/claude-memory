@@ -632,10 +632,11 @@ struct SyncDaemonArgs {
     /// and pushes local deltas via `/api/v1/sync/push`.
     #[arg(long, value_delimiter = ',')]
     peers: Vec<String>,
-    /// Seconds between sync cycles. Each cycle does one pull and one
-    /// push per peer. Defaults to 10 seconds — the "agent-A learns it,
-    /// agent-B knows it in 10 seconds" demo rhythm. Minimum 1.
-    #[arg(long, default_value_t = 10)]
+    /// Seconds between sync cycles. Each cycle reconciles every peer
+    /// in parallel (one pull + one push per peer). Defaults to 2 seconds
+    /// — the v0.6.0 cadence that keeps a 3-node mesh within a handful
+    /// of records of steady-state under heavy writes. Minimum 1.
+    #[arg(long, default_value_t = 2)]
     interval: u64,
     /// Optional `X-API-Key` to present to peers that have api-key auth
     /// enabled. Same key is sent to every peer in this invocation; use
@@ -3115,21 +3116,40 @@ async fn cmd_sync_daemon(
     // Graceful shutdown: ctrl_c wakes up the loop.
     let mut shutdown = Box::pin(tokio::signal::ctrl_c());
 
+    let db_path_owned: Arc<Path> = Arc::from(db_path);
+    let local_agent_id_arc: Arc<str> = Arc::from(local_agent_id.as_str());
+    let api_key_arc: Option<Arc<str>> = args.api_key.as_deref().map(Arc::from);
+    let peers_arc: Vec<Arc<str>> = args.peers.iter().map(|s| Arc::from(s.as_str())).collect();
     loop {
-        for peer_url in &args.peers {
-            if let Err(e) = sync_cycle_once(
-                &client,
-                db_path,
-                &local_agent_id,
-                peer_url,
-                args.api_key.as_deref(),
-                batch_size,
-            )
-            .await
-            {
-                tracing::warn!("sync-daemon: peer {peer_url} cycle failed: {e}");
-            }
+        // v0.6.0: reconcile peers in parallel. A slow or unreachable
+        // peer used to block every other peer behind it for the full
+        // cycle — now each peer runs on its own task and a single
+        // stuck peer only delays the deadline for the group, not the
+        // other peers' work. With N peers this cuts full-cycle latency
+        // from N×per-peer to max(per-peer).
+        let mut set: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+        for peer_url in &peers_arc {
+            let client = client.clone();
+            let db_path = db_path_owned.clone();
+            let local_agent_id = local_agent_id_arc.clone();
+            let peer_url = peer_url.clone();
+            let api_key = api_key_arc.clone();
+            set.spawn(async move {
+                if let Err(e) = sync_cycle_once(
+                    &client,
+                    &db_path,
+                    &local_agent_id,
+                    &peer_url,
+                    api_key.as_deref(),
+                    batch_size,
+                )
+                .await
+                {
+                    tracing::warn!("sync-daemon: peer {peer_url} cycle failed: {e}");
+                }
+            });
         }
+        while set.join_next().await.is_some() {}
 
         tokio::select! {
             () = tokio::time::sleep(std::time::Duration::from_secs(interval)) => {}

@@ -29,7 +29,8 @@ export type Source =
   | "cli"
   | "import"
   | "consolidation"
-  | "system";
+  | "system"
+  | "chaos";
 
 /**
  * A Memory row. Corresponds to `ai_memory::models::Memory` (15 fields).

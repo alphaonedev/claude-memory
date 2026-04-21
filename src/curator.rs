@@ -116,8 +116,12 @@ pub fn run_once(
     let mut report = CuratorReport::new(cfg.dry_run);
     let started = Instant::now();
 
-    let candidates = collect_candidates(conn, cfg)?;
+    let CandidateBatch {
+        memories: candidates,
+        truncated,
+    } = collect_candidates(conn, cfg)?;
     report.memories_scanned = candidates.len();
+    record_truncation(&mut report, truncated, cfg);
 
     let eligible: Vec<&Memory> = candidates
         .iter()
@@ -284,16 +288,40 @@ pub fn run_daemon(
     tracing::info!("curator daemon shutdown");
 }
 
-fn collect_candidates(conn: &Connection, cfg: &CuratorConfig) -> Result<Vec<Memory>> {
+/// Result of `collect_candidates` — the memories plus a truncation
+/// flag so callers can surface "I may have missed rows" in their
+/// report rather than silently dropping (#300 item 3 fix).
+pub(crate) struct CandidateBatch {
+    pub memories: Vec<Memory>,
+    /// True iff at least one tier hit the `max_ops_per_cycle * 4` cap;
+    /// callers should add a `report.errors` note so operators notice.
+    pub truncated: bool,
+}
+
+/// Append a truncation warning to the report when `collect_candidates`
+/// hit its per-tier cap. Extracted as a helper so `run_once` stays
+/// under clippy's `too_many_lines` ceiling.
+fn record_truncation(report: &mut CuratorReport, truncated: bool, cfg: &CuratorConfig) {
+    if truncated {
+        report.errors.push(format!(
+            "collect_candidates truncated at cap={} per tier; consider raising max_ops_per_cycle or paginating across cycles",
+            cfg.max_ops_per_cycle.saturating_mul(4)
+        ));
+    }
+}
+
+fn collect_candidates(conn: &Connection, cfg: &CuratorConfig) -> Result<CandidateBatch> {
     // We sweep mid + long tier only. Short tier is too volatile — it'll
     // likely be GC'd before the next curator cycle anyway.
+    let cap = cfg.max_ops_per_cycle.saturating_mul(4);
     let mut out = Vec::new();
+    let mut truncated = false;
     for tier in [Tier::Mid, Tier::Long] {
         let batch = db::list(
             conn,
             None,
             Some(&tier),
-            cfg.max_ops_per_cycle.saturating_mul(4),
+            cap,
             0,
             None,
             None,
@@ -301,9 +329,20 @@ fn collect_candidates(conn: &Connection, cfg: &CuratorConfig) -> Result<Vec<Memo
             None,
             None,
         )?;
+        if batch.len() >= cap {
+            // We can't tell from db::list whether there were strictly
+            // more than cap rows without a second probe, so treat
+            // cap-saturation as definitely-truncated. False positives
+            // are acceptable here — a single-line error entry is
+            // cheap, silent data loss is not.
+            truncated = true;
+        }
         out.extend(batch);
     }
-    Ok(out)
+    Ok(CandidateBatch {
+        memories: out,
+        truncated,
+    })
 }
 
 fn needs_curation(mem: &Memory, cfg: &CuratorConfig) -> bool {

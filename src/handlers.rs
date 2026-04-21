@@ -62,6 +62,21 @@ pub struct ApiKeyState {
     pub key: Option<String>,
 }
 
+/// Constant-time byte-slice equality. Doesn't short-circuit on the
+/// first mismatched byte, preventing timing-oracle leaks of secret
+/// material. Used for API-key comparison (#301 hardening item 3).
+#[inline]
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 /// Middleware: reject requests with 401 if `api_key` is configured and request
 /// doesn't provide a matching `X-API-Key` header or `?api_key=` query param.
 /// The `/api/v1/health` endpoint is exempt.
@@ -83,7 +98,7 @@ pub async fn api_key_auth(
     // Check X-API-Key header
     if let Some(header_val) = req.headers().get("x-api-key")
         && let Ok(val) = header_val.to_str()
-        && val == expected.as_str()
+        && constant_time_eq(val.as_bytes(), expected.as_bytes())
     {
         return next.run(req).await.into_response();
     }
@@ -92,7 +107,7 @@ pub async fn api_key_auth(
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
             if let Some(val) = pair.strip_prefix("api_key=")
-                && val == expected.as_str()
+                && constant_time_eq(val.as_bytes(), expected.as_bytes())
             {
                 return next.run(req).await.into_response();
             }
@@ -630,6 +645,7 @@ pub async fn get_memory(State(state): State<Db>, Path(id): Path<String>) -> impl
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn update_memory(
     State(app): State<AppState>,
     Path(id): Path<String>,
@@ -699,18 +715,21 @@ pub async fn update_memory(
             // pointing at the old vector and stale semantic recall results
             // linger even after the row is updated.
             let content_changed = body.title.is_some() || body.content.is_some();
+            let mut lock_opt = Some(lock);
             if content_changed && let Some(ref m) = mem {
                 let text = format!("{} {}", m.title, m.content);
                 if let Some(emb) = app.embedder.as_ref().as_ref() {
                     match emb.embed(&text) {
                         Ok(vec) => {
-                            if let Err(e) = db::set_embedding(&lock.0, &resolved_id, &vec) {
+                            if let Some(ref l) = lock_opt
+                                && let Err(e) = db::set_embedding(&l.0, &resolved_id, &vec)
+                            {
                                 tracing::warn!(
                                     "failed to refresh embedding for {resolved_id}: {e}"
                                 );
                             }
                             // Drop DB lock before touching vector index.
-                            drop(lock);
+                            lock_opt.take();
                             let mut idx_lock = app.vector_index.lock().await;
                             if let Some(idx) = idx_lock.as_mut() {
                                 idx.remove(&resolved_id);
@@ -720,6 +739,24 @@ pub async fn update_memory(
                         Err(e) => tracing::warn!("embedding regeneration failed: {e}"),
                     }
                 }
+            }
+            // Drop the DB lock before fanning out — peers POST back to
+            // our sync_push so we'd deadlock if we held it.
+            drop(lock_opt);
+            // v0.6.0.1: fan out the mutation to peers so remote readers
+            // see the update, not the pre-update row. insert_if_newer on
+            // peers sees a newer updated_at and applies.
+            if let (Some(fed), Some(m)) = (app.federation.as_ref(), mem.as_ref())
+                && let Ok(tracker) = crate::federation::broadcast_store_quorum(fed, m).await
+                && let Err(err) = crate::federation::finalise_quorum(&tracker)
+            {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("Retry-After", "2")],
+                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                )
+                    .into_response();
             }
             Json(json!(mem)).into_response()
         }
@@ -741,11 +778,13 @@ pub async fn update_memory(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn delete_memory(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -835,18 +874,39 @@ pub async fn delete_memory(
         }
     }
 
-    match db::delete(&lock.0, &target.id) {
-        Ok(true) => Json(json!({"deleted": true})).into_response(),
+    let delete_outcome = db::delete(&lock.0, &target.id);
+    // Drop DB lock before fanning out — peers POST back to our
+    // sync_push and we'd deadlock on the shared Mutex if we held it.
+    drop(lock);
+    match delete_outcome {
+        Ok(true) => {
+            // v0.6.0.1: propagate tombstone via sync_push.deletions.
+            if let Some(fed) = app.federation.as_ref()
+                && let Ok(tracker) =
+                    crate::federation::broadcast_delete_quorum(fed, &target.id).await
+                && let Err(err) = crate::federation::finalise_quorum(&tracker)
+            {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("Retry-After", "2")],
+                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                )
+                    .into_response();
+            }
+            Json(json!({"deleted": true})).into_response()
+        }
         _ => (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response(),
     }
 }
 
 #[allow(clippy::too_many_lines)]
 pub async fn promote_memory(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -958,6 +1018,22 @@ pub async fn promote_memory(
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": "internal server error"})),
+                )
+                    .into_response();
+            }
+            // v0.6.0.1: fan out the promoted memory so peers pick up the
+            // new tier + cleared expiry via insert_if_newer's newer-wins merge.
+            let promoted_mem = db::get(&lock.0, &resolved_id).ok().flatten();
+            drop(lock);
+            if let (Some(fed), Some(m)) = (app.federation.as_ref(), promoted_mem.as_ref())
+                && let Ok(tracker) = crate::federation::broadcast_store_quorum(fed, m).await
+                && let Err(err) = crate::federation::finalise_quorum(&tracker)
+            {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [("Retry-After", "2")],
+                    Json(serde_json::to_value(&payload).unwrap_or_default()),
                 )
                     .into_response();
             }
@@ -1627,6 +1703,14 @@ pub struct SyncPushBody {
     /// Memories the sender is offering. Applied via the existing
     /// timestamp-aware merge (`insert_if_newer`).
     pub memories: Vec<Memory>,
+    /// Memory IDs the sender has deleted and wants propagated. Applied
+    /// via `db::delete`. v0.6.0.1: simple remove (no tombstone row); a
+    /// concurrent newer `insert_if_newer` from another peer could revive
+    /// the row — a Last-Writer-Wins quirk we live with until v0.7's
+    /// CRDT-lite tombstone table lands. In the common 4-node mesh, the
+    /// same delete reaches every peer well before any revival window.
+    #[serde(default)]
+    pub deletions: Vec<String>,
     /// Preview mode — classify and count, do not write.
     #[serde(default)]
     pub dry_run: bool,
@@ -1643,6 +1727,7 @@ pub struct SyncSinceQuery {
     pub peer: Option<String>,
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn sync_push(
     State(state): State<Db>,
     headers: HeaderMap,
@@ -1667,6 +1752,15 @@ pub async fn sync_push(
         )
             .into_response();
     }
+    if body.deletions.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("sync_push limited to {} deletions per request", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
     // Receiver's local identity — default to the caller-supplied header,
     // fall back to the anonymous placeholder. Recorded in sync_state rows.
     let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
@@ -1685,6 +1779,7 @@ pub async fn sync_push(
     let mut applied = 0usize;
     let mut noop = 0usize;
     let mut skipped = 0usize;
+    let mut deleted = 0usize;
     let mut latest_seen: Option<String> = None;
 
     for mem in &body.memories {
@@ -1711,6 +1806,28 @@ pub async fn sync_push(
         }
     }
 
+    // Process deletions (v0.6.0.1 — scenario 10 fanout). Invalid ids are
+    // skipped silently; missing rows count as no-op. Peers that have
+    // already GC'd the row see identical post-state.
+    for del_id in &body.deletions {
+        if validate::validate_id(del_id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::delete(&lock.0, del_id) {
+            Ok(true) => deleted += 1,
+            Ok(false) => noop += 1,
+            Err(e) => {
+                tracing::warn!("sync_push: delete failed for {del_id}: {e}");
+                skipped += 1;
+            }
+        }
+    }
+
     // Advance the vector clock with the highest `updated_at` we observed.
     // Skipped in dry-run mode since the caller is only previewing.
     if !body.dry_run
@@ -1730,6 +1847,7 @@ pub async fn sync_push(
         StatusCode::OK,
         Json(json!({
             "applied": applied,
+            "deleted": deleted,
             "noop": noop,
             "skipped": skipped,
             "dry_run": body.dry_run,
@@ -2275,6 +2393,74 @@ mod tests {
         )
         .unwrap();
         assert!(rows.is_empty(), "dry_run must not write rows");
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_applies_deletions() {
+        // v0.6.0.1 — sync_push's `deletions` field removes the listed ids
+        // from the receiver so peer-side tombstone fanout works for
+        // scenario-10. (a2a-hermes r14.)
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+
+        let seeded_id = {
+            let lock = state.lock().await;
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: "delete-fanout".into(),
+                title: "to-be-deleted".into(),
+                content: "body".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(state.clone());
+
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-alice",
+            "sender_clock": {"entries": {}},
+            "memories": [],
+            "deletions": [seeded_id.clone()],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "local-receiver")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["deleted"], 1);
+
+        let lock = state.lock().await;
+        let gone = db::get(&lock.0, &seeded_id).unwrap();
+        assert!(
+            gone.is_none(),
+            "row should have been tombstoned by sync_push"
+        );
     }
 
     #[tokio::test]

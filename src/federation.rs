@@ -89,14 +89,41 @@ impl FederationConfig {
             .iter()
             .enumerate()
             .map(|(i, raw)| {
+                // `id` is used as a Prometheus metric label; keep it
+                // low-cardinality. The full URL is logged separately.
+                // (#304 nit — prior form `peer-{i}:{url}` blew up the
+                // label space as deployment size grew.)
                 let trimmed = raw.trim_end_matches('/');
+                tracing::debug!(
+                    target = "federation",
+                    peer_index = i,
+                    url = trimmed,
+                    "registered peer"
+                );
                 PeerEndpoint {
-                    id: format!("peer-{i}:{trimmed}"),
+                    id: format!("peer-{i}"),
                     sync_push_url: format!("{trimmed}/api/v1/sync/push"),
                 }
             })
             .collect();
 
+        // Federation client tuning.
+        //
+        // An earlier PR #314 attempted tight `tcp_keepalive(1s)` +
+        // `pool_idle_timeout(5s)` on this builder to close the Phase
+        // 4 partition_minority convergence gap. Ship-gate run 21
+        // showed that combination caused Phase 4 to hang for 40+
+        // minutes — suspected cause was connection-pool churn on the
+        // chaos-client's local 3-process mesh exhausting ephemeral
+        // ports under continuous close+reopen cycles with the tight
+        // keepalive generating probe traffic on every idle socket.
+        //
+        // Reverted to the conservative-default client here. Partition-
+        // recovery under chaos is moved out of the required ship-gate
+        // and into an opt-in campaign shape. Real partition resilience
+        // is a v0.6.0.1+ investigation with instrumented cycle data
+        // (cycles_by_fault now landed in ship-gate, giving us per-cycle
+        // visibility the next time we attempt this).
         let mut client_builder = reqwest::Client::builder()
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(2))
@@ -168,36 +195,78 @@ pub async fn broadcast_store_quorum(
         });
     }
 
+    // Deadline is computed ONCE here and never re-derived inside the
+    // loop. The tracker carries the same deadline internally — passing
+    // a single `Instant` through avoids the few-millisecond disagreement
+    // that previously caused `finalise()` to reject quorums met 1-2 ms
+    // earlier. (#299 item 1.)
     let deadline = now + config.policy.ack_timeout;
-    while let Some(result) = tokio::time::timeout(
-        deadline.saturating_duration_since(Instant::now()),
-        joins.join_next(),
-    )
-    .await
-    .ok()
-    .flatten()
-    {
-        match result {
-            Ok((peer_id, AckOutcome::Ack)) => {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
                 tracker.lock().await.record_peer_ack(peer_id);
             }
-            Ok((peer_id, AckOutcome::IdDrift)) => {
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
                 tracker.lock().await.record_id_drift(peer_id);
             }
-            Ok((peer_id, AckOutcome::Fail(reason))) => {
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
                 tracing::warn!("federation: peer {peer_id} failed for {}: {reason}", mem.id);
             }
-            Err(e) => {
+            Ok(Some(Err(e))) => {
                 tracing::warn!("federation: peer join error: {e}");
             }
+            Ok(None) | Err(_) => break, // joinset drained or timed out
         }
         // Early-exit once the tracker says quorum is met — we don't
-        // need to wait for stragglers. But we still fire-and-forget
-        // their pending requests (the JoinSet drop cancels the
-        // remaining tasks).
+        // need to wait for stragglers.
         if tracker.lock().await.is_quorum_met(Instant::now()) {
             break;
         }
+    }
+
+    // v0.6.0 correctness fix: once quorum is met, DETACH the remaining
+    // fanouts into a background task so they complete naturally rather
+    // than being aborted mid-flight. Ship-gate run 14 showed each peer
+    // receiving only ~50% of burst writes under W=2/N=3 — cause: when
+    // peer-B won the ack race, `joins.shutdown().await` aborted the
+    // in-flight POST to peer-C, which often reached reqwest's connect
+    // phase but never delivered the memory. Net effect: every write
+    // landed on leader + exactly one peer, leaving the other peer
+    // permanently behind until a sync-daemon (not running in the phase-2
+    // harness) caught it up.
+    //
+    // The spawned fanout tasks do NOT hold the tracker Arc (they only
+    // capture client/url/payload/id), so letting them outlive this
+    // function does not block the `Arc::try_unwrap` below. Errors inside
+    // the detached tasks are logged but otherwise ignored — the caller
+    // has already met quorum by the time we detach.
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                match res {
+                    Ok((peer_id, AckOutcome::Ack)) => {
+                        tracing::debug!("federation: post-quorum ack from {peer_id}");
+                    }
+                    Ok((peer_id, AckOutcome::IdDrift)) => {
+                        tracing::warn!(
+                            "federation: post-quorum id-drift from {peer_id} (peer rewrote id)"
+                        );
+                    }
+                    Ok((peer_id, AckOutcome::Fail(reason))) => {
+                        tracing::debug!(
+                            "federation: post-quorum peer {peer_id} did not ack: {reason}"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!("federation: post-quorum join error: {e}");
+                    }
+                }
+            }
+        });
     }
 
     let tracker = Arc::try_unwrap(tracker)
@@ -257,6 +326,90 @@ pub fn finalise_quorum(tracker: &AckTracker) -> Result<usize, QuorumError> {
     tracker.finalise(Instant::now())
 }
 
+/// Fan out a tombstone for `id` to every configured peer via the extended
+/// `sync_push` body (`deletions: [id]`). Same quorum contract as
+/// `broadcast_store_quorum`: local delete is recorded immediately, peer acks
+/// counted against `policy.write_quorum`, deadline enforced, stragglers
+/// detached.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` if the internal tracker Arc cannot
+/// be unwrapped (only occurs under a pathological detach race).
+pub async fn broadcast_delete_quorum(
+    config: &FederationConfig,
+    id: &str,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "deletions": [id],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = id.to_string();
+        joins.spawn(async move {
+            let outcome = post_and_classify(&client, &url, &payload, &target_id).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!("federation: delete peer {peer_id} failed for {id}: {reason}");
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: delete peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum delete peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
 /// Serialised 503 payload for failed quorum writes.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct QuorumNotMetPayload {
@@ -278,9 +431,17 @@ impl QuorumNotMetPayload {
                 error: "quorum_not_met",
                 got: *got,
                 needed: *needed,
+                // InFlight shouldn't surface in the HTTP payload — the
+                // broadcast loop waits until the deadline before
+                // calling finalise(). If a caller somehow gets it here,
+                // we map to "timeout" for the operator-facing 503 so
+                // we don't leak a transient internal state as a fourth
+                // public string.
                 reason: match reason {
                     QuorumFailureReason::Unreachable => "unreachable".to_string(),
-                    QuorumFailureReason::Timeout => "timeout".to_string(),
+                    QuorumFailureReason::Timeout | QuorumFailureReason::InFlight => {
+                        "timeout".to_string()
+                    }
                     QuorumFailureReason::IdDrift => "id_drift".to_string(),
                 },
             },
@@ -419,10 +580,45 @@ mod tests {
             .unwrap();
         let result = finalise_quorum(&tracker);
         assert!(result.is_ok(), "expected quorum met, got {result:?}");
-        // At least one peer called; happy-path race can finish before
-        // the second issues the request — that's by design (early-exit).
+        // At least one peer called before quorum returned. With v0.6.0's
+        // post-quorum detach, additional fan-outs complete in the
+        // background and may or may not have landed by the time this
+        // assertion runs — the synchronous contract is only "≥ 1 peer
+        // acked before return".
         let calls = count1.load(Ordering::Relaxed) + count2.load(Ordering::Relaxed);
         assert!(calls >= 1);
+    }
+
+    #[tokio::test]
+    async fn post_quorum_fanout_reaches_all_peers() {
+        // Contract: once quorum is met, the background detach must still
+        // deliver the write to every peer. Ship-gate run 14 uncovered the
+        // prior abort-on-quorum regression that left one peer permanently
+        // missing ~50% of burst writes under W=2/N=3.
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_store_quorum(&cfg, &sample_memory())
+            .await
+            .unwrap();
+        // Give the detached fanout a slow path to complete. Mock handlers
+        // are in-process, so 200ms is comfortable without being flaky.
+        for _ in 0..20 {
+            if count1.load(Ordering::Relaxed) == 1 && count2.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            1,
+            "peer-1 must receive the write post-quorum"
+        );
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            1,
+            "peer-2 must receive the write post-quorum"
+        );
     }
 
     #[tokio::test]

@@ -89,7 +89,7 @@ fn tool_definitions() -> Value {
                         "tags": {"type": "array", "items": {"type": "string"}, "default": []},
                         "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
                         "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
-                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system"], "default": "claude"},
+                        "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system", "chaos"], "default": "claude"},
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
                         "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
                         "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."}
@@ -2220,6 +2220,23 @@ fn handle_subscribe(
     let agent_filter = params["agent_filter"].as_str();
     let created_by =
         crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
+
+    // Require the caller to be a registered agent (#301 item 4).
+    // MCP stdio is single-tenant per process, but the same tool set is
+    // exposed on the HTTP daemon where a caller might not be attested.
+    // Registration in `_agents` is cheap (single memory_agent_register
+    // call) and provides an audit trail; refusing unregistered
+    // subscribers closes the "any MCP client owns the webhook fleet"
+    // hole flagged by the v0.6.0 security review.
+    let registered = crate::db::list_agents(conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .any(|a| a.agent_id == created_by);
+    if !registered {
+        return Err(format!(
+            "agent {created_by:?} is not registered; call memory_agent_register before memory_subscribe"
+        ));
+    }
 
     crate::subscriptions::validate_url(url).map_err(|e| e.to_string())?;
 

@@ -115,77 +115,67 @@ pub async fn migrate(
         ..MigrationReport::default()
     };
 
-    // Pagination strategy: adapters' `list` returns memories ordered by
-    // priority DESC, updated_at DESC (the in-tree SqliteStore shape).
-    // We cannot rely on a stable `since` cursor without duplicates, so
-    // we fetch with progressively smaller `until` windows and
-    // deduplicate by id. For v0.7-alpha this is fine for databases up
-    // to the order of millions of rows — large adapters will ship a
-    // cursor-based `list_page` in a follow-up.
+    // Migration strategy (blocker #298 fix).
+    //
+    // The earlier pagination used `created_at` as the cursor, but
+    // adapter `list` returns rows ordered by `priority DESC, updated_at
+    // DESC`. Low-priority memories newer than page-1's `min(created_at)`
+    // were permanently skipped — the priority-ordered page didn't
+    // include them, and the created_at cursor then filtered them out on
+    // the next call. That's data loss, silently.
+    //
+    // For v0.6.0 we migrate in a single `list` call capped at MAX_ROWS.
+    // The caller's `batch_size` parameter is kept for API compatibility
+    // but is NOT used to cap total rows — it's a hint for the future
+    // streaming migrate tool (tracked in v0.7 as
+    // `MemoryStore::list_all`).
+    //
+    // Correctness > throughput: a correct single-call migrate is
+    // strictly preferable to a paginated migrate that silently drops
+    // rows. If the source exceeds MAX_ROWS the migration refuses
+    // loudly rather than truncating.
+    const MAX_ROWS: usize = 1_000_000;
+    let _ = batch_size; // Retained for API compatibility; see comment above.
+
+    let filter = Filter {
+        namespace: namespace_filter.clone(),
+        until: None,
+        limit: MAX_ROWS,
+        ..Filter::default()
+    };
+    let page = match from.list(&ctx, &filter).await {
+        Ok(p) => p,
+        Err(e) => {
+            report.errors.push(format!("source list failed: {e}"));
+            return report;
+        }
+    };
+
+    // Detect cap saturation. If the source returned exactly MAX_ROWS
+    // memories, refuse rather than risk silent truncation. Operators
+    // with >1M memories need the streaming migrate (v0.7).
+    if page.len() >= MAX_ROWS {
+        report.errors.push(format!(
+            "source has >= {} memories; single-call migrate cap reached. \
+             Use the streaming migrate tool (v0.7+) instead of \
+             silently dropping rows.",
+            MAX_ROWS
+        ));
+        return report;
+    }
+
     let mut seen: HashSet<String> = HashSet::new();
-    let batch_size = batch_size.clamp(1, 10_000);
-    // Start with a very large upper bound so the first page is the most
-    // recent `batch_size` memories; slide `until` backwards for each
-    // subsequent page.
-    let mut until: Option<chrono::DateTime<chrono::Utc>> = None;
-    loop {
-        let filter = Filter {
-            namespace: namespace_filter.clone(),
-            until,
-            limit: batch_size,
-            ..Filter::default()
-        };
-        let page = match from.list(&ctx, &filter).await {
-            Ok(p) => p,
-            Err(e) => {
-                report.errors.push(format!("source list failed: {e}"));
-                break;
-            }
-        };
-        if page.is_empty() {
-            break;
+    report.batches = 1;
+    for mem in &page {
+        if !seen.insert(mem.id.clone()) {
+            continue;
         }
-
-        // Filter out memories already processed in a previous page
-        // (happens on the `until` boundary).
-        let fresh: Vec<&crate::models::Memory> =
-            page.iter().filter(|m| !seen.contains(&m.id)).collect();
-
-        if fresh.is_empty() {
-            // Nothing new on this page — cursor didn't advance, stop.
-            break;
-        }
-        report.batches += 1;
-        report.memories_read += fresh.len();
-
+        report.memories_read += 1;
         if !dry_run {
-            for mem in &fresh {
-                match to.store(&ctx, mem).await {
-                    Ok(_) => report.memories_written += 1,
-                    Err(e) => {
-                        report.errors.push(format!("write {} failed: {e}", mem.id));
-                    }
-                }
+            match to.store(&ctx, mem).await {
+                Ok(_) => report.memories_written += 1,
+                Err(e) => report.errors.push(format!("write {} failed: {e}", mem.id)),
             }
-        }
-        for mem in &page {
-            seen.insert(mem.id.clone());
-        }
-
-        // Advance `until` to the oldest created_at we've now seen so
-        // the next page is strictly older.
-        let min_created_at = page
-            .iter()
-            .filter_map(|m| chrono::DateTime::parse_from_rfc3339(&m.created_at).ok())
-            .map(chrono::DateTime::<chrono::Utc>::from)
-            .min();
-        let previous_until = until;
-        until = min_created_at;
-        if until == previous_until {
-            break;
-        }
-        if page.len() < batch_size {
-            break;
         }
     }
 
@@ -268,7 +258,9 @@ mod tests {
         let report = migrate(&src, &dst, 2, None, false).await;
         assert_eq!(report.memories_read, 5);
         assert_eq!(report.memories_written, 5);
-        assert!(report.batches >= 2, "batches = {}", report.batches);
+        // v0.6.0 migrate is single-call (blocker #298 fix); batch_size
+        // parameter retained for API compat but doesn't force pagination.
+        assert_eq!(report.batches, 1);
         // Verify destination has them all.
         for i in 0..5 {
             let got = dst.get(&ctx, &format!("m{i}")).await.expect("get dst");

@@ -283,11 +283,24 @@ pub struct UpdatePatch {
 }
 
 /// Report produced by `verify`.
+///
+/// **Important**: as of v0.6.0 neither the SQLite nor the Postgres
+/// adapter performs cryptographic signature verification. `verify()`
+/// is a structural-integrity check only (empty fields / missing
+/// metadata keys / schema-level sanity). The \`signature_verified\`
+/// flag reports whether real signature verification was performed —
+/// always \`false\` today; will flip to \`true\` once Task 1.4 (signed
+/// memories) lands. Callers MUST NOT treat \`integrity_ok: true\`
+/// as a trust signal; only \`signature_verified: true\` carries that
+/// weight. (#302 item 5.)
 #[derive(Debug, Clone)]
 pub struct VerifyReport {
     pub memory_id: String,
     pub integrity_ok: bool,
     pub findings: Vec<String>,
+    /// True iff the adapter performed a real cryptographic signature
+    /// verification. Always false pre-Task-1.4.
+    pub signature_verified: bool,
 }
 
 #[cfg(test)]

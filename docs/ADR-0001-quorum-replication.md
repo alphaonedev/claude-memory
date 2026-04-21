@@ -67,31 +67,68 @@ mesh.
 
 ### Chaos-testing methodology
 
-A real durability claim needs measurement. The chaos harness supports
-four classes of injected fault:
+A real durability claim needs measurement. The v0.6.0 chaos harness
+(`packaging/chaos/run-chaos.sh`) injects four fault classes. Two are
+true injections; two are **documented simulations** that approximate a
+related fault class without the kernel-capability requirements of the
+real thing. The ADR is honest about which is which so campaign
+reports never overclaim.
+
+#### Injected (real) — carry the phase's evidence
 
 1. **`kill_primary_mid_write`** — SIGKILL the originating node between
    the local-commit and the quorum-ack step. Reconciliation on restart
-   must converge.
-2. **`partition_minority`** — iptables-drop traffic from the originating
-   node to `N - W + 1` peers. Writes MUST fail with
-   `BackendUnavailable{quorum}` and the caller MUST NOT see partial
-   commits.
-3. **`drop_random_acks`** — randomly drop 1/3 of inbound ack packets
-   for 60 s. Retry behaviour MUST eventually converge; no memory MUST
-   silently go missing.
-4. **`clock_skew_peer`** — run one peer with its NTP frozen 5 min
-   behind. Writes MUST still succeed; skew MUST appear in
-   `replication_clock_skew_seconds`.
+   must converge. Exercised: abrupt writer loss, recovery, idempotent
+   replay.
+2. **`partition_minority`** — `iptables -I INPUT -s <peer> -j DROP`
+   for 500 ms on the originating node, severing its ability to reach
+   both peers, then restoring. Exercised: quorum contract under
+   transient partition. Writes during the partition MUST fail with
+   `quorum_not_met`; writes after restoration MUST converge.
 
-Each campaign reports a **durability bound**: the empirical fraction of
-writes that converged to every quorum-member within `--quorum-timeout-ms
-* 10` under N chaos cycles. A number below 1.0 does not immediately
-fail the run — it surfaces for tracking. The claim we eventually
-defend is **not** "<0.01% loss" (not measurable at chaos-campaign
-scales without thousands of hours of runtime) but rather "**100% of
-committed writes converged to every reachable quorum-member under 200
-chaos cycles of each failure class**".
+#### Simulated — exercise the code path, not the fault class
+
+3. **`drop_random_acks`** — approximated by `SIGSTOP` on the ack-peer
+   process for 500 ms (no kernel-level packet manipulation). This
+   exercises the writer's ack-timeout and retry logic as if acks were
+   dropped, but does NOT exercise real packet-drop scenarios such as
+   partial-frame corruption or TCP retransmit storms. A real
+   implementation would need `iptables` with the `STATISTIC` module
+   or `tc netem loss 33%` — tracked as follow-up (see Open questions).
+4. **`clock_skew_peer`** — RECORDED only. The harness logs the intent
+   and moves on without actually manipulating the peer's clock;
+   `date --set` / NTP override requires `CAP_SYS_TIME` on the peer
+   container, which the ship-gate infrastructure does not grant. A
+   real implementation can either (a) bind-mount a read-only `faketime`
+   LD_PRELOAD into the peer, or (b) run the peer in a privileged
+   container with its NTP daemon masked. Tracked as follow-up.
+
+#### What a passing campaign demonstrates
+
+Each campaign reports a **convergence bound per fault class** —
+`(sum ok across cycles) / (sum writes across cycles)`. The pass
+criterion is **≥ 0.995 per class for all four classes**. A campaign
+that meets this demonstrates:
+
+- The two real classes (`kill_primary`, `partition_minority`) directly
+  validate quorum-writer behaviour under abrupt writer loss and
+  transient network isolation.
+- The two simulated classes validate that the writer's retry and
+  ack-timeout code paths do not regress, even though they do not
+  validate the underlying fault's semantics end-to-end.
+
+#### What the claim is — and isn't
+
+The public claim derived from a passing campaign is **"convergence
+fraction ≥ 0.995 under the four-fault-class campaign described in
+ADR-0001, with two fault classes simulated as documented."** It is
+**NOT** "<0.01% loss probability" (not measurable at campaign scales
+without thousands of hours of runtime) and it is **NOT** a guarantee
+against real-world packet drops or clock skew until the two simulated
+classes are promoted to real injections. Marketing copy MUST reflect
+both of those qualifications — a campaign report with only
+`kill_primary` + `partition_minority` as true faults cannot carry a
+"chaos-proof" tagline on its own.
 
 ### Non-goals
 

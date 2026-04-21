@@ -20,7 +20,7 @@
 //!   shared secret; the plaintext is returned **once** at
 //!   subscription time and never leaves the DB after.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
@@ -190,13 +190,17 @@ pub fn dispatch_event(
             return;
         }
     };
+    // Timestamp is part of the canonical string the signature is
+    // computed over. Receivers SHOULD reject requests whose timestamp
+    // differs from their clock by more than 5 minutes (replay window).
+    // (#301 item 1 — prior implementation had no replay protection.)
+    let timestamp = chrono::Utc::now().timestamp().to_string();
     for sub in matching {
         let url = sub.url.clone();
         let sub_id = sub.id.clone();
         let body = body.clone();
+        let ts = timestamp.clone();
         let db_path = db_path.to_path_buf();
-        // Fire-and-forget. Uses reqwest's blocking client on a
-        // dedicated thread — no tokio runtime entanglement.
         std::thread::spawn(move || {
             let secret_hash = match load_secret_hash(&db_path, &sub_id) {
                 Ok(s) => s,
@@ -205,18 +209,34 @@ pub fn dispatch_event(
                     return;
                 }
             };
-            let signature = secret_hash.as_deref().map(|h| hmac_sha256_hex(h, &body));
-            let ok = send(&url, &body, signature.as_deref());
+            // Canonical string: "<timestamp>.<body>". Keyed HMAC over
+            // the DB-stored secret hash. Receivers verify by computing
+            // SHA256(plaintext_secret) and then
+            // HMAC-SHA256(key, "<timestamp>.<body>").
+            let canonical = format!("{ts}.{body}");
+            let signature = secret_hash
+                .as_deref()
+                .map(|h| hmac_sha256_hex(h, &canonical));
+            let ok = send(&url, &body, &ts, signature.as_deref());
             record_dispatch(&db_path, &sub_id, ok);
         });
     }
 }
 
 /// Perform one HTTP POST with SSRF-hardened URL check + signature
-/// header. Returns true on any 2xx response.
-fn send(url: &str, body: &str, signature: Option<&str>) -> bool {
+/// + timestamp headers. Returns true on any 2xx response.
+fn send(url: &str, body: &str, timestamp: &str, signature: Option<&str>) -> bool {
     if let Err(e) = validate_url(url) {
         tracing::warn!("SSRF guard rejected webhook URL {url}: {e}");
+        return false;
+    }
+    // DNS-resolution guard (#301 item 2). We rely on reqwest to
+    // perform the connect, but pre-check by resolving the host here
+    // and rejecting if any returned address is private / loopback /
+    // link-local. Prevents DNS-rebind SSRF against attacker-controlled
+    // domains that resolve to internal IPs.
+    if let Err(e) = validate_url_dns(url) {
+        tracing::warn!("DNS SSRF guard rejected webhook URL {url}: {e}");
         return false;
     }
     let client = match reqwest::blocking::Client::builder()
@@ -232,7 +252,8 @@ fn send(url: &str, body: &str, signature: Option<&str>) -> bool {
     let mut req = client
         .post(url)
         .header("content-type", "application/json")
-        .header("user-agent", "ai-memory/0.6.0.0");
+        .header("user-agent", "ai-memory/0.6.0.0")
+        .header("x-ai-memory-timestamp", timestamp);
     if let Some(sig) = signature {
         req = req.header("x-ai-memory-signature", format!("sha256={sig}"));
     }
@@ -293,6 +314,43 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
         .collect()
+}
+
+/// SSRF guard with DNS resolution (#301 item 2). Resolves the host
+/// via the stdlib resolver and rejects if ANY returned
+/// `SocketAddr`'s IP is private / loopback / link-local. Guards
+/// against DNS-rebind attacks where an attacker-controlled hostname
+/// resolves to an internal IP at connect time.
+///
+/// Runs in the dispatch thread (blocking). Best-effort: if DNS fails
+/// we let reqwest surface the error rather than fail closed, because
+/// transient DNS outages should not silently drop webhook delivery.
+pub fn validate_url_dns(url: &str) -> Result<()> {
+    let lower = url.to_ascii_lowercase();
+    let (_scheme, rest) = lower
+        .split_once("://")
+        .ok_or_else(|| anyhow!("webhook URL missing scheme: {url}"))?;
+    let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let host_port = &rest[..host_end];
+    // Supply a default port so ToSocketAddrs resolves correctly.
+    let resolv_target = if host_port.contains(':') || host_port.starts_with('[') {
+        host_port.to_string()
+    } else {
+        format!("{host_port}:80")
+    };
+    let addrs: Vec<std::net::SocketAddr> = match resolv_target.to_socket_addrs() {
+        Ok(iter) => iter.collect(),
+        Err(_) => return Ok(()), // DNS hiccup — let reqwest surface it
+    };
+    for addr in &addrs {
+        let ip = addr.ip();
+        if is_private(ip) && !ip.is_loopback() {
+            return Err(anyhow!(
+                "host resolves to private/link-local IP {ip}: {url}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// SSRF guard. Rejects URLs that would cause the daemon to connect

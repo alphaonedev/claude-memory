@@ -134,12 +134,21 @@ impl std::error::Error for QuorumError {}
 #[serde(rename_all = "snake_case")]
 pub enum QuorumFailureReason {
     /// No peers reachable at all (network / DNS / zero configured).
+    /// Only reported after the deadline passed with zero acks.
     Unreachable,
     /// Peers reachable but fewer than `W-1` acked before deadline.
+    /// Reported after the deadline passed with a partial ack set.
     Timeout,
     /// Peer ack arrived but disagreed on the memory id — replication
     /// divergence surfaced for operator investigation.
     IdDrift,
+    /// Quorum is not (yet) met but the deadline has not passed.
+    /// Caller should keep waiting; this is a transient
+    /// "ask-for-status-while-tasks-in-flight" answer. Distinguished
+    /// from `Timeout` / `Unreachable` so retry strategies don't
+    /// confuse "give it more time" with "peers are gone"
+    /// (#299 item 3 — classification was previously inverted).
+    InFlight,
 }
 
 /// Collects remote acks against a deadline. Pure logic — no I/O.
@@ -216,14 +225,27 @@ impl AckTracker {
         if got >= self.policy.w {
             return Ok(got);
         }
-        let reason = if self.acks.is_empty() && now > self.deadline {
-            QuorumFailureReason::Unreachable
-        } else if now > self.deadline {
-            QuorumFailureReason::Timeout
+        // Classification (#299 item 3 — previously collapsed the
+        // pre-deadline "still waiting" case to `Timeout` which
+        // misdirected caller retry logic):
+        //
+        //   acks.is_empty() && past deadline → Unreachable (no ack ever
+        //     landed, all peers down or network partitioned).
+        //   past deadline, partial acks      → Timeout (some peers
+        //     responded, some did not before the deadline).
+        //   pre-deadline                     → InFlight (caller is
+        //     asking early; tracker isn't done waiting yet).
+        //
+        // `InFlight` is a distinct variant so retry strategies can tell
+        // "give it more time" apart from "the peers are gone".
+        let reason = if now > self.deadline {
+            if self.acks.is_empty() {
+                QuorumFailureReason::Unreachable
+            } else {
+                QuorumFailureReason::Timeout
+            }
         } else {
-            // Under deadline but not enough yet — caller should keep
-            // waiting; surface as Timeout only after deadline passes.
-            QuorumFailureReason::Timeout
+            QuorumFailureReason::InFlight
         };
         Err(QuorumError::QuorumNotMet {
             got,
