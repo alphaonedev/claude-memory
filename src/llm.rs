@@ -8,7 +8,7 @@ use std::time::Duration;
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(30);
-const PULL_TIMEOUT: Duration = Duration::from_secs(120);
+const PULL_TIMEOUT: Duration = Duration::from_mins(2);
 
 const QUERY_EXPANSION_PROMPT: &str = r"You are a search query expander. Given a search query, generate 5-8 additional search terms that are semantically related. Return ONLY the terms, one per line, no numbering or explanation.
 
