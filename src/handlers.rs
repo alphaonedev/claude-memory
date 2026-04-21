@@ -121,17 +121,28 @@ pub async fn api_key_auth(
         .into_response()
 }
 
-pub async fn health(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn health(State(app): State<AppState>) -> impl IntoResponse {
+    let lock = app.db.lock().await;
     let ok = db::health_check(&lock.0).unwrap_or(false);
+    drop(lock);
+    let embedder_ready = app.embedder.as_ref().is_some();
+    let federation_enabled = app.federation.as_ref().is_some();
     let code = if ok {
         StatusCode::OK
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
+    // v0.6.2 (#327): expose embedder status so operators can tell from
+    // /health alone whether semantic recall is wired up on this node.
     (
         code,
-        Json(json!({"status": if ok { "ok" } else { "error" }, "service": "ai-memory"})),
+        Json(json!({
+            "status": if ok { "ok" } else { "error" },
+            "service": "ai-memory",
+            "version": env!("CARGO_PKG_VERSION"),
+            "embedder_ready": embedder_ready,
+            "federation_enabled": federation_enabled,
+        })),
     )
         .into_response()
 }
@@ -1504,7 +1515,10 @@ pub async fn list_namespaces(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
-pub async fn create_link(State(state): State<Db>, Json(body): Json<LinkBody>) -> impl IntoResponse {
+pub async fn create_link(
+    State(app): State<AppState>,
+    Json(body): Json<LinkBody>,
+) -> impl IntoResponse {
     if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1512,9 +1526,73 @@ pub async fn create_link(State(state): State<Db>, Json(body): Json<LinkBody>) ->
         )
             .into_response();
     }
-    let lock = state.lock().await;
-    match db::create_link(&lock.0, &body.source_id, &body.target_id, &body.relation) {
-        Ok(()) => (StatusCode::CREATED, Json(json!({"linked": true}))).into_response(),
+    let lock = app.db.lock().await;
+    let create_result = db::create_link(&lock.0, &body.source_id, &body.target_id, &body.relation);
+    // Drop DB lock before fanning out — peers POST back to our sync_push
+    // and we'd deadlock on the shared Mutex if we held it.
+    drop(lock);
+    match create_result {
+        Ok(()) => {
+            // v0.6.2 (#325): propagate link to peers.
+            if let Some(fed) = app.federation.as_ref() {
+                let link = crate::models::MemoryLink {
+                    source_id: body.source_id.clone(),
+                    target_id: body.target_id.clone(),
+                    relation: body.relation.clone(),
+                    created_at: chrono::Utc::now().to_rfc3339(),
+                };
+                match crate::federation::broadcast_link_quorum(fed, &link).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("link fanout error (local committed): {e:?}");
+                    }
+                }
+            }
+            (StatusCode::CREATED, Json(json!({"linked": true}))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// v0.6.2 (#325) — DELETE /api/v1/links. Removes the directional link
+/// `source_id → target_id` locally. Deletion is NOT fanned out in v0.6.2:
+/// the receiving-side API is `db::delete_link`, and `sync_push` does not
+/// yet carry a link-tombstone list. Full link tombstones ship with v0.7
+/// CRDT-lite. For current scenario coverage (scenario-11 tests create),
+/// create-link fanout is sufficient.
+pub async fn delete_link(
+    State(app): State<AppState>,
+    Json(body): Json<LinkBody>,
+) -> impl IntoResponse {
+    if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    let lock = app.db.lock().await;
+    let delete_result = db::delete_link(&lock.0, &body.source_id, &body.target_id);
+    drop(lock);
+    match delete_result {
+        Ok(removed) => Json(json!({"deleted": removed})).into_response(),
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
@@ -1655,7 +1733,7 @@ fn default_ns() -> String {
 }
 
 pub async fn consolidate_memories(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<ConsolidateBody>,
 ) -> impl IntoResponse {
@@ -1680,9 +1758,10 @@ pub async fn consolidate_memories(
                     .into_response();
             }
         };
-    let lock = state.lock().await;
+    let lock = app.db.lock().await;
     let tier = body.tier.unwrap_or(Tier::Long);
-    match db::consolidate(
+    let source_ids = body.ids.clone();
+    let consolidate_result = db::consolidate(
         &lock.0,
         &body.ids,
         &body.title,
@@ -1691,12 +1770,47 @@ pub async fn consolidate_memories(
         &tier,
         "consolidation",
         &consolidator_agent_id,
-    ) {
-        Ok(new_id) => (
-            StatusCode::CREATED,
-            Json(json!({"id": new_id, "consolidated": body.ids.len()})),
-        )
-            .into_response(),
+    );
+    // Read the newly consolidated memory back so we can fanout — must do
+    // this inside the same lock window because db::consolidate deletes
+    // the source rows as part of its transaction.
+    let new_mem = match &consolidate_result {
+        Ok(new_id) => db::get(&lock.0, new_id).ok().flatten(),
+        Err(_) => None,
+    };
+    // Drop DB lock before fanning out — peers POST back to our sync_push
+    // and we'd deadlock on the shared Mutex if we held it.
+    drop(lock);
+    match consolidate_result {
+        Ok(new_id) => {
+            // v0.6.2 (#326): propagate consolidation to peers so
+            // `metadata.consolidated_from_agents` and the deleted sources
+            // are in sync across the mesh.
+            if let (Some(fed), Some(mem)) = (app.federation.as_ref(), new_mem) {
+                match crate::federation::broadcast_consolidate_quorum(fed, &mem, &source_ids).await
+                {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("consolidate fanout error (local committed): {e:?}");
+                    }
+                }
+            }
+            (
+                StatusCode::CREATED,
+                Json(json!({"id": new_id, "consolidated": body.ids.len()})),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
@@ -1893,6 +2007,12 @@ pub struct SyncPushBody {
     /// same delete reaches every peer well before any revival window.
     #[serde(default)]
     pub deletions: Vec<String>,
+    /// v0.6.2 (#325): memory links the sender wants propagated. Applied
+    /// via `db::create_link` on each peer. Duplicates are a no-op thanks
+    /// to the unique `(source_id, target_id, relation)` constraint on
+    /// `memory_links`.
+    #[serde(default)]
+    pub links: Vec<MemoryLink>,
     /// Preview mode — classify and count, do not write.
     #[serde(default)]
     pub dry_run: bool,
@@ -2024,6 +2144,34 @@ pub async fn sync_push(
         }
     }
 
+    // v0.6.2 (#325): process incoming links. Duplicates are expected on
+    // retry / re-sync and collapse to a no-op via the unique index on
+    // (source_id, target_id, relation). Invalid ids are skipped silently
+    // — same posture as deletions.
+    let mut links_applied = 0usize;
+    for link in &body.links {
+        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::create_link(&lock.0, &link.source_id, &link.target_id, &link.relation) {
+            Ok(()) => links_applied += 1,
+            Err(e) => {
+                tracing::warn!(
+                    "sync_push: create_link failed ({} -> {} / {}): {e}",
+                    link.source_id,
+                    link.target_id,
+                    link.relation
+                );
+                skipped += 1;
+            }
+        }
+    }
+
     // Advance the vector clock with the highest `updated_at` we observed.
     // Skipped in dry-run mode since the caller is only previewing.
     if !body.dry_run
@@ -2085,6 +2233,7 @@ pub async fn sync_push(
         Json(json!({
             "applied": applied,
             "deleted": deleted,
+            "links_applied": links_applied,
             "noop": noop,
             "skipped": skipped,
             "dry_run": body.dry_run,
@@ -2795,6 +2944,99 @@ mod tests {
             gone.is_none(),
             "row should have been tombstoned by sync_push"
         );
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_applies_incoming_links() {
+        // v0.6.2 (#325) — sync_push's `links` field applies the listed
+        // (source, target, relation) triples via db::create_link on the
+        // receiver so peer-side link fanout works for scenario-11.
+        // (a2a-hermes-v0.6.1-r15.)
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+
+        // Seed two memories on the receiver so the link has valid endpoints.
+        let (m1, m2) = {
+            let lock = state.lock().await;
+            let m1 = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: "link-fanout".into(),
+                title: "source".into(),
+                content: "a".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+            };
+            let m1_id = db::insert(&lock.0, &m1).unwrap();
+            let m2 = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: "link-fanout".into(),
+                title: "target".into(),
+                content: "b".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+            };
+            let m2_id = db::insert(&lock.0, &m2).unwrap();
+            (m1_id, m2_id)
+        };
+
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state.clone()));
+
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-alice",
+            "sender_clock": {"entries": {}},
+            "memories": [],
+            "links": [{
+                "source_id": m1,
+                "target_id": m2,
+                "relation": "related_to",
+                "created_at": now,
+            }],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "local-receiver")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["links_applied"], 1);
+
+        let lock = state.lock().await;
+        let links = db::get_links(&lock.0, &m1).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].target_id, m2);
+        assert_eq!(links[0].relation, "related_to");
     }
 
     #[tokio::test]

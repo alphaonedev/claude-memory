@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.2 + v0.7 tracks
+
+### Fixed — v0.6.2 a2a-gate r15 bug punchlist
+
+Three correctness gaps surfaced by `a2a-hermes-v0.6.1-r15` (11/14 scenarios
+passing) — see diagnostic trace at
+[ai2ai-gate#r15 evidence](https://alphaonedev.github.io/ai-memory-ai2ai-gate/runs/).
+
+- **[#325]** `create_link` fanout — `POST /api/v1/links` now broadcasts
+  the new link to every peer via quorum write. Scenario-11 of the
+  a2a-gate harness exercised this: charlie couldn't see an M1→M2 link
+  written on alice's node. `SyncPushBody` grows a `links: Vec<MemoryLink>`
+  field applied via `db::create_link` on peers; duplicates are idempotent
+  thanks to the existing unique index on `(source_id, target_id, relation)`.
+  New `federation::broadcast_link_quorum`. Delete-link fanout deferred
+  to v0.7 CRDT-lite link tombstones (local DELETE is now routable at
+  `DELETE /api/v1/links`).
+- **[#326]** `consolidate` fanout — `POST /api/v1/consolidate` now
+  broadcasts both the new consolidated memory AND the source-id
+  deletions in a single sync_push call. Scenario-5 exposed the gap:
+  peer nodes never saw the consolidated memory at all, so
+  `metadata.consolidated_from_agents` read as `"[]"`. New
+  `federation::broadcast_consolidate_quorum`.
+- **[#327]** Embedder-failure visibility on `ai-memory serve` — the
+  prior `WARN` when HuggingFace-Hub fetch failed was easy to miss in
+  DO droplet logs, which black-holed scenario-18 semantic recall
+  silently. Now logs at `ERROR` with an `⚠️ EMBEDDER LOAD FAILED`
+  marker + operator-facing remediation pointer. `/api/v1/health`
+  grows `embedder_ready: bool` + `federation_enabled: bool` fields so
+  the harness can assert semantic-tier readiness before scenarios run.
+
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
 ### Fixed — v0.6.0 pre-tag SAL blocker punchlist (#293)
