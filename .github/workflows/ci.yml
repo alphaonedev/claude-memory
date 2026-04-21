@@ -138,7 +138,9 @@ jobs:
   crates-io:
     name: Publish to crates.io
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags (SemVer `-` suffix, e.g. v0.6.2-rc.0) — only
+    # real releases (v0.6.2 without suffix) publish to crates.io.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -154,7 +156,8 @@ jobs:
   homebrew:
     name: Update Homebrew formula
     needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Homebrew users get the latest stable only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - name: Extract version from tag
@@ -259,7 +262,8 @@ jobs:
   docker:
     name: Docker (GHCR)
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — GHCR image tags reflect stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     permissions:
       contents: read
       packages: write
@@ -298,7 +302,8 @@ jobs:
   ppa:
     name: Ubuntu PPA
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Launchpad PPA users get stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -359,7 +364,8 @@ jobs:
   copr:
     name: Fedora COPR
     needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Fedora COPR users get stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
