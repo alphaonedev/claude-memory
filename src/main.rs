@@ -927,15 +927,38 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             .await?;
             match build {
                 Ok(emb) => {
-                    tracing::info!("embedder loaded ({})", emb.model_description());
+                    tracing::info!(
+                        "embedder loaded ({}) — tier={} semantic recall enabled",
+                        emb.model_description(),
+                        feature_tier.as_str()
+                    );
                     Some(emb)
                 }
                 Err(e) => {
-                    tracing::warn!("embedder failed to load: {e}; daemon runs keyword-only");
+                    // v0.6.2 (#327): make embedder load failures loud. The
+                    // prior WARN level was easy to miss in DO droplet logs,
+                    // which led to scenario-18 black-holing (semantic recall
+                    // falling back to keyword-only without the operator
+                    // noticing). An ERROR-level log with an obvious marker
+                    // surfaces this immediately in `journalctl -u ai-memory`
+                    // or tail -f /var/log/ai-memory-serve.log.
+                    tracing::error!(
+                        "⚠️  EMBEDDER LOAD FAILED — tier={} requested semantic features, \
+                         but embedder init errored: {e}. Daemon falls back to keyword-only. \
+                         Semantic recall, sync_push embedding refresh (#322), and HNSW index \
+                         will be NO-OPS. Check network egress to HuggingFace Hub + available \
+                         memory for model weights. To force keyword-only explicitly (silences \
+                         this error), set `tier = \"keyword\"` in config.toml.",
+                        feature_tier.as_str()
+                    );
                     None
                 }
             }
         } else {
+            tracing::info!(
+                "embedder disabled — tier={} keyword-only (FTS5); semantic recall not wired",
+                feature_tier.as_str()
+            );
             None
         };
     let vector_index = if embedder.is_some() {
@@ -1088,6 +1111,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             get(handlers::detect_contradictions),
         )
         .route("/api/v1/links", post(handlers::create_link))
+        .route("/api/v1/links", delete(handlers::delete_link))
         .route("/api/v1/links/{id}", get(handlers::get_links))
         .route("/api/v1/namespaces", get(handlers::list_namespaces))
         .route("/api/v1/stats", get(handlers::get_stats))
