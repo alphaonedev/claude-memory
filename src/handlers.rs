@@ -1307,6 +1307,188 @@ pub async fn forget_memories(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ContradictionsQuery {
+    /// Topic to group candidate memories by. Resolved via (in order):
+    /// `metadata.topic` exact match, then `title` exact match, then FTS
+    /// content substring. At least one of `topic` or `namespace` is required.
+    pub topic: Option<String>,
+    /// Namespace to scope the search. Optional — default is cross-namespace.
+    pub namespace: Option<String>,
+    /// Pagination cap. Defaults to 50, hard max 200.
+    pub limit: Option<usize>,
+}
+
+/// HTTP handler for v0.6.0.1 issue #321 — surfaces contradiction candidates
+/// over the same REST surface scenarios use, so a2a-gate scenario-6 and any
+/// future federation-level contradiction probe don't have to go through the
+/// MCP stdio path.
+///
+/// Returns `{memories, links}` where:
+/// - `memories` are the candidates grouped by topic/title (respecting the
+///   UPSERT (title, namespace) invariant: if writers collided, only the LWW
+///   survivor is returned — callers should use distinct titles per writer).
+/// - `links` includes any existing `contradicts` rows from the `memory_links`
+///   table PLUS a heuristic synthesis: when ≥2 candidates share a topic/title
+///   but have materially different content, emit a synthetic `contradicts`
+///   relation between each pair. The synthesized links carry
+///   `relation:"contradicts"` and a `synthesized:true` flag so callers can
+///   distinguish them from LLM-detected or operator-authored links.
+///
+/// Heuristic-only intentionally — LLM-backed detection (the existing MCP
+/// `memory_detect_contradiction` tool) stays MCP-scoped so the HTTP surface
+/// has no runtime LLM dependency. A follow-up issue can add opt-in LLM
+/// resolution when `config.tier == Smart | Autonomous`.
+#[allow(clippy::too_many_lines)]
+pub async fn detect_contradictions(
+    State(state): State<Db>,
+    Query(q): Query<ContradictionsQuery>,
+) -> impl IntoResponse {
+    if q.topic.is_none() && q.namespace.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "at least one of `topic` or `namespace` is required"})),
+        )
+            .into_response();
+    }
+    if let Some(ref ns) = q.namespace
+        && let Err(e) = validate::validate_namespace(ns)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    let limit = q.limit.unwrap_or(50).min(200);
+    let lock = state.lock().await;
+    let all = match db::list(
+        &lock.0,
+        q.namespace.as_deref(),
+        None,
+        limit,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("detect_contradictions list error: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Topic match: metadata.topic == topic OR title == topic. Kept as a
+    // retained filter rather than pushing to SQL because metadata is JSON
+    // and the match predicate may evolve.
+    let candidates: Vec<Memory> = match q.topic.as_deref() {
+        Some(t) => all
+            .into_iter()
+            .filter(|m| {
+                m.metadata
+                    .get("topic")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| s == t)
+                    || m.title == t
+            })
+            .collect(),
+        None => all,
+    };
+
+    // Existing contradicts links involving any candidate.
+    let candidate_ids: std::collections::HashSet<String> =
+        candidates.iter().map(|m| m.id.clone()).collect();
+    let mut existing_links: Vec<serde_json::Value> = Vec::new();
+    for id in &candidate_ids {
+        if let Ok(links) = db::get_links(&lock.0, id) {
+            for link in links {
+                if link.relation.contains("contradict")
+                    && candidate_ids.contains(&link.source_id)
+                    && candidate_ids.contains(&link.target_id)
+                {
+                    existing_links.push(json!({
+                        "source_id": link.source_id,
+                        "target_id": link.target_id,
+                        "relation": link.relation,
+                        "synthesized": false,
+                    }));
+                }
+            }
+        }
+    }
+    // Dedup — each (source,target,relation) appears at most once.
+    existing_links.sort_by_key(|v| {
+        (
+            v.get("source_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("target_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("relation")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+    existing_links.dedup_by_key(|v| {
+        (
+            v.get("source_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("target_id")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+            v.get("relation")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string(),
+        )
+    });
+
+    // Heuristic: when ≥2 candidates share a topic/title but content
+    // differs, synthesize pairwise contradicts links. Marked
+    // synthesized:true so callers can treat operator-authored links as
+    // higher-confidence than this fallback.
+    let mut synth_links: Vec<serde_json::Value> = Vec::new();
+    for (i, a) in candidates.iter().enumerate() {
+        for b in candidates.iter().skip(i + 1) {
+            let same_topic = match q.topic.as_deref() {
+                Some(_) => true,
+                None => a.title == b.title,
+            };
+            if same_topic && a.content != b.content && a.id != b.id {
+                synth_links.push(json!({
+                    "source_id": a.id,
+                    "target_id": b.id,
+                    "relation": "contradicts",
+                    "synthesized": true,
+                }));
+            }
+        }
+    }
+
+    let mut links = existing_links;
+    links.extend(synth_links);
+
+    Json(json!({
+        "memories": candidates,
+        "links": links,
+    }))
+    .into_response()
+}
+
 pub async fn list_namespaces(State(state): State<Db>) -> impl IntoResponse {
     let lock = state.lock().await;
     match db::list_namespaces(&lock.0) {
@@ -1729,10 +1911,11 @@ pub struct SyncSinceQuery {
 
 #[allow(clippy::too_many_lines)]
 pub async fn sync_push(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<SyncPushBody>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     if let Err(e) = validate::validate_agent_id(&body.sender_agent_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1782,6 +1965,16 @@ pub async fn sync_push(
     let mut deleted = 0usize;
     let mut latest_seen: Option<String> = None;
 
+    // v0.6.0.1 (#322): peers that apply a synced memory must also refresh
+    // their embedding + HNSW index so downstream semantic recall surfaces
+    // the row. Without this, scenario-18 observed a2a-hermes r14 black-hole
+    // pattern: substrate CRUD fanout works, but semantic recall on peers
+    // silently misses propagated writes.
+    //
+    // Collect rows that need an embedding refresh and apply AFTER we drop
+    // the DB lock (embedder is CPU-heavy; holding the Mutex across that
+    // would serialize unrelated writers for hundreds of ms).
+    let mut embedding_refresh: Vec<(String, String)> = Vec::new();
     for mem in &body.memories {
         if validate::validate_memory(mem).is_err() {
             skipped += 1;
@@ -1798,7 +1991,10 @@ pub async fn sync_push(
             continue;
         }
         match db::insert_if_newer(&lock.0, mem) {
-            Ok(_id) => applied += 1,
+            Ok(actual_id) => {
+                applied += 1;
+                embedding_refresh.push((actual_id, format!("{} {}", mem.title, mem.content)));
+            }
             Err(e) => {
                 tracing::warn!("sync_push: insert_if_newer failed for {}: {e}", mem.id);
                 skipped += 1;
@@ -1837,11 +2033,52 @@ pub async fn sync_push(
         tracing::warn!("sync_push: sync_state_observe failed: {e}");
     }
 
+    // v0.6.0.1 (#322): regenerate embeddings for applied rows so peer-side
+    // semantic recall surfaces the propagated memories. Without this,
+    // scenario-18 observed the a2a-hermes r14 black-hole pattern:
+    // substrate CRUD fanout works, but semantic recall on peers misses.
+    //
+    // Embedding + set_embedding are serialized under the existing DB lock;
+    // HNSW updates happen after we release the lock to avoid contention.
+    let mut hnsw_updates: Vec<(String, Vec<f32>)> = Vec::new();
+    if !body.dry_run
+        && !embedding_refresh.is_empty()
+        && let Some(emb) = app.embedder.as_ref().as_ref()
+    {
+        for (id, text) in &embedding_refresh {
+            match emb.embed(text) {
+                Ok(vec) => {
+                    if let Err(e) = db::set_embedding(&lock.0, id, &vec) {
+                        tracing::warn!("sync_push: set_embedding failed for {id}: {e}");
+                        continue;
+                    }
+                    hnsw_updates.push((id.clone(), vec));
+                }
+                Err(e) => {
+                    tracing::warn!("sync_push: embed failed for {id}: {e}");
+                }
+            }
+        }
+    }
+
     // Receiver's current clock, returned so the sender can learn which
     // peers the receiver has seen. Phase 3 Task 3a.1 will use this to
     // short-circuit redundant pushes.
     let receiver_clock = db::sync_state_load(&lock.0, &local_agent_id)
         .unwrap_or_else(|_| crate::models::VectorClock::default());
+
+    // Release DB lock before touching the HNSW index — the vector index
+    // has its own mutex and holding both serializes unrelated writers.
+    drop(lock);
+    if !hnsw_updates.is_empty() {
+        let mut idx_lock = app.vector_index.lock().await;
+        if let Some(idx) = idx_lock.as_mut() {
+            for (id, vec) in hnsw_updates {
+                idx.remove(&id);
+                idx.insert(id, vec);
+            }
+        }
+    }
 
     (
         StatusCode::OK,
@@ -2218,7 +2455,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/push", axum_post(sync_push))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
 
         let now = Utc::now().to_rfc3339();
         let body = serde_json::json!({
@@ -2290,7 +2527,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/push", axum_post(sync_push))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let now = Utc::now().to_rfc3339();
         // Build MAX_BULK_SIZE + 1 entries (1001).
         let mems: Vec<serde_json::Value> = (0..=MAX_BULK_SIZE)
@@ -2340,7 +2577,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/push", axum_post(sync_push))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
 
         let now = Utc::now().to_rfc3339();
         let body = serde_json::json!({
@@ -2396,6 +2633,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_contradictions_surfaces_same_topic_candidates_and_synth_link() {
+        // v0.6.0.1 (#321) — GET /api/v1/contradictions?topic=X&namespace=Y
+        // returns the candidate memories sharing the topic and a synthesized
+        // contradicts link between any pair with differing content.
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+
+        // Seed two memories with metadata.topic=T and DIFFERENT content. We
+        // use distinct titles so UPSERT-on-(title,namespace) doesn't dedup —
+        // that's the scenario-6 fix in ai2ai-gate.
+        {
+            let lock = state.lock().await;
+            let topic = "sky-color-test";
+            for (title, agent, content) in [
+                ("sky-color-test-alice", "ai:alice", "sky-color-test is blue"),
+                ("sky-color-test-bob", "ai:bob", "sky-color-test is red"),
+            ] {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Mid,
+                    namespace: "contradictions-test".into(),
+                    title: title.into(),
+                    content: content.into(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "api".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({
+                        "agent_id": agent,
+                        "topic": topic,
+                    }),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+
+        let app = Router::new()
+            .route("/api/v1/contradictions", axum_get(detect_contradictions))
+            .with_state(state);
+
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(
+                        "/api/v1/contradictions?topic=sky-color-test&namespace=contradictions-test",
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        let memories = v["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 2, "both candidates should be returned");
+
+        let links = v["links"].as_array().unwrap();
+        let synth_contradict = links.iter().find(|l| {
+            l["relation"].as_str() == Some("contradicts")
+                && l["synthesized"].as_bool() == Some(true)
+        });
+        assert!(
+            synth_contradict.is_some(),
+            "expected a synthesized contradicts link between alice and bob"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_contradictions_requires_topic_or_namespace() {
+        // Guard: calling the endpoint with neither topic nor namespace is a
+        // 400 — we refuse to scan the whole DB by accident.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/contradictions", axum_get(detect_contradictions))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/contradictions")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn http_sync_push_applies_deletions() {
         // v0.6.0.1 — sync_push's `deletions` field removes the listed ids
         // from the receiver so peer-side tombstone fanout works for
@@ -2427,7 +2761,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/sync/push", axum_post(sync_push))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
 
         let body = serde_json::json!({
             "sender_agent_id": "peer-alice",

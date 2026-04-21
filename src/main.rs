@@ -425,6 +425,12 @@ struct ServeArgs {
     /// Optional mTLS client key for outbound federation POSTs.
     #[arg(long)]
     quorum_client_key: Option<PathBuf>,
+    /// v0.6.0.1 (#320) — how often, in seconds, the daemon pulls peers
+    /// for any updates it missed while offline or partitioned. 0 disables
+    /// the catchup loop entirely. Default 30s keeps a post-partition
+    /// node convergent within one interval after resume.
+    #[arg(long, default_value_t = 30)]
+    catchup_interval_secs: u64,
 }
 
 #[derive(Args)]
@@ -966,6 +972,19 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             fed.peer_count(),
             args.quorum_timeout_ms,
         );
+        // v0.6.0.1 (#320) — post-partition catchup poller. Closes the gap
+        // where a rejoining node only sees post-resume writes.
+        if args.catchup_interval_secs > 0 {
+            let interval = std::time::Duration::from_secs(args.catchup_interval_secs);
+            tracing::info!(
+                "catchup loop enabled: polling {} peer(s) every {}s",
+                fed.peer_count(),
+                args.catchup_interval_secs,
+            );
+            federation::spawn_catchup_loop(fed.clone(), db_state.clone(), interval);
+        } else {
+            tracing::info!("catchup loop disabled (--catchup-interval-secs=0)");
+        }
     }
 
     let app_state = handlers::AppState {
@@ -1064,6 +1083,10 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .route("/api/v1/recall", post(handlers::recall_memories_post))
         .route("/api/v1/forget", post(handlers::forget_memories))
         .route("/api/v1/consolidate", post(handlers::consolidate_memories))
+        .route(
+            "/api/v1/contradictions",
+            get(handlers::detect_contradictions),
+        )
         .route("/api/v1/links", post(handlers::create_link))
         .route("/api/v1/links/{id}", get(handlers::get_links))
         .route("/api/v1/namespaces", get(handlers::list_namespaces))

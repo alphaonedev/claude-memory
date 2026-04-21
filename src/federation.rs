@@ -461,6 +461,168 @@ impl QuorumNotMetPayload {
     }
 }
 
+/// v0.6.0.1 (#320) — post-partition catchup poller.
+///
+/// Previously a node rejoining the mesh after SIGSTOP / network blip / restart
+/// would only receive NEW writes that arrived AFTER resume; anything the
+/// other peers wrote during the outage stayed on those peers. r14 scenario-14
+/// observed this as node-3 seeing 2/20 writes post-SIGCONT.
+///
+/// This loop periodically calls `GET /api/v1/sync/since?peer=<local>` against
+/// each configured peer, applying returned memories via `insert_if_newer`.
+/// The `since` value is the receiver-side vector clock entry for that peer,
+/// so we never re-pull already-applied rows. First catchup after a restart
+/// runs with `since=None`, pulling a capped snapshot (limit=500).
+///
+/// Interval is operator-tunable via `--catchup-interval-secs`. 0 disables.
+/// The loop is a best-effort background task: errors are logged but never
+/// propagated. In the happy path a partitioned node converges within one
+/// interval after resume.
+///
+/// This is deliberately NOT a substitute for the synchronous quorum-write
+/// path — it's a safety net for the tail. Normal writes still fan out via
+/// `broadcast_store_quorum`; catchup only fires for rows that DIDN'T land
+/// during the original write deadline.
+pub fn spawn_catchup_loop(
+    config: FederationConfig,
+    db: crate::handlers::Db,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Small upfront delay so the first catchup doesn't fire before the
+        // HTTP server has bound — avoids spurious "connection refused" on
+        // node-1 during rolling start of a fresh cluster.
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        loop {
+            catchup_once(&config, &db).await;
+            tokio::time::sleep(interval).await;
+        }
+    })
+}
+
+async fn catchup_once(config: &FederationConfig, db: &crate::handlers::Db) {
+    let local_id = config.sender_agent_id.clone();
+    for peer in &config.peers {
+        // Rebuild the peer's base URL from sync_push_url to get the
+        // /api/v1/sync/since endpoint without recomputing peer config.
+        let base = peer
+            .sync_push_url
+            .trim_end_matches("/api/v1/sync/push")
+            .to_string();
+
+        // Load our local vector-clock entry for this peer so we only pull
+        // the delta. First-time-ever runs with no prior clock pull a full
+        // snapshot (capped below by ?limit=500 on the peer side).
+        let since_opt: Option<String> = {
+            let lock = db.lock().await;
+            match crate::db::sync_state_load(&lock.0, &local_id) {
+                Ok(clock) => clock.entries.get(&peer.id).cloned(),
+                Err(_) => None,
+            }
+        };
+
+        let url = match since_opt.as_deref() {
+            Some(s) => format!(
+                "{base}/api/v1/sync/since?since={}&peer={local_id}",
+                urlencoding_encode(s)
+            ),
+            None => format!("{base}/api/v1/sync/since?peer={local_id}"),
+        };
+
+        let resp = match config.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(
+                    "catchup: peer {} returned HTTP {} — skipping this tick",
+                    peer.id,
+                    r.status()
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!("catchup: peer {} unreachable: {e}", peer.id);
+                continue;
+            }
+        };
+
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("catchup: peer {} returned unparseable body: {e}", peer.id);
+                continue;
+            }
+        };
+
+        let memories = match body.get("memories").and_then(|v| v.as_array()) {
+            Some(arr) => arr.clone(),
+            None => continue,
+        };
+
+        if memories.is_empty() {
+            continue;
+        }
+
+        let mut applied = 0usize;
+        let mut latest_ts: Option<String> = None;
+        {
+            let lock = db.lock().await;
+            for raw in &memories {
+                let mem: crate::models::Memory = match serde_json::from_value(raw.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("catchup: unparseable memory from peer {}: {e}", peer.id);
+                        continue;
+                    }
+                };
+                if crate::validate::validate_memory(&mem).is_err() {
+                    continue;
+                }
+                if latest_ts
+                    .as_deref()
+                    .is_none_or(|cur| mem.updated_at.as_str() > cur)
+                {
+                    latest_ts = Some(mem.updated_at.clone());
+                }
+                if crate::db::insert_if_newer(&lock.0, &mem).is_ok() {
+                    applied += 1;
+                }
+            }
+            if let Some(ts) = latest_ts.as_deref()
+                && let Err(e) = crate::db::sync_state_observe(&lock.0, &local_id, &peer.id, ts)
+            {
+                tracing::warn!("catchup: sync_state_observe failed for {}: {e}", peer.id);
+            }
+        }
+
+        if applied > 0 {
+            tracing::info!(
+                "catchup: applied {applied} memories from peer {} (since={})",
+                peer.id,
+                since_opt.as_deref().unwrap_or("<full-snapshot>"),
+            );
+        }
+    }
+}
+
+// Minimal RFC 3986 percent-encoder for the `since` timestamp. Only covers
+// what RFC 3339 + our namespace/id charsets can produce. We intentionally
+// avoid pulling in a url-encoding crate for a 12-character string.
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 6);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            _ => {
+                use std::fmt::Write;
+                let _ = write!(out, "%{b:02X}");
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
