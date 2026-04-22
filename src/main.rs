@@ -1024,6 +1024,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         embedder: Arc::new(embedder),
         vector_index: Arc::new(Mutex::new(vector_index)),
         federation: Arc::new(federation),
+        tier_config: Arc::new(tier_config.clone()),
     };
     let state = db_state;
 
@@ -1122,7 +1123,35 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .route("/api/v1/links", post(handlers::create_link))
         .route("/api/v1/links", delete(handlers::delete_link))
         .route("/api/v1/links/{id}", get(handlers::get_links))
-        .route("/api/v1/namespaces", get(handlers::list_namespaces))
+        // HTTP parity for MCP-only tools. The `/api/v1/namespaces` surface
+        // serves three verbs: GET lists namespaces OR (when ?namespace=…)
+        // fetches the namespace standard, POST sets a standard, DELETE
+        // clears one. S34/S35 use the query-string form; the path form
+        // (`/api/v1/namespaces/{ns}/standard`) is kept for MCP-tool parity.
+        .route(
+            "/api/v1/namespaces",
+            get(handlers::get_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces",
+            post(handlers::set_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces",
+            delete(handlers::clear_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            post(handlers::set_namespace_standard),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            get(handlers::get_namespace_standard),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            delete(handlers::clear_namespace_standard),
+        )
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))
@@ -1150,6 +1179,14 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // and streaming land in v0.8.0.
         .route("/api/v1/sync/push", post(handlers::sync_push))
         .route("/api/v1/sync/since", get(handlers::sync_since))
+        // HTTP parity for MCP-only tools.
+        .route("/api/v1/capabilities", get(handlers::get_capabilities))
+        .route("/api/v1/notify", post(handlers::notify))
+        .route("/api/v1/inbox", get(handlers::get_inbox))
+        .route("/api/v1/subscriptions", post(handlers::subscribe))
+        .route("/api/v1/subscriptions", delete(handlers::unsubscribe))
+        .route("/api/v1/subscriptions", get(handlers::list_subscriptions))
+        .route("/api/v1/session/start", post(handlers::session_start))
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             handlers::api_key_auth,

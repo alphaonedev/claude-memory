@@ -1527,7 +1527,17 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
         })
         .map(|token| {
             // Strip FTS5 special characters to prevent injection.
-            // Hyphens are allowed inside words (e.g. "well-known").
+            // Hyphens are allowed inside words (e.g. "well-known"): the
+            // unicode61 tokenizer treats `-` as a separator when indexing,
+            // so `foo-bar` indexes as `foo` + `bar`. Keeping the hyphen in
+            // the per-token phrase (below we wrap each token in `"…"`)
+            // produces a phrase query that FTS5 evaluates by matching the
+            // hyphen-split component terms in order — which is exactly
+            // what callers expect when searching for hyphenated content.
+            // Dropping the `'-'` filter here fixes scenario S28 without
+            // reopening the `+`/`-` exclusion-injection hole (every token
+            // is already phrase-quoted before being joined, so `-` cannot
+            // reach FTS5 as a prefix operator).
             let clean: String = token
                 .chars()
                 .filter(|c| {
@@ -1541,7 +1551,6 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
                         && *c != ':'
                         && *c != '|'
                         && *c != '+'
-                        && *c != '-'
                 })
                 .collect();
             if clean.is_empty() {
@@ -3793,12 +3802,18 @@ mod tests {
         // Empty input returns placeholder
         let sanitized3 = sanitize_fts_query("", true);
         assert_eq!(sanitized3, "\"_empty_\"");
-        // + and - prefix operators are stripped (prevents exclusion injection)
+        // `+` prefix operator is stripped (prevents exclusion injection);
+        // `-` is now preserved inside phrase-quoted tokens so hyphenated
+        // content ("well-known", "foo-bar") searches correctly against
+        // the unicode61 tokenizer. Phrase-quoting keeps `-` from reaching
+        // FTS5 as a prefix operator, closing the injection hole.
         let sanitized4 = sanitize_fts_query("-secret +required", true);
-        assert!(!sanitized4.contains('-'));
         assert!(!sanitized4.contains('+'));
         assert!(sanitized4.contains("secret"));
         assert!(sanitized4.contains("required"));
+        // Hyphenated tokens pass through as phrase searches.
+        let sanitized5 = sanitize_fts_query("well-known", true);
+        assert!(sanitized5.contains("well-known"));
     }
 
     #[test]

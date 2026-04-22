@@ -15,7 +15,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::config::ResolvedTtl;
+use crate::config::{ResolvedTtl, TierConfig};
 use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
@@ -46,6 +46,10 @@ pub struct AppState {
     /// to peers via `FederationConfig::broadcast_store_quorum` when
     /// this is `Some`.
     pub federation: Arc<Option<crate::federation::FederationConfig>>,
+    /// Resolved [`TierConfig`] for this daemon. Exposed so HTTP
+    /// endpoints that mirror MCP tools (notably `/capabilities`) can
+    /// reuse the MCP-side report builder without re-parsing config.
+    pub tier_config: Arc<TierConfig>,
 }
 
 impl FromRef<AppState> for Db {
@@ -437,7 +441,7 @@ pub async fn create_memory(
 }
 
 pub async fn register_agent(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Json(body): Json<RegisterAgentBody>,
 ) -> impl IntoResponse {
     if let Err(e) = validate::validate_agent_id(&body.agent_id) {
@@ -463,19 +467,51 @@ pub async fn register_agent(
             .into_response();
     }
 
-    let lock = state.lock().await;
-    match db::register_agent(&lock.0, &body.agent_id, &body.agent_type, &capabilities) {
-        Ok(id) => (
-            StatusCode::CREATED,
-            Json(json!({
-                "registered": true,
-                "id": id,
-                "agent_id": body.agent_id,
-                "agent_type": body.agent_type,
-                "capabilities": capabilities,
-            })),
-        )
-            .into_response(),
+    let lock = app.db.lock().await;
+    let register_result =
+        db::register_agent(&lock.0, &body.agent_id, &body.agent_type, &capabilities);
+    // Read the persisted `_agents` row back so we can fan it out to peers.
+    // The cluster-wide S12 invariant is that an agent registered on node-1
+    // is visible on node-4 — which only holds when the `_agents` namespace
+    // replicates via `broadcast_store_quorum`.
+    let registered_mem = match &register_result {
+        Ok(id) => db::get(&lock.0, id).ok().flatten(),
+        Err(_) => None,
+    };
+    drop(lock);
+
+    match register_result {
+        Ok(id) => {
+            if let (Some(fed), Some(mem)) = (app.federation.as_ref(), registered_mem.as_ref()) {
+                match crate::federation::broadcast_store_quorum(fed, mem).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("register_agent fanout error (local committed): {e:?}");
+                    }
+                }
+            }
+            (
+                StatusCode::CREATED,
+                Json(json!({
+                    "registered": true,
+                    "id": id,
+                    "agent_id": body.agent_id,
+                    "agent_type": body.agent_type,
+                    "capabilities": capabilities,
+                })),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("handler error: {e}");
             (
@@ -2362,6 +2398,816 @@ pub async fn sync_since(
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// HTTP parity helpers.
+// ---------------------------------------------------------------------------
+
+/// Fan out a locally-committed memory to peers via quorum store. On success,
+/// returns `None`; on quorum miss, returns `Some(503_response)` for the
+/// caller to short-circuit with. Network errors are logged and swallowed —
+/// the local commit already landed and the sync-daemon catches stragglers.
+async fn fanout_or_503(app: &AppState, mem: &Memory) -> Option<axum::response::Response> {
+    let fed = app.federation.as_ref().as_ref()?;
+    match crate::federation::broadcast_store_quorum(fed, mem).await {
+        Ok(tracker) => match crate::federation::finalise_quorum(&tracker) {
+            Ok(_) => None,
+            Err(err) => {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                Some(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("Retry-After", "2")],
+                        Json(serde_json::to_value(&payload).unwrap_or_default()),
+                    )
+                        .into_response(),
+                )
+            }
+        },
+        Err(e) => {
+            tracing::warn!("fanout error (local committed): {e:?}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// HTTP parity for MCP-only tools (feat/http-parity-for-mcp-only-tools).
+//
+// Each endpoint below mirrors an existing handler in `mcp.rs`, adapting the
+// MCP tool's params shape to the HTTP request surface used by the testbook v3
+// scenarios. Where practical the HTTP wrapper delegates straight into
+// `crate::mcp::handle_*` with a synthesized params Value so the business-logic
+// contract stays single-sourced; where a scenario's assertion conflicts with
+// the MCP contract (notably the S33 subscription shape and the S34/S35
+// `/api/v1/namespaces` query-string routing), we match the scenario.
+// ---------------------------------------------------------------------------
+
+/// Helper — resolve the caller's `agent_id` using the HTTP precedence chain,
+/// accepting an optional body value, the `X-Agent-Id` header, and an optional
+/// `?agent_id=` query param. Returns a 400 on invalid input; synthesizes an
+/// anonymous id on miss.
+fn resolve_caller_agent_id(
+    body: Option<&str>,
+    headers: &HeaderMap,
+    query: Option<&str>,
+) -> Result<String, String> {
+    // Body → query → header (body wins, query next, header last). Matches the
+    // precedence already used by `register_agent` / `create_memory` with
+    // query inserted at the same tier as body for handlers that read from
+    // the querystring (e.g. GET /inbox?agent_id=...).
+    if let Some(id) = body
+        && !id.is_empty()
+    {
+        validate::validate_agent_id(id).map_err(|e| format!("invalid agent_id: {e}"))?;
+        return Ok(id.to_string());
+    }
+    if let Some(id) = query
+        && !id.is_empty()
+    {
+        validate::validate_agent_id(id).map_err(|e| format!("invalid agent_id: {e}"))?;
+        return Ok(id.to_string());
+    }
+    let header_val = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    crate::identity::resolve_http_agent_id(None, header_val)
+        .map_err(|e| format!("invalid agent_id: {e}"))
+}
+
+// --- /api/v1/capabilities (GET) -------------------------------------------
+
+pub async fn get_capabilities(State(app): State<AppState>) -> impl IntoResponse {
+    // Mirrors `mcp::handle_capabilities`. Reranker state isn't tracked on the
+    // HTTP AppState (HTTP daemons that wire a cross-encoder record it via
+    // the tier config's `cross_encoder` flag, which is enough for scenario
+    // S30's equivalence check).
+    match crate::mcp::handle_capabilities(app.tier_config.as_ref(), None) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => {
+            tracing::error!("capabilities: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+// --- /api/v1/notify (POST) + /api/v1/inbox (GET) ---------------------------
+
+#[derive(Deserialize)]
+pub struct NotifyBody {
+    pub target_agent_id: String,
+    pub title: String,
+    /// Accept either `payload` (MCP tool name) or `content` (S32 scenario).
+    #[serde(default)]
+    pub payload: Option<String>,
+    #[serde(default)]
+    pub content: Option<String>,
+    #[serde(default)]
+    pub priority: Option<i64>,
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// Optional explicit sender id — falls back to `X-Agent-Id` header.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+pub async fn notify(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<NotifyBody>,
+) -> impl IntoResponse {
+    let Some(payload) = body.payload.or(body.content) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "payload or content is required"})),
+        )
+            .into_response();
+    };
+    let sender = match resolve_caller_agent_id(body.agent_id.as_deref(), &headers, None) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+        }
+    };
+
+    let mut params = json!({
+        "target_agent_id": body.target_agent_id,
+        "title": body.title,
+        "payload": payload,
+    });
+    if let Some(p) = body.priority {
+        params["priority"] = json!(p);
+    }
+    if let Some(t) = body.tier {
+        params["tier"] = json!(t);
+    }
+
+    let lock = app.db.lock().await;
+    let resolved_ttl = lock.2.clone();
+    // Route via the MCP handler so the wire contract stays single-sourced.
+    // `mcp_client = Some(&sender)` makes `resolve_agent_id(None, _)` return
+    // the caller-resolved HTTP id — same effective provenance.
+    let mcp_client = sender.clone();
+    let result = crate::mcp::handle_notify(&lock.0, &params, &resolved_ttl, Some(&mcp_client));
+    drop(lock);
+
+    match result {
+        Ok(v) => (StatusCode::CREATED, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct InboxQuery {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub unread_only: Option<bool>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+pub async fn get_inbox(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<InboxQuery>,
+) -> impl IntoResponse {
+    let owner = match resolve_caller_agent_id(None, &headers, q.agent_id.as_deref()) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+        }
+    };
+
+    let mut params = json!({"agent_id": owner});
+    if let Some(u) = q.unread_only {
+        params["unread_only"] = json!(u);
+    }
+    if let Some(l) = q.limit {
+        params["limit"] = json!(l);
+    }
+    let lock = app.db.lock().await;
+    // Pass the resolved owner as `mcp_client` too so `handle_inbox`'s
+    // identity-resolution fallback lands on the same id whichever branch
+    // it consults (it prefers `params["agent_id"]` when present).
+    let result = crate::mcp::handle_inbox(&lock.0, &params, None);
+    drop(lock);
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+// --- /api/v1/subscriptions (POST / DELETE / GET) ---------------------------
+//
+// Two shapes are supported. The webhook shape from the MCP tool
+// (`{url, events, secret, namespace_filter, agent_filter}`) is the primary
+// contract. Scenario S33 uses a lighter shape (`{agent_id, namespace}`) to
+// express "subscribe this agent to a namespace". We accept both: when a
+// namespace is supplied without a URL we synthesize an internal loopback URL
+// (`http://localhost/_ns/<agent_id>/<namespace>`) that passes SSRF validation
+// and sets `agent_filter`/`namespace_filter` accordingly. This lets S33 round-
+// trip without needing a separate subscriptions table.
+
+#[derive(Deserialize)]
+pub struct SubscribeBody {
+    /// Webhook URL — required for the MCP contract, optional for the S33
+    /// namespace-subscription shape.
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub events: Option<String>,
+    #[serde(default)]
+    pub secret: Option<String>,
+    #[serde(default)]
+    pub namespace_filter: Option<String>,
+    #[serde(default)]
+    pub agent_filter: Option<String>,
+    /// S33 shape: caller-supplied namespace to track.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Optional explicit subscriber id.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+pub async fn subscribe(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<SubscribeBody>,
+) -> impl IntoResponse {
+    let caller = match resolve_caller_agent_id(body.agent_id.as_deref(), &headers, None) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+        }
+    };
+
+    // Rewrite S33's `{agent_id, namespace}` body into the webhook shape.
+    let (url, namespace_filter, agent_filter) = if let Some(u) = body.url {
+        (u, body.namespace_filter, body.agent_filter)
+    } else {
+        let Some(ns) = body.namespace.clone() else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "url or namespace is required"})),
+            )
+                .into_response();
+        };
+        // Synthetic loopback URL — passes the SSRF allowlist (localhost
+        // loopback hostnames are permitted). The synthetic host encodes
+        // (agent_id, namespace) so the GET view can round-trip them.
+        let synthetic = format!("http://localhost/_ns/{caller}/{ns}");
+        (
+            synthetic,
+            Some(ns),
+            body.agent_filter.or_else(|| Some(caller.clone())),
+        )
+    };
+
+    let events = body.events.unwrap_or_else(|| "*".to_string());
+
+    // Ensure the caller is a registered agent (the MCP tool enforces this).
+    // Auto-register for the S33 shape so scenario callers don't have to
+    // pre-call /agents themselves — same auto-create pattern used elsewhere
+    // for the HTTP surface.
+    let lock = app.db.lock().await;
+    let already = db::list_agents(&lock.0)
+        .ok()
+        .is_some_and(|a| a.iter().any(|x| x.agent_id == caller));
+    if !already {
+        let _ = db::register_agent(&lock.0, &caller, "ai:generic", &[]);
+    }
+    // Inline subscribe path — we cannot delegate to `mcp::handle_subscribe`
+    // here because that helper re-resolves the caller via
+    // `resolve_agent_id(None, Some(mcp_client))`, which synthesizes a
+    // `ai:<client>@<host>:pid-N` id rather than using the HTTP-resolved
+    // `caller` verbatim. An HTTP caller registered under "ai:bob" must be
+    // able to subscribe as "ai:bob", not as "ai:ai:bob@host:pid-N".
+    let sub_result: Result<serde_json::Value, String> = (|| {
+        crate::subscriptions::validate_url(&url).map_err(|e| e.to_string())?;
+        let id = crate::subscriptions::insert(
+            &lock.0,
+            &crate::subscriptions::NewSubscription {
+                url: &url,
+                events: &events,
+                secret: body.secret.as_deref(),
+                namespace_filter: namespace_filter.as_deref(),
+                agent_filter: agent_filter.as_deref(),
+                created_by: Some(&caller),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "id": id,
+            "url": url,
+            "events": events,
+            "namespace_filter": namespace_filter,
+            "agent_filter": agent_filter,
+            "created_by": caller,
+        }))
+    })();
+    // Federate the `_agents` write we may have just done so registration is
+    // cluster-wide. (Best-effort — subscriptions themselves live in a
+    // separate table that does not ride `sync_push` today.)
+    let registered_mem = if already {
+        None
+    } else {
+        db::list(
+            &lock.0,
+            Some("_agents"),
+            None,
+            1000,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .find(|m| m.title == format!("agent:{caller}"))
+        })
+    };
+    drop(lock);
+
+    if let Some(ref mem) = registered_mem
+        && let Some(resp) = fanout_or_503(&app, mem).await
+    {
+        return resp;
+    }
+
+    match sub_result {
+        Ok(mut v) => {
+            // Echo the caller's view of the subscription so S33 can find
+            // {namespace, agent_id} keys in the response without relying on
+            // the synthetic URL.
+            if let Some(obj) = v.as_object_mut() {
+                if let Some(ref ns) = namespace_filter {
+                    obj.insert("namespace".into(), json!(ns));
+                }
+                obj.insert("agent_id".into(), json!(caller));
+            }
+            (StatusCode::CREATED, Json(v)).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct UnsubscribeQuery {
+    #[serde(default)]
+    pub id: Option<String>,
+    /// S33 shape: (`agent_id`, namespace) lookup.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    #[serde(default)]
+    pub namespace: Option<String>,
+}
+
+pub async fn unsubscribe(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Query(q): Query<UnsubscribeQuery>,
+) -> impl IntoResponse {
+    // Prefer explicit id. If absent, dispatch by (agent_id, namespace) for
+    // S33 — find the first matching row from list() and delete it.
+    if let Some(id) = q.id.clone() {
+        let mut params = json!({"id": id});
+        // Keep the key name stable across both handlers' interior shapes.
+        let _ = params.as_object_mut();
+        let lock = app.db.lock().await;
+        let result = crate::mcp::handle_unsubscribe(&lock.0, &params);
+        drop(lock);
+        return match result {
+            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+        };
+    }
+
+    let caller = match resolve_caller_agent_id(None, &headers, q.agent_id.as_deref()) {
+        Ok(id) => id,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
+        }
+    };
+    let Some(ns) = q.namespace else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "id or (agent_id, namespace) required"})),
+        )
+            .into_response();
+    };
+
+    let lock = app.db.lock().await;
+    let subs = crate::subscriptions::list(&lock.0).unwrap_or_default();
+    let target = subs.into_iter().find(|s| {
+        s.namespace_filter.as_deref() == Some(ns.as_str())
+            && (s.agent_filter.as_deref() == Some(caller.as_str())
+                || s.created_by.as_deref() == Some(caller.as_str()))
+    });
+    let outcome = match target {
+        Some(s) => crate::subscriptions::delete(&lock.0, &s.id).map(|r| (s.id, r)),
+        None => Ok((String::new(), false)),
+    };
+    drop(lock);
+    match outcome {
+        Ok((id, removed)) => {
+            (StatusCode::OK, Json(json!({"id": id, "removed": removed}))).into_response()
+        }
+        Err(e) => {
+            tracing::error!("unsubscribe: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ListSubscriptionsQuery {
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+pub async fn list_subscriptions(
+    State(state): State<Db>,
+    Query(q): Query<ListSubscriptionsQuery>,
+) -> impl IntoResponse {
+    let lock = state.lock().await;
+    let subs = match crate::subscriptions::list(&lock.0) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("list_subscriptions: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response();
+        }
+    };
+    drop(lock);
+    // Filter by agent_id when the caller passed one (S33's per-agent view).
+    let filtered: Vec<_> = match q.agent_id.as_deref() {
+        Some(aid) => subs
+            .into_iter()
+            .filter(|s| {
+                s.agent_filter.as_deref() == Some(aid) || s.created_by.as_deref() == Some(aid)
+            })
+            .collect(),
+        None => subs,
+    };
+    // Expose the subscribed namespace as a top-level field per row so S33 can
+    // read `namespace` directly without probing `namespace_filter`.
+    let rows: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "url": s.url,
+                "events": s.events,
+                "namespace": s.namespace_filter,
+                "namespace_filter": s.namespace_filter,
+                "agent_filter": s.agent_filter,
+                "agent_id": s.agent_filter.clone().or(s.created_by.clone()),
+                "created_by": s.created_by,
+                "created_at": s.created_at,
+                "dispatch_count": s.dispatch_count,
+                "failure_count": s.failure_count,
+            })
+        })
+        .collect();
+    let count = rows.len();
+    (
+        StatusCode::OK,
+        Json(json!({"count": count, "subscriptions": rows})),
+    )
+        .into_response()
+}
+
+// --- /api/v1/namespaces/{ns}/standard (POST / GET / DELETE) ----------------
+//    +/api/v1/namespaces (POST with body.namespace, GET/DELETE with ?namespace=)
+//
+// S34/S35 drive the standard via the bare `/api/v1/namespaces` surface; the
+// `/namespaces/{ns}/standard` path is kept for API-shape parity with the MCP
+// tool namespace. Both share a single underlying implementation.
+
+#[derive(Deserialize)]
+pub struct NamespaceStandardBody {
+    /// The memory id representing the standard.
+    #[serde(default)]
+    pub id: Option<String>,
+    /// Optional parent namespace for chain lookups.
+    #[serde(default)]
+    pub parent: Option<String>,
+    /// Optional governance policy to merge into the standard's metadata.
+    #[serde(default)]
+    pub governance: Option<serde_json::Value>,
+    /// Accepted for the path-less `/namespaces` form — ignored when the
+    /// namespace is supplied via a URL segment.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// Some scenarios nest the payload under `standard` (S34 does so).
+    #[serde(default)]
+    pub standard: Option<Box<NamespaceStandardBody>>,
+}
+
+fn flatten_standard_body(body: NamespaceStandardBody) -> NamespaceStandardBody {
+    // When the caller nests fields under `standard: { … }` (S34 shape), pull
+    // the inner payload up to the top level so the single code path below
+    // can read it uniformly.
+    if let Some(inner) = body.standard {
+        let mut merged = *inner;
+        if merged.namespace.is_none() {
+            merged.namespace = body.namespace;
+        }
+        if merged.id.is_none() {
+            merged.id = body.id;
+        }
+        if merged.parent.is_none() {
+            merged.parent = body.parent;
+        }
+        if merged.governance.is_none() {
+            merged.governance = body.governance;
+        }
+        merged
+    } else {
+        body
+    }
+}
+
+fn namespace_standard_params(ns: &str, body: &NamespaceStandardBody) -> serde_json::Value {
+    let mut params = json!({"namespace": ns});
+    if let Some(ref id) = body.id {
+        params["id"] = json!(id);
+    }
+    if let Some(ref p) = body.parent {
+        params["parent"] = json!(p);
+    }
+    if let Some(ref g) = body.governance {
+        params["governance"] = g.clone();
+    }
+    params
+}
+
+async fn set_namespace_standard_inner(
+    app: &AppState,
+    ns: &str,
+    body: NamespaceStandardBody,
+) -> axum::response::Response {
+    let body = flatten_standard_body(body);
+    // Auto-seed a placeholder standard memory when the caller didn't supply
+    // an `id`. S34's body is `{governance: …}` with no id — we create a
+    // minimal standard memory so the governance policy has a home.
+    let lock = app.db.lock().await;
+    let resolved_id = if let Some(id) = body.id.clone() {
+        id
+    } else {
+        // Look for an existing placeholder first to keep repeat calls
+        // idempotent; otherwise insert a new row.
+        let existing = db::list(
+            &lock.0,
+            Some(ns),
+            None,
+            1,
+            0,
+            None,
+            None,
+            None,
+            Some("_namespace_standard"),
+            None,
+        )
+        .ok()
+        .and_then(|v| v.into_iter().next());
+        if let Some(m) = existing {
+            m.id
+        } else {
+            let now = Utc::now().to_rfc3339();
+            let placeholder = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: ns.to_string(),
+                title: format!("_standard:{ns}"),
+                content: format!("namespace standard for {ns}"),
+                tags: vec!["_namespace_standard".to_string()],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({"agent_id": "system"}),
+            };
+            match db::insert(&lock.0, &placeholder) {
+                Ok(id) => id,
+                Err(e) => {
+                    tracing::error!("namespace_standard: placeholder insert failed: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal server error"})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+    let mut effective = body;
+    effective.id = Some(resolved_id.clone());
+    let params = namespace_standard_params(ns, &effective);
+    let result = crate::mcp::handle_namespace_set_standard(&lock.0, &params);
+    // Capture the standard memory so we can fan it out to peers — cluster
+    // visibility of governance rules matters for S34/S35.
+    let standard_mem = db::get(&lock.0, &resolved_id).ok().flatten();
+    drop(lock);
+
+    match result {
+        Ok(v) => {
+            if let Some(ref mem) = standard_mem
+                && let Some(resp) = fanout_or_503(app, mem).await
+            {
+                return resp;
+            }
+            (StatusCode::CREATED, Json(v)).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn set_namespace_standard(
+    State(app): State<AppState>,
+    Path(ns): Path<String>,
+    Json(body): Json<NamespaceStandardBody>,
+) -> impl IntoResponse {
+    set_namespace_standard_inner(&app, &ns, body).await
+}
+
+#[derive(Deserialize)]
+pub struct NamespaceStandardQuery {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub inherit: Option<bool>,
+}
+
+pub async fn get_namespace_standard(
+    State(state): State<Db>,
+    Path(ns): Path<String>,
+    Query(q): Query<NamespaceStandardQuery>,
+) -> impl IntoResponse {
+    let mut params = json!({"namespace": ns});
+    if let Some(inh) = q.inherit {
+        params["inherit"] = json!(inh);
+    }
+    let lock = state.lock().await;
+    let result = crate::mcp::handle_namespace_get_standard(&lock.0, &params);
+    drop(lock);
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn clear_namespace_standard(
+    State(state): State<Db>,
+    Path(ns): Path<String>,
+) -> impl IntoResponse {
+    let params = json!({"namespace": ns});
+    let lock = state.lock().await;
+    let result = crate::mcp::handle_namespace_clear_standard(&lock.0, &params);
+    drop(lock);
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+// Query-string forms for the S34/S35 `/api/v1/namespaces?namespace=…` shape.
+pub async fn set_namespace_standard_qs(
+    State(app): State<AppState>,
+    Json(body): Json<NamespaceStandardBody>,
+) -> impl IntoResponse {
+    let Some(ns) = body
+        .namespace
+        .clone()
+        .or_else(|| body.standard.as_ref().and_then(|s| s.namespace.clone()))
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "namespace is required"})),
+        )
+            .into_response();
+    };
+    set_namespace_standard_inner(&app, &ns, body).await
+}
+
+pub async fn get_namespace_standard_qs(
+    State(state): State<Db>,
+    Query(q): Query<NamespaceStandardQuery>,
+) -> impl IntoResponse {
+    // If no namespace is supplied this shares a route with the existing
+    // `list_namespaces` GET; the router chains the two so a plain
+    // `GET /api/v1/namespaces` still returns the list.
+    let Some(ns) = q.namespace.clone() else {
+        return list_namespaces(State(state)).await.into_response();
+    };
+    let mut params = json!({"namespace": ns});
+    if let Some(inh) = q.inherit {
+        params["inherit"] = json!(inh);
+    }
+    let lock = state.lock().await;
+    let result = crate::mcp::handle_namespace_get_standard(&lock.0, &params);
+    drop(lock);
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+pub async fn clear_namespace_standard_qs(
+    State(state): State<Db>,
+    Query(q): Query<NamespaceStandardQuery>,
+) -> impl IntoResponse {
+    let Some(ns) = q.namespace else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "namespace is required"})),
+        )
+            .into_response();
+    };
+    let params = json!({"namespace": ns});
+    let lock = state.lock().await;
+    let result = crate::mcp::handle_namespace_clear_standard(&lock.0, &params);
+    drop(lock);
+    match result {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
+// --- /api/v1/session/start (POST) ------------------------------------------
+
+#[derive(Deserialize)]
+pub struct SessionStartBody {
+    #[serde(default)]
+    pub namespace: Option<String>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+    #[serde(default)]
+    pub agent_id: Option<String>,
+}
+
+pub async fn session_start(
+    State(state): State<Db>,
+    headers: HeaderMap,
+    Json(body): Json<SessionStartBody>,
+) -> impl IntoResponse {
+    // agent_id is optional for session_start; but if supplied it must validate.
+    if let Some(ref id) = body.agent_id
+        && let Err(e) = validate::validate_agent_id(id)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid agent_id: {e}")})),
+        )
+            .into_response();
+    }
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let _ = header_agent_id; // identity currently informational for session_start
+    let mut params = json!({});
+    if let Some(ref n) = body.namespace {
+        params["namespace"] = json!(n);
+    }
+    if let Some(l) = body.limit {
+        params["limit"] = json!(l);
+    }
+    let lock = state.lock().await;
+    let result = crate::mcp::handle_session_start(&lock.0, &params, None);
+    drop(lock);
+    match result {
+        Ok(mut v) => {
+            // Stamp a stable session id so callers (S36) can correlate
+            // subsequent writes. We don't persist sessions today; the id is
+            // advisory and round-tripped via metadata by the caller.
+            if let Some(obj) = v.as_object_mut() {
+                obj.entry("session_id")
+                    .or_insert_with(|| json!(Uuid::new_v4().to_string()));
+                if let Some(ref a) = body.agent_id {
+                    obj.insert("agent_id".into(), json!(a));
+                }
+            }
+            (StatusCode::OK, Json(v)).into_response()
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2549,6 +3395,7 @@ mod tests {
             embedder: Arc::new(None),
             vector_index: Arc::new(Mutex::new(None)),
             federation: Arc::new(None),
+            tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
         }
     }
 

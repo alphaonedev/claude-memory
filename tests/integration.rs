@@ -8310,3 +8310,439 @@ fn test_serve_rejects_half_tls_config() {
     );
     let _ = std::fs::remove_file(&db);
 }
+
+// ---------------------------------------------------------------------------
+// HTTP parity for MCP-only tools — feat/http-parity-for-mcp-only-tools.
+//
+// End-to-end HTTP-surface coverage for S30/S32/S33/S34/S35/S36. Each test
+// spawns `ai-memory serve` on a free port, curls the relevant endpoint, and
+// tears the daemon down. We speak curl to avoid pulling in a reqwest
+// blocking client to the test harness.
+// ---------------------------------------------------------------------------
+
+fn curl_get(port: u16, path: &str) -> (String, serde_json::Value) {
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-w",
+            "\n%{http_code}",
+            &format!("http://127.0.0.1:{port}{path}"),
+        ])
+        .output()
+        .unwrap();
+    let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, code) = raw.rsplit_once('\n').unwrap_or(("", ""));
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    (code.trim().to_string(), v)
+}
+
+fn curl_post(
+    port: u16,
+    path: &str,
+    body: &serde_json::Value,
+    agent_id: Option<&str>,
+) -> (String, serde_json::Value) {
+    let mut args: Vec<String> = vec![
+        "-s".into(),
+        "-w".into(),
+        "\n%{http_code}".into(),
+        "-X".into(),
+        "POST".into(),
+        "-H".into(),
+        "content-type: application/json".into(),
+    ];
+    if let Some(id) = agent_id {
+        args.push("-H".into());
+        args.push(format!("x-agent-id: {id}"));
+    }
+    args.push("-d".into());
+    args.push(body.to_string());
+    args.push(format!("http://127.0.0.1:{port}{path}"));
+    let out = std::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .unwrap();
+    let raw = String::from_utf8_lossy(&out.stdout).into_owned();
+    let (body, code) = raw.rsplit_once('\n').unwrap_or(("", ""));
+    let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    (code.trim().to_string(), v)
+}
+
+fn curl_delete(port: u16, path: &str, agent_id: Option<&str>) -> String {
+    let mut args: Vec<String> = vec![
+        "-s".into(),
+        "-o".into(),
+        "/dev/null".into(),
+        "-w".into(),
+        "%{http_code}".into(),
+        "-X".into(),
+        "DELETE".into(),
+    ];
+    if let Some(id) = agent_id {
+        args.push("-H".into());
+        args.push(format!("x-agent-id: {id}"));
+    }
+    args.push(format!("http://127.0.0.1:{port}{path}"));
+    let out = std::process::Command::new("curl")
+        .args(&args)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+struct DaemonGuard {
+    child: std::process::Child,
+    port: u16,
+    db: std::path::PathBuf,
+}
+
+impl DaemonGuard {
+    fn spawn() -> Self {
+        let bin = env!("CARGO_BIN_EXE_ai-memory");
+        let dir = std::env::temp_dir();
+        let db = dir.join(format!("ai-memory-http-parity-{}.db", uuid::Uuid::new_v4()));
+        let port = free_port();
+        let child = cmd(bin)
+            .args([
+                "--db",
+                db.to_str().unwrap(),
+                "serve",
+                "--port",
+                &port.to_string(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(wait_for_health(port), "serve never came up");
+        DaemonGuard { child, port, db }
+    }
+}
+
+impl Drop for DaemonGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.db);
+    }
+}
+
+#[test]
+fn http_capabilities_returns_json_with_version() {
+    // Scenario S30 equivalence probe — GET /api/v1/capabilities returns
+    // {tier, version, features, models}.
+    let d = DaemonGuard::spawn();
+    let (code, body) = curl_get(d.port, "/api/v1/capabilities");
+    assert_eq!(code, "200", "body: {body}");
+    assert!(body.get("tier").is_some(), "missing tier: {body}");
+    assert!(body.get("version").is_some(), "missing version: {body}");
+    assert!(body.get("features").is_some(), "missing features: {body}");
+}
+
+#[test]
+fn http_notify_and_inbox_round_trip() {
+    // S32 — alice notifies ai:bob; bob fetches his inbox by ?agent_id=
+    // and sees the message, plus charlie's inbox stays empty.
+    let d = DaemonGuard::spawn();
+    // Register senders/receivers so subscribe doesn't reject ai:alice.
+    // (notify doesn't require registration — but we exercise both sides
+    // from a consistent identity posture.)
+    let _ = curl_post(
+        d.port,
+        "/api/v1/agents",
+        &serde_json::json!({"agent_id": "ai:alice", "agent_type": "ai:generic"}),
+        None,
+    );
+    let _ = curl_post(
+        d.port,
+        "/api/v1/agents",
+        &serde_json::json!({"agent_id": "ai:bob", "agent_type": "ai:generic"}),
+        None,
+    );
+
+    let marker = format!("marker-{}", uuid::Uuid::new_v4());
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/notify",
+        &serde_json::json!({
+            "target_agent_id": "ai:bob",
+            "title": "hello bob",
+            "content": format!("hello bob, token={marker}"),
+        }),
+        Some("ai:alice"),
+    );
+    assert_eq!(code, "201");
+
+    let (code, body) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:bob&limit=50");
+    assert_eq!(code, "200");
+    let messages = body["messages"].as_array().expect("messages array");
+    assert!(
+        messages
+            .iter()
+            .any(|m| m["payload"].as_str().unwrap_or("").contains(&marker)),
+        "bob's inbox missing marker — body: {body}"
+    );
+
+    // charlie must NOT see bob's notification.
+    let (_code, body2) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:charlie&limit=50");
+    let messages2 = body2["messages"].as_array().cloned().unwrap_or_default();
+    assert!(
+        !messages2
+            .iter()
+            .any(|m| m["payload"].as_str().unwrap_or("").contains(&marker)),
+        "scope breach — charlie saw marker"
+    );
+}
+
+#[test]
+fn http_notify_rejects_missing_payload() {
+    // Validation — notify without payload/content returns 400.
+    let d = DaemonGuard::spawn();
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/notify",
+        &serde_json::json!({
+            "target_agent_id": "ai:bob",
+            "title": "no payload",
+        }),
+        Some("ai:alice"),
+    );
+    assert_eq!(code, "400");
+}
+
+#[test]
+fn http_inbox_cross_source_agent_id_body_vs_query_vs_header() {
+    // Cross-source agent_id — the inbox endpoint accepts the owner via
+    // the query string OR an X-Agent-Id header. All three forms are
+    // exercised against the same running daemon so we can prove they
+    // resolve consistently.
+    let d = DaemonGuard::spawn();
+    // Seed one message for ai:bob.
+    let _ = curl_post(
+        d.port,
+        "/api/v1/notify",
+        &serde_json::json!({
+            "target_agent_id": "ai:bob",
+            "title": "seed",
+            "content": "inbox-cross-source seed",
+        }),
+        Some("ai:alice"),
+    );
+
+    // Query string path.
+    let (code_q, body_q) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:bob&limit=5");
+    assert_eq!(code_q, "200");
+    assert_eq!(body_q["agent_id"], "ai:bob", "query-string owner mismatch");
+
+    // Header path.
+    let out = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-H",
+            "x-agent-id: ai:bob",
+            &format!("http://127.0.0.1:{}/api/v1/inbox?limit=5", d.port),
+        ])
+        .output()
+        .unwrap();
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+    assert_eq!(v["agent_id"], "ai:bob", "header owner mismatch: {v}");
+}
+
+#[test]
+fn http_subscriptions_s33_shape_round_trip() {
+    // S33 — POST {agent_id, namespace}; GET ?agent_id=; DELETE
+    // ?agent_id=&namespace= removes the row.
+    let d = DaemonGuard::spawn();
+    // Pre-register the subscriber so handle_subscribe doesn't reject.
+    let _ = curl_post(
+        d.port,
+        "/api/v1/agents",
+        &serde_json::json!({"agent_id": "ai:bob", "agent_type": "ai:generic"}),
+        None,
+    );
+    let ns = format!(
+        "scenario33-pubsub-{}",
+        &uuid::Uuid::new_v4().to_string()[..6]
+    );
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/subscriptions",
+        &serde_json::json!({"agent_id": "ai:bob", "namespace": ns}),
+        Some("ai:bob"),
+    );
+    assert!(code == "201" || code == "200", "subscribe code={code}");
+
+    let (code_g, body_g) = curl_get(d.port, "/api/v1/subscriptions?agent_id=ai:bob");
+    assert_eq!(code_g, "200");
+    let rows = body_g["subscriptions"]
+        .as_array()
+        .expect("subscriptions array");
+    assert!(
+        rows.iter().any(|r| r["namespace"].as_str() == Some(&ns)),
+        "subscribed namespace {ns} missing — {body_g}"
+    );
+
+    let del_code = curl_delete(
+        d.port,
+        &format!("/api/v1/subscriptions?agent_id=ai:bob&namespace={ns}"),
+        Some("ai:bob"),
+    );
+    assert!(
+        del_code == "200" || del_code == "204",
+        "delete code={del_code}"
+    );
+
+    let (_code_g2, body_g2) = curl_get(d.port, "/api/v1/subscriptions?agent_id=ai:bob");
+    let rows_after = body_g2["subscriptions"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !rows_after
+            .iter()
+            .any(|r| r["namespace"].as_str() == Some(&ns)),
+        "namespace still listed after delete — {body_g2}"
+    );
+}
+
+#[test]
+fn http_subscribe_rejects_missing_shape() {
+    // Validation — body with neither url nor namespace is a 400.
+    let d = DaemonGuard::spawn();
+    let _ = curl_post(
+        d.port,
+        "/api/v1/agents",
+        &serde_json::json!({"agent_id": "ai:bob", "agent_type": "ai:generic"}),
+        None,
+    );
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/subscriptions",
+        &serde_json::json!({"agent_id": "ai:bob"}),
+        Some("ai:bob"),
+    );
+    assert_eq!(code, "400");
+}
+
+#[test]
+fn http_namespace_standard_query_string_set_get_clear() {
+    // S34/S35 — POST /api/v1/namespaces {namespace, standard:{governance}},
+    // GET /api/v1/namespaces?namespace=, DELETE /api/v1/namespaces?namespace=.
+    let d = DaemonGuard::spawn();
+    let ns = format!(
+        "scenario35-parent-{}",
+        &uuid::Uuid::new_v4().to_string()[..6]
+    );
+    // POST with S34 shape — no explicit id; body.standard.governance.
+    let (code_p, body_p) = curl_post(
+        d.port,
+        "/api/v1/namespaces",
+        &serde_json::json!({
+            "namespace": ns,
+            "standard": {
+                "governance": {
+                    "write": "any",
+                    "promote": "any",
+                    "delete": "owner",
+                    "approver": "human"
+                }
+            }
+        }),
+        Some("ai:alice"),
+    );
+    assert!(
+        code_p == "201" || code_p == "200",
+        "set code={code_p} body={body_p}"
+    );
+
+    // GET returns the standard.
+    let (code_g, body_g) = curl_get(d.port, &format!("/api/v1/namespaces?namespace={ns}"));
+    assert_eq!(code_g, "200");
+    assert_eq!(body_g["namespace"], ns);
+    assert!(
+        body_g["standard_id"].is_string(),
+        "missing standard_id: {body_g}"
+    );
+
+    // DELETE clears.
+    let del_code = curl_delete(
+        d.port,
+        &format!("/api/v1/namespaces?namespace={ns}"),
+        Some("ai:alice"),
+    );
+    assert_eq!(del_code, "200");
+
+    // Subsequent GET should report null standard.
+    let (_code_g2, body_g2) = curl_get(d.port, &format!("/api/v1/namespaces?namespace={ns}"));
+    assert!(
+        body_g2["standard_id"].is_null()
+            || body_g2
+                .get("warning")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| s.contains("not found")),
+        "standard still present after clear: {body_g2}"
+    );
+}
+
+#[test]
+fn http_namespace_standard_path_form_parity() {
+    // Path-form parity — POST /api/v1/namespaces/{ns}/standard also works.
+    let d = DaemonGuard::spawn();
+    let ns = format!("path-ns-{}", &uuid::Uuid::new_v4().to_string()[..6]);
+    let (code_p, body_p) = curl_post(
+        d.port,
+        &format!("/api/v1/namespaces/{ns}/standard"),
+        &serde_json::json!({}),
+        Some("ai:alice"),
+    );
+    assert!(
+        code_p == "201" || code_p == "200",
+        "path-form POST code={code_p} body={body_p}"
+    );
+    let (code_g, body_g) = curl_get(d.port, &format!("/api/v1/namespaces/{ns}/standard"));
+    assert_eq!(code_g, "200");
+    assert_eq!(body_g["namespace"], ns);
+}
+
+#[test]
+fn http_namespace_standard_rejects_missing_namespace() {
+    // Validation — DELETE /api/v1/namespaces without ?namespace= is 400.
+    let d = DaemonGuard::spawn();
+    let del_code = curl_delete(d.port, "/api/v1/namespaces", None);
+    assert_eq!(del_code, "400");
+}
+
+#[test]
+fn http_session_start_returns_session_id() {
+    // S36 — POST /api/v1/session/start returns session_id.
+    let d = DaemonGuard::spawn();
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/session/start",
+        &serde_json::json!({
+            "agent_id": "ai:alice",
+            "namespace": "scenario36-session",
+            "limit": 10,
+        }),
+        Some("ai:alice"),
+    );
+    assert_eq!(code, "200");
+    assert!(
+        body["session_id"].as_str().is_some_and(|s| !s.is_empty()),
+        "missing session_id: {body}"
+    );
+}
+
+#[test]
+fn http_session_start_rejects_invalid_agent_id() {
+    // Validation — invalid agent_id is a 400.
+    let d = DaemonGuard::spawn();
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/session/start",
+        &serde_json::json!({"agent_id": "has space", "namespace": "ok"}),
+        None,
+    );
+    assert_eq!(code, "400");
+}

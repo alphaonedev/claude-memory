@@ -1217,7 +1217,7 @@ fn handle_recall(
     Ok(resp)
 }
 
-fn handle_capabilities(
+pub(crate) fn handle_capabilities(
     tier_config: &TierConfig,
     reranker: Option<&CrossEncoder>,
 ) -> Result<Value, String> {
@@ -1830,7 +1830,7 @@ fn handle_consolidate(
 // Namespace standard handlers
 // ---------------------------------------------------------------------------
 
-fn handle_namespace_set_standard(
+pub(crate) fn handle_namespace_set_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -1899,7 +1899,7 @@ fn handle_namespace_set_standard(
     Ok(resp)
 }
 
-fn handle_namespace_get_standard(
+pub(crate) fn handle_namespace_get_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -1977,7 +1977,7 @@ fn extract_governance(mem_val: &Value) -> Value {
     }
 }
 
-fn handle_namespace_clear_standard(
+pub(crate) fn handle_namespace_clear_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -2098,7 +2098,7 @@ fn messages_namespace_for(agent_id: &str) -> String {
     format!("_messages/{agent_id}")
 }
 
-fn handle_notify(
+pub(crate) fn handle_notify(
     conn: &rusqlite::Connection,
     params: &Value,
     resolved_ttl: &crate::config::ResolvedTtl,
@@ -2162,7 +2162,7 @@ fn handle_notify(
     }))
 }
 
-fn handle_inbox(
+pub(crate) fn handle_inbox(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,
@@ -2226,7 +2226,7 @@ fn handle_inbox(
 
 // --- v0.6.0.0 webhook subscriptions ---------------------------------------
 
-fn handle_subscribe(
+pub(crate) fn handle_subscribe(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,
@@ -2281,13 +2281,16 @@ fn handle_subscribe(
     }))
 }
 
-fn handle_unsubscribe(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(crate) fn handle_unsubscribe(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     let removed = crate::subscriptions::delete(conn, id).map_err(|e| e.to_string())?;
     Ok(json!({"id": id, "removed": removed}))
 }
 
-fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
+pub(crate) fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
     let subs = crate::subscriptions::list(conn).map_err(|e| e.to_string())?;
     Ok(json!({"count": subs.len(), "subscriptions": subs}))
 }
@@ -2399,7 +2402,7 @@ fn handle_gc(conn: &rusqlite::Connection, params: &Value, archive: bool) -> Resu
     Ok(json!({"collected": count, "dry_run": false}))
 }
 
-fn handle_session_start(
+pub(crate) fn handle_session_start(
     conn: &rusqlite::Connection,
     params: &Value,
     llm: Option<&OllamaClient>,
