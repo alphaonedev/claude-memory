@@ -689,8 +689,8 @@ mod tests {
 
     #[test]
     fn constants_valid() {
-        assert!(MAX_CONTENT_SIZE > 0);
-        assert!(PROMOTION_THRESHOLD > 0);
+        const _: () = assert!(MAX_CONTENT_SIZE > 0);
+        const _: () = assert!(PROMOTION_THRESHOLD > 0);
         assert_eq!(SHORT_TTL_EXTEND_SECS, 3600);
         assert_eq!(MID_TTL_EXTEND_SECS, 86400);
     }

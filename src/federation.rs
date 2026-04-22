@@ -83,6 +83,21 @@ impl FederationConfig {
         if quorum_writes == 0 || peer_urls.is_empty() {
             return Ok(None);
         }
+        // Ultrareview #341: reject duplicate peer URLs at build time.
+        // If the same peer URL appears twice under different indices,
+        // both would count as distinct ack sources and the quorum
+        // guarantee is violated. Normalize (trim trailing slash,
+        // lowercase scheme+host) before comparing.
+        let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for raw in peer_urls {
+            let normalized = raw.trim_end_matches('/').to_ascii_lowercase();
+            if !seen_urls.insert(normalized.clone()) {
+                return Err(anyhow::anyhow!(
+                    "duplicate peer URL in --quorum-peers: {raw} (normalized: {normalized}) \
+                     — duplicates would let a single peer contribute to quorum more than once"
+                ));
+            }
+        }
         let n = 1 + peer_urls.len(); // local node + remotes
         let policy = QuorumPolicy::new(n, quorum_writes, timeout, Duration::from_secs(30))
             .map_err(|e| anyhow::anyhow!("invalid quorum policy: {e}"))?;
@@ -205,7 +220,7 @@ pub async fn broadcast_store_quorum(
         let mem_id = mem.id.clone();
         let payload = body.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &mem_id).await;
+            let outcome = post_and_classify(&client, &url, &payload, &mem_id, Some(&mem_id)).await;
             (id, outcome)
         });
     }
@@ -260,6 +275,11 @@ pub async fn broadcast_store_quorum(
     // the detached tasks are logged but otherwise ignored — the caller
     // has already met quorum by the time we detach.
     if !joins.is_empty() {
+        // Ultrareview #343: emit a metric on detach-task failures so
+        // mesh divergence is observable. The detach task itself is
+        // still fire-and-forget — a full shutdown-drain would require
+        // plumbing a shared JoinSet into AppState; tracked separately.
+        let mem_id = mem.id.clone();
         tokio::spawn(async move {
             while let Some(res) = joins.join_next().await {
                 match res {
@@ -270,14 +290,26 @@ pub async fn broadcast_store_quorum(
                         tracing::warn!(
                             "federation: post-quorum id-drift from {peer_id} (peer rewrote id)"
                         );
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["id_drift"])
+                            .inc();
                     }
                     Ok((peer_id, AckOutcome::Fail(reason))) => {
-                        tracing::debug!(
-                            "federation: post-quorum peer {peer_id} did not ack: {reason}"
+                        tracing::warn!(
+                            "federation: post-quorum peer {peer_id} did not ack for {mem_id}: {reason}"
                         );
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["peer_fail"])
+                            .inc();
                     }
                     Err(e) => {
-                        tracing::warn!("federation: post-quorum join error: {e}");
+                        tracing::warn!("federation: post-quorum join error for {mem_id}: {e}");
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["join_error"])
+                            .inc();
                     }
                 }
             }
@@ -304,8 +336,19 @@ async fn post_and_classify(
     url: &str,
     body: &serde_json::Value,
     expected_id: &str,
+    idempotency_key: Option<&str>,
 ) -> AckOutcome {
-    match client.post(url).json(body).send().await {
+    // Ultrareview #346: attach an idempotency key so peers can dedupe
+    // on retry. If a tokio::timeout fires locally but the HTTP POST
+    // already reached the peer, the peer applies the write once; a
+    // subsequent catchup sync carrying the same memory.id will be a
+    // no-op via `insert_if_newer`. The key is set from the outgoing
+    // memory id by default, which is stable across retries.
+    let mut req = client.post(url).json(body);
+    if let Some(key) = idempotency_key {
+        req = req.header("Idempotency-Key", key);
+    }
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             match resp.json::<serde_json::Value>().await {
                 Ok(v) => {
@@ -374,7 +417,8 @@ pub async fn broadcast_delete_quorum(
         let payload = body.clone();
         let target_id = id.to_string();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &target_id).await;
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
             (peer_id, outcome)
         });
     }
@@ -457,7 +501,7 @@ pub async fn broadcast_link_quorum(
         let payload = body.clone();
         let log_id = log_id.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &log_id).await;
+            let outcome = post_and_classify(&client, &url, &payload, &log_id, Some(&log_id)).await;
             (peer_id, outcome)
         });
     }
@@ -540,7 +584,8 @@ pub async fn broadcast_consolidate_quorum(
         let payload = body.clone();
         let target_id = new_mem.id.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &target_id).await;
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
             (peer_id, outcome)
         });
     }

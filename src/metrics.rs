@@ -43,6 +43,10 @@ pub struct Metrics {
     pub curator_cycles_total: IntCounter,
     pub curator_operations_total: IntCounterVec,
     pub curator_cycle_duration_seconds: HistogramVec,
+    /// Ultrareview #343: count of post-quorum fanout tasks whose
+    /// outcome could not be observed (shutdown, panic, or the
+    /// spawned task erred). Non-zero indicates mesh divergence risk.
+    pub federation_fanout_dropped_total: IntCounterVec,
 }
 
 /// Lazily-built process-global metrics handle.
@@ -164,6 +168,16 @@ impl Metrics {
         )?;
         registry.register(Box::new(curator_cycle_duration_seconds.clone()))?;
 
+        let federation_fanout_dropped_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "ai_memory_federation_fanout_dropped_total",
+                "Post-quorum fanout tasks whose outcome could not be observed. \
+                 reason=shutdown|panic|join_error. Non-zero indicates mesh divergence risk.",
+            ),
+            &["reason"],
+        )?;
+        registry.register(Box::new(federation_fanout_dropped_total.clone()))?;
+
         Ok(Self {
             registry,
             store_total,
@@ -179,6 +193,7 @@ impl Metrics {
             curator_cycles_total,
             curator_operations_total,
             curator_cycle_duration_seconds,
+            federation_fanout_dropped_total,
         })
     }
 }

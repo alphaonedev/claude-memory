@@ -63,6 +63,29 @@ pub struct ApiKeyState {
 }
 
 /// Constant-time byte-slice equality. Doesn't short-circuit on the
+/// Percent-decode a URL-encoded query value in place. Invalid %XX
+/// escapes are passed through verbatim (lossy). Ultrareview #337.
+#[inline]
+fn percent_decode_lossy(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let h = (bytes[i + 1] as char).to_digit(16);
+            let l = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(h), Some(l)) = (h, l) {
+                out.push((h * 16 + l) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// first mismatched byte, preventing timing-oracle leaks of secret
 /// material. Used for API-key comparison (#301 hardening item 3).
 #[inline]
@@ -103,13 +126,20 @@ pub async fn api_key_auth(
         return next.run(req).await.into_response();
     }
 
-    // Check ?api_key= query param
+    // Check ?api_key= query param (ultrareview #337: URL-decode
+    // before comparison. A key with reserved chars like `+`, `%`,
+    // `&` must be percent-encoded by the caller per RFC 3986; the
+    // previous raw-compare path silently mismatched those keys and
+    // opened an encoded-bypass surface where a key containing `%2B`
+    // would compare against `%2B` rather than `+`, producing a
+    // different trust decision depending on caller quoting.)
     if let Some(query) = req.uri().query() {
         for pair in query.split('&') {
-            if let Some(val) = pair.strip_prefix("api_key=")
-                && constant_time_eq(val.as_bytes(), expected.as_bytes())
-            {
-                return next.run(req).await.into_response();
+            if let Some(val) = pair.strip_prefix("api_key=") {
+                let decoded = percent_decode_lossy(val);
+                if constant_time_eq(decoded.as_bytes(), expected.as_bytes()) {
+                    return next.run(req).await.into_response();
+                }
             }
         }
     }
@@ -1174,6 +1204,14 @@ pub async fn recall_memories_get(
         )
             .into_response();
     }
+    // Ultrareview #348: reject budget_tokens=0 explicitly.
+    if p.budget_tokens == Some(0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "budget_tokens must be >= 1"})),
+        )
+            .into_response();
+    }
     if let Some(ref a) = p.as_agent
         && let Err(e) = validate::validate_namespace(a)
     {
@@ -1238,6 +1276,14 @@ pub async fn recall_memories_post(
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": "context is required"})),
+        )
+            .into_response();
+    }
+    // Ultrareview #348: reject budget_tokens=0 explicitly.
+    if body.budget_tokens == Some(0) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "budget_tokens must be >= 1"})),
         )
             .into_response();
     }
@@ -1894,8 +1940,19 @@ pub async fn list_archive(
     State(state): State<Db>,
     Query(q): Query<ArchiveListQuery>,
 ) -> impl IntoResponse {
+    // Ultrareview #350: validate limit range. `usize` already precludes
+    // negative values at the serde layer, but `limit=0` silently
+    // returned an empty page — indistinguishable from "no results".
+    // Require 1..=1000 and reject 0 with a specific error.
+    if matches!(q.limit, Some(0)) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "limit must be >= 1"})),
+        )
+            .into_response();
+    }
     let lock = state.lock().await;
-    let limit = q.limit.unwrap_or(50).min(1000);
+    let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0);
     match db::list_archived(&lock.0, q.namespace.as_deref(), limit, offset) {
         Ok(items) => Json(json!({"archived": items, "count": items.len()})).into_response(),
