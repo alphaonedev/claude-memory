@@ -2399,6 +2399,38 @@ pub async fn sync_since(
 }
 
 // ---------------------------------------------------------------------------
+// HTTP parity helpers.
+// ---------------------------------------------------------------------------
+
+/// Fan out a locally-committed memory to peers via quorum store. On success,
+/// returns `None`; on quorum miss, returns `Some(503_response)` for the
+/// caller to short-circuit with. Network errors are logged and swallowed —
+/// the local commit already landed and the sync-daemon catches stragglers.
+async fn fanout_or_503(app: &AppState, mem: &Memory) -> Option<axum::response::Response> {
+    let fed = app.federation.as_ref().as_ref()?;
+    match crate::federation::broadcast_store_quorum(fed, mem).await {
+        Ok(tracker) => match crate::federation::finalise_quorum(&tracker) {
+            Ok(_) => None,
+            Err(err) => {
+                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                Some(
+                    (
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        [("Retry-After", "2")],
+                        Json(serde_json::to_value(&payload).unwrap_or_default()),
+                    )
+                        .into_response(),
+                )
+            }
+        },
+        Err(e) => {
+            tracing::warn!("fanout error (local committed): {e:?}");
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // HTTP parity for MCP-only tools (feat/http-parity-for-mcp-only-tools).
 //
 // Each endpoint below mirrors an existing handler in `mcp.rs`, adapting the
@@ -2635,19 +2667,6 @@ pub async fn subscribe(
     };
 
     let events = body.events.unwrap_or_else(|| "*".to_string());
-    let mut params = json!({
-        "url": url,
-        "events": events,
-    });
-    if let Some(ref s) = body.secret {
-        params["secret"] = json!(s);
-    }
-    if let Some(ref n) = namespace_filter {
-        params["namespace_filter"] = json!(n);
-    }
-    if let Some(ref a) = agent_filter {
-        params["agent_filter"] = json!(a);
-    }
 
     // Ensure the caller is a registered agent (the MCP tool enforces this).
     // Auto-register for the S33 shape so scenario callers don't have to
@@ -2660,7 +2679,35 @@ pub async fn subscribe(
     if !already {
         let _ = db::register_agent(&lock.0, &caller, "ai:generic", &[]);
     }
-    let sub_result = crate::mcp::handle_subscribe(&lock.0, &params, Some(&caller));
+    // Inline subscribe path — we cannot delegate to `mcp::handle_subscribe`
+    // here because that helper re-resolves the caller via
+    // `resolve_agent_id(None, Some(mcp_client))`, which synthesizes a
+    // `ai:<client>@<host>:pid-N` id rather than using the HTTP-resolved
+    // `caller` verbatim. An HTTP caller registered under "ai:bob" must be
+    // able to subscribe as "ai:bob", not as "ai:ai:bob@host:pid-N".
+    let sub_result: Result<serde_json::Value, String> = (|| {
+        crate::subscriptions::validate_url(&url).map_err(|e| e.to_string())?;
+        let id = crate::subscriptions::insert(
+            &lock.0,
+            &crate::subscriptions::NewSubscription {
+                url: &url,
+                events: &events,
+                secret: body.secret.as_deref(),
+                namespace_filter: namespace_filter.as_deref(),
+                agent_filter: agent_filter.as_deref(),
+                created_by: Some(&caller),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(json!({
+            "id": id,
+            "url": url,
+            "events": events,
+            "namespace_filter": namespace_filter,
+            "agent_filter": agent_filter,
+            "created_by": caller,
+        }))
+    })();
     // Federate the `_agents` write we may have just done so registration is
     // cluster-wide. (Best-effort — subscriptions themselves live in a
     // separate table that does not ride `sync_push` today.)
@@ -2687,17 +2734,10 @@ pub async fn subscribe(
     };
     drop(lock);
 
-    if let (Some(fed), Some(mem)) = (app.federation.as_ref(), registered_mem.as_ref())
-        && let Ok(tracker) = crate::federation::broadcast_store_quorum(fed, mem).await
-        && let Err(err) = crate::federation::finalise_quorum(&tracker)
+    if let Some(ref mem) = registered_mem
+        && let Some(resp) = fanout_or_503(&app, mem).await
     {
-        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            [("Retry-After", "2")],
-            Json(serde_json::to_value(&payload).unwrap_or_default()),
-        )
-            .into_response();
+        return resp;
     }
 
     match sub_result {
@@ -2989,17 +3029,10 @@ async fn set_namespace_standard_inner(
 
     match result {
         Ok(v) => {
-            if let (Some(fed), Some(mem)) = (app.federation.as_ref(), standard_mem.as_ref())
-                && let Ok(tracker) = crate::federation::broadcast_store_quorum(fed, mem).await
-                && let Err(err) = crate::federation::finalise_quorum(&tracker)
+            if let Some(ref mem) = standard_mem
+                && let Some(resp) = fanout_or_503(app, mem).await
             {
-                let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    [("Retry-After", "2")],
-                    Json(serde_json::to_value(&payload).unwrap_or_default()),
-                )
-                    .into_response();
+                return resp;
             }
             (StatusCode::CREATED, Json(v)).into_response()
         }
