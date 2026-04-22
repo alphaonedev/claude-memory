@@ -425,6 +425,14 @@ struct ServeArgs {
     /// Optional mTLS client key for outbound federation POSTs.
     #[arg(long)]
     quorum_client_key: Option<PathBuf>,
+    /// Optional root CA cert to trust for outbound federation HTTPS.
+    /// Required whenever peers present a cert NOT rooted in Mozilla's
+    /// `webpki-roots` bundle (self-signed, private CA, ephemeral test
+    /// CA, etc.) — without this, the reqwest rustls-tls client rejects
+    /// peer certs and every quorum write times out as `quorum_not_met`.
+    /// See #333.
+    #[arg(long)]
+    quorum_ca_cert: Option<PathBuf>,
     /// v0.6.0.1 (#320) — how often, in seconds, the daemon pulls peers
     /// for any updates it missed while offline or partitioned. 0 disables
     /// the catchup loop entirely. Default 30s keeps a post-partition
@@ -985,6 +993,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         std::time::Duration::from_millis(args.quorum_timeout_ms),
         args.quorum_client_cert.as_deref(),
         args.quorum_client_key.as_deref(),
+        args.quorum_ca_cert.as_deref(),
         format!("host:{}", gethostname::gethostname().to_string_lossy()),
     )
     .context("federation config")?;

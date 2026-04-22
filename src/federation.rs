@@ -77,6 +77,7 @@ impl FederationConfig {
         timeout: Duration,
         client_cert_path: Option<&std::path::Path>,
         client_key_path: Option<&std::path::Path>,
+        ca_cert_path: Option<&std::path::Path>,
         sender_agent_id: String,
     ) -> anyhow::Result<Option<Self>> {
         if quorum_writes == 0 || peer_urls.is_empty() {
@@ -128,6 +129,20 @@ impl FederationConfig {
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(2))
             .use_rustls_tls();
+        // --quorum-ca-cert: trust a caller-supplied root CA for outbound
+        // federation POSTs. Required whenever peers present a cert NOT
+        // rooted in webpki-roots (Mozilla CA bundle) — e.g. a self-
+        // signed / ephemeral CA generated for an isolated test fleet.
+        // Without this, reqwest's rustls-tls feature (webpki-roots
+        // only) rejects the peer cert and every quorum write times
+        // out as quorum_not_met. See alphaonedev/ai-memory-mcp#333.
+        if let Some(ca_path) = ca_cert_path {
+            let ca_pem = std::fs::read(ca_path)
+                .map_err(|e| anyhow::anyhow!("read --quorum-ca-cert: {e}"))?;
+            let ca = reqwest::Certificate::from_pem(&ca_pem)
+                .map_err(|e| anyhow::anyhow!("parse --quorum-ca-cert: {e}"))?;
+            client_builder = client_builder.add_root_certificate(ca);
+        }
         if let (Some(cert), Some(key)) = (client_cert_path, client_key_path) {
             let cert_pem =
                 std::fs::read(cert).map_err(|e| anyhow::anyhow!("read --client-cert: {e}"))?;
@@ -1020,6 +1035,7 @@ mod tests {
             Duration::from_millis(500),
             None,
             None,
+            None,
             "ai:test".to_string(),
         )
         .unwrap();
@@ -1032,6 +1048,7 @@ mod tests {
             2,
             &[],
             Duration::from_millis(500),
+            None,
             None,
             None,
             "ai:test".to_string(),
