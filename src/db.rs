@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -474,6 +474,43 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
         }
 
+        if version < 14 {
+            // Ultrareview #342: list / search / recall queries filter by
+            // `json_extract(metadata, '$.agent_id') = ?`, which SQLite
+            // cannot index. On large mesh peers this degenerates to a
+            // full table scan per request and a DoS vector — a single
+            // authenticated client hitting `/memories?agent_id=X` in a
+            // loop pegs CPU and blocks other queries on the shared
+            // connection. Add a VIRTUAL generated column so the
+            // comparison becomes a real column lookup the query planner
+            // can serve from an index.
+            //
+            // Ultrareview #353: also add `created_at` index so export
+            // and snapshot queries stop scanning + sorting full table.
+            let has_agent_id_idx: bool = conn
+                .prepare("SELECT agent_id_idx FROM memories LIMIT 0")
+                .is_ok();
+            if !has_agent_id_idx {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN agent_id_idx TEXT \
+                     GENERATED ALWAYS AS (\
+                         CASE WHEN json_valid(metadata) \
+                         THEN json_extract(metadata, '$.agent_id') \
+                         ELSE NULL END\
+                     ) VIRTUAL",
+                    [],
+                )?;
+            }
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_agent_id ON memories(agent_id_idx)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at)",
+                [],
+            )?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -526,10 +563,16 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
 }
 
 /// Insert with upsert on title+namespace. Returns the ID (existing or new).
+///
+/// Ultrareview #352: collapses the previous `INSERT`/`ON CONFLICT` +
+/// separate `SELECT` into a single `INSERT ... RETURNING id`. Another
+/// concurrent writer could otherwise slot in between the two statements
+/// and the `SELECT` would return the wrong row id. `SQLite` 3.35+
+/// supports `RETURNING`; it executes atomically within the `INSERT`.
 pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
-    conn.execute(
+    let actual_id: String = conn.query_row(
         "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
@@ -554,18 +597,14 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                     json_extract(memories.metadata, '$.agent_id')
                 )
                 ELSE excluded.metadata
-            END",
+            END
+         RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json,
         ],
-    )?;
-    // Return the actual ID (could be the existing one on conflict)
-    let actual_id: String = conn.query_row(
-        "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
-        params![mem.title, mem.namespace],
         |r| r.get(0),
     )?;
     Ok(actual_id)
@@ -719,28 +758,41 @@ pub fn update(
     let metadata_json = serde_json::to_string(metadata)?;
     let now = Utc::now().to_rfc3339();
 
-    // Check for title+namespace collision with a DIFFERENT memory
-    if new_title != existing.title || namespace != existing.namespace {
-        let collision: Option<String> = conn
-            .query_row(
-                "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2 AND id != ?3",
-                params![new_title, namespace, id],
-                |r| r.get(0),
-            )
-            .ok();
-        if let Some(other_id) = collision {
-            anyhow::bail!(
-                "title '{new_title}' already exists in namespace '{namespace}' (memory {other_id})"
-            );
-        }
-    }
-
-    conn.execute(
+    // Ultrareview #354: rely on the UNIQUE INDEX on (title, namespace)
+    // to enforce collision atomically at the DB layer. The previous
+    // check-then-update sequence had a race — another transaction
+    // could insert a colliding row between the SELECT and the UPDATE,
+    // and the UPDATE would surface as a generic SQLite constraint
+    // error to the caller. Now the collision check is inline: the
+    // UPDATE fails with a well-scoped UniqueViolation, and we re-
+    // query the colliding row's id only on that specific error for
+    // the friendly message.
+    let update_res = conn.execute(
         "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10
          WHERE id=?11",
         params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id],
-    )?;
-    Ok((true, content_changed))
+    );
+    match update_res {
+        Ok(_) => Ok((true, content_changed)),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let other: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2 AND id != ?3",
+                    params![new_title, namespace, id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(other_id) = other {
+                anyhow::bail!(
+                    "title '{new_title}' already exists in namespace '{namespace}' (memory {other_id})"
+                );
+            }
+            Err(anyhow::anyhow!("update failed with constraint violation"))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
@@ -889,7 +941,7 @@ pub fn list(
            AND (?5 IS NULL OR created_at >= ?5)
            AND (?6 IS NULL OR created_at <= ?6)
            AND (?7 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?7))
-           AND (?10 IS NULL OR json_extract(metadata, '$.agent_id') = ?10)
+           AND (?10 IS NULL OR agent_id_idx = ?10)
          ORDER BY priority DESC, updated_at DESC
          LIMIT ?8 OFFSET ?9",
     )?;
@@ -945,7 +997,7 @@ pub fn search(
            AND (?6 IS NULL OR m.created_at >= ?6)
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
-           AND (?10 IS NULL OR json_extract(m.metadata, '$.agent_id') = ?10)
+           AND (?10 IS NULL OR m.agent_id_idx = ?10)
            {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
@@ -1961,19 +2013,34 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
 }
 
 /// Insert with timestamp-aware conflict resolution for sync.
-/// Only overwrites if the incoming memory is newer (by `updated_at`).
+/// Only overwrites if the incoming memory is newer (by `updated_at`,
+/// tiebroken by memory.id for a total order across peers —
+/// ultrareview #344, #345).
+///
+/// Rationale: ISO 8601 / RFC 3339 strings compare lexicographically
+/// as long as all timestamps carry consistent precision + Z suffix.
+/// Equal timestamps (common when two nodes edit in the same ms, or
+/// when NTP aligns clocks) previously produced non-deterministic
+/// winners per peer, causing permanent mesh divergence. Adding the
+/// memory.id tiebreaker yields a total order every peer agrees on.
 pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
-    conn.execute(
+    let actual_id: String = conn.query_row(
         "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
-            content = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.content ELSE memories.content END,
-            tags = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.tags ELSE memories.tags END,
+            content = CASE WHEN excluded.updated_at > memories.updated_at
+                             OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                           THEN excluded.content ELSE memories.content END,
+            tags = CASE WHEN excluded.updated_at > memories.updated_at
+                          OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                        THEN excluded.tags ELSE memories.tags END,
             priority = MAX(memories.priority, excluded.priority),
             confidence = MAX(memories.confidence, excluded.confidence),
-            source = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.source ELSE memories.source END,
+            source = CASE WHEN excluded.updated_at > memories.updated_at
+                            OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                          THEN excluded.source ELSE memories.source END,
             tier = CASE WHEN excluded.tier = 'long' THEN 'long'
                         WHEN memories.tier = 'long' THEN 'long'
                         WHEN excluded.tier = 'mid' THEN 'mid'
@@ -1987,25 +2054,24 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
                 WHEN json_extract(memories.metadata, '$.agent_id') IS NOT NULL
                 THEN json_set(
                     CASE WHEN excluded.updated_at > memories.updated_at
+                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                          THEN excluded.metadata
                          ELSE memories.metadata END,
                     '$.agent_id',
                     json_extract(memories.metadata, '$.agent_id')
                 )
                 ELSE CASE WHEN excluded.updated_at > memories.updated_at
+                               OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                           THEN excluded.metadata
                           ELSE memories.metadata END
-            END",
+            END
+         RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json,
         ],
-    )?;
-    let actual_id: String = conn.query_row(
-        "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
-        params![mem.title, mem.namespace],
         |r| r.get(0),
     )?;
     Ok(actual_id)

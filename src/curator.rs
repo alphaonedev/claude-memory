@@ -547,8 +547,10 @@ mod tests {
             expires_at: None,
             metadata: serde_json::json!({}),
         };
-        let mut cfg = CuratorConfig::default();
-        cfg.include_namespaces = vec!["other".to_string()];
+        let mut cfg = CuratorConfig {
+            include_namespaces: vec!["other".to_string()],
+            ..CuratorConfig::default()
+        };
         assert!(!needs_curation(&mem, &cfg));
         cfg.include_namespaces = vec!["app".to_string()];
         assert!(needs_curation(&mem, &cfg));
@@ -573,8 +575,10 @@ mod tests {
             expires_at: None,
             metadata: serde_json::json!({}),
         };
-        let mut cfg = CuratorConfig::default();
-        cfg.exclude_namespaces = vec!["noisy".to_string()];
+        let cfg = CuratorConfig {
+            exclude_namespaces: vec!["noisy".to_string()],
+            ..CuratorConfig::default()
+        };
         assert!(!needs_curation(&mem, &cfg));
     }
 

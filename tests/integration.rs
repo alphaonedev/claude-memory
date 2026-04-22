@@ -1976,10 +1976,15 @@ fn test_mcp_unknown_tool() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let resp: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("invalid JSON response");
-    // Tool errors come back as isError in MCP spec
-    let text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
-    assert!(text.contains("unknown tool"), "expected unknown tool error");
-    assert_eq!(resp["result"]["isError"], true);
+    // Ultrareview #349: unknown tool returns JSON-RPC -32601 Method not
+    // found, not ok_response with isError.
+    assert_eq!(resp["error"]["code"], -32601, "expected JSON-RPC -32601");
+    let msg = resp["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg.contains("unknown tool"),
+        "expected 'unknown tool' in error message, got {msg:?}"
+    );
+    assert!(resp["result"].is_null(), "result must be absent on error");
 
     let _ = std::fs::remove_file(&db_path);
 }
@@ -2507,17 +2512,17 @@ fn test_namespace_auto_detect_parent() {
     let child_id = child_stored["id"].as_str().unwrap().to_string();
 
     // Set parent standard first, then child (no explicit parent — should auto-detect)
+    let parent_set = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject","id":"{parent_id}"}}}}}}"#,
+    );
+    let child_set = format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject-tests","id":"{child_id}"}}}}}}"#,
+    );
     let mcp_input = format!(
         "{}\n{}\n{}\n{}\n",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject","id":"{}"}}}}}}"#,
-            parent_id
-        ),
-        format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"myproject-tests","id":"{}"}}}}}}"#,
-            child_id
-        ),
+        parent_set,
+        child_set,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_recall","arguments":{"context":"rules","namespace":"myproject-tests","format":"json"}}}"#,
     );
 
@@ -2624,13 +2629,13 @@ fn test_mcp_namespace_standard_auto_prepend() {
     assert!(output.status.success());
 
     // Set standard via MCP, then recall with namespace
+    let set_standard = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"test-ns","id":"{std_id}"}}}}}}"#,
+    );
     let mcp_input = format!(
         "{}\n{}\n{}\n",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"test-ns","id":"{}"}}}}}}"#,
-            std_id
-        ),
+        set_standard,
         r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"memory_recall","arguments":{"context":"rules","namespace":"test-ns","format":"json"}}}"#,
     );
 
@@ -2718,17 +2723,17 @@ fn test_namespace_standard_cascade_on_delete() {
     let std_id = stored["id"].as_str().unwrap().to_string();
 
     // Set standard, then delete the memory, then get standard
+    let set_standard = format!(
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"cascade-ns","id":"{std_id}"}}}}}}"#,
+    );
+    let delete_mem = format!(
+        r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_delete","arguments":{{"id":"{std_id}"}}}}}}"#,
+    );
     let mcp_input = format!(
         "{}\n{}\n{}\n{}\n",
         r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
-        format!(
-            r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"name":"memory_namespace_set_standard","arguments":{{"namespace":"cascade-ns","id":"{}"}}}}}}"#,
-            std_id
-        ),
-        format!(
-            r#"{{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{{"name":"memory_delete","arguments":{{"id":"{}"}}}}}}"#,
-            std_id
-        ),
+        set_standard,
+        delete_mem,
         r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"memory_namespace_get_standard","arguments":{"namespace":"cascade-ns"}}}"#,
     );
 
@@ -2937,8 +2942,8 @@ fn test_mcp_store_invalid_metadata_defaults_to_empty() {
     assert_eq!(lines.len(), 4, "expected 4 responses, got: {stdout}");
 
     // All three stores should succeed (invalid metadata silently defaults to {})
-    for i in 0..3 {
-        let resp: serde_json::Value = serde_json::from_str(lines[i]).unwrap();
+    for (i, line) in lines.iter().enumerate().take(3) {
+        let resp: serde_json::Value = serde_json::from_str(line).unwrap();
         let text = resp["result"]["content"][0]["text"].as_str().unwrap();
         let data: serde_json::Value = serde_json::from_str(text).unwrap();
         assert!(
@@ -7251,7 +7256,7 @@ fn test_budget_truncates_to_fit() {
     let v = recall_with_budget(bin, &db, "alpha", Some(25));
     let count = v["count"].as_u64().unwrap() as usize;
     assert!(
-        count >= 1 && count < 5,
+        (1..5).contains(&count),
         "budget must truncate; got count={count}"
     );
     let tokens_used = v["tokens_used"].as_u64().unwrap();

@@ -72,9 +72,16 @@ fn err_response(id: Value, code: i64, message: String) -> RpcResponse {
 
 // --- Tool definitions ---
 
+/// Version tag for the `tools/list` response schema. Bumped whenever
+/// an existing tool's shape changes in a breaking way (renamed params,
+/// tightened schemas, removed options). Adding a new tool is additive
+/// and does NOT require a bump. Ultrareview #351.
+const TOOLS_VERSION: &str = "2026-04-22";
+
 #[allow(clippy::too_many_lines)]
 fn tool_definitions() -> Value {
     json!({
+        "toolsVersion": TOOLS_VERSION,
         "tools": [
             {
                 "name": "memory_store",
@@ -1088,7 +1095,7 @@ fn handle_recall(
     let _ = db::gc_if_needed(conn, archive_on_gc);
     let context = params["context"].as_str().ok_or("context is required")?;
     let namespace = params["namespace"].as_str();
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).unwrap_or(usize::MAX);
     let tags = params["tags"].as_str();
     let since = params["since"].as_str();
     let until = params["until"].as_str();
@@ -1098,9 +1105,16 @@ fn handle_recall(
         validate::validate_namespace(a).map_err(|e| e.to_string())?;
     }
     // Task 1.11: optional token budget.
-    let budget_tokens = params["budget_tokens"]
-        .as_u64()
-        .and_then(|n| usize::try_from(n).ok());
+    // Ultrareview #348: reject budget_tokens=0 explicitly. An off-by-one
+    // or uninitialized counter passed as 0 would previously return an
+    // empty result with no error — hides the caller's bug.
+    let budget_tokens = match params["budget_tokens"].as_u64() {
+        Some(0) => {
+            return Err("budget_tokens must be >= 1".to_string());
+        }
+        Some(n) => usize::try_from(n).ok(),
+        None => None,
+    };
 
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
@@ -1295,7 +1309,10 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     let query = params["query"].as_str().ok_or("query is required")?;
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
+    // Ultrareview #339: saturate instead of panic on 32-bit targets
+    // where u64 may exceed usize::MAX. A malicious client passing
+    // limit=2^63 would otherwise take down the daemon.
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).unwrap_or(usize::MAX);
 
     let agent_id = params["agent_id"].as_str();
     if let Some(aid) = agent_id {
@@ -1325,7 +1342,8 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).expect("u64 as usize");
+    // Ultrareview #339: saturate instead of panic (see handle_search).
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(20)).unwrap_or(usize::MAX);
     let agent_id = params["agent_id"].as_str();
     if let Some(aid) = agent_id {
         validate::validate_agent_id(aid).map_err(|e| e.to_string())?;
@@ -2156,7 +2174,7 @@ fn handle_inbox(
         crate::identity::resolve_agent_id(explicit, mcp_client).map_err(|e| e.to_string())?;
     let unread_only = params["unread_only"].as_bool().unwrap_or(false);
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50))
-        .expect("u64 as usize")
+        .unwrap_or(usize::MAX)
         .min(500);
     let namespace = messages_namespace_for(&owner);
     let items = db::list(
@@ -2277,7 +2295,7 @@ fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, Strin
 fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let status = params["status"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
-        .expect("u64 as usize")
+        .unwrap_or(usize::MAX)
         .min(1000);
     let items = db::list_pending_actions(conn, status, limit).map_err(|e| e.to_string())?;
     Ok(json!({"count": items.len(), "pending": items}))
@@ -2336,8 +2354,8 @@ fn handle_pending_reject(
 
 fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).expect("u64 as usize");
-    let offset = usize::try_from(params["offset"].as_u64().unwrap_or(0)).expect("u64 as usize");
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).unwrap_or(usize::MAX);
+    let offset = usize::try_from(params["offset"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
     let items =
         db::list_archived(conn, namespace, limit.min(1000), offset).map_err(|e| e.to_string())?;
     Ok(json!({"archived": items, "count": items.len()}))
@@ -2387,7 +2405,7 @@ fn handle_session_start(
     llm: Option<&OllamaClient>,
 ) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).expect("u64 as usize");
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).unwrap_or(usize::MAX);
 
     let results = db::list(
         conn,
@@ -2572,7 +2590,15 @@ fn handle_request(
                 "memory_subscribe" => handle_subscribe(conn, arguments, mcp_client),
                 "memory_unsubscribe" => handle_unsubscribe(conn, arguments),
                 "memory_list_subscriptions" => handle_list_subscriptions(conn),
-                _ => Err(format!("unknown tool: {tool_name}")),
+                // Ultrareview #349: unknown tool is a JSON-RPC 2.0
+                // "method not found" condition — return -32601, not
+                // an ok_response with `isError: true`. Clients that
+                // switch on error code can then misroute / retry
+                // correctly. We surface the tool name in `data` so
+                // clients can log it without parsing the message.
+                unknown => {
+                    return err_response(id, -32601, format!("unknown tool: {unknown}"));
+                }
             };
 
             match result {

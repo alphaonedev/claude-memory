@@ -1314,6 +1314,24 @@ async fn load_fingerprint_allowlist(path: &Path) -> Result<std::collections::Has
         }
         // Accept a leading `sha256:` marker for forward-compat with richer formats.
         let hex_part = line.strip_prefix("sha256:").unwrap_or(line);
+        // Ultrareview #338: reject any non-hex, non-colon character —
+        // including embedded whitespace/tabs. Previously the parser
+        // stripped only `:` and relied on the length check to catch
+        // whitespace, but silent acceptance of copy-paste artefacts
+        // (e.g. soft-wraps producing internal spaces) would produce
+        // misleading parse errors further down rather than a clear
+        // "whitespace not allowed" signal. Keep it strict.
+        if let Some(bad) = hex_part
+            .chars()
+            .find(|c| !c.is_ascii_hexdigit() && *c != ':')
+        {
+            anyhow::bail!(
+                "mTLS allowlist line {}: unexpected character {:?} — \
+                 entries must be 64 hex chars with optional `:` separators",
+                lineno + 1,
+                bad
+            );
+        }
         let hex_clean: String = hex_part.chars().filter(|c| *c != ':').collect();
         if hex_clean.len() != 64 {
             anyhow::bail!(
@@ -3137,31 +3155,46 @@ async fn cmd_sync_daemon(
     // the trust anchor, so fingerprint pinning of the peer's server
     // cert is a Layer 2b refinement tracked in #224.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // Ultrareview #336: --insecure-skip-server-verify must be gated
+    // behind a compensating control. When server-cert verification is
+    // disabled, require the daemon to present a client cert so at
+    // least the peer authenticates US via its mTLS allowlist. Without
+    // either side of the handshake verified, the connection is an
+    // open MITM surface.
+    if args.insecure_skip_server_verify && (args.client_cert.is_none() || args.client_key.is_none())
+    {
+        anyhow::bail!(
+            "sync-daemon: --insecure-skip-server-verify requires both --client-cert \
+             and --client-key as a compensating mTLS control. Running with neither side \
+             of the TLS handshake verified is an open MITM surface and is refused."
+        );
+    }
+
     let client = if let (Some(cert_path), Some(key_path)) = (&args.client_cert, &args.client_key) {
         // mTLS path — daemon presents client cert; the peer's
         // FingerprintAllowlistVerifier authenticates us. Server-cert
         // pinning on this side is Layer 2b (post-v0.6.0).
         let rustls_config = build_rustls_client_config(cert_path, key_path).await?;
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .use_preconfigured_tls(rustls_config)
-            .build()?
-    } else {
-        // No client cert — server cert verification is the only
-        // remaining trust anchor. Default to system trust roots
-        // (the secure path) UNLESS the operator explicitly opts in
-        // to the insecure mode (red-team #232 — was silent MITM
-        // risk before v0.6.0).
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+            .use_preconfigured_tls(rustls_config);
         if args.insecure_skip_server_verify {
             tracing::warn!(
-                "sync-daemon: --insecure-skip-server-verify set — peer server \
-                 certificates will NOT be validated. MITM attacks possible. \
-                 Do NOT use in production (red-team #232)."
+                "sync-daemon: --insecure-skip-server-verify set with --client-cert — \
+                 peer server certificates will NOT be validated; peer authenticates us \
+                 via mTLS allowlist (compensating control). Do NOT use in production."
             );
             builder = builder.danger_accept_invalid_certs(true);
         }
         builder.build()?
+    } else {
+        // No client cert — server cert verification is the only
+        // remaining trust anchor. Default to system trust roots
+        // (the secure path). --insecure-skip-server-verify without
+        // mTLS was refused above.
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?
     };
 
     tracing::info!(
