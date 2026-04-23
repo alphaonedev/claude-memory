@@ -2366,7 +2366,17 @@ pub fn recall_hybrid(
                 continue;
             }
             let cosine = f64::from(1.0 - hit.distance);
-            if cosine > 0.3
+            // v0.6.2 (S18 iteration): cosine gate relaxed 0.3 → 0.2.
+            // Scenario-18 caught a real-world miss at the old ceiling:
+            // semantically-related pairs with varied phrasing ("morning
+            // outdoor exercise routine" vs. "brisk uphill strides along
+            // the ridge line trails") landed at 0.25-0.29 cosine and
+            // silently fell below 0.3, returning zero semantic hits.
+            // 0.2 keeps clearly-unrelated content out (random noise
+            // hovers near 0) while admitting legitimate semantic
+            // associations; the blended score + FTS component still
+            // rank relevance on the way out.
+            if cosine > 0.2
                 && let Some(mem) = get(conn, &hit.id)?
             {
                 // Apply namespace/expiry/tag filters. Task 1.12: when
@@ -2446,7 +2456,8 @@ pub fn recall_hybrid(
                     query_embedding,
                     &emb,
                 ));
-                if cosine > 0.3 {
+                // v0.6.2 (S18): see matching note above at the HNSW gate.
+                if cosine > 0.2 {
                     scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                 }
             }
