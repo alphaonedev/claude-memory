@@ -333,6 +333,37 @@ pub async fn create_memory(
                     .into_response();
             }
             Ok(GovernanceDecision::Pending(pending_id)) => {
+                // v0.6.2 (S34): fan out the new pending row so peers can
+                // approve / reject / list it. Load the canonical row we
+                // just inserted and broadcast before responding.
+                let pending_row = db::get_pending_action(&lock.0, &pending_id).ok().flatten();
+                let namespace = mem.namespace.clone();
+                drop(lock);
+                if let (Some(pa), Some(fed)) = (pending_row.as_ref(), app.federation.as_ref()) {
+                    match crate::federation::broadcast_pending_quorum(fed, pa).await {
+                        Ok(tracker) => {
+                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        Err(err) => {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
                 return (
                     StatusCode::ACCEPTED,
                     Json(json!({
@@ -340,7 +371,7 @@ pub async fn create_memory(
                         "pending_id": pending_id,
                         "reason": "governance requires approval",
                         "action": "store",
-                        "namespace": mem.namespace,
+                        "namespace": namespace,
                     })),
                 )
                     .into_response();
@@ -568,12 +599,15 @@ pub async fn list_pending(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn approve_pending(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     use crate::db::ApproveOutcome;
+    use crate::models::PendingDecision;
+    let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -595,14 +629,64 @@ pub async fn approve_pending(
     let lock = state.lock().await;
     match db::approve_with_approver_type(&lock.0, &id, &agent_id) {
         Ok(ApproveOutcome::Approved) => match db::execute_pending_action(&lock.0, &id) {
-            Ok(memory_id) => Json(json!({
-                "approved": true,
-                "id": id,
-                "decided_by": agent_id,
-                "executed": true,
-                "memory_id": memory_id,
-            }))
-            .into_response(),
+            Ok(memory_id) => {
+                // v0.6.2 (S34): fan out the decision AND the resulting
+                // memory so approve on one node makes the governed write
+                // visible on every peer. Drop the DB lock before any
+                // outbound HTTP.
+                let produced_mem = memory_id
+                    .as_deref()
+                    .and_then(|mid| db::get(&lock.0, mid).ok().flatten());
+                drop(lock);
+                if let Some(fed) = app.federation.as_ref() {
+                    let decision = PendingDecision {
+                        id: id.clone(),
+                        approved: true,
+                        decider: agent_id.clone(),
+                    };
+                    match crate::federation::broadcast_pending_decision_quorum(fed, &decision).await
+                    {
+                        Ok(tracker) => {
+                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        Err(err) => {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    // If approval produced a brand-new memory (store
+                    // path), also broadcast it so peers have the row.
+                    // delete / promote paths produce no new memory
+                    // (the pending payload carries memory_id).
+                    if let Some(ref mem) = produced_mem
+                        && let Some(resp) = fanout_or_503(&app, mem).await
+                    {
+                        return resp;
+                    }
+                }
+                Json(json!({
+                    "approved": true,
+                    "id": id,
+                    "decided_by": agent_id,
+                    "executed": true,
+                    "memory_id": memory_id,
+                }))
+                .into_response()
+            }
             Err(e) => {
                 tracing::error!("execute pending error: {e}");
                 (
@@ -641,10 +725,12 @@ pub async fn approve_pending(
 }
 
 pub async fn reject_pending(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    use crate::models::PendingDecision;
+    let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -666,6 +752,37 @@ pub async fn reject_pending(
     let lock = state.lock().await;
     match db::decide_pending_action(&lock.0, &id, false, &agent_id) {
         Ok(true) => {
+            drop(lock);
+            // v0.6.2 (S34): fan out the reject so peers converge.
+            if let Some(fed) = app.federation.as_ref() {
+                let decision = PendingDecision {
+                    id: id.clone(),
+                    approved: false,
+                    decider: agent_id.clone(),
+                };
+                match crate::federation::broadcast_pending_decision_quorum(fed, &decision).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(err) => {
+                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("Retry-After", "2")],
+                            Json(serde_json::to_value(&payload).unwrap_or_default()),
+                        )
+                            .into_response();
+                    }
+                }
+            }
             Json(json!({"rejected": true, "id": id, "decided_by": agent_id})).into_response()
         }
         Ok(false) => (
@@ -939,6 +1056,36 @@ pub async fn delete_memory(
                     .into_response();
             }
             Ok(GovernanceDecision::Pending(pending_id)) => {
+                // v0.6.2 (S34): fan out the new pending delete row so peers
+                // see consistent governance queue state.
+                let pending_row = db::get_pending_action(&lock.0, &pending_id).ok().flatten();
+                let target_id = target.id.clone();
+                drop(lock);
+                if let (Some(pa), Some(fed)) = (pending_row.as_ref(), app.federation.as_ref()) {
+                    match crate::federation::broadcast_pending_quorum(fed, pa).await {
+                        Ok(tracker) => {
+                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        Err(err) => {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
                 return (
                     StatusCode::ACCEPTED,
                     Json(json!({
@@ -946,7 +1093,7 @@ pub async fn delete_memory(
                         "pending_id": pending_id,
                         "reason": "governance requires approval",
                         "action": "delete",
-                        "memory_id": target.id,
+                        "memory_id": target_id,
                     })),
                 )
                     .into_response();
@@ -1060,6 +1207,35 @@ pub async fn promote_memory(
                     .into_response();
             }
             Ok(GovernanceDecision::Pending(pending_id)) => {
+                // v0.6.2 (S34): fan out the new pending promote row too.
+                let pending_row = db::get_pending_action(&lock.0, &pending_id).ok().flatten();
+                let target_id = target.id.clone();
+                drop(lock);
+                if let (Some(pa), Some(fed)) = (pending_row.as_ref(), app.federation.as_ref()) {
+                    match crate::federation::broadcast_pending_quorum(fed, pa).await {
+                        Ok(tracker) => {
+                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        Err(err) => {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
                 return (
                     StatusCode::ACCEPTED,
                     Json(json!({
@@ -1067,7 +1243,7 @@ pub async fn promote_memory(
                         "pending_id": pending_id,
                         "reason": "governance requires approval",
                         "action": "promote",
-                        "memory_id": target.id,
+                        "memory_id": target_id,
                     })),
                 )
                     .into_response();
@@ -1156,7 +1332,13 @@ pub async fn list_memories(
             .into_response();
     }
     let lock = state.lock().await;
-    let limit = p.limit.unwrap_or(20).min(200);
+    // v0.6.2 (S40): raise ceiling from 200 → `MAX_BULK_SIZE` (1000) so bulk
+    // fanout scenarios that POST 500+ rows to a leader can verify full
+    // peer delivery via a single `GET /memories?limit=N` (previously the
+    // list silently capped at 200 regardless of whether fanout worked).
+    // Default remains 20 — only explicit `?limit=` callers see the
+    // higher ceiling.
+    let limit = p.limit.unwrap_or(20).min(MAX_BULK_SIZE);
     match db::list(
         &lock.0,
         p.namespace.as_deref(),
@@ -1213,7 +1395,9 @@ pub async fn search_memories(
             .into_response();
     }
     let lock = state.lock().await;
-    let limit = p.limit.unwrap_or(20).min(200);
+    // v0.6.2 (S40): mirror the `list_memories` ceiling raise so search
+    // over a bulk-populated namespace isn't also capped at 200.
+    let limit = p.limit.unwrap_or(20).min(MAX_BULK_SIZE);
     match db::search(
         &lock.0,
         &p.q,
@@ -1464,7 +1648,9 @@ pub async fn detect_contradictions(
         )
             .into_response();
     }
-    let limit = q.limit.unwrap_or(50).min(200);
+    // v0.6.2 (S40): raise to `MAX_BULK_SIZE` so a detect-contradictions
+    // sweep over a bulk-populated namespace isn't silently capped at 200.
+    let limit = q.limit.unwrap_or(50).min(MAX_BULK_SIZE);
     let lock = state.lock().await;
     let all = match db::list(
         &lock.0,
@@ -2367,6 +2553,25 @@ pub struct SyncPushBody {
     /// `memory_links`.
     #[serde(default)]
     pub links: Vec<MemoryLink>,
+    /// v0.6.2 (S34): pending-action rows the sender wants propagated.
+    /// Applied via `db::upsert_pending_action` — preserves the originator's
+    /// id + status + approvals so the cluster agrees on pending state.
+    /// Without this, `POST /api/v1/pending/{id}/approve` on a peer 404s
+    /// because the row only exists on the originator.
+    #[serde(default)]
+    pub pendings: Vec<crate::models::PendingAction>,
+    /// v0.6.2 (S34): pending-action decisions the sender wants propagated
+    /// so approve/reject on any node lands consistently. Applied via
+    /// `db::decide_pending_action` — already-decided rows no-op, replay-safe.
+    #[serde(default)]
+    pub pending_decisions: Vec<crate::models::PendingDecision>,
+    /// v0.6.2 (S35): namespace-standard meta rows the sender wants
+    /// propagated. Applied via `db::set_namespace_standard(conn, ns,
+    /// standard_id, parent.as_deref())` so the peer's inheritance-chain
+    /// walk uses the originator's explicit parent (not a locally
+    /// auto-detected one).
+    #[serde(default)]
+    pub namespace_meta: Vec<crate::models::NamespaceMetaEntry>,
     /// Preview mode — classify and count, do not write.
     #[serde(default)]
     pub dry_run: bool,
@@ -2432,6 +2637,39 @@ pub async fn sync_push(
             StatusCode::BAD_REQUEST,
             Json(json!({
                 "error": format!("sync_push limited to {} restores per request", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
+    if body.pendings.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("sync_push limited to {} pendings per request", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
+    if body.pending_decisions.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "sync_push limited to {} pending_decisions per request",
+                    MAX_BULK_SIZE
+                )
+            })),
+        )
+            .into_response();
+    }
+    if body.namespace_meta.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "sync_push limited to {} namespace_meta per request",
+                    MAX_BULK_SIZE
+                )
             })),
         )
             .into_response();
@@ -2594,6 +2832,105 @@ pub async fn sync_push(
         }
     }
 
+    // v0.6.2 (S34): process incoming pending-action rows. Uses
+    // `upsert_pending_action` so replays / races converge on the
+    // originator's canonical row. Invalid ids skipped silently.
+    let mut pendings_applied = 0usize;
+    for pa in &body.pendings {
+        if validate::validate_id(&pa.id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::upsert_pending_action(&lock.0, pa) {
+            Ok(()) => pendings_applied += 1,
+            Err(e) => {
+                tracing::warn!("sync_push: upsert_pending_action failed for {}: {e}", pa.id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // v0.6.2 (S34): process incoming pending-action decisions. No-op on
+    // already-decided rows; that's the steady-state when the originator
+    // and this peer both saw the decision. Rejected decisions still
+    // transition status so retries on either side see `status != 'pending'`.
+    let mut pending_decisions_applied = 0usize;
+    for dec in &body.pending_decisions {
+        if validate::validate_id(&dec.id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::decide_pending_action(&lock.0, &dec.id, dec.approved, &dec.decider) {
+            Ok(true) => {
+                pending_decisions_applied += 1;
+                // On approve, replay the pending payload so the target
+                // write (store/delete/promote) actually lands on this
+                // peer — matches the originator's post-approve state.
+                if dec.approved {
+                    match db::execute_pending_action(&lock.0, &dec.id) {
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::warn!(
+                                "sync_push: execute_pending_action failed for {}: {e}",
+                                dec.id
+                            );
+                        }
+                    }
+                }
+            }
+            Ok(false) => noop += 1, // already decided — converged state
+            Err(e) => {
+                tracing::warn!(
+                    "sync_push: decide_pending_action failed for {}: {e}",
+                    dec.id
+                );
+                skipped += 1;
+            }
+        }
+    }
+
+    // v0.6.2 (S35): process incoming namespace_meta rows. Applies via
+    // `set_namespace_standard` so the peer's inheritance-chain walk has
+    // the originator's explicit parent link. The standard memory itself
+    // rides on the same push via `memories` (or arrived earlier through
+    // `broadcast_store_quorum`); the namespace-meta row closes the gap.
+    let mut namespace_meta_applied = 0usize;
+    for entry in &body.namespace_meta {
+        if validate::validate_namespace(&entry.namespace).is_err()
+            || validate::validate_id(&entry.standard_id).is_err()
+        {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::set_namespace_standard(
+            &lock.0,
+            &entry.namespace,
+            &entry.standard_id,
+            entry.parent_namespace.as_deref(),
+        ) {
+            Ok(()) => namespace_meta_applied += 1,
+            Err(e) => {
+                tracing::warn!(
+                    "sync_push: set_namespace_standard failed for {}: {e}",
+                    entry.namespace
+                );
+                skipped += 1;
+            }
+        }
+    }
+
     // Advance the vector clock with the highest `updated_at` we observed.
     // Skipped in dry-run mode since the caller is only previewing.
     if !body.dry_run
@@ -2658,6 +2995,9 @@ pub async fn sync_push(
             "archived": archived,
             "restored": restored,
             "links_applied": links_applied,
+            "pendings_applied": pendings_applied,
+            "pending_decisions_applied": pending_decisions_applied,
+            "namespace_meta_applied": namespace_meta_applied,
             "noop": noop,
             "skipped": skipped,
             "dry_run": body.dry_run,
@@ -3402,6 +3742,11 @@ async fn set_namespace_standard_inner(
     // Capture the standard memory so we can fan it out to peers — cluster
     // visibility of governance rules matters for S34/S35.
     let standard_mem = db::get(&lock.0, &resolved_id).ok().flatten();
+    // v0.6.2 (S35): also capture the freshly-written namespace_meta row
+    // so peers learn the explicit (namespace, standard_id, parent) tuple.
+    // Without this, peers auto-detect a parent via `-` prefix which may
+    // disagree with what the originator set.
+    let meta_entry = db::get_namespace_meta_entry(&lock.0, ns).ok().flatten();
     drop(lock);
 
     match result {
@@ -3410,6 +3755,30 @@ async fn set_namespace_standard_inner(
                 && let Some(resp) = fanout_or_503(app, mem).await
             {
                 return resp;
+            }
+            if let (Some(entry), Some(fed)) = (meta_entry.as_ref(), app.federation.as_ref()) {
+                match crate::federation::broadcast_namespace_meta_quorum(fed, entry).await {
+                    Ok(tracker) => {
+                        if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                    Err(err) => {
+                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("Retry-After", "2")],
+                            Json(serde_json::to_value(&payload).unwrap_or_default()),
+                        )
+                            .into_response();
+                    }
+                }
             }
             (StatusCode::CREATED, Json(v)).into_response()
         }

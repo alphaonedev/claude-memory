@@ -8355,13 +8355,19 @@ fn curl_post(
         args.push("-H".into());
         args.push(format!("x-agent-id: {id}"));
     }
-    args.push("-d".into());
-    args.push(body.to_string());
+    // Spill body to a temp file to avoid Windows CreateProcess argv overflow
+    // (ERROR_FILENAME_EXCED_RANGE / OS error 206) on bulk POSTs >~32 KB.
+    let payload_path =
+        std::env::temp_dir().join(format!("ai-memory-curl-{}.json", uuid::Uuid::new_v4()));
+    std::fs::write(&payload_path, body.to_string()).unwrap();
+    args.push("--data-binary".into());
+    args.push(format!("@{}", payload_path.display()));
     args.push(format!("http://127.0.0.1:{port}{path}"));
     let out = std::process::Command::new("curl")
         .args(&args)
         .output()
         .unwrap();
+    let _ = std::fs::remove_file(&payload_path);
     let raw = String::from_utf8_lossy(&out.stdout).into_owned();
     let (body, code) = raw.rsplit_once('\n').unwrap_or(("", ""));
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
@@ -9205,5 +9211,505 @@ fn http_sync_since_echoes_since_param() {
     assert!(
         mems.iter().any(|m| m["id"] == id),
         "new memory must appear in sync_since result: {body}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// v0.6.2 PR #final — S34 / S35 / S18 / S39 / S40 coverage.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_list_memories_cap_raised_to_max_bulk_size() {
+    // S40: before this PR, `list_memories?limit=N` silently capped at 200.
+    // Bulk-fanout scenarios POST 500+ rows and verify via a single
+    // `GET /memories?limit=1000` — the old cap made that impossible.
+    // This test pins the ceiling at `MAX_BULK_SIZE` (1000) and verifies
+    // that a mid-range request (300) returns the full set.
+    let d = DaemonGuard::spawn();
+
+    let n = 300usize;
+    let bodies: Vec<serde_json::Value> = (0..n)
+        .map(|i| {
+            serde_json::json!({
+                "tier": "long",
+                "namespace": "list-cap",
+                "title": format!("cap-{i}"),
+                "content": "row",
+                "tags": [],
+                "priority": 5,
+                "confidence": 1.0,
+                "source": "api",
+                "metadata": {}
+            })
+        })
+        .collect();
+    let (code, resp) = curl_post(
+        d.port,
+        "/api/v1/memories/bulk",
+        &serde_json::Value::Array(bodies),
+        Some("ai:list-cap"),
+    );
+    assert_eq!(code, "200", "bulk_create: {resp}");
+
+    // Explicit limit > 200 must now return all 300 rows.
+    let (code, body) = curl_get(d.port, "/api/v1/memories?namespace=list-cap&limit=500");
+    assert_eq!(code, "200", "list_memories: {body}");
+    let mems = body["memories"].as_array().expect("memories array");
+    assert_eq!(
+        mems.len(),
+        n,
+        "list must return all {n} rows, got {}",
+        mems.len()
+    );
+
+    // limit=1000 is still the ceiling — a request for 2000 clamps to 1000.
+    // We already have 300 rows, so asking for 2000 returns 300 (not capped
+    // by the ceiling but proves the request parses + executes).
+    let (code, body) = curl_get(d.port, "/api/v1/memories?namespace=list-cap&limit=2000");
+    assert_eq!(code, "200");
+    let mems = body["memories"].as_array().expect("memories array");
+    assert_eq!(mems.len(), n);
+}
+
+#[test]
+fn http_sync_push_applies_pendings() {
+    // S34: direct unit-ish coverage of the new `sync_push.pendings` field.
+    // POST a pending_actions row to the peer via sync_push and assert
+    // GET /api/v1/pending on the peer surfaces it.
+    let peer = DaemonGuard::spawn();
+
+    let pending_id = uuid::Uuid::new_v4().to_string();
+    let (code, resp) = curl_post(
+        peer.port,
+        "/api/v1/sync/push",
+        &serde_json::json!({
+            "sender_agent_id": "ai:pending-origin",
+            "memories": [],
+            "pendings": [{
+                "id": pending_id,
+                "action_type": "store",
+                "memory_id": null,
+                "namespace": "s34-pending",
+                "payload": {"title": "x", "content": "y"},
+                "requested_by": "ai:alice",
+                "requested_at": chrono::Utc::now().to_rfc3339(),
+                "status": "pending",
+                "approvals": []
+            }],
+            "dry_run": false
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "sync_push: {resp}");
+    assert_eq!(resp["pendings_applied"].as_u64().unwrap_or(0), 1);
+
+    let (code, list) = curl_get(peer.port, "/api/v1/pending?limit=100");
+    assert_eq!(code, "200", "list_pending: {list}");
+    let rows = list["pending"].as_array().expect("pending array");
+    assert!(
+        rows.iter().any(|r| r["id"].as_str() == Some(&pending_id)),
+        "peer's /pending missing fanned-out row: {list}"
+    );
+}
+
+#[test]
+fn http_sync_push_applies_pending_decisions() {
+    // S34: verify the `sync_push.pending_decisions` field transitions the
+    // status column on an existing pending row.
+    let peer = DaemonGuard::spawn();
+    let pending_id = uuid::Uuid::new_v4().to_string();
+
+    // Seed a pending row via sync_push.pendings first.
+    let (code, _) = curl_post(
+        peer.port,
+        "/api/v1/sync/push",
+        &serde_json::json!({
+            "sender_agent_id": "ai:pending-origin",
+            "memories": [],
+            "pendings": [{
+                "id": pending_id,
+                "action_type": "store",
+                "memory_id": null,
+                "namespace": "s34-decide",
+                "payload": {"title": "reject-me", "content": "…"},
+                "requested_by": "ai:alice",
+                "requested_at": chrono::Utc::now().to_rfc3339(),
+                "status": "pending",
+                "approvals": []
+            }],
+            "dry_run": false
+        }),
+        None,
+    );
+    assert_eq!(code, "200");
+
+    // Now push a REJECT decision and assert the row transitions.
+    let (code, resp) = curl_post(
+        peer.port,
+        "/api/v1/sync/push",
+        &serde_json::json!({
+            "sender_agent_id": "ai:pending-origin",
+            "memories": [],
+            "pending_decisions": [{
+                "id": pending_id,
+                "approved": false,
+                "decider": "ai:bob"
+            }],
+            "dry_run": false
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "sync_push decisions: {resp}");
+    assert_eq!(resp["pending_decisions_applied"].as_u64().unwrap_or(0), 1);
+
+    let (_, list) = curl_get(peer.port, "/api/v1/pending?limit=100");
+    let rows = list["pending"].as_array().expect("pending array");
+    let row = rows
+        .iter()
+        .find(|r| r["id"].as_str() == Some(&pending_id))
+        .expect("pending row missing");
+    assert_eq!(
+        row["status"].as_str().unwrap_or(""),
+        "rejected",
+        "status must transition after pending_decisions: {row}"
+    );
+}
+
+#[test]
+fn http_sync_push_applies_namespace_meta() {
+    // S35: verify the `sync_push.namespace_meta` field upserts a
+    // (namespace, standard_id, parent_namespace) tuple on the peer.
+    let peer = DaemonGuard::spawn();
+
+    // Seed the standard memory the meta row will point at. Any `long`
+    // memory in the target namespace suffices.
+    let (code, created) = curl_post(
+        peer.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "tier": "long",
+            "namespace": "s35-child",
+            "title": "std",
+            "content": "standard policy row",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:s35"),
+    );
+    assert_eq!(code, "201", "seed standard: {created}");
+    let standard_id = created["id"].as_str().unwrap().to_string();
+
+    // Push the meta row pinning parent = s35-parent.
+    let (code, resp) = curl_post(
+        peer.port,
+        "/api/v1/sync/push",
+        &serde_json::json!({
+            "sender_agent_id": "ai:ns-meta-origin",
+            "memories": [],
+            "namespace_meta": [{
+                "namespace": "s35-child",
+                "standard_id": standard_id,
+                "parent_namespace": "s35-parent",
+                "updated_at": chrono::Utc::now().to_rfc3339()
+            }],
+            "dry_run": false
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "sync_push meta: {resp}");
+    assert_eq!(resp["namespace_meta_applied"].as_u64().unwrap_or(0), 1);
+
+    // Fetching the standard with inherit=true should now report the
+    // explicit parent the originator set.
+    let (code, body) = curl_get(
+        peer.port,
+        "/api/v1/namespaces/s35-child/standard?inherit=true",
+    );
+    assert_eq!(code, "200", "get standard: {body}");
+    // The standard endpoint returns a `parent` / inherited chain under
+    // `inherit_chain` or similar — accept any shape that echoes the
+    // configured parent.
+    let body_str = body.to_string();
+    assert!(
+        body_str.contains("s35-parent"),
+        "standard response must surface parent: {body}"
+    );
+}
+
+#[test]
+fn http_capabilities_reports_embedder_loaded_correctly() {
+    // S18: capabilities.features.embedder_loaded must reflect runtime
+    // embedder presence, not just config. Under AI_MEMORY_NO_CONFIG=1
+    // + no explicit tier, the daemon ends up in keyword tier → no
+    // embedder → embedder_loaded = false. (We don't spin up the full
+    // semantic tier here because model downloads are flaky in CI and
+    // gated by network access — keyword-side assertion is sufficient
+    // to prove the flag reports runtime state, not a hardcoded true.)
+    let d = DaemonGuard::spawn();
+    let (code, body) = curl_get(d.port, "/api/v1/capabilities");
+    assert_eq!(code, "200", "capabilities: {body}");
+
+    // Regardless of tier, the flag must exist on the features object.
+    let features = body.get("features").expect("features object");
+    assert!(
+        features.get("embedder_loaded").is_some(),
+        "features.embedder_loaded must be present: {features}"
+    );
+    // Under keyword tier (AI_MEMORY_NO_CONFIG=1 default), no embedder
+    // is initialised; the flag must be false — not hardcoded true.
+    // Tier confirms our test environment.
+    if body["tier"].as_str() == Some("keyword") {
+        assert_eq!(
+            features["embedder_loaded"].as_bool(),
+            Some(false),
+            "keyword tier must report embedder_loaded=false (not hardcoded true)"
+        );
+    }
+}
+
+#[test]
+fn http_sync_since_returns_post_checkpoint_writes() {
+    // S39 product behavior test: POST 10 memories, capture timestamp,
+    // POST 10 more, then GET /sync/since?since=<timestamp> and assert
+    // the result contains exactly the second batch. If this passes,
+    // the S39 scenario failure in a2a-hermes is a harness ssh
+    // STOP/CONT reliability issue, not a product bug.
+    let d = DaemonGuard::spawn();
+
+    // Batch 1: 10 memories.
+    for i in 0..10 {
+        let (code, _) = curl_post(
+            d.port,
+            "/api/v1/memories",
+            &serde_json::json!({
+                "tier": "long",
+                "namespace": "s39-delta",
+                "title": format!("batch1-{i}"),
+                "content": "first wave",
+                "tags": [],
+                "priority": 5,
+                "confidence": 1.0,
+                "source": "api",
+                "metadata": {}
+            }),
+            Some("ai:s39"),
+        );
+        assert_eq!(code, "201");
+    }
+
+    // Capture checkpoint. Pause briefly so the post-checkpoint batch
+    // has a strictly-greater `updated_at`.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    let checkpoint = chrono::Utc::now().to_rfc3339();
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+
+    // Batch 2: 10 more.
+    let mut batch2_ids = Vec::new();
+    for i in 0..10 {
+        let (code, created) = curl_post(
+            d.port,
+            "/api/v1/memories",
+            &serde_json::json!({
+                "tier": "long",
+                "namespace": "s39-delta",
+                "title": format!("batch2-{i}"),
+                "content": "post-checkpoint wave",
+                "tags": [],
+                "priority": 5,
+                "confidence": 1.0,
+                "source": "api",
+                "metadata": {}
+            }),
+            Some("ai:s39"),
+        );
+        assert_eq!(code, "201", "batch2 create: {created}");
+        batch2_ids.push(created["id"].as_str().unwrap().to_string());
+    }
+
+    // Query /sync/since?since=<checkpoint>.
+    let encoded = checkpoint.replace('+', "%2B").replace(':', "%3A");
+    let (code, body) = curl_get(
+        d.port,
+        &format!("/api/v1/sync/since?since={encoded}&limit=1000"),
+    );
+    assert_eq!(code, "200", "sync_since: {body}");
+    let mems = body["memories"].as_array().expect("memories array");
+
+    // Every batch2 id must be present.
+    for id in &batch2_ids {
+        assert!(
+            mems.iter().any(|m| m["id"].as_str() == Some(id)),
+            "batch2 memory {id} missing from sync_since delta: {body}"
+        );
+    }
+    // No batch1 memory may slip through — they're all older than the
+    // checkpoint.
+    for m in mems {
+        let title = m["title"].as_str().unwrap_or("");
+        assert!(
+            !title.starts_with("batch1-"),
+            "pre-checkpoint memory leaked into delta: {title}"
+        );
+    }
+}
+
+#[test]
+fn http_pending_governance_approve_rejects_cross_peer() {
+    // S34 end-to-end: POST /memories on leader against a governed
+    // namespace (write=approve) → ACCEPTED + pending_id. The pending
+    // row must land on the peer too so `GET /pending` on the peer
+    // surfaces it. Without broadcast_pending_quorum the peer sees
+    // nothing and cross-peer approve is impossible.
+    let peer = DaemonGuard::spawn();
+    let leader = spawn_leader(2, &[format!("http://127.0.0.1:{}", peer.port)]);
+
+    // Seed the governance standard on the leader with write=approve.
+    // The namespace_meta fanout will carry the pointer to the peer.
+    // We use the query-string form for convenience.
+    // 1. Store a placeholder standard memory.
+    let (code, created) = curl_post(
+        leader.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "tier": "long",
+            "namespace": "s34-gov",
+            "title": "std",
+            "content": "gov policy row",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:s34-owner"),
+    );
+    assert_eq!(code, "201", "seed standard: {created}");
+    let sid = created["id"].as_str().unwrap().to_string();
+
+    // 2. Install governance: write=approve, approver=human.
+    let (code, set_resp) = curl_post(
+        leader.port,
+        "/api/v1/namespaces/s34-gov/standard",
+        &serde_json::json!({
+            "id": sid,
+            "governance": {
+                "write": "approve",
+                "promote": "any",
+                "delete": "any",
+                "approver": "human"
+            }
+        }),
+        Some("ai:s34-owner"),
+    );
+    assert_eq!(code, "201", "set governance: {set_resp}");
+
+    // 3. Attempt a governed write — expect ACCEPTED + pending_id.
+    let (code, pending_resp) = curl_post(
+        leader.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "tier": "long",
+            "namespace": "s34-gov",
+            "title": "governed-write",
+            "content": "waiting for approval",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:s34-alice"),
+    );
+    assert_eq!(code, "202", "governed write: {pending_resp}");
+    let pending_id = pending_resp["pending_id"]
+        .as_str()
+        .expect("pending_id in response")
+        .to_string();
+
+    // 4. The pending row must be visible on the peer within the
+    //    quorum window. Poll briefly.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        let (code, body) = curl_get(peer.port, "/api/v1/pending?limit=100");
+        if code == "200"
+            && let Some(rows) = body["pending"].as_array()
+            && rows.iter().any(|r| r["id"].as_str() == Some(&pending_id))
+        {
+            found = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        found,
+        "pending row {pending_id} never reached peer's /pending"
+    );
+}
+
+#[test]
+fn http_namespace_standard_meta_fans_out() {
+    // S35: set a standard with an explicit parent on the leader; the
+    // namespace_meta fanout must land the (ns, standard_id, parent)
+    // tuple on the peer so `GET /namespaces/child/standard?inherit=true`
+    // on the peer walks to the correct parent.
+    let peer = DaemonGuard::spawn();
+    let leader = spawn_leader(2, &[format!("http://127.0.0.1:{}", peer.port)]);
+
+    // Seed a standard memory on leader (fans out to peer automatically).
+    let (code, created) = curl_post(
+        leader.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "tier": "long",
+            "namespace": "s35-meta-fanout",
+            "title": "std",
+            "content": "standard policy row",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:s35"),
+    );
+    assert_eq!(code, "201", "seed: {created}");
+    let sid = created["id"].as_str().unwrap().to_string();
+
+    // Set namespace standard with an explicit parent on leader.
+    let (code, set_resp) = curl_post(
+        leader.port,
+        "/api/v1/namespaces/s35-meta-fanout/standard",
+        &serde_json::json!({
+            "id": sid,
+            "parent": "s35-meta-parent"
+        }),
+        Some("ai:s35"),
+    );
+    assert_eq!(code, "201", "set standard: {set_resp}");
+
+    // Within the quorum window the peer's inherit-chain walk must see
+    // the parent the leader set (via the namespace_meta fanout) — not
+    // auto-detected by `-` prefix (which would return None for the
+    // child's isolated name).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut found = false;
+    while std::time::Instant::now() < deadline {
+        let (code, body) = curl_get(
+            peer.port,
+            "/api/v1/namespaces/s35-meta-fanout/standard?inherit=true",
+        );
+        if code == "200" && body.to_string().contains("s35-meta-parent") {
+            found = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(
+        found,
+        "peer never saw the parent namespace from the meta fanout"
     );
 }

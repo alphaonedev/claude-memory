@@ -2722,6 +2722,33 @@ pub fn get_namespace_parent(conn: &Connection, namespace: &str) -> Option<String
     .ok()
 }
 
+/// v0.6.2 (S35): read the full `namespace_meta` row for a namespace so the
+/// caller can fan it out to peers. Returns `None` when no standard is set.
+/// Mirrors the (`namespace`, `standard_id`, `parent_namespace`, `updated_at`)
+/// tuple used by `set_namespace_standard`.
+#[allow(clippy::unnecessary_wraps)]
+pub fn get_namespace_meta_entry(
+    conn: &Connection,
+    namespace: &str,
+) -> Result<Option<crate::models::NamespaceMetaEntry>> {
+    let row = conn
+        .query_row(
+            "SELECT namespace, standard_id, parent_namespace, updated_at
+             FROM namespace_meta WHERE namespace = ?1",
+            params![namespace],
+            |r| {
+                Ok(crate::models::NamespaceMetaEntry {
+                    namespace: r.get(0)?,
+                    standard_id: r.get(1)?,
+                    parent_namespace: r.get(2)?,
+                    updated_at: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                })
+            },
+        )
+        .ok();
+    Ok(row)
+}
+
 /// Clear the standard for a namespace.
 pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bool> {
     let changed = conn.execute(
@@ -2879,6 +2906,49 @@ pub fn queue_pending_action(
         ],
     )?;
     Ok(id)
+}
+
+/// v0.6.2 (S34): upsert a `pending_actions` row from a canonical `PendingAction`
+/// struct — used by `sync_push` to apply a peer-originated pending row so
+/// governance state is cluster-consistent. Preserves `approvals` and
+/// decision fields verbatim so re-plays converge. Uses `INSERT ... ON
+/// CONFLICT(id) DO UPDATE` because the originator's id is stable across
+/// peers (unlike `queue_pending_action` which mints a fresh UUID per
+/// queue call).
+pub fn upsert_pending_action(conn: &Connection, pa: &PendingAction) -> Result<()> {
+    let payload_json = serde_json::to_string(&pa.payload)?;
+    let approvals_json = serde_json::to_string(&pa.approvals)?;
+    conn.execute(
+        "INSERT INTO pending_actions
+         (id, action_type, memory_id, namespace, payload, requested_by,
+          requested_at, status, decided_by, decided_at, approvals)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+            action_type  = excluded.action_type,
+            memory_id    = excluded.memory_id,
+            namespace    = excluded.namespace,
+            payload      = excluded.payload,
+            requested_by = excluded.requested_by,
+            requested_at = excluded.requested_at,
+            status       = excluded.status,
+            decided_by   = excluded.decided_by,
+            decided_at   = excluded.decided_at,
+            approvals    = excluded.approvals",
+        params![
+            pa.id,
+            pa.action_type,
+            pa.memory_id,
+            pa.namespace,
+            payload_json,
+            pa.requested_by,
+            pa.requested_at,
+            pa.status,
+            pa.decided_by,
+            pa.decided_at,
+            approvals_json,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn list_pending_actions(

@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::models::{Memory, MemoryLink};
+use crate::models::{Memory, MemoryLink, NamespaceMetaEntry, PendingAction, PendingDecision};
 use crate::replication::{AckTracker, QuorumError, QuorumFailureReason, QuorumPolicy};
 
 /// Configured-at-serve federation state. Parsed from
@@ -802,6 +802,272 @@ pub async fn broadcast_consolidate_quorum(
                 if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
                     tracing::debug!(
                         "federation: post-quorum consolidate peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S34): fan out a just-created pending-action row to every peer
+/// via `sync_push.pendings`. Callers pass the fully-hydrated `PendingAction`
+/// read from their local `pending_actions` table so peers can upsert it
+/// with the same id / status / approvals tuple the originator has. Mirrors
+/// the quorum semantics of `broadcast_store_quorum` — local pending row
+/// is already persisted at call time; peer acks are counted against
+/// `policy.write_quorum`.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_pending_quorum(
+    config: &FederationConfig,
+    pending: &PendingAction,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "pendings": [pending],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = pending.id.clone();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: pending peer {peer_id} failed for {}: {reason}",
+                    pending.id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: pending peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum pending peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S34): fan out a pending-action decision (approve/reject) to
+/// peers via `sync_push.pending_decisions`. Without this, an approve on
+/// node-2 leaves the row in `status='pending'` on node-1 and the caller
+/// sees inconsistent governance state across the cluster. Peers apply
+/// via `db::decide_pending_action` which is a no-op on already-decided
+/// rows — replay-safe.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_pending_decision_quorum(
+    config: &FederationConfig,
+    decision: &PendingDecision,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "pending_decisions": [decision],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = decision.id.clone();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: pending-decision peer {peer_id} failed for {}: {reason}",
+                    decision.id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: pending-decision peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum pending-decision peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S35): fan out a `namespace_meta` row (the `(namespace,
+/// standard_id, parent_namespace)` tuple set by `set_namespace_standard`)
+/// to peers via `sync_push.namespace_meta`. Without this, peers see the
+/// standard memory (already fanned out via `broadcast_store_quorum`) but
+/// not the meta row tying it to a namespace + parent — so the
+/// parent-chain walk on the peer falls through to `auto_detect_parent`
+/// and can return a different ancestor than the originator.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_namespace_meta_quorum(
+    config: &FederationConfig,
+    entry: &NamespaceMetaEntry,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "namespace_meta": [entry],
+        "dry_run": false,
+    });
+
+    let target_id = entry.namespace.clone();
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target = target_id.clone();
+        joins.spawn(async move {
+            let outcome = post_and_classify(&client, &url, &payload, &target, Some(&target)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: namespace_meta peer {peer_id} failed for {}: {reason}",
+                    entry.namespace
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: namespace_meta peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum namespace_meta peer {peer_id} did not ack: {reason}"
                     );
                 }
             }

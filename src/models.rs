@@ -366,6 +366,39 @@ pub struct PendingAction {
     pub approvals: Vec<Approval>,
 }
 
+/// v0.6.2 (S34): a pending-action decision (approve / reject) the originating
+/// node wants propagated to peers so callers on any peer see consistent state
+/// (approve/reject on node-2 → decision must reach node-1 etc.).
+///
+/// Shipped as an additive `sync_push.pending_decisions` field. Peers apply
+/// via `db::decide_pending_action`; already-decided rows are a no-op.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PendingDecision {
+    pub id: String,
+    pub approved: bool,
+    pub decider: String,
+}
+
+/// v0.6.2 (S35): a namespace-standard metadata row the originating node wants
+/// propagated to peers. `set_namespace_standard` writes to `namespace_meta`
+/// locally; without federation, a peer sees the standard memory (fanned out
+/// via `broadcast_store_quorum`) but not the `(namespace, standard_id,
+/// parent_namespace)` tuple, so inheritance-chain walks on the peer fall
+/// back to `auto_detect_parent` and can miss an explicit parent link.
+///
+/// Shipped as an additive `sync_push.namespace_meta` field. Peers apply
+/// via `db::set_namespace_standard(conn, namespace, standard_id,
+/// parent_namespace.as_deref())`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespaceMetaEntry {
+    pub namespace: String,
+    pub standard_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_namespace: Option<String>,
+    #[serde(default)]
+    pub updated_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // Task 1.8 — Governance Metadata
 // ---------------------------------------------------------------------------
