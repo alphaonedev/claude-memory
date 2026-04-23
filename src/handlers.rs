@@ -2102,6 +2102,12 @@ pub struct SyncPushBody {
     /// same delete reaches every peer well before any revival window.
     #[serde(default)]
     pub deletions: Vec<String>,
+    /// v0.6.2 (S29): memory IDs the sender has explicitly archived and
+    /// wants propagated. Applied via `db::archive_memory` — a soft move
+    /// from `memories` to `archived_memories`. Missing-on-peer IDs no-op.
+    /// Distinct from `deletions`, which is a hard DELETE.
+    #[serde(default)]
+    pub archives: Vec<String>,
     /// v0.6.2 (#325): memory links the sender wants propagated. Applied
     /// via `db::create_link` on each peer. Duplicates are a no-op thanks
     /// to the unique `(source_id, target_id, relation)` constraint on
@@ -2159,6 +2165,15 @@ pub async fn sync_push(
         )
             .into_response();
     }
+    if body.archives.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("sync_push limited to {} archives per request", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
     // Receiver's local identity — default to the caller-supplied header,
     // fall back to the anonymous placeholder. Recorded in sync_state rows.
     let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
@@ -2178,6 +2193,7 @@ pub async fn sync_push(
     let mut noop = 0usize;
     let mut skipped = 0usize;
     let mut deleted = 0usize;
+    let mut archived = 0usize;
     let mut latest_seen: Option<String> = None;
 
     // v0.6.0.1 (#322): peers that apply a synced memory must also refresh
@@ -2234,6 +2250,29 @@ pub async fn sync_push(
             Ok(false) => noop += 1,
             Err(e) => {
                 tracing::warn!("sync_push: delete failed for {del_id}: {e}");
+                skipped += 1;
+            }
+        }
+    }
+
+    // v0.6.2 (S29): process explicit archives. Soft-move from `memories`
+    // to `archived_memories` — distinct from deletions which hard-delete.
+    // Missing rows count as no-op (peer may have already archived or
+    // never received the original write).
+    for arch_id in &body.archives {
+        if validate::validate_id(arch_id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match db::archive_memory(&lock.0, arch_id, Some("sync_push")) {
+            Ok(true) => archived += 1,
+            Ok(false) => noop += 1,
+            Err(e) => {
+                tracing::warn!("sync_push: archive_memory failed for {arch_id}: {e}");
                 skipped += 1;
             }
         }
@@ -2328,6 +2367,7 @@ pub async fn sync_push(
         Json(json!({
             "applied": applied,
             "deleted": deleted,
+            "archived": archived,
             "links_applied": links_applied,
             "noop": noop,
             "skipped": skipped,
@@ -3572,6 +3612,78 @@ mod tests {
             "push must record sender in sync_state; got: {:?}",
             clock.entries
         );
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_applies_archives() {
+        // S29 — sync_push must accept an `archives` field and move matching
+        // rows from `memories` to `archived_memories` via
+        // `db::archive_memory`. Missing ids no-op. The response exposes a
+        // new `archived` counter.
+        let state = test_state();
+        // Seed one row that the peer will ask us to archive; one id that
+        // doesn't exist here (must no-op, not error).
+        let id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "s29".into(),
+                title: "Archive M1".into(),
+                content: "body".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state.clone()));
+
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-a",
+            "sender_clock": {"entries": {}},
+            "memories": [],
+            "archives": [id, "missing-on-peer"],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["archived"], 1, "live row must be archived");
+        assert_eq!(v["noop"], 1, "missing id must no-op");
+
+        // Row is gone from active memories, present in archive, with the
+        // correct `sync_push` reason.
+        let lock = state.lock().await;
+        assert!(db::get(&lock.0, &id).unwrap().is_none());
+        let archived = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0]["id"], id);
+        assert_eq!(archived[0]["archive_reason"], "sync_push");
     }
 
     #[tokio::test]

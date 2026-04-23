@@ -805,6 +805,68 @@ pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
     Ok(changed > 0)
 }
 
+/// Move a memory from `memories` to `archived_memories`. Used by the
+/// HTTP `/api/v1/archive` explicit-archive endpoint (S29) and by
+/// `sync_push` when a peer pushes an `archives: [id]` record.
+///
+/// Unlike `gc(archive=true)` this does not filter on `expires_at` — the
+/// caller is explicitly asking for the row to be archived right now.
+///
+/// Returns `true` if a row was moved, `false` if no live memory existed
+/// with this id (e.g. it was already archived or never written locally).
+/// A missing-on-peer id is expected during normal fanout and callers
+/// treat it as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the INSERT-SELECT or DELETE fails.
+pub fn archive_memory(conn: &Connection, id: &str, reason: Option<&str>) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let reason = reason.unwrap_or("archive");
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<bool> {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM memories WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            return Ok(false);
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO archived_memories
+             (id, tier, namespace, title, content, tags, priority, confidence,
+              source, access_count, created_at, updated_at, last_accessed_at,
+              expires_at, archived_at, archive_reason, metadata)
+             SELECT id, tier, namespace, title, content, tags, priority, confidence,
+                    source, access_count, created_at, updated_at, last_accessed_at,
+                    expires_at, ?1, ?2, metadata
+             FROM memories WHERE id = ?3",
+            params![now, reason, id],
+        )?;
+        // Clean up namespace_meta — mirrors `delete`'s cleanup so an archived
+        // row is not still referenced as the namespace standard.
+        conn.execute(
+            "DELETE FROM namespace_meta WHERE standard_id = ?1",
+            params![id],
+        )?;
+        let removed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(removed > 0)
+    })();
+    match result {
+        Ok(moved) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(moved)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
 /// Count memories that would be deleted by forget (for `dry_run`).
 pub fn forget_count(
     conn: &Connection,
@@ -3718,6 +3780,55 @@ mod tests {
 
         let stats = archive_stats(&conn).unwrap();
         assert_eq!(stats["archived_total"], 2);
+    }
+
+    #[test]
+    fn archive_memory_moves_live_row_to_archive() {
+        // S29 — explicit archive endpoint must move the row out of
+        // `memories` and into `archived_memories` with the caller-supplied
+        // reason. Unlike gc(archive=true), this is NOT gated on
+        // `expires_at` — the caller is asking for it right now.
+        let conn = test_db();
+        let mem = make_memory("Archive me", "s29", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+
+        let moved = archive_memory(&conn, &id, Some("explicit")).unwrap();
+        assert!(moved, "live row must be archived on first call");
+        assert!(
+            get(&conn, &id).unwrap().is_none(),
+            "row must be removed from active table"
+        );
+
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0]["id"], id);
+        assert_eq!(archived[0]["archive_reason"], "explicit");
+
+        // Second call is a no-op — row is already out of `memories`.
+        let second = archive_memory(&conn, &id, Some("explicit")).unwrap();
+        assert!(
+            !second,
+            "second archive call must report no-op (no live row)"
+        );
+    }
+
+    #[test]
+    fn archive_memory_missing_id_returns_false() {
+        // Peers that never saw M1 must no-op, not error, on sync_push
+        // archives fanout.
+        let conn = test_db();
+        let moved = archive_memory(&conn, "nonexistent-id", None).unwrap();
+        assert!(!moved);
+    }
+
+    #[test]
+    fn archive_memory_default_reason_is_archive() {
+        let conn = test_db();
+        let mem = make_memory("Default reason", "s29", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        assert!(archive_memory(&conn, &id, None).unwrap());
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived[0]["archive_reason"], "archive");
     }
 
     #[test]
