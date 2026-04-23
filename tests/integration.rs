@@ -8746,3 +8746,68 @@ fn http_session_start_rejects_invalid_agent_id() {
     );
     assert_eq!(code, "400");
 }
+
+#[test]
+fn http_archive_by_ids_end_to_end_moves_row_from_active_to_archive() {
+    // Scenario S29 end-to-end via a real spawned daemon:
+    //   1. POST /api/v1/memories to create M1 locally.
+    //   2. POST /api/v1/archive with {"ids":[m1]}.
+    //   3. GET /api/v1/archive and confirm M1 is present with reason.
+    //   4. GET /api/v1/memories/{m1} returns 404.
+    let d = DaemonGuard::spawn();
+    let (code, created) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "tier": "long",
+            "namespace": "s29-e2e",
+            "title": "Archive e2e",
+            "content": "will be archived by POST /api/v1/archive",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:s29"),
+    );
+    assert_eq!(code, "201", "create body: {created}");
+    let id = created["id"]
+        .as_str()
+        .expect("create response must include id")
+        .to_string();
+
+    let (code, resp) = curl_post(
+        d.port,
+        "/api/v1/archive",
+        &serde_json::json!({"ids": [id], "reason": "s29-e2e"}),
+        Some("ai:s29"),
+    );
+    assert_eq!(code, "200", "archive body: {resp}");
+    assert_eq!(resp["count"], 1);
+    assert_eq!(resp["archived"][0], id);
+
+    // Active memory is gone.
+    let (code, _) = curl_get(d.port, &format!("/api/v1/memories/{id}"));
+    assert_eq!(code, "404", "archived memory must no longer be active");
+
+    // Archive list contains the entry with the supplied reason.
+    let (code, listing) = curl_get(d.port, "/api/v1/archive?namespace=s29-e2e");
+    assert_eq!(code, "200");
+    let items = listing["archived"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], id);
+    assert_eq!(items[0]["archive_reason"], "s29-e2e");
+
+    // Re-archiving the same id is idempotent — it now counts as `missing`
+    // (no live row to move), with no error.
+    let (code, resp) = curl_post(
+        d.port,
+        "/api/v1/archive",
+        &serde_json::json!({"ids": [id]}),
+        Some("ai:s29"),
+    );
+    assert_eq!(code, "200", "second archive body: {resp}");
+    assert_eq!(resp["count"], 0);
+    assert_eq!(resp["missing"].as_array().unwrap().len(), 1);
+}

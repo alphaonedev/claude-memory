@@ -1157,6 +1157,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .route("/api/v1/export", get(handlers::export_memories))
         .route("/api/v1/import", post(handlers::import_memories))
         .route("/api/v1/archive", get(handlers::list_archive))
+        .route("/api/v1/archive", post(handlers::archive_by_ids))
         .route("/api/v1/archive", delete(handlers::purge_archive))
         .route(
             "/api/v1/archive/{id}/restore",

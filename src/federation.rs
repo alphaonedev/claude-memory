@@ -482,9 +482,6 @@ pub async fn broadcast_delete_quorum(
 ///
 /// Returns `QuorumError::LocalWriteFailed` if the internal tracker Arc cannot
 /// be unwrapped (only occurs under a pathological detach race).
-// Intentional: wired into the `/api/v1/archive` HTTP endpoint in the
-// follow-up commit of this PR. Tests in this module exercise it directly.
-#[allow(dead_code)]
 pub async fn broadcast_archive_quorum(
     config: &FederationConfig,
     id: &str,

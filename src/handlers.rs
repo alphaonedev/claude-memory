@@ -2070,6 +2070,122 @@ pub async fn archive_stats(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
+/// Request body for `POST /api/v1/archive` — S29 explicit archive.
+#[derive(Debug, Deserialize)]
+pub struct ArchiveByIdsBody {
+    pub ids: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// POST /api/v1/archive — explicit archive of the given memory ids
+/// (S29). For each id:
+///   1. Call `db::archive_memory` locally to soft-move the row.
+///   2. If federation is configured, broadcast via
+///      `broadcast_archive_quorum` so peers land in the same terminal
+///      state (row out of `memories`, row into `archived_memories`).
+///
+/// On a quorum miss for ANY id, short-circuit with 503 via the shared
+/// `fanout_or_503`-style payload. This matches the posture of the
+/// delete + consolidate fanout endpoints.
+///
+/// Response body:
+/// ```json
+/// {"archived": [id1, id2], "missing": [id3], "count": 2}
+/// ```
+/// where `missing` enumerates ids that had no live row locally (common
+/// during retries). The response never includes content/metadata — use
+/// `GET /api/v1/archive` to list archive entries.
+pub async fn archive_by_ids(
+    State(app): State<AppState>,
+    Json(body): Json<ArchiveByIdsBody>,
+) -> impl IntoResponse {
+    // Bound the batch the same way bulk_create / sync_push do.
+    if body.ids.len() > MAX_BULK_SIZE {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("archive limited to {} ids per request", MAX_BULK_SIZE)})),
+        )
+            .into_response();
+    }
+    // Validate all ids up-front so we never start mutating on a bad batch.
+    for id in &body.ids {
+        if let Err(e) = validate::validate_id(id) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid id {id}: {e}")})),
+            )
+                .into_response();
+        }
+    }
+    let reason = body.reason.as_deref().unwrap_or("archive").to_string();
+    let mut archived: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+
+    for id in &body.ids {
+        // Local archive. Hold the lock only across this one call per id so
+        // we can release it before a potentially slow network fanout.
+        let moved = {
+            let lock = app.db.lock().await;
+            match db::archive_memory(&lock.0, id, Some(&reason)) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("archive_by_ids: archive_memory({id}) failed: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal server error"})),
+                    )
+                        .into_response();
+                }
+            }
+        };
+        if !moved {
+            // Row wasn't live locally — record as missing but keep going.
+            // Do NOT fan out (peers can't know to archive from a row they
+            // may have under a different state; the originator's local
+            // state is the trigger).
+            missing.push(id.clone());
+            continue;
+        }
+
+        // Fanout. Mirror the shape used by the other
+        // quorum-backed write endpoints (delete, consolidate) — on a
+        // miss, surface the `quorum_not_met` payload with 503 + Retry-After.
+        if let Some(fed) = app.federation.as_ref() {
+            match crate::federation::broadcast_archive_quorum(fed, id).await {
+                Ok(tracker) => {
+                    if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                        let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                        return (
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            [("Retry-After", "2")],
+                            Json(serde_json::to_value(&payload).unwrap_or_default()),
+                        )
+                            .into_response();
+                    }
+                }
+                Err(e) => {
+                    // Local commit already landed — sync-daemon catches
+                    // stragglers. Same posture as `fanout_or_503`.
+                    tracing::warn!("archive fanout error (local committed): {e:?}");
+                }
+            }
+        }
+        archived.push(id.clone());
+    }
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "archived": archived,
+            "missing": missing,
+            "count": archived.len(),
+            "reason": reason,
+        })),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Phase 3 foundation (issue #224) — HTTP sync endpoints.
 //
@@ -3684,6 +3800,127 @@ mod tests {
         assert_eq!(archived.len(), 1);
         assert_eq!(archived[0]["id"], id);
         assert_eq!(archived[0]["archive_reason"], "sync_push");
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_happy_path() {
+        // S29 — POST /api/v1/archive with `{ids:[...]}` soft-moves each
+        // live row to the archive table with the supplied reason.
+        // Missing ids are reported in a `missing` array, not an error.
+        let state = test_state();
+        let live_id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "s29".into(),
+                title: "Live for archive".into(),
+                content: "will be archived".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state.clone()));
+
+        let body = serde_json::json!({
+            "ids": [live_id, "does-not-exist"],
+            "reason": "scenario_s29"
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["archived"].as_array().unwrap().len(), 1);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 1);
+        assert_eq!(v["reason"], "scenario_s29");
+
+        // Row is gone from active, present in archive with caller's reason.
+        let lock = state.lock().await;
+        assert!(db::get(&lock.0, &live_id).unwrap().is_none());
+        let archived = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0]["id"], live_id);
+        assert_eq!(archived[0]["archive_reason"], "scenario_s29");
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_default_reason() {
+        // When `reason` is omitted the response + archive row must record
+        // the default "archive" reason (matches `db::archive_memory`).
+        let state = test_state();
+        let live_id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "s29-default".into(),
+                title: "Default reason".into(),
+                content: "c".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({"ids": [live_id]});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["reason"], "archive");
+        let lock = state.lock().await;
+        let archived = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert_eq!(archived[0]["archive_reason"], "archive");
     }
 
     #[tokio::test]
