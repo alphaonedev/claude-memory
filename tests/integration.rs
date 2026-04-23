@@ -8355,13 +8355,19 @@ fn curl_post(
         args.push("-H".into());
         args.push(format!("x-agent-id: {id}"));
     }
-    args.push("-d".into());
-    args.push(body.to_string());
+    // Spill body to a temp file to avoid Windows CreateProcess argv overflow
+    // (ERROR_FILENAME_EXCED_RANGE / OS error 206) on bulk POSTs >~32 KB.
+    let payload_path =
+        std::env::temp_dir().join(format!("ai-memory-curl-{}.json", uuid::Uuid::new_v4()));
+    std::fs::write(&payload_path, body.to_string()).unwrap();
+    args.push("--data-binary".into());
+    args.push(format!("@{}", payload_path.display()));
     args.push(format!("http://127.0.0.1:{port}{path}"));
     let out = std::process::Command::new("curl")
         .args(&args)
         .output()
         .unwrap();
+    let _ = std::fs::remove_file(&payload_path);
     let raw = String::from_utf8_lossy(&out.stdout).into_owned();
     let (body, code) = raw.rsplit_once('\n').unwrap_or(("", ""));
     let v: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
