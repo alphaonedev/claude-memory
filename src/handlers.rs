@@ -50,6 +50,14 @@ pub struct AppState {
     /// endpoints that mirror MCP tools (notably `/capabilities`) can
     /// reuse the MCP-side report builder without re-parsing config.
     pub tier_config: Arc<TierConfig>,
+    /// v0.6.2 (S18): resolved recall scoring config — tier half-lives,
+    /// legacy-scoring toggle. Exposed so `recall_memories_get` /
+    /// `recall_memories_post` can call `db::recall_hybrid` (semantic
+    /// blend) when the embedder is loaded, mirroring how the MCP
+    /// `memory_recall` handler already wires it (src/mcp.rs:1157).
+    /// Prior to this, HTTP recall was keyword-only regardless of
+    /// embedder availability — scenario-18 surfaced the gap.
+    pub scoring: Arc<crate::config::ResolvedScoring>,
 }
 
 impl FromRef<AppState> for Db {
@@ -1424,7 +1432,7 @@ pub async fn search_memories(
 }
 
 pub async fn recall_memories_get(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(p): Query<RecallQuery>,
 ) -> impl IntoResponse {
     let ctx = p.context.unwrap_or_default();
@@ -1452,55 +1460,23 @@ pub async fn recall_memories_get(
         )
             .into_response();
     }
-    let lock = state.lock().await;
     let limit = p.limit.unwrap_or(10).min(50);
-    match db::recall(
-        &lock.0,
+    recall_response(
+        &app,
         &ctx,
         p.namespace.as_deref(),
         limit,
         p.tags.as_deref(),
         p.since.as_deref(),
         p.until.as_deref(),
-        lock.2.short_extend_secs,
-        lock.2.mid_extend_secs,
         p.as_agent.as_deref(),
         p.budget_tokens,
-    ) {
-        Ok((r, tokens_used)) => {
-            let scored: Vec<serde_json::Value> = r
-                .iter()
-                .map(|(m, s)| {
-                    let mut v = serde_json::to_value(m).unwrap_or_default();
-                    if let Some(obj) = v.as_object_mut() {
-                        obj.insert("score".to_string(), json!((*s * 1000.0).round() / 1000.0));
-                    }
-                    v
-                })
-                .collect();
-            let mut resp = json!({
-                "memories": scored,
-                "count": scored.len(),
-                "tokens_used": tokens_used,
-            });
-            if let Some(b) = p.budget_tokens {
-                resp["budget_tokens"] = json!(b);
-            }
-            Json(resp).into_response()
-        }
-        Err(e) => {
-            tracing::error!("handler error: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"error": "internal server error"})),
-            )
-                .into_response()
-        }
-    }
+    )
+    .await
 }
 
 pub async fn recall_memories_post(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Json(body): Json<RecallBody>,
 ) -> impl IntoResponse {
     if body.context.trim().is_empty() {
@@ -1510,7 +1486,6 @@ pub async fn recall_memories_post(
         )
             .into_response();
     }
-    // Ultrareview #348: reject budget_tokens=0 explicitly.
     if body.budget_tokens == Some(0) {
         return (
             StatusCode::BAD_REQUEST,
@@ -1527,21 +1502,98 @@ pub async fn recall_memories_post(
         )
             .into_response();
     }
-    let lock = state.lock().await;
     let limit = body.limit.unwrap_or(10).min(50);
-    match db::recall(
-        &lock.0,
+    recall_response(
+        &app,
         &body.context,
         body.namespace.as_deref(),
         limit,
         body.tags.as_deref(),
         body.since.as_deref(),
         body.until.as_deref(),
-        lock.2.short_extend_secs,
-        lock.2.mid_extend_secs,
         body.as_agent.as_deref(),
         body.budget_tokens,
-    ) {
+    )
+    .await
+}
+
+/// v0.6.2 (S18): shared HTTP recall implementation. Uses `db::recall_hybrid`
+/// (semantic + FTS adaptive blend) when the embedder is loaded — matching
+/// how the MCP `memory_recall` handler wires recall at src/mcp.rs:1157.
+/// Gracefully falls back to `db::recall` (keyword-only) when the embedder
+/// is not present or embedding the query fails. Closes the gap where the
+/// HTTP surface was keyword-only regardless of server tier — scenario-18
+/// surfaced the black-hole on peers that fanned out memories but never
+/// exercised the semantic recall path.
+#[allow(clippy::too_many_arguments)]
+async fn recall_response(
+    app: &AppState,
+    context: &str,
+    namespace: Option<&str>,
+    limit: usize,
+    tags: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    as_agent: Option<&str>,
+    budget_tokens: Option<usize>,
+) -> axum::response::Response {
+    // Embed the query BEFORE grabbing the DB lock — embed() is CPU-heavy
+    // and holding the SQLite mutex across it serialises unrelated writes.
+    let query_emb: Option<Vec<f32>> = if let Some(emb) = app.embedder.as_ref().as_ref() {
+        match emb.embed(context) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!("recall: embedder query failed, falling back to keyword-only: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let lock = app.db.lock().await;
+    let short_extend = lock.2.short_extend_secs;
+    let mid_extend = lock.2.mid_extend_secs;
+
+    let (result, mode) = if let Some(ref qe) = query_emb {
+        let vi_guard = app.vector_index.lock().await;
+        let vi_ref = vi_guard.as_ref();
+        let r = db::recall_hybrid(
+            &lock.0,
+            context,
+            qe,
+            namespace,
+            limit,
+            tags,
+            since,
+            until,
+            vi_ref,
+            short_extend,
+            mid_extend,
+            as_agent,
+            budget_tokens,
+            app.scoring.as_ref(),
+        );
+        drop(vi_guard);
+        (r, "hybrid")
+    } else {
+        let r = db::recall(
+            &lock.0,
+            context,
+            namespace,
+            limit,
+            tags,
+            since,
+            until,
+            short_extend,
+            mid_extend,
+            as_agent,
+            budget_tokens,
+        );
+        (r, "keyword")
+    };
+
+    match result {
         Ok((r, tokens_used)) => {
             let scored: Vec<serde_json::Value> = r
                 .iter()
@@ -1557,8 +1609,9 @@ pub async fn recall_memories_post(
                 "memories": scored,
                 "count": scored.len(),
                 "tokens_used": tokens_used,
+                "mode": mode,
             });
-            if let Some(b) = body.budget_tokens {
+            if let Some(b) = budget_tokens {
                 resp["budget_tokens"] = json!(b);
             }
             Json(resp).into_response()
@@ -4218,6 +4271,7 @@ mod tests {
             vector_index: Arc::new(Mutex::new(None)),
             federation: Arc::new(None),
             tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
+            scoring: Arc::new(crate::config::ResolvedScoring::default()),
         }
     }
 
@@ -4711,6 +4765,7 @@ mod tests {
             vector_index: Arc::new(Mutex::new(None)),
             federation: Arc::new(Some(fed)),
             tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
+            scoring: Arc::new(crate::config::ResolvedScoring::default()),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))

@@ -1025,6 +1025,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         vector_index: Arc::new(Mutex::new(vector_index)),
         federation: Arc::new(federation),
         tier_config: Arc::new(tier_config.clone()),
+        scoring: Arc::new(app_config.effective_scoring()),
     };
     let state = db_state;
 
