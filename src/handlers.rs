@@ -3930,7 +3930,7 @@ pub async fn clear_namespace_standard_qs(
 /// v0.6.2 (S35 follow-up): shared implementation for path and query-string
 /// clear handlers. Runs the local clear then, on success, fans the cleared
 /// namespace out to peers via `broadcast_namespace_meta_clear_quorum`.
-/// Returns 503 quorum_not_met when federation is configured and the quorum
+/// Returns 503 `quorum_not_met` when federation is configured and the quorum
 /// contract fails — matching the pattern established by
 /// `set_namespace_standard_inner`.
 async fn clear_namespace_standard_inner(app: &AppState, ns: &str) -> axum::response::Response {
