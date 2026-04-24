@@ -331,7 +331,10 @@ enum AckOutcome {
     Fail(String),
 }
 
-async fn post_and_classify(
+/// Single-attempt POST to a peer, classifying the response into an
+/// `AckOutcome`. No retries — callers that want retry-on-transient-fail
+/// should use [`post_and_classify`].
+async fn post_once(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
@@ -369,6 +372,75 @@ async fn post_and_classify(
         }
         Ok(resp) => AckOutcome::Fail(format!("http {}", resp.status())),
         Err(e) => AckOutcome::Fail(format!("network: {e}")),
+    }
+}
+
+/// Backoff before the single retry attempt in [`post_and_classify`].
+/// Short enough to fit both attempts inside the default 2s ack deadline
+/// plus the per-request client timeout; long enough to let a transient
+/// peer-side SQLite-mutex contention or network flap clear.
+const FANOUT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// POST to a peer with a single retry on transient failure.
+///
+/// v0.6.2 Patch 2 (S40): v3r26 hermes-tls scenario-40 had node-2 see
+/// 499/500 bulk rows. Same scenario on ironclaw-tls passed 500/500/500.
+/// Root cause: under W=2/N=4 quorum the leader returns 200 once two peers
+/// ack. The third peer's POST runs in the post-quorum detach task. If
+/// that POST fails (transient network flap, peer 5xx under concurrent
+/// SQLite-mutex contention, TLS handshake reset), it was previously
+/// fire-and-forget — the row stayed permanently missing on that peer
+/// until a sync-daemon caught it up. The harness runs no sync daemon,
+/// so one missed POST = one permanently missing row.
+///
+/// Fix: retry once on `AckOutcome::Fail`. The Idempotency-Key header
+/// ensures a partial-apply race (peer received the first POST but the
+/// response was lost) deduplicates to a no-op on the peer side via
+/// `insert_if_newer`. `IdDrift` is NOT retried — it indicates the peer
+/// semantically disagreed about the id, not a transient failure, so
+/// retrying would just observe the same disagreement.
+///
+/// Quorum contract is unchanged: callers still observe a single
+/// `AckOutcome` per peer, now reflecting the best of two attempts.
+async fn post_and_classify(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    expected_id: &str,
+    idempotency_key: Option<&str>,
+) -> AckOutcome {
+    match post_once(client, url, body, expected_id, idempotency_key).await {
+        AckOutcome::Ack => AckOutcome::Ack,
+        AckOutcome::IdDrift => AckOutcome::IdDrift,
+        AckOutcome::Fail(first_reason) => {
+            tokio::time::sleep(FANOUT_RETRY_BACKOFF).await;
+            match post_once(client, url, body, expected_id, idempotency_key).await {
+                AckOutcome::Ack => {
+                    tracing::debug!(
+                        "federation: peer POST retry succeeded for {expected_id} (first attempt: {first_reason})"
+                    );
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["ok"])
+                        .inc();
+                    AckOutcome::Ack
+                }
+                AckOutcome::IdDrift => {
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["id_drift"])
+                        .inc();
+                    AckOutcome::IdDrift
+                }
+                AckOutcome::Fail(retry_reason) => {
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["fail"])
+                        .inc();
+                    AckOutcome::Fail(format!("first: {first_reason}; retry: {retry_reason}"))
+                }
+            }
+        }
     }
 }
 
@@ -1424,6 +1496,11 @@ mod tests {
         Ack,
         Fail,
         Hang,
+        /// Return HTTP 500 on the first `fail_until` calls, then 200.
+        /// Used to exercise the S40 retry-once path.
+        FailThenAck {
+            fail_until: usize,
+        },
     }
 
     #[derive(Clone)]
@@ -1436,7 +1513,7 @@ mod tests {
         axum::extract::State(state): axum::extract::State<MockState>,
         AxumJson(_body): AxumJson<serde_json::Value>,
     ) -> (StatusCode, AxumJson<serde_json::Value>) {
-        state.count.fetch_add(1, Ordering::Relaxed);
+        let call = state.count.fetch_add(1, Ordering::Relaxed) + 1;
         match state.behaviour {
             MockBehaviour::Ack => (
                 StatusCode::OK,
@@ -1449,6 +1526,19 @@ mod tests {
             MockBehaviour::Hang => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 (StatusCode::OK, AxumJson(serde_json::json!({"applied":1})))
+            }
+            MockBehaviour::FailThenAck { fail_until } => {
+                if call <= fail_until {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        AxumJson(serde_json::json!({"error":"stub transient failure"})),
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        AxumJson(serde_json::json!({"applied":1,"noop":0,"skipped":0})),
+                    )
+                }
             }
         }
     }
@@ -1545,6 +1635,58 @@ mod tests {
             count2.load(Ordering::Relaxed),
             1,
             "peer-2 must receive the write post-quorum"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_peer_failure_is_retried_once() {
+        // S40 regression guard: a transient 5xx from a peer on the
+        // first POST must be retried exactly once. Previously the post
+        // was fire-and-forget — one peer that 5xx'd a single bulk row
+        // left that row permanently missing on that peer (v3r26
+        // hermes-tls scenario-40: node-2 saw 499/500).
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_store_quorum(&cfg, &sample_memory())
+            .await
+            .unwrap();
+        // Retry backoff is 250ms + retry round-trip; poll up to 2s.
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            1,
+            "peer-1 acked first time, no retry"
+        );
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            2,
+            "peer-2 must see exactly two attempts (first fail, retry ack)"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_peer_failure_stops_after_one_retry() {
+        // Retry policy is exactly one retry — a peer that stays down
+        // must NOT be called more than twice per row (no infinite
+        // backoff, no thundering herd on a wedged peer).
+        let (url1, _) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_store_quorum(&cfg, &sample_memory())
+            .await
+            .unwrap();
+        // Wait long enough that any further retries would have fired.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            2,
+            "persistently-failing peer must be called exactly twice (1 + 1 retry)"
         );
     }
 
