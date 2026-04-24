@@ -385,6 +385,10 @@ jobs:
           sudo apt-get install -y pipx
           pipx ensurepath
           pipx install copr-cli
+          # copr-cli 2.5 ships without `rich` in its pipx venv and
+          # fails at import (ModuleNotFoundError: No module named 'rich').
+          # Inject it manually so the CLI starts.
+          pipx inject copr-cli rich
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure copr-cli
