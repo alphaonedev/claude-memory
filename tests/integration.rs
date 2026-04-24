@@ -8968,8 +8968,14 @@ fn http_bulk_create_fans_out_concurrently() {
     // n×quorum-window. Concurrent-bounded fanout completes ≪ sequential
     // for n rows (sequential would scale to n * ack_timeout on the worst
     // case — we just assert we're not catastrophically regressed).
+    //
+    // v0.6.2 Patch 2 (S40): the terminal catchup batch adds one extra
+    // per-peer POST with all n rows. Under the cargo-test default
+    // parallelism of 16 the machine is already saturated, so the cap
+    // is 45s to absorb catchup + jitter. A sequential regression would
+    // still take ≥n * ack_timeout (100s+) and blow past this bound.
     assert!(
-        elapsed.as_secs() < 30,
+        elapsed.as_secs() < 45,
         "bulk_create took {elapsed:?} — concurrent fanout regressed"
     );
 }

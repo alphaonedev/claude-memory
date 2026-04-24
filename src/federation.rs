@@ -444,6 +444,89 @@ async fn post_and_classify(
     }
 }
 
+/// v0.6.2 Patch 2 (S40): post-fanout catchup for `bulk_create`.
+///
+/// After the per-row `broadcast_store_quorum` fanouts complete, issue a
+/// single batched `sync_push` per peer with *every* row the leader just
+/// committed. Peer-side `insert_if_newer` is idempotent, so rows that
+/// already landed via the per-row fanout are no-ops on the peer; rows
+/// that a peer missed (post-quorum detach failure + retry both failed,
+/// or post-quorum detach timed out on that peer) are applied.
+///
+/// ## Why a catchup batch in addition to retry-once?
+///
+/// v3r26 hermes-tls S40 and v3r27 ironclaw-off S40 both showed a
+/// single row missing on one specific peer (499/500) despite the
+/// retry-once fix in [`post_and_classify`]. Retry-once is a probability
+/// improver, not a guarantee: a peer under sustained SQLite-mutex
+/// contention can drop two consecutive POSTs inside the ~250ms retry
+/// window. A terminal batched catchup closes that last gap at O(1)
+/// extra POST per peer instead of O(N) retries per row.
+///
+/// ## Safety
+///
+/// - Idempotent: peer's `insert_if_newer` matches on `id` + `updated_at`
+///   and no-ops on already-applied rows.
+/// - Quorum contract unchanged: the catchup runs AFTER quorum has been
+///   met and the HTTP response shape decided. It cannot weaken any
+///   guarantee; it only strengthens eventual consistency.
+/// - Non-blocking for caller semantics: errors are logged and returned
+///   but the leader still returns 200 to the client. The `bulk_create`
+///   HTTP contract only promises local commit + W-1 peer acks, and
+///   those have already landed by the time this is called.
+///
+/// Returns a map of `peer_id -> error string` for peers where the
+/// catchup POST itself failed (logged by the caller). A successful
+/// catchup POST appears in the map as an empty string or is omitted.
+pub async fn bulk_catchup_push(
+    config: &FederationConfig,
+    memories: &[Memory],
+) -> Vec<(String, String)> {
+    if memories.is_empty() || config.peers.is_empty() {
+        return Vec::new();
+    }
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": memories,
+        "dry_run": false,
+    });
+    let mut joins: JoinSet<(String, Result<(), String>)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let id = peer.id.clone();
+        let payload = body.clone();
+        joins.spawn(async move {
+            let mut req = client.post(&url).json(&payload);
+            // No Idempotency-Key on the batch — the batch is itself an
+            // idempotent replay, and the peer's `insert_if_newer`
+            // dedupes per row by (id, updated_at).
+            req = req.header("X-Catchup", "bulk");
+            let outcome = match req.send().await {
+                Ok(resp) if resp.status().is_success() => Ok(()),
+                Ok(resp) => Err(format!("http {}", resp.status())),
+                Err(e) => Err(format!("network: {e}")),
+            };
+            (id, outcome)
+        });
+    }
+    let mut errors = Vec::new();
+    while let Some(res) = joins.join_next().await {
+        match res {
+            Ok((peer_id, Err(err))) => {
+                tracing::warn!("bulk_catchup_push: peer {peer_id} failed: {err}");
+                errors.push((peer_id, err));
+            }
+            Ok((_, Ok(()))) => {}
+            Err(e) => {
+                tracing::warn!("bulk_catchup_push: join error: {e:?}");
+                errors.push(("unknown".to_string(), e.to_string()));
+            }
+        }
+    }
+    errors
+}
+
 /// Classify an `AckTracker` into either a committed quorum (`Ok(n)`) or
 /// an error with a reason suitable for the `/503 quorum_not_met`
 /// payload. Consumes the tracker — call after the broadcast loop.
@@ -1687,6 +1770,65 @@ mod tests {
             count2.load(Ordering::Relaxed),
             2,
             "persistently-failing peer must be called exactly twice (1 + 1 retry)"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_hits_every_peer_once() {
+        // S40 catchup: verify the terminal batch POST reaches every
+        // peer exactly once, with the full row set in a single request.
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let mems = vec![sample_memory(), sample_memory(), sample_memory()];
+        let errors = bulk_catchup_push(&cfg, &mems).await;
+        assert!(
+            errors.is_empty(),
+            "catchup must succeed on healthy peers, got {errors:?}"
+        );
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            1,
+            "peer-1 must receive exactly one catchup batch"
+        );
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            1,
+            "peer-2 must receive exactly one catchup batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_reports_peer_failures() {
+        // Catchup errors must be surfaced to the caller for logging —
+        // quorum was already met upstream, so the HTTP contract holds,
+        // but the leader should record which peers fell behind.
+        let (url1, _) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, _) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let mems = vec![sample_memory()];
+        let errors = bulk_catchup_push(&cfg, &mems).await;
+        assert_eq!(errors.len(), 1, "exactly one peer failed the catchup");
+        assert!(
+            errors[0].1.contains("500") || errors[0].1.contains("http"),
+            "error must name the HTTP failure, got {:?}",
+            errors[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_empty_inputs_are_noop() {
+        // No rows + no peers → no work, no panics, no POSTs.
+        let cfg = build_config(vec![], 1, 500);
+        assert!(bulk_catchup_push(&cfg, &[]).await.is_empty());
+
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1], 1, 500);
+        assert!(bulk_catchup_push(&cfg, &[]).await.is_empty());
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            0,
+            "no catchup POST must fire when the row set is empty"
         );
     }
 

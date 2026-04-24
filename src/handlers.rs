@@ -2284,6 +2284,27 @@ pub async fn bulk_create(
                 Err(e) => tracing::warn!("bulk_create: fanout task join error: {e:?}"),
             }
         }
+
+        // v0.6.2 Patch 2 (S40): terminal catchup batch. Per-row quorum
+        // met above, but the post-quorum detach path — even with
+        // retry-once in `post_and_classify` — can still leave a peer
+        // one row behind under sustained SQLite-mutex contention (v3r26
+        // hermes-tls 499/500 and v3r27 ironclaw-off 499/500 both tripped
+        // the scenario despite the retry). A single batched `sync_push`
+        // per peer with every committed row closes the gap: peer's
+        // `insert_if_newer` no-ops rows it already has and applies the
+        // missing one. O(1) extra POST per peer vs O(N) per-row retries.
+        //
+        // Errors are logged and folded into the response `errors` array
+        // but do NOT fail the bulk write — quorum was already met, so
+        // the HTTP contract is satisfied. The catchup only strengthens
+        // eventual consistency within the scenario settle window.
+        if !created_mems.is_empty() {
+            let catchup_errors = crate::federation::bulk_catchup_push(fed, &created_mems).await;
+            for (peer_id, err) in catchup_errors {
+                errors.push(format!("catchup to {peer_id}: {err}"));
+            }
+        }
     }
     Json(json!({"created": created_mems.len(), "errors": errors})).into_response()
 }
@@ -4807,18 +4828,21 @@ mod tests {
         assert_eq!(v["created"], n);
 
         // Foreground fanout already waits for W-1 acks per row, so the
-        // per-row POST has landed by the time the request returns. Give
-        // detached stragglers a quick window just in case.
+        // per-row POST has landed by the time the request returns. v0.6.2
+        // Patch 2 (S40) adds a terminal catchup batch — one extra POST
+        // per peer with the full row set — so the expected total is
+        // `n + 1` per peer. Give detached stragglers a quick window.
+        let expected = n + 1;
         for _ in 0..20 {
-            if count.load(Ordering::Relaxed) >= n {
+            if count.load(Ordering::Relaxed) >= expected {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         assert_eq!(
             count.load(Ordering::Relaxed),
-            n,
-            "mock peer must receive one sync_push POST per bulk row"
+            expected,
+            "mock peer must receive one sync_push POST per bulk row plus one terminal catchup batch"
         );
     }
 
