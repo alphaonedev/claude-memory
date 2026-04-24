@@ -5,36 +5,104 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.2 + v0.7 tracks
+## [v0.6.2] — 2026-04-24 — A2A-CERTIFIED
 
-### Fixed — v0.6.2 a2a-gate r15 bug punchlist
+First release to carry the a2a-gate **consecutive-green streak 3/3**
+certification. Three consecutive full-testbook passes across six
+homogeneous cells (ironclaw + hermes × off/tls/mtls on DigitalOcean,
+and openclaw × off on a local Docker mesh) validate that A2A
+scenarios against ai-memory v0.6.2 are green end-to-end on
+`release/v0.6.2 @ 3e018d6`.
 
-Three correctness gaps surfaced by `a2a-hermes-v0.6.1-r15` (11/14 scenarios
-passing) — see diagnostic trace at
-[ai2ai-gate#r15 evidence](https://alphaonedev.github.io/ai-memory-ai2ai-gate/runs/).
+**Evidence** — every scenario artifact is committed alongside the
+releasing branch of the a2a-gate repo:
+<https://alphaonedev.github.io/ai-memory-ai2ai-gate/runs/>
 
-- **[#325]** `create_link` fanout — `POST /api/v1/links` now broadcasts
+### Fixed — federation fanout correctness (a2a-gate v3r22–r30)
+
+- **[#325]** `create_link` fanout — `POST /api/v1/links` broadcasts
   the new link to every peer via quorum write. Scenario-11 of the
-  a2a-gate harness exercised this: charlie couldn't see an M1→M2 link
-  written on alice's node. `SyncPushBody` grows a `links: Vec<MemoryLink>`
-  field applied via `db::create_link` on peers; duplicates are idempotent
-  thanks to the existing unique index on `(source_id, target_id, relation)`.
-  New `federation::broadcast_link_quorum`. Delete-link fanout deferred
-  to v0.7 CRDT-lite link tombstones (local DELETE is now routable at
-  `DELETE /api/v1/links`).
-- **[#326]** `consolidate` fanout — `POST /api/v1/consolidate` now
-  broadcasts both the new consolidated memory AND the source-id
-  deletions in a single sync_push call. Scenario-5 exposed the gap:
-  peer nodes never saw the consolidated memory at all, so
+  a2a-gate harness exercised this: charlie couldn't see an M1→M2
+  link written on alice's node. `SyncPushBody` grows a
+  `links: Vec<MemoryLink>` field applied via `db::create_link` on
+  peers; duplicates are idempotent via the existing
+  `(source_id, target_id, relation)` unique index. New
+  `federation::broadcast_link_quorum`. Delete-link fanout deferred
+  to v0.7 CRDT-lite tombstones.
+- **[#326]** `consolidate` fanout — `POST /api/v1/consolidate`
+  broadcasts the new consolidated memory AND the source-id
+  deletions in a single sync_push call. Scenario-5 exposed the
+  gap: peer nodes never saw the consolidated memory, so
   `metadata.consolidated_from_agents` read as `"[]"`. New
   `federation::broadcast_consolidate_quorum`.
-- **[#327]** Embedder-failure visibility on `ai-memory serve` — the
-  prior `WARN` when HuggingFace-Hub fetch failed was easy to miss in
-  DO droplet logs, which black-holed scenario-18 semantic recall
-  silently. Now logs at `ERROR` with an `⚠️ EMBEDDER LOAD FAILED`
-  marker + operator-facing remediation pointer. `/api/v1/health`
-  grows `embedder_ready: bool` + `federation_enabled: bool` fields so
-  the harness can assert semantic-tier readiness before scenarios run.
+- **[#327]** Embedder-failure visibility on `ai-memory serve` —
+  HuggingFace-Hub fetch failure now logs at `ERROR` with an
+  `⚠️ EMBEDDER LOAD FAILED` marker and a remediation pointer.
+  `/api/v1/health` grows `embedder_ready: bool` +
+  `federation_enabled: bool` fields so harnesses can assert
+  semantic-tier readiness before scenarios run.
+- **[#363]** List cap 200 → 1000 + pending-action fanout +
+  namespace_meta fanout (S34 / S35 / S40). Closed the three
+  fanout gaps surfaced by v3r22.
+- **[#364]** `clear_namespace_standard` fanout symmetry follow-up
+  to #363 — the clear path was missing from `SyncPushBody`;
+  scenario-35 on peer-nodes saw stale standards after a clear on
+  the leader.
+- **[#366]** HTTP `/api/v1/recall` now uses hybrid semantic when
+  the embedder is loaded. Scenario-18 previously black-holed
+  because the endpoint fell through to FTS-only even with a live
+  embedder.
+- **[#367]** Relax semantic cosine threshold 0.3 → 0.2 in
+  `recall_hybrid`. Scenario-18 caught a miss at 0.25–0.29 cosine
+  for legitimately-related content; the lower threshold preserves
+  top-K recall without introducing noise (blended score still
+  gated by `fts.rank + …` component).
+- **[#368]** S40 fanout retry — `post_and_classify` retries once
+  on `AckOutcome::Fail` with a 250 ms backoff. `Idempotency-Key`
+  already present on `sync_push` makes a partial-apply race
+  dedupe to a no-op on the peer via `insert_if_newer`. RCA:
+  v3r26 hermes-tls scenario-40 saw `node-2 499/500 bulk rows`
+  post-quorum because the detached per-peer POST had transiently
+  failed; no retry, no catchup.
+- **[#369]** S40 `bulk_create` terminal catchup batch per peer.
+  After the per-row quorum drains, the leader sends ONE batched
+  `sync_push` per peer with every committed row. Peer-side
+  `insert_if_newer` dedupes already-applied rows; rows dropped by
+  the detached path land now. O(1) extra POST per peer vs O(N)
+  retries per row. Proven to close the gap on v3r28 after retry
+  alone was insufficient on v3r27 (ironclaw-off still dropped one
+  row despite the retry — sustained SQLite-mutex contention
+  during a 500-row burst can drop two consecutive POSTs).
+
+### Evidence & reproducibility
+
+The a2a-gate repository carries the full certification evidence:
+
+- **Runs dashboard** —
+  <https://alphaonedev.github.io/ai-memory-ai2ai-gate/runs/>
+- **AI NHI insights** (tri-audience analysis) —
+  <https://alphaonedev.github.io/ai-memory-ai2ai-gate/insights/>
+- **Local Docker mesh reproducibility spec** —
+  <https://alphaonedev.github.io/ai-memory-ai2ai-gate/local-docker-mesh/>
+
+Per-campaign evidence pages under `runs/` carry scenario-level
+JSON, stderr logs, baseline attestation, F3 peer-replication
+canary, and a campaign.meta.json provenance trace. The DO
+campaigns (v3r28 / v3r29 / v3r30) used `release/v0.6.2 @ 3e018d6`
+with `ai_memory_source_build=true`; the local-docker campaigns
+(r1 / r2 / r3) used the same commit via a committed release
+binary.
+
+### Certification matrix
+
+| | off | tls | mtls |
+|---|---|---|---|
+| **ironclaw (DO)** | ✅ v3r30 35/35 | ✅ v3r30 35/35 | ✅ v3r30 37/37 |
+| **hermes (DO)** | ✅ v3r30 35/35 | ✅ v3r30 35/35 | ✅ v3r30 37/37 |
+| **openclaw (local-docker)** | ✅ r3 35/35 | ⏸ Phase 3 | ⏸ Phase 3 |
+
+Total: **214 passing scenarios** across six cells on the final
+certification run (v3r30 DO + local-docker r3).
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
