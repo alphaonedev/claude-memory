@@ -19,9 +19,10 @@ capabilities:
    able to bypass API-key / mTLS, inject memories with a forged
    `agent_id`, or enumerate memories without authorization.
 3. **Compromised peer** holding valid mTLS cert. They CAN push
-   memories under any `agent_id` they claim in the request body —
-   this is the **Layer 2b gap**, tracked as issue #238 and addressed
-   in v0.7 (see `src/attestation.rs`).
+   memories under any `agent_id` they claim in the request body.
+   Operators should treat the `agent_id` on synced memories as a
+   claimed identity, not an attested one, and keep the mTLS peer
+   allowlist tight accordingly.
 4. **Compromised LLM** (Ollama returning malicious content). Autonomy
    hooks never `exec` or write to disk outside the database. Worst
    case: bad tags, spurious contradiction flags. Reversible via the
@@ -30,7 +31,8 @@ capabilities:
 Out of scope (non-goals):
 
 - **Byzantine peer tolerance**. Peers are assumed to be honest at the
-  sync protocol level (mTLS + future Layer 2b attestation gate that).
+  sync protocol level; mTLS on the peer allowlist is the trust
+  boundary.
 - **Side-channel attacks** (timing, cache, etc.) on the SQLCipher
   passphrase. We expose the passphrase only via a root-readable file.
 - **Denial of service at the database layer**. SQLite uses a
@@ -124,19 +126,6 @@ complete the TLS handshake.
 # peer-b.example.com
 7E:1B:FE:22:…:AA
 ```
-
-### Attested `agent_id` (Layer 2b, v0.7)
-
-The current trust model authenticates the **connection** (mTLS
-allowlist) but not the **identity claim**. A peer with a valid cert
-can POST `sync_push` claiming any `sender_agent_id`. v0.7 closes
-this:
-
-- `AttestationMode::Off` (default) — preserves v0.6.0 behaviour.
-- `AttestationMode::Warn` — log the mismatch, accept the request.
-- `AttestationMode::Reject` — return 403 on mismatch.
-
-Primitives shipped in #285; handler wiring is a v0.7.1 follow-up.
 
 ## Data at rest
 
