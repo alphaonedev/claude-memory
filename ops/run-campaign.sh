@@ -332,7 +332,7 @@ while true; do
   PROMPT="${PROMPT//LOG_BRANCH_PLACEHOLDER/$LOG_BRANCH}"
   PROMPT="${PROMPT//MEMORY_NAMESPACE_PLACEHOLDER/$MEMORY_NAMESPACE}"
 
-  AI_MEMORY_DB=/var/root/.claude/ai-memory.db \
+  AI_MEMORY_DB="${AI_MEMORY_DB:-$HOME/.claude/ai-memory.db}" \
   AI_MEMORY_AGENT_ID=campaign-runner \
   ITER_NUM="$ITER_PADDED" \
   claude -p "$PROMPT" \
@@ -341,15 +341,19 @@ while true; do
     --add-dir "$CHARTER_REPO" \
     --add-dir "$LOG_WORKTREE" \
     --max-turns "$MAX_TURNS" \
+    --output-format stream-json \
+    --verbose \
+    --include-partial-messages \
     >> "$iter_log" 2>&1
   rc=$?
 
   log "=== iteration $ITER_PADDED ended (exit=$rc) ==="
 
-  # Daily log volume guard: pause 1h if today exceeds 500MB.
+  # Daily log volume guard: pause 1h if today exceeds 2GB.
+  # (stream-json + partial messages writes much more than plaintext output.)
   today_kb=$(du -sk "$LOG_DIR/$(date +%F)".* 2>/dev/null | awk '{s+=$1} END {print s+0}')
-  if [ "$today_kb" -gt 512000 ]; then
-    log "log volume for today exceeds 500MB — pausing 1 hour"
+  if [ "$today_kb" -gt 2097152 ]; then
+    log "log volume for today exceeds 2GB — pausing 1 hour"
     sleep 3600
   fi
 
