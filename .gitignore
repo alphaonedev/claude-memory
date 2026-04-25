@@ -20,3 +20,6 @@ benchmarks/longmemeval/results/
 # Local scratch (never committed)
 /backup/
 .claude/
+
+# Autonomous campaign runtime state (logs, kill-switch, pid)
+.agentic/

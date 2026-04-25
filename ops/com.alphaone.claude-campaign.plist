@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd plist for the ai-memory-mcp v0.6.3 grand-slam campaign.
+
+  Install (24x7, auto-restart on crash, persists across reboots):
+    sudo cp ops/com.alphaone.claude-campaign.plist /Library/LaunchDaemons/
+    sudo chown root:wheel /Library/LaunchDaemons/com.alphaone.claude-campaign.plist
+    sudo chmod 644 /Library/LaunchDaemons/com.alphaone.claude-campaign.plist
+    sudo launchctl bootstrap system /Library/LaunchDaemons/com.alphaone.claude-campaign.plist
+
+  Stop:
+    sudo launchctl bootout system /Library/LaunchDaemons/com.alphaone.claude-campaign.plist
+
+  Status:
+    sudo launchctl print system/com.alphaone.claude-campaign
+
+  KeepAlive checks the kill-switch — touching .agentic/kill-switch makes launchd
+  honor the next clean exit and stop respawning.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alphaone.claude-campaign</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/var/root/dev/ai-memory-mcp/ops/run-campaign.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/var/root/dev/ai-memory-mcp</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>PathState</key>
+        <dict>
+            <key>/var/root/dev/ai-memory-mcp/.agentic/kill-switch</key>
+            <false/>
+        </dict>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/var/root/dev/ai-memory-mcp/.agentic/logs/launchd.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/var/root/dev/ai-memory-mcp/.agentic/logs/launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/var/root</string>
+        <key>DEV_BRANCH</key>
+        <string>release/v0.6.3</string>
+        <key>CHARTER_REPO</key>
+        <string>/var/root/dev/agentic-mem-labs</string>
+        <key>CHARTER_PATH</key>
+        <string>strategy/2026-04-25/ai-memory-v0.6.3-grand-slam.md</string>
+        <key>INTERVAL_SECS</key>
+        <string>300</string>
+        <key>MAX_TURNS</key>
+        <string>40</string>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>
