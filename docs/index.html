@@ -8,16 +8,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ai-memory&trade; -- Persistent Memory for Any AI</title>
-    <meta name="description" content="Give any AI persistent memory across sessions. MCP-based memory management for Claude, ChatGPT, Grok, Llama, and any MCP-compatible platform. A single Rust binary with three interfaces (MCP, HTTP, CLI), four feature tiers (keyword, semantic, smart, autonomous) with local LLMs via Ollama, SQLite FTS5, HNSW vector index, and 6-factor ranking.">
+    <meta name="description" content="Persistent memory for any AI agent. v0.6.2 ships a single Rust binary with four operational modes — stdio MCP server, HTTP/mTLS daemon, autonomous curator, and quorum sync — plus 26 MCP tools, 24 HTTP endpoints, 26 CLI commands. Hybrid recall (FTS5 + vector + cross-encoder reranking), three-tier TTL, namespaces, links, archive, governance approval flow. SQLite-backed, local-first, zero cloud dependencies.">
     <meta name="theme-color" content="#0d1117">
     <meta property="og:title" content="ai-memory — Persistent Memory for Any AI">
-    <meta property="og:description" content="Give any AI persistent memory. Works with Claude, ChatGPT, Grok, Llama, Cursor, and more. Zero token cost until recall. 17 MCP tools, 20 HTTP endpoints, 25 CLI commands.">
+    <meta property="og:description" content="Persistent memory for any AI agent. v0.6.2: 26 MCP tools, hybrid recall, autonomous curator daemon that keeps memory tidy between sessions. Local-first, zero cloud dependencies.">
     <meta property="og:url" content="https://alphaonedev.github.io/ai-memory-mcp/">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="ai-memory">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="ai-memory — Persistent Memory for Any AI">
-    <meta name="twitter:description" content="Give any AI persistent memory. Works with Claude, ChatGPT, Grok, Llama, Cursor, and more. Zero token cost until recall.">
+    <meta name="twitter:description" content="Persistent memory for any AI agent. v0.6.2: 26 MCP tools, hybrid recall, autonomous curator daemon. Local-first, zero cloud dependencies.">
     <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/">
     <style>
         /* ============================================================
@@ -349,9 +349,9 @@
         </p>
         <div class="stats-row">
             <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
-            <div class="stat"><span class="num">23</span><span class="label">MCP Tools</span></div>
-            <div class="stat"><span class="num">4</span><span class="label">Feature Tiers</span></div>
-            <div class="stat"><span class="num">188</span><span class="label">Tests</span></div>
+            <div class="stat"><span class="num">26</span><span class="label">MCP Tools</span></div>
+            <div class="stat"><span class="num">4</span><span class="label">Operational Modes</span></div>
+            <div class="stat"><span class="num">191</span><span class="label">Tests</span></div>
         </div>
         <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
     </div>
@@ -386,6 +386,48 @@
             </div>
         </div>
         <p style="font-size:.85rem;color:var(--text-muted)">Pure SQLite FTS5 + BM25 &mdash; zero cloud dependencies &mdash; <a href="#benchmarks">full benchmark details &amp; replication steps</a></p>
+    </div>
+</section>
+
+<!-- ================================================================
+     FOUR OPERATIONAL MODES (v0.6.2 capability surface)
+     ================================================================ -->
+<section id="modes">
+    <div class="container">
+        <h2>One binary, four operational modes</h2>
+        <p class="section-subtitle">ai-memory is a multi-mode Rust application (tokio + axum) that can run any of these in isolation or simultaneously. They share one SQLite database.</p>
+
+        <div class="platform-grid" style="grid-template-columns:repeat(auto-fill,minmax(220px,1fr))">
+            <div class="platform-card" style="text-align:left">
+                <span class="platform-icon">⌥</span>
+                <h4>stdio MCP server</h4>
+                <p>26 native tools over JSON-RPC for Claude, Codex, Cursor, Gemini, Grok, OpenClaw, and any MCP client. Reactive — answers per turn. <code>ai-memory mcp</code></p>
+                <span class="platform-tag tag-mcp">MCP</span>
+            </div>
+            <div class="platform-card" style="text-align:left">
+                <span class="platform-icon">⎈</span>
+                <h4>HTTP / mTLS daemon</h4>
+                <p>24 REST endpoints on <code>127.0.0.1:9077</code>. TLS, optional mTLS allowlist, API-key auth. Runs a background GC loop. <code>ai-memory serve</code></p>
+                <span class="platform-tag tag-http">HTTP</span>
+            </div>
+            <div class="platform-card" style="text-align:left">
+                <span class="platform-icon">◐</span>
+                <h4>Autonomous curator</h4>
+                <p>Self-scheduling loop that keeps memory tidy. Auto-tag, contradiction detection, near-duplicate consolidation, priority feedback, rollback log. Default cadence 1h. <code>ai-memory curator --daemon</code></p>
+                <span class="platform-tag tag-universal">Autonomous</span>
+            </div>
+            <div class="platform-card" style="text-align:left">
+                <span class="platform-icon">⇄</span>
+                <h4>Sync daemon</h4>
+                <p>Quorum-based peer federation across instances. W-of-N writes (default majority), vector-clock CRDT-lite merge, mTLS allowlist between peers. <code>ai-memory sync-daemon</code></p>
+                <span class="platform-tag tag-universal">Federation</span>
+            </div>
+        </div>
+
+        <div style="margin-top:1.5rem;padding:1.25rem 1.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px">
+            <p style="font-size:.7rem;text-transform:uppercase;letter-spacing:.15em;color:var(--orange);margin-bottom:.5rem;font-weight:700">Why the curator matters</p>
+            <p style="font-size:.95rem;line-height:1.6;margin:0">Most memory layers are persistent but inert — what you put in is what you get out. ai-memory is <strong style="color:var(--text)">self-maintaining</strong>: the curator runs while your AI agents are not active, surfacing contradictions before they accumulate, consolidating duplicates so recall stays sharp, and reranking priority by access pattern. Every action is reversible via the rollback log. Destructive operations can be gated behind the governance approval flow. Recall quality stays high as the corpus grows.</p>
+        </div>
     </div>
 </section>
 
@@ -656,7 +698,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 17 memory tools natively. No daemon, no ports. MCP servers do <strong>not</strong> go in <code>settings.json</code> or <code>settings.local.json</code>. The <code>--tier</code> flag is required — options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
+                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 26 memory tools natively. No daemon, no ports. MCP servers do <strong>not</strong> go in <code>settings.json</code> or <code>settings.local.json</code>. The <code>--tier</code> flag is required — options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
                     <p style="font-size:.85rem"><strong>Windows:</strong> Use <code>ai-memory.exe</code> for the command and forward slashes in paths: <code>"C:/Users/YourName/.claude/ai-memory.db"</code></p>
                 </div>
 
@@ -1033,7 +1075,7 @@ ai-memory list -n my-project                                         <span class
 <section id="features" class="alt">
     <div class="container">
         <h2>What It Does</h2>
-        <p class="section-subtitle">Every capability at a glance. 4 feature tiers (keyword to autonomous), 17 MCP tools, three interfaces, one shared database. Works with any AI that supports MCP or HTTP.</p>
+        <p class="section-subtitle">Every capability at a glance. 4 feature tiers (keyword to autonomous), 26 MCP tools, four operational modes (MCP, HTTP, curator, sync), one shared SQLite database. Works with any AI that supports MCP or HTTP.</p>
 
         <div class="feature-grid">
             <div class="feature-card" style="border:1px solid var(--green);background:rgba(63,185,80,.04)">
@@ -1121,7 +1163,7 @@ ai-memory list -n my-project                                         <span class
                         <td>nomic-embed-text-v1.5 <span style="color:var(--text-muted);font-size:.75rem">(768-dim, via Ollama)</span></td>
                         <td>Gemma 4 E2B <span style="color:var(--text-muted);font-size:.75rem">(~1GB)</span></td>
                         <td><a href="https://ollama.com">Ollama</a></td>
-                        <td>+ LLM query expansion, auto-tagging, auto-consolidation, 17 MCP tools</td>
+                        <td>+ LLM query expansion, auto-tagging, auto-consolidation, 26 MCP tools</td>
                     </tr>
                     <tr>
                         <td><span class="tier-tag tier-tag-autonomous">autonomous</span></td>
@@ -1129,7 +1171,7 @@ ai-memory list -n my-project                                         <span class
                         <td>nomic-embed-text-v1.5 <span style="color:var(--text-muted);font-size:.75rem">(768-dim, via Ollama)</span></td>
                         <td>Gemma 4 E4B <span style="color:var(--text-muted);font-size:.75rem">(~2.3GB)</span></td>
                         <td><a href="https://ollama.com">Ollama</a></td>
-                        <td>+ Neural cross-encoder reranking (ms-marco-MiniLM), contradiction analysis, 17 MCP tools</td>
+                        <td>+ Neural cross-encoder reranking (ms-marco-MiniLM), contradiction analysis, 26 MCP tools</td>
                     </tr>
                 </tbody>
             </table>
