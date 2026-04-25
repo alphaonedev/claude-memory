@@ -646,8 +646,15 @@ mod tests {
     /// In-test LLM stub. Deterministic: returns fixed tags + treats
     /// "contradict" as a sentinel in content to flag contradictions.
     struct StubLlm {
+        // Read by the trait impls below; the test paths in this module exercise
+        // `summarize_memories` only, so rustc 1.93+ flags these reads as dead.
+        // Curator and MCP integration tests (in `mcp.rs`/`curator.rs`) cover
+        // `auto_tag` and `detect_contradiction`; this stub keeps the protocol
+        // complete so any future autonomy test can exercise either method.
+        #[allow(dead_code)]
         auto_tag_result: Vec<String>,
         summary: String,
+        #[allow(dead_code)]
         contradiction_sentinel: String,
         calls: Mutex<Vec<String>>,
     }
