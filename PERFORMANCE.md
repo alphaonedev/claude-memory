@@ -8,9 +8,10 @@ build still meets that cost.
 
 This document is the authoritative budget table. The CI guard
 (`.github/workflows/bench.yml`, Stream F) and the `ai-memory bench`
-subcommand (Stream E) will both read from these targets once they land.
-Until then, this file establishes the contract; later patches under
-v0.6.3 wire the measurement and enforcement.
+subcommand (Stream E) both read from these targets — every pull
+request against `main`, `develop`, or `release/**` runs the bench
+workload on `ubuntu-latest` and fails when any p95 exceeds its
+target by more than the published 10% tolerance.
 
 ## Budget Table
 
@@ -32,10 +33,12 @@ v0.6.3 wire the measurement and enforcement.
 
 ## CI Guard Threshold
 
-The `bench.yml` workflow (Stream F, scheduled to land later in v0.6.3)
-runs `ai-memory bench` on every PR against `release/v0.6.3` and the
-trunk branches and **fails the build when any operation's measured p95
-exceeds its target by more than 10%.**
+The `bench.yml` workflow (Stream F) runs `ai-memory bench` on every
+PR against `main`, `develop`, or `release/**` and on every push to
+those branches. It **fails the build when any operation's measured
+p95 exceeds its target by more than 10%.** The full table lands in
+the workflow run summary; the JSON document is uploaded as a
+`bench-results` artifact for downstream tooling.
 
 p99 targets in the table above are **informational** until the v0.6.3
 soak window closes. They are recorded here to make the long-tail goal
@@ -68,8 +71,8 @@ reference hardware, not absolute floors for every machine.
 | `ai-memory bench` subcommand | ✅ landed (scaffold) | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1) |
 | Per-tool MCP `tracing` spans | ✅ landed | `src/mcp.rs` `handle_request` — `mcp_tool_call` span carries `tool` + `rpc_id`; `elapsed_ms` emitted at exit |
 | Embedding-bound + KG operations in `bench` | 🚧 Stream E follow-up | next iterations of v0.6.3 |
-| `bench.yml` CI workflow | 🚧 Stream F | `.github/workflows/bench.yml` (planned) |
-| Measured numbers in CI history | ⏳ pending | populated once `bench.yml` lands |
+| `bench.yml` CI workflow | ✅ landed | `.github/workflows/bench.yml` — gates every PR and trunk push on `ubuntu-latest`; uploads `bench-results` artifact (JSON + table) |
+| Measured numbers in CI history | ✅ collecting | each workflow run's summary carries the table; the JSON artifact is retained per GitHub Actions retention policy |
 
 The status table is updated as each Stream lands within the v0.6.3
 cycle. When measurements begin, this file will gain a "Latest measured"
@@ -81,8 +84,8 @@ The `ai-memory bench` subcommand seeds an in-memory disposable
 SQLite database (the operator's main DB is untouched) and reports
 per-operation p50/p95/p99 against the budgets above. Exit code is
 non-zero when any p95 exceeds its budget by more than the published
-10% tolerance, so the same binary is suitable for use in a CI guard
-once `bench.yml` (Stream F) wires it up.
+10% tolerance — the same binary the `bench.yml` CI guard runs on
+every pull request.
 
 ```
 $ ai-memory bench

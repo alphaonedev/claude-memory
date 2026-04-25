@@ -61,6 +61,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in-flight. Closes Pillar 3 / Stream F doc deliverable from the
   v0.6.3 charter.
 
+- **`bench.yml` CI guard (Pillar 3 / Stream F)** — new
+  `.github/workflows/bench.yml` runs `ai-memory bench` on every pull
+  request and trunk push (`main`, `develop`, `release/**`) plus on
+  manual `workflow_dispatch`. The job builds the release binary on
+  `ubuntu-latest` (the latency reference per `PERFORMANCE.md`),
+  streams the bench table into the workflow run summary, and uploads
+  a `bench-results` artifact (`bench-results.json` +
+  `bench-table.txt`) for downstream tooling. The `ai-memory bench`
+  binary already exits non-zero when any operation's measured p95
+  exceeds its target by more than the published 10% tolerance, so
+  the workflow fails on regression without additional gating logic.
+  Closes the last Stream F deliverable from charter §"Stream F —
+  Performance Budgets + CI Guard"; budgets are now continuously
+  enforced against trunk and PRs.
+
 - **Per-tool MCP tracing spans (Pillar 3 / Stream E)** — every
   `tools/call` dispatch now runs inside an `info`-level
   `mcp_tool_call` span carrying the tool name and JSON-RPC id. After
