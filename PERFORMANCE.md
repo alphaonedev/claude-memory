@@ -68,9 +68,10 @@ reference hardware, not absolute floors for every machine.
 | Component | State | Where |
 |---|---|---|
 | Published budgets | ✅ landed | this file |
-| `ai-memory bench` subcommand | ✅ landed (scaffold) | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1) |
+| `ai-memory bench` subcommand | ✅ landed | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1), `memory_kg_query` (depth=1), `memory_kg_timeline` |
 | Per-tool MCP `tracing` spans | ✅ landed | `src/mcp.rs` `handle_request` — `mcp_tool_call` span carries `tool` + `rpc_id`; `elapsed_ms` emitted at exit |
-| Embedding-bound + KG operations in `bench` | 🚧 Stream E follow-up | next iterations of v0.6.3 |
+| KG operations in `bench` | ✅ landed | `src/bench.rs` — seeds 50 sources × 4 outbound links (every link `valid_from`-stamped), drives `kg_query` at depth=1 and `kg_timeline` |
+| Embedding-bound operations in `bench` | 🚧 Stream E follow-up | needs an embedder fixture decision (opt-in flag vs cfg(test) fake vs pre-cached model) — see iter-0017 handoff |
 | `bench.yml` CI workflow | ✅ landed | `.github/workflows/bench.yml` — gates every PR and trunk push on `ubuntu-latest`; uploads `bench-results` artifact (JSON + table) |
 | Measured numbers in CI history | ✅ collecting | each workflow run's summary carries the table; the JSON artifact is retained per GitHub Actions retention policy |
 
@@ -91,22 +92,27 @@ every pull request.
 $ ai-memory bench
 Operation                       Target (p95)   Measured (p95)   p50      p99      Status
 ─────────────────────────────────────────────────────────────────────────────────────────
-memory_store (no embedding)     <   20 ms           0.6 ms         0.4      0.8    PASS
-memory_search (FTS5)            <  100 ms           1.9 ms         1.5      2.0    PASS
-memory_recall (hot, depth=1)    <   50 ms          16.5 ms        14.4     21.0    PASS
+memory_store (no embedding)     <   20 ms           0.5 ms         0.3      0.5    PASS
+memory_search (FTS5)            <  100 ms           0.7 ms         0.5      0.8    PASS
+memory_recall (hot, depth=1)    <   50 ms           5.7 ms         4.5      6.5    PASS
+memory_kg_query (depth=1)       <  100 ms           0.7 ms         0.5      0.9    PASS
+memory_kg_timeline              <  100 ms           0.1 ms         0.1      0.1    PASS
 ```
 
 `--iterations` and `--warmup` (clamped to `[1, 100_000]` and
 `[0, 10_000]` respectively) tune the sample size. `--json` emits the
 same numbers as a single JSON document for downstream tooling.
 
-Operations that depend on the embedder (`memory_store` with
-embedding, `memory_recall` cold/full hybrid), the KG (`memory_kg_query`,
-`memory_kg_timeline`), the curator daemon, and the federation ack path
-are not yet wired into `bench` — they each need fixtures or external
-services that don't belong on the hot path of a `cargo test` run.
-They land in a follow-up Stream E iteration alongside the canonical
-1000-memory workload at `benchmarks/v063/canonical_workload.json`.
+The KG rows seed an in-process fixture (50 source memories × 4
+outbound links each, every link with `valid_from` stamped) so the
+`memory_kg_query` and `memory_kg_timeline` paths run end-to-end with
+no external service. Embedding-bound paths (`memory_store` with
+embedding, `memory_recall` cold/full hybrid), the curator daemon, and
+the federation ack path are not yet wired in — they each need
+fixtures or external services that don't belong on the hot path of a
+`cargo test` run. They land in a follow-up Stream E iteration
+alongside the canonical 1000-memory workload at
+`benchmarks/v063/canonical_workload.json`.
 
 ## Why Publish These at All
 

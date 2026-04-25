@@ -8,12 +8,18 @@
 //! verdict per operation. The CI guard (Stream F) enforces the same
 //! 10% p95 tolerance documented in `PERFORMANCE.md`.
 //!
-//! This iteration covers the three embedding-free operations
-//! (`memory_store` no-embedding, `memory_search` FTS5,
-//! `memory_recall` hot depth=1). Embedding-bound and KG operations are
-//! tracked as follow-up work — they need an embedder process and a
-//! seeded KG fixture, neither of which belongs on the hot path of a
-//! `cargo test` invocation.
+//! Coverage in this build:
+//! - Embedding-free CRUD: `memory_store` (no embedding), `memory_search`
+//!   (FTS5), `memory_recall` (hot, depth=1).
+//! - Knowledge-graph traversal: `memory_kg_query` (depth=1) and
+//!   `memory_kg_timeline`. Both seed an in-process fixture (50 sources
+//!   × 4 outbound links each, all with explicit `valid_from`) so the
+//!   bench runs without any external service.
+//!
+//! Embedding-bound paths (`memory_store` with embedding,
+//! `memory_recall` cold/full hybrid) still require an embedder process
+//! and are tracked as follow-up Stream E work — they don't belong on
+//! the hot path of a `cargo test` invocation.
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -47,6 +53,11 @@ pub enum Operation {
     SearchFts,
     /// `memory_recall` hot path, depth=1 (no hierarchy expansion).
     RecallHot,
+    /// `memory_kg_query` recursive-CTE traversal at depth=1 (the
+    /// shallowest path through the depth ≤ 3 budget bucket).
+    KgQueryDepth1,
+    /// `memory_kg_timeline` — ordered timeline for a single source.
+    KgTimeline,
 }
 
 impl Operation {
@@ -56,16 +67,25 @@ impl Operation {
             Self::StoreNoEmbedding => "memory_store (no embedding)",
             Self::SearchFts => "memory_search (FTS5)",
             Self::RecallHot => "memory_recall (hot, depth=1)",
+            Self::KgQueryDepth1 => "memory_kg_query (depth=1)",
+            Self::KgTimeline => "memory_kg_timeline",
         }
     }
 
     /// p95 budget in milliseconds, sourced from `PERFORMANCE.md`.
+    ///
+    /// `KgQueryDepth1` is bucketed under "depth ≤ 3" (100 ms) — its
+    /// budget collapses with `SearchFts` and `KgTimeline` despite
+    /// belonging to a different table row.
     #[must_use]
+    #[allow(clippy::match_same_arms)]
     pub fn target_p95_ms(self) -> f64 {
         match self {
             Self::StoreNoEmbedding => 20.0,
             Self::SearchFts => 100.0,
             Self::RecallHot => 50.0,
+            Self::KgQueryDepth1 => 100.0,
+            Self::KgTimeline => 100.0,
         }
     }
 }
@@ -121,7 +141,10 @@ pub fn run(conn: &Connection, config: &BenchConfig) -> Result<Vec<OperationResul
     let store = run_store_no_embedding(conn, config)?;
     let search = run_search_fts(conn, config)?;
     let recall = run_recall_hot(conn, config)?;
-    Ok(vec![store, search, recall])
+    let kg_sources = seed_kg_fixture(conn, &config.namespace)?;
+    let kg_query = run_kg_query_depth1(conn, config, &kg_sources)?;
+    let kg_timeline = run_kg_timeline(conn, config, &kg_sources)?;
+    Ok(vec![store, search, recall, kg_query, kg_timeline])
 }
 
 fn run_store_no_embedding(conn: &Connection, config: &BenchConfig) -> Result<OperationResult> {
@@ -205,6 +228,86 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
         samples.push(start.elapsed());
     }
     Ok(percentile_summary(Operation::RecallHot, &samples))
+}
+
+/// Source memory IDs returned from [`seed_kg_fixture`]. Each source has
+/// `KG_FIXTURE_LINKS_PER_SOURCE` outbound links — the bench drives both
+/// `kg_query` and `kg_timeline` against the same fixture.
+const KG_FIXTURE_SOURCES: usize = 50;
+const KG_FIXTURE_LINKS_PER_SOURCE: usize = 4;
+
+fn run_kg_query_depth1(
+    conn: &Connection,
+    config: &BenchConfig,
+    sources: &[String],
+) -> Result<OperationResult> {
+    debug_assert!(
+        !sources.is_empty(),
+        "kg_query bench requires a seeded fixture"
+    );
+    let total = config.warmup + config.iterations;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        let src = &sources[i % sources.len()];
+        let start = Instant::now();
+        let _ = db::kg_query(conn, src, 1, None, None, None)?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(Operation::KgQueryDepth1, &samples))
+}
+
+fn run_kg_timeline(
+    conn: &Connection,
+    config: &BenchConfig,
+    sources: &[String],
+) -> Result<OperationResult> {
+    debug_assert!(
+        !sources.is_empty(),
+        "kg_timeline bench requires a seeded fixture"
+    );
+    let total = config.warmup + config.iterations;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        let src = &sources[i % sources.len()];
+        let start = Instant::now();
+        let _ = db::kg_timeline(conn, src, None, None, None)?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(Operation::KgTimeline, &samples))
+}
+
+/// Seed the in-process KG fixture: `KG_FIXTURE_SOURCES` source memories,
+/// each with `KG_FIXTURE_LINKS_PER_SOURCE` outbound links to distinct
+/// targets. Every link sets `valid_from` so `kg_timeline` (which skips
+/// rows with NULL `valid_from`) sees the full corpus. Returns the source
+/// IDs so the runners can hand them to `kg_query` / `kg_timeline`.
+fn seed_kg_fixture(conn: &Connection, namespace: &str) -> Result<Vec<String>> {
+    let mut sources = Vec::with_capacity(KG_FIXTURE_SOURCES);
+    for s in 0..KG_FIXTURE_SOURCES {
+        let src = synth_memory(namespace, s, "kg-src");
+        // `db::insert` upserts on `(title, namespace)` and returns the
+        // canonical id, which differs from `src.id` if the row already
+        // exists. Use the returned id so the fixture remains correct
+        // even when `run()` is invoked twice against the same conn.
+        let src_id = db::insert(conn, &src)?;
+        for t in 0..KG_FIXTURE_LINKS_PER_SOURCE {
+            let target_idx = s * KG_FIXTURE_LINKS_PER_SOURCE + t;
+            let tgt = synth_memory(namespace, target_idx, "kg-tgt");
+            let tgt_id = db::insert(conn, &tgt)?;
+            // `db::create_link` stamps `created_at` and `valid_from` to
+            // the current wall clock — sufficient for `kg_timeline`
+            // (which skips rows with NULL `valid_from`).
+            db::create_link(conn, &src_id, &tgt_id, "related_to")?;
+        }
+        sources.push(src_id);
+    }
+    Ok(sources)
 }
 
 fn seed_corpus(conn: &Connection, namespace: &str, prefix: &str, count: usize) -> Result<()> {
@@ -358,13 +461,15 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_three_results() {
+    fn run_returns_all_five_results() {
         let conn = fresh_conn();
         let results = run(&conn, &small_config()).unwrap();
-        assert_eq!(results.len(), 3);
+        assert_eq!(results.len(), 5);
         assert_eq!(results[0].operation, Operation::StoreNoEmbedding);
         assert_eq!(results[1].operation, Operation::SearchFts);
         assert_eq!(results[2].operation, Operation::RecallHot);
+        assert_eq!(results[3].operation, Operation::KgQueryDepth1);
+        assert_eq!(results[4].operation, Operation::KgTimeline);
         for r in &results {
             assert_eq!(r.samples, 30);
             assert!(r.measured_p50_ms <= r.measured_p95_ms);
@@ -414,6 +519,8 @@ mod tests {
         assert!(table.contains("memory_store (no embedding)"));
         assert!(table.contains("memory_search (FTS5)"));
         assert!(table.contains("memory_recall (hot, depth=1)"));
+        assert!(table.contains("memory_kg_query (depth=1)"));
+        assert!(table.contains("memory_kg_timeline"));
         assert!(table.contains("Status"));
     }
 
@@ -423,5 +530,30 @@ mod tests {
         assert!((Operation::StoreNoEmbedding.target_p95_ms() - 20.0).abs() < 1e-9);
         assert!((Operation::SearchFts.target_p95_ms() - 100.0).abs() < 1e-9);
         assert!((Operation::RecallHot.target_p95_ms() - 50.0).abs() < 1e-9);
+        assert!((Operation::KgQueryDepth1.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::KgTimeline.target_p95_ms() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seed_kg_fixture_populates_sources_and_links() {
+        let conn = fresh_conn();
+        let sources = seed_kg_fixture(&conn, "kg-fixture-test").unwrap();
+        assert_eq!(sources.len(), KG_FIXTURE_SOURCES);
+        // Every source carries the expected fan-out, every link has a
+        // non-null `valid_from` (otherwise `kg_timeline` would skip it).
+        for src in &sources {
+            let nodes = db::kg_query(&conn, src, 1, None, None, None).unwrap();
+            assert_eq!(nodes.len(), KG_FIXTURE_LINKS_PER_SOURCE);
+            let timeline = db::kg_timeline(&conn, src, None, None, None).unwrap();
+            assert_eq!(timeline.len(), KG_FIXTURE_LINKS_PER_SOURCE);
+            for ev in &timeline {
+                // `kg_timeline` filters out NULL `valid_from` rows in SQL,
+                // so any returned event must carry a non-empty stamp.
+                assert!(
+                    !ev.valid_from.is_empty(),
+                    "kg fixture must stamp valid_from on every link"
+                );
+            }
+        }
     }
 }
