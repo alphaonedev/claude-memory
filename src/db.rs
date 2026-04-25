@@ -2378,6 +2378,140 @@ pub fn invalidate_link(
     }))
 }
 
+/// Default cap on rows returned by `kg_query` when the caller does not
+/// specify one (Pillar 2 / Stream C). Mirrors `kg_timeline`'s default so
+/// the two traversal tools behave consistently for agents driving them.
+pub const KG_QUERY_DEFAULT_LIMIT: usize = 200;
+
+/// Hard ceiling on `kg_query` rows. Matches `kg_timeline` and the
+/// existing list/recall caps to keep traversal bounded against
+/// pathological fan-out.
+pub const KG_QUERY_MAX_LIMIT: usize = 1000;
+
+/// Maximum traversal depth supported by [`kg_query`] in this build. The
+/// first slice of Pillar 2 / Stream C ships outbound depth=1
+/// ("expand neighbors"); the recursive-CTE multi-hop traversal lands in
+/// a follow-up iteration. Keeping the constant here lets the next slice
+/// raise the ceiling in one place without touching callers.
+pub const KG_QUERY_MAX_SUPPORTED_DEPTH: usize = 1;
+
+/// Outbound KG traversal from a source memory (Pillar 2 / Stream C —
+/// `memory_kg_query`). Returns one row per link reachable within
+/// `max_depth` hops, filtered by:
+///
+/// - `valid_at` (RFC3339, optional): only links valid at that instant —
+///   `valid_from <= valid_at AND (valid_until IS NULL OR valid_until > valid_at)`.
+///   When omitted, the temporal filter is skipped and rows with NULL
+///   `valid_from` are also returned (legacy / un-anchored links).
+/// - `allowed_agents` (optional): when provided, only links with
+///   `observed_by` in the set are returned. An **empty** allowlist
+///   returns zero rows by design — callers signaling "no agents are
+///   trusted" must get an empty traversal, not the unfiltered fallback.
+///   When omitted entirely (`None`), the agent filter is skipped.
+/// - `limit`: row cap, clamped to [1, [`KG_QUERY_MAX_LIMIT`]].
+///
+/// `max_depth` must be in `[1, KG_QUERY_MAX_SUPPORTED_DEPTH]`. This
+/// build supports depth=1 only; passing a larger value yields an
+/// explicit error rather than a silent truncation. The recursive CTE
+/// path lands in the follow-up iteration that finishes Stream C.
+///
+/// Ordering is `COALESCE(valid_from, created_at) ASC, created_at ASC`,
+/// so the result is deterministic whether or not the caller scopes by
+/// time. The `depth` field is always 1 in this build; the `path` field
+/// is the simple `<source_id>-><target_id>` string and generalizes to
+/// multi-hop paths in the follow-up iteration.
+pub fn kg_query(
+    conn: &Connection,
+    source_id: &str,
+    max_depth: usize,
+    valid_at: Option<&str>,
+    allowed_agents: Option<&[String]>,
+    limit: Option<usize>,
+) -> Result<Vec<crate::models::KgQueryNode>> {
+    use crate::models::KgQueryNode;
+
+    if max_depth == 0 {
+        anyhow::bail!("max_depth must be >= 1");
+    }
+    if max_depth > KG_QUERY_MAX_SUPPORTED_DEPTH {
+        anyhow::bail!(
+            "max_depth={max_depth} exceeds supported depth={KG_QUERY_MAX_SUPPORTED_DEPTH}; \
+             multi-hop traversal lands in a follow-up iteration"
+        );
+    }
+
+    // Empty allowlist == "no agents are trusted" — short-circuit so we
+    // don't have to invent a SQL `IN ()` clause (which is invalid).
+    if let Some(agents) = allowed_agents
+        && agents.is_empty()
+    {
+        return Ok(Vec::new());
+    }
+
+    let cap = limit
+        .unwrap_or(KG_QUERY_DEFAULT_LIMIT)
+        .clamp(1, KG_QUERY_MAX_LIMIT);
+
+    // Compose the predicate dynamically. Bind values are appended in the
+    // same order so positional placeholders line up.
+    let mut sql = String::from(
+        "SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until,
+                ml.observed_by, m.title, m.namespace
+         FROM memory_links ml
+         JOIN memories m ON m.id = ml.target_id
+         WHERE ml.source_id = ?1",
+    );
+    let mut binds: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(source_id.to_string())];
+
+    if let Some(t) = valid_at {
+        sql.push_str(" AND ml.valid_from IS NOT NULL AND ml.valid_from <= ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        binds.push(Box::new(t.to_string()));
+        sql.push_str(" AND (ml.valid_until IS NULL OR ml.valid_until > ?");
+        sql.push_str(&(binds.len() + 1).to_string());
+        sql.push(')');
+        binds.push(Box::new(t.to_string()));
+    }
+
+    if let Some(agents) = allowed_agents {
+        // Already short-circuited the empty case above.
+        let placeholders: Vec<String> = (0..agents.len())
+            .map(|i| format!("?{}", binds.len() + 1 + i))
+            .collect();
+        sql.push_str(" AND ml.observed_by IN (");
+        sql.push_str(&placeholders.join(", "));
+        sql.push(')');
+        for a in agents {
+            binds.push(Box::new(a.clone()));
+        }
+    }
+
+    sql.push_str(" ORDER BY COALESCE(ml.valid_from, ml.created_at) ASC, ml.created_at ASC LIMIT ?");
+    sql.push_str(&(binds.len() + 1).to_string());
+    binds.push(Box::new(i64::try_from(cap).unwrap_or(i64::MAX)));
+
+    let mut stmt = conn.prepare(&sql)?;
+    let bind_refs: Vec<&dyn rusqlite::ToSql> = binds.iter().map(AsRef::as_ref).collect();
+    let source_owned = source_id.to_string();
+    let rows = stmt.query_map(rusqlite::params_from_iter(bind_refs), |row| {
+        let target_id: String = row.get(0)?;
+        let path = format!("{source_owned}->{target_id}");
+        Ok(KgQueryNode {
+            target_id,
+            relation: row.get(1)?,
+            valid_from: row.get(2)?,
+            valid_until: row.get(3)?,
+            observed_by: row.get(4)?,
+            title: row.get(5)?,
+            target_namespace: row.get(6)?,
+            depth: 1,
+            path,
+        })
+    })?;
+    rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(Into::into)
+}
+
 /// List all aliases registered for an entity, ordered by registration
 /// time then alphabetical for stable display.
 fn list_entity_aliases(conn: &Connection, entity_id: &str) -> Result<Vec<String>> {
@@ -6379,6 +6513,314 @@ mod tests {
         assert_eq!(vf.as_deref(), Some("2026-01-01T00:00:00+00:00"));
         assert_eq!(ob.as_deref(), Some("agent-x"));
         assert_eq!(ca, now);
+    }
+
+    // -- Pillar 2 / Stream C — kg_query (depth=1) ---------------------------
+
+    /// Insert a link with explicit temporal/observed_by columns so the
+    /// `kg_query` filter tests can pin behavior without relying on
+    /// wall-clock spread.
+    fn insert_link_full(
+        conn: &Connection,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+        valid_from: Option<&str>,
+        valid_until: Option<&str>,
+        observed_by: Option<&str>,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memory_links \
+             (source_id, target_id, relation, created_at, valid_from, valid_until, observed_by) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                source_id,
+                target_id,
+                relation,
+                now,
+                valid_from,
+                valid_until,
+                observed_by
+            ],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn kg_query_returns_outbound_neighbors_at_depth_1() {
+        let conn = test_db();
+        let src = make_memory("alpha", "kg/projects/alpha", Tier::Long, 5);
+        let n1 = make_memory("kickoff", "kg/projects/alpha", Tier::Long, 5);
+        let n2 = make_memory("design", "kg/projects/alpha", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &n1).unwrap();
+        insert(&conn, &n2).unwrap();
+        insert_link_full(
+            &conn,
+            &src.id,
+            &n1.id,
+            "related_to",
+            Some("2026-01-15T00:00:00+00:00"),
+            None,
+            Some("agent-1"),
+        );
+        insert_link_full(
+            &conn,
+            &src.id,
+            &n2.id,
+            "supersedes",
+            Some("2026-02-03T00:00:00+00:00"),
+            None,
+            Some("agent-2"),
+        );
+
+        let nodes = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        assert_eq!(nodes.len(), 2);
+        // Ordered by COALESCE(valid_from, created_at) ASC.
+        assert_eq!(nodes[0].target_id, n1.id);
+        assert_eq!(nodes[1].target_id, n2.id);
+        assert_eq!(nodes[0].title, "kickoff");
+        assert_eq!(nodes[0].relation, "related_to");
+        assert_eq!(nodes[0].observed_by.as_deref(), Some("agent-1"));
+        assert_eq!(nodes[0].depth, 1);
+        assert_eq!(nodes[0].path, format!("{}->{}", src.id, n1.id));
+        assert_eq!(nodes[0].target_namespace, "kg/projects/alpha");
+    }
+
+    #[test]
+    fn kg_query_filters_by_valid_at_window() {
+        let conn = test_db();
+        let src = make_memory("e", "ns", Tier::Long, 5);
+        let t1 = make_memory("e1", "ns", Tier::Long, 5);
+        let t2 = make_memory("e2", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &t1).unwrap();
+        insert(&conn, &t2).unwrap();
+        // t1 valid 2026-01-01 → 2026-02-01; t2 valid from 2026-03-01.
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t1.id,
+            "related_to",
+            Some("2026-01-01T00:00:00+00:00"),
+            Some("2026-02-01T00:00:00+00:00"),
+            None,
+        );
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t2.id,
+            "related_to",
+            Some("2026-03-01T00:00:00+00:00"),
+            None,
+            None,
+        );
+
+        // At 2026-01-15 only t1 is valid.
+        let n_jan = kg_query(
+            &conn,
+            &src.id,
+            1,
+            Some("2026-01-15T00:00:00+00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n_jan.len(), 1);
+        assert_eq!(n_jan[0].target_id, t1.id);
+
+        // At 2026-02-15 the first link is closed, the second hasn't
+        // started yet — empty.
+        let n_feb = kg_query(
+            &conn,
+            &src.id,
+            1,
+            Some("2026-02-15T00:00:00+00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(n_feb.is_empty());
+
+        // At 2026-04-01 only t2 is valid.
+        let n_apr = kg_query(
+            &conn,
+            &src.id,
+            1,
+            Some("2026-04-01T00:00:00+00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(n_apr.len(), 1);
+        assert_eq!(n_apr[0].target_id, t2.id);
+    }
+
+    #[test]
+    fn kg_query_skips_null_valid_from_when_valid_at_filter_active() {
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        let t = make_memory("t", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &t).unwrap();
+        // Link with NULL valid_from — must be invisible to a temporally
+        // scoped query (we cannot tell if it was valid at any point).
+        insert_link_full(&conn, &src.id, &t.id, "related_to", None, None, None);
+
+        let with_filter = kg_query(
+            &conn,
+            &src.id,
+            1,
+            Some("2026-01-15T00:00:00+00:00"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(with_filter.is_empty());
+
+        // Without the filter, the same link IS returned.
+        let without = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        assert_eq!(without.len(), 1);
+        assert_eq!(without[0].target_id, t.id);
+    }
+
+    #[test]
+    fn kg_query_filters_by_allowed_agents() {
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        let t1 = make_memory("t1", "ns", Tier::Long, 5);
+        let t2 = make_memory("t2", "ns", Tier::Long, 5);
+        let t3 = make_memory("t3", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &t1).unwrap();
+        insert(&conn, &t2).unwrap();
+        insert(&conn, &t3).unwrap();
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t1.id,
+            "related_to",
+            Some("2026-01-01T00:00:00+00:00"),
+            None,
+            Some("agent-a"),
+        );
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t2.id,
+            "related_to",
+            Some("2026-01-02T00:00:00+00:00"),
+            None,
+            Some("agent-b"),
+        );
+        // Link with NULL observed_by must be excluded once the agent
+        // filter is active (`NULL IN (...)` is NULL/false in SQLite).
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t3.id,
+            "related_to",
+            Some("2026-01-03T00:00:00+00:00"),
+            None,
+            None,
+        );
+
+        let allow_a = vec!["agent-a".to_string()];
+        let only_a = kg_query(&conn, &src.id, 1, None, Some(&allow_a), None).unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].target_id, t1.id);
+
+        let allow_both = vec!["agent-a".to_string(), "agent-b".to_string()];
+        let both = kg_query(&conn, &src.id, 1, None, Some(&allow_both), None).unwrap();
+        assert_eq!(both.len(), 2);
+    }
+
+    #[test]
+    fn kg_query_empty_allowed_agents_returns_zero_rows() {
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        let t = make_memory("t", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &t).unwrap();
+        insert_link_full(
+            &conn,
+            &src.id,
+            &t.id,
+            "related_to",
+            Some("2026-01-01T00:00:00+00:00"),
+            None,
+            Some("agent-a"),
+        );
+
+        // Sanity: no filter returns the link.
+        let unfiltered = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        assert_eq!(unfiltered.len(), 1);
+
+        // Empty allowlist == "no agents trusted" — must return zero
+        // rows, not silently fall through to the unfiltered path.
+        let empty: Vec<String> = Vec::new();
+        let none = kg_query(&conn, &src.id, 1, None, Some(&empty), None).unwrap();
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn kg_query_rejects_max_depth_zero() {
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        let err = kg_query(&conn, &src.id, 0, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("max_depth"));
+    }
+
+    #[test]
+    fn kg_query_rejects_unsupported_max_depth() {
+        // The first slice ships depth=1 only; depth>=2 must produce an
+        // explicit error so the recursive-CTE follow-up can lift the
+        // ceiling without surprising callers that already passed 2+.
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        let err = kg_query(&conn, &src.id, 2, None, None, None).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("max_depth=2"));
+        assert!(msg.contains("supported depth=1"));
+    }
+
+    #[test]
+    fn kg_query_limit_clamped_to_max() {
+        let conn = test_db();
+        let src = make_memory("s", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        for i in 0..3 {
+            let t = make_memory(&format!("t{i}"), "ns", Tier::Long, 5);
+            insert(&conn, &t).unwrap();
+            insert_link_full(
+                &conn,
+                &src.id,
+                &t.id,
+                "related_to",
+                Some(&format!("2026-01-{:02}T00:00:00+00:00", i + 1)),
+                None,
+                None,
+            );
+        }
+
+        // limit=usize::MAX clamps to KG_QUERY_MAX_LIMIT (1000),
+        // which is bigger than our 3 rows — all returned.
+        let all = kg_query(&conn, &src.id, 1, None, None, Some(usize::MAX)).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // limit=0 clamps up to 1.
+        let one = kg_query(&conn, &src.id, 1, None, None, Some(0)).unwrap();
+        assert_eq!(one.len(), 1);
+    }
+
+    #[test]
+    fn kg_query_empty_for_unknown_source() {
+        let conn = test_db();
+        let nodes = kg_query(&conn, "no-such-id", 1, None, None, None).unwrap();
+        assert!(nodes.is_empty());
     }
 
     #[test]

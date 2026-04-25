@@ -1180,6 +1180,13 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // link existed (with `previous_valid_until`); 404 when no link
         // matches the triple.
         .route("/api/v1/kg/invalidate", post(handlers::kg_invalidate))
+        // Pillar 2 / Stream C — KG outbound traversal ('expand
+        // neighbors'). REST mirror of the MCP `memory_kg_query` tool.
+        // POST is used because `allowed_agents` is a list. This build
+        // supports `max_depth=1` only; multi-hop traversal lands in a
+        // follow-up iteration. 422 when an unsupported max_depth is
+        // requested.
+        .route("/api/v1/kg/query", post(handlers::kg_query))
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))
