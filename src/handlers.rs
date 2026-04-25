@@ -2364,6 +2364,124 @@ pub async fn kg_invalidate(
     }
 }
 
+/// JSON body for `POST /api/v1/kg/query` (Pillar 2 / Stream C —
+/// `memory_kg_query`). POST is used because `allowed_agents` is a list;
+/// keeping it in a body avoids over-long query strings and keeps the
+/// surface symmetric with `POST /api/v1/kg/invalidate`. `max_depth`
+/// defaults to 1 in this build (multi-hop lands in a follow-up).
+#[derive(Debug, Deserialize)]
+pub struct KgQueryBody {
+    pub source_id: String,
+    pub max_depth: Option<usize>,
+    pub valid_at: Option<String>,
+    pub allowed_agents: Option<Vec<String>>,
+    pub limit: Option<usize>,
+}
+
+/// `POST /api/v1/kg/query` — REST mirror of the MCP `memory_kg_query`
+/// tool. Returns outbound depth=1 neighbors of `source_id` filtered by
+/// the temporal/agent windows. 400 for invalid IDs/timestamps; 422 when
+/// `max_depth` exceeds the supported ceiling (clearer than 500 for what
+/// is a documented limitation, not an internal error).
+pub async fn kg_query(State(state): State<Db>, Json(body): Json<KgQueryBody>) -> impl IntoResponse {
+    if let Err(e) = validate::validate_id(&body.source_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid source_id: {e}")})),
+        )
+            .into_response();
+    }
+    let max_depth = body.max_depth.unwrap_or(1);
+    let valid_at = body
+        .valid_at
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(t) = valid_at
+        && let Err(e) = validate::validate_expires_at_format(t)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid valid_at: {e}")})),
+        )
+            .into_response();
+    }
+    let allowed_agents: Option<Vec<String>> = body.allowed_agents.as_ref().map(|v| {
+        v.iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    });
+    if let Some(agents) = allowed_agents.as_ref() {
+        for a in agents {
+            if let Err(e) = validate::validate_agent_id(a) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid allowed_agents entry: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let lock = state.lock().await;
+    match db::kg_query(
+        &lock.0,
+        &body.source_id,
+        max_depth,
+        valid_at,
+        allowed_agents.as_deref(),
+        body.limit,
+    ) {
+        Ok(nodes) => {
+            let memories_json: Vec<serde_json::Value> = nodes
+                .iter()
+                .map(|n| {
+                    json!({
+                        "target_id": n.target_id,
+                        "relation": n.relation,
+                        "valid_from": n.valid_from,
+                        "valid_until": n.valid_until,
+                        "observed_by": n.observed_by,
+                        "title": n.title,
+                        "target_namespace": n.target_namespace,
+                        "depth": n.depth,
+                        "path": n.path,
+                    })
+                })
+                .collect();
+            let paths_json: Vec<&str> = nodes.iter().map(|n| n.path.as_str()).collect();
+            Json(json!({
+                "source_id": body.source_id,
+                "max_depth": max_depth,
+                "memories": memories_json,
+                "paths": paths_json,
+                "count": nodes.len(),
+            }))
+            .into_response()
+        }
+        Err(e) => {
+            // The `kg_query` DB layer raises explicit errors for
+            // depth=0 and for max_depth past the supported ceiling;
+            // those are caller-fixable, not server faults.
+            let msg = e.to_string();
+            if msg.contains("max_depth") {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(json!({"error": msg})),
+                )
+                    .into_response();
+            }
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn create_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,

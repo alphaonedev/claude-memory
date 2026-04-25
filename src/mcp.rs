@@ -237,6 +237,21 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_kg_query",
+                "description": "Pillar 2 / Stream C — outbound KG traversal from a source memory ('expand neighbors'). Returns one node per link reachable from `source_id`, with the link's temporal-validity columns (valid_from, valid_until, observed_by) and the target memory's title/namespace. Filters: `valid_at` keeps only links valid at that instant; `allowed_agents` keeps only links observed by an agent in the set (empty list returns zero rows by design — empty allowlist means 'no agents are trusted'). Ordered by COALESCE(valid_from, created_at) ASC for deterministic display. This build supports `max_depth=1` only; multi-hop recursive traversal lands in a follow-up iteration and a clear error is returned for `max_depth >= 2`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string", "description": "Memory ID whose outbound links form the traversal frontier. Typically an entity_id from memory_entity_register, but any memory works."},
+                        "max_depth": {"type": "integer", "minimum": 1, "maximum": 1, "default": 1, "description": "Hops from the source. This build supports 1 only ('expand neighbors'); larger values return an explicit error until the recursive-CTE slice ships."},
+                        "valid_at": {"type": "string", "description": "RFC3339 timestamp; only links valid at this instant (valid_from <= valid_at AND (valid_until IS NULL OR valid_until > valid_at)) are returned. Omit to skip the temporal filter (NULL valid_from rows are then included)."},
+                        "allowed_agents": {"type": "array", "items": {"type": "string"}, "description": "If provided, only links whose observed_by is in this set are returned. An empty array returns zero rows. Omit to skip the agent filter."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200, "description": "Max nodes returned. Clamped to [1, 1000]."}
+                    },
+                    "required": ["source_id"]
+                }
+            },
+            {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
                 "inputSchema": {
@@ -1684,6 +1699,78 @@ fn handle_kg_invalidate(conn: &rusqlite::Connection, params: &Value) -> Result<V
     }
 }
 
+fn handle_kg_query(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let source_id = params["source_id"]
+        .as_str()
+        .ok_or("source_id is required")?;
+    validate::validate_id(source_id).map_err(|e| e.to_string())?;
+
+    let max_depth = params["max_depth"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(1);
+
+    let valid_at = params["valid_at"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(t) = valid_at {
+        validate::validate_expires_at_format(t).map_err(|e| e.to_string())?;
+    }
+
+    let allowed_agents: Option<Vec<String>> = params["allowed_agents"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::trim).filter(|s| !s.is_empty()))
+            .map(str::to_string)
+            .collect()
+    });
+    if let Some(agents) = allowed_agents.as_ref() {
+        for a in agents {
+            validate::validate_agent_id(a).map_err(|e| e.to_string())?;
+        }
+    }
+
+    let limit = params["limit"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
+
+    let nodes = db::kg_query(
+        conn,
+        source_id,
+        max_depth,
+        valid_at,
+        allowed_agents.as_deref(),
+        limit,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let memories_json: Vec<Value> = nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "target_id": n.target_id,
+                "relation": n.relation,
+                "valid_from": n.valid_from,
+                "valid_until": n.valid_until,
+                "observed_by": n.observed_by,
+                "title": n.title,
+                "target_namespace": n.target_namespace,
+                "depth": n.depth,
+                "path": n.path,
+            })
+        })
+        .collect();
+    let paths_json: Vec<&str> = nodes.iter().map(|n| n.path.as_str()).collect();
+
+    Ok(json!({
+        "source_id": source_id,
+        "max_depth": max_depth,
+        "memories": memories_json,
+        "paths": paths_json,
+        "count": nodes.len(),
+    }))
+}
+
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
@@ -2908,6 +2995,7 @@ fn handle_request(
                 "memory_entity_get_by_alias" => handle_entity_get_by_alias(conn, arguments),
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
                 "memory_kg_invalidate" => handle_kg_invalidate(conn, arguments),
+                "memory_kg_query" => handle_kg_query(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
                 "memory_promote" => handle_promote(conn, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
@@ -3272,16 +3360,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_42_tools() {
+    fn tool_definitions_returns_43_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
         // (Pillar 2 / Stream B), and memory_kg_timeline +
-        // memory_kg_invalidate (Pillar 2 / Stream C) on top of the
-        // 36-tool v0.6.0.0 surface.
+        // memory_kg_invalidate + memory_kg_query (Pillar 2 / Stream C)
+        // on top of the 36-tool v0.6.0.0 surface.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 42);
+        assert_eq!(tools.len(), 43);
     }
 
     #[test]
@@ -3315,6 +3403,14 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"memory_kg_invalidate"));
+    }
+
+    #[test]
+    fn tool_definitions_include_kg_query() {
+        let defs = tool_definitions();
+        let tools = defs["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"memory_kg_query"));
     }
 
     #[test]

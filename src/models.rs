@@ -423,6 +423,25 @@ pub struct KgTimelineEvent {
     pub target_namespace: String,
 }
 
+/// One node returned by `db::kg_query` (Pillar 2 / Stream C —
+/// `memory_kg_query`). Each node represents a memory reachable from the
+/// query's source through one outbound link, carrying the link's
+/// temporal-validity columns plus the target memory's display fields and
+/// the traversal path. `depth` is the number of hops from the source
+/// (always 1 in this build; multi-hop lands in a follow-up iteration).
+#[derive(Debug, Clone, Serialize)]
+pub struct KgQueryNode {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub observed_by: Option<String>,
+    pub title: String,
+    pub target_namespace: String,
+    pub depth: usize,
+    pub path: String,
+}
+
 // ---------------------------------------------------------------------------
 // Task 1.9 — Governance Enforcement
 // ---------------------------------------------------------------------------
