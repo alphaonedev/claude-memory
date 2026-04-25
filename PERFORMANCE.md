@@ -68,9 +68,10 @@ reference hardware, not absolute floors for every machine.
 | Component | State | Where |
 |---|---|---|
 | Published budgets | ✅ landed | this file |
-| `ai-memory bench` subcommand | ✅ landed | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1), `memory_kg_query` (depth=1, depth=3, depth=5), `memory_kg_timeline` |
+| `ai-memory bench` subcommand | ✅ landed | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1), `memory_kg_query` (depth=1, depth=3, depth=5), `memory_kg_timeline`, `memory_get_taxonomy` (full tree), `memory_session_start` |
 | Per-tool MCP `tracing` spans | ✅ landed | `src/mcp.rs` `handle_request` — `mcp_tool_call` span carries `tool` + `rpc_id`; `elapsed_ms` emitted at exit |
 | KG operations in `bench` | ✅ landed | `src/bench.rs` — fan-out fixture (50 × 4 outbound, every link `valid_from`-stamped) drives `kg_query` depth=1 + `kg_timeline`; chain fixture (50 chains × 5 hops) drives `kg_query` depth=3 + depth=5 |
+| Hierarchy + hook in `bench` | ✅ landed | `src/bench.rs` — hierarchical fixture (5 top-level prefixes × 4 children × 5 leaves = 100 memories across 20 namespaces) drives `memory_get_taxonomy` (full tree) and `memory_session_start` (full `mcp::handle_session_start`, `llm = None`) |
 | Embedding-bound operations in `bench` | 🚧 Stream E follow-up | needs an embedder fixture decision (opt-in flag vs cfg(test) fake vs pre-cached model) — see iter-0017 handoff |
 | `bench.yml` CI workflow | ✅ landed | `.github/workflows/bench.yml` — gates every PR and trunk push on `ubuntu-latest`; uploads `bench-results` artifact (JSON + table) |
 | Measured numbers in CI history | ✅ collecting | each workflow run's summary carries the table; the JSON artifact is retained per GitHub Actions retention policy |
@@ -90,15 +91,17 @@ every pull request.
 
 ```
 $ ai-memory bench
-Operation                       Target (p95)   Measured (p95)   p50      p99      Status
-─────────────────────────────────────────────────────────────────────────────────────────
-memory_store (no embedding)     <   20 ms           0.4 ms         0.3      0.5    PASS
-memory_search (FTS5)            <  100 ms           0.5 ms         0.5      0.5    PASS
-memory_recall (hot, depth=1)    <   50 ms           4.8 ms         4.2      5.3    PASS
-memory_kg_query (depth=1)       <  100 ms           0.5 ms         0.5      0.5    PASS
-memory_kg_query (depth=3)       <  100 ms           0.6 ms         0.6      0.6    PASS
-memory_kg_query (depth=5)       <  250 ms           0.7 ms         0.6      1.0    PASS
-memory_kg_timeline              <  100 ms           0.1 ms         0.1      0.1    PASS
+Operation                           Target (p95)   Measured (p95)   p50      p99      Status
+─────────────────────────────────────────────────────────────────────────────────────────────
+memory_store (no embedding)         <   20 ms           0.5 ms         0.3      0.6    PASS
+memory_search (FTS5)                <  100 ms           0.5 ms         0.5      0.5    PASS
+memory_recall (hot, depth=1)        <   50 ms           4.3 ms         3.5      4.6    PASS
+memory_kg_query (depth=1)           <  100 ms           0.4 ms         0.2      0.4    PASS
+memory_kg_query (depth=3)           <  100 ms           0.6 ms         0.5      0.6    PASS
+memory_kg_query (depth=5)           <  250 ms           0.6 ms         0.6      0.6    PASS
+memory_kg_timeline                  <  100 ms           0.1 ms         0.1      0.1    PASS
+memory_get_taxonomy (full tree)     <  100 ms           4.4 ms         4.1      4.5    PASS
+memory_session_start                <  100 ms           3.6 ms         3.2      3.7    PASS
 ```
 
 `--iterations` and `--warmup` (clamped to `[1, 100_000]` and
@@ -118,6 +121,19 @@ end-to-end with no external service:
   nodes at depth=3 and all five at depth=5, so the recursive CTE is
   exercised at the documented depth ceiling rather than collapsing to
   a single hop.
+
+The hierarchy + hook rows share a single in-process fixture so the
+tree-walk and the Claude Code hook critical path see a non-trivial
+namespace graph rather than a flat root:
+
+- A **hierarchical fixture** (5 top-level prefixes × 4 children × 5
+  leaves = 100 memories across 20 nested namespaces under
+  `ai-memory-bench-tax/top-N/mid-M`) drives `memory_get_taxonomy`
+  (full tree) and `memory_session_start` (full
+  `mcp::handle_session_start` invocation, `llm = None` so the hook
+  measures the same `db::list` + JSON serialisation +
+  `inject_namespace_standard` an MCP client sees on every call,
+  without an external Ollama dependency).
 
 Embedding-bound paths (`memory_store` with embedding, `memory_recall`
 cold/full hybrid), the curator daemon, and the federation ack path are

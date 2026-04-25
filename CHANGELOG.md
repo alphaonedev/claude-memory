@@ -76,6 +76,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Performance Budgets + CI Guard"; budgets are now continuously
   enforced against trunk and PRs.
 
+- **`ai-memory bench` taxonomy + session_start coverage (Pillar 3 / Stream E)**
+  — the bench tool now exercises two more rows of the published
+  `PERFORMANCE.md` budget table: `memory_get_taxonomy` (full tree,
+  100 ms p95) and `memory_session_start` (Claude Code hook critical
+  path, 100 ms p95). Both share a single in-process hierarchical
+  fixture (5 top-level prefixes × 4 children × 5 leaves = 100 memories
+  spread across 20 nested namespaces under
+  `ai-memory-bench-tax/top-N/mid-M`). Taxonomy drives `db::get_taxonomy`
+  with the full `MAX_NAMESPACE_DEPTH` walk so the tree-assembly path is
+  exercised end to end; session_start drives
+  `mcp::handle_session_start` directly with `llm = None` so the bench
+  measures the same `db::list` + JSON serialisation +
+  `inject_namespace_standard` an MCP client sees on every
+  `memory_session_start` call, without an external Ollama dependency.
+  Local M4 measurements: taxonomy p95 ~4.4 ms, session_start p95
+  ~3.6 ms — both PASS, both well inside the 10% tolerance enforced by
+  `bench.yml`. Default `cargo test` and the `bench.yml` CI guard now
+  cover seven of the nine embedding-free rows in the budget table; the
+  remaining gap is `memory_check_duplicate` (embedding-bound, lands
+  alongside the `--with-embedding` ops). No new dependencies.
+
 - **`ai-memory bench` KG depth=3 + depth=5 coverage (Pillar 3 / Stream E)**
   — `memory_kg_query` is now exercised at the deepest hop of both
   documented budget buckets: depth=3 against the "depth ≤ 3" 100 ms

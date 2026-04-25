@@ -19,8 +19,18 @@
 //!       (50 chains × 5 hops each = 300 memories + 250 links). depth=3
 //!       hits the "depth ≤ 3" 100 ms budget bucket; depth=5 hits the
 //!       "depth ≤ 5" 250 ms tail-case bucket.
+//! - Hierarchy + hook critical path:
+//!     - `memory_get_taxonomy` against a hierarchical fixture (5
+//!       top-level prefixes × 4 children × 5 leaves = 100 memories
+//!       across 20 namespaces) so the tree-walk returns a non-trivial
+//!       node graph rather than a single flat root.
+//!     - `memory_session_start` invokes the full
+//!       `mcp::handle_session_start` against the same fixture so the
+//!       bench measures the Claude Code hook critical path
+//!       (`db::list` + JSON serialisation + `inject_namespace_standard`)
+//!       — not just `db::list` — without an LLM dependency.
 //!
-//! Both fixtures live in the same in-process disposable `SQLite` — no
+//! All fixtures live in the same in-process disposable `SQLite` — no
 //! external service required.
 //!
 //! Embedding-bound paths (`memory_store` with embedding,
@@ -74,6 +84,17 @@ pub enum Operation {
     KgQueryDepth5,
     /// `memory_kg_timeline` — ordered timeline for a single source.
     KgTimeline,
+    /// `memory_get_taxonomy` — full-tree namespace hierarchy walk
+    /// (Pillar 1 / Stream A). Driven against a fixture spanning multiple
+    /// nested namespaces so the tree assembly path is exercised end to
+    /// end. Budget 100 ms p95.
+    Taxonomy,
+    /// `memory_session_start` — full Claude Code hook critical path.
+    /// Invokes `mcp::handle_session_start` (with `llm = None`) so the
+    /// bench measures the same `db::list` + JSON serialisation +
+    /// `inject_namespace_standard` an MCP client sees on every
+    /// `tools/call`. Budget 100 ms p95.
+    SessionStart,
 }
 
 impl Operation {
@@ -87,6 +108,8 @@ impl Operation {
             Self::KgQueryDepth3 => "memory_kg_query (depth=3)",
             Self::KgQueryDepth5 => "memory_kg_query (depth=5)",
             Self::KgTimeline => "memory_kg_timeline",
+            Self::Taxonomy => "memory_get_taxonomy (full tree)",
+            Self::SessionStart => "memory_session_start",
         }
     }
 
@@ -94,9 +117,10 @@ impl Operation {
     ///
     /// `KgQueryDepth1` and `KgQueryDepth3` both fall in the
     /// "depth ≤ 3" (100 ms) bucket; `KgQueryDepth5` is the tail case
-    /// at "depth ≤ 5" (250 ms). `SearchFts` and `KgTimeline` happen to
-    /// share the same numeric budget as the depth ≤ 3 bucket despite
-    /// belonging to different table rows in `PERFORMANCE.md`.
+    /// at "depth ≤ 5" (250 ms). `SearchFts`, `KgTimeline`, `Taxonomy`,
+    /// and `SessionStart` happen to share the same numeric budget as
+    /// the depth ≤ 3 bucket despite belonging to different table rows
+    /// in `PERFORMANCE.md`.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub fn target_p95_ms(self) -> f64 {
@@ -108,6 +132,8 @@ impl Operation {
             Self::KgQueryDepth3 => 100.0,
             Self::KgQueryDepth5 => 250.0,
             Self::KgTimeline => 100.0,
+            Self::Taxonomy => 100.0,
+            Self::SessionStart => 100.0,
         }
     }
 }
@@ -171,6 +197,12 @@ pub fn run(conn: &Connection, config: &BenchConfig) -> Result<Vec<OperationResul
     let kg_query_d5 =
         run_kg_query_chain(conn, config, &kg_chain_sources, Operation::KgQueryDepth5, 5)?;
     let kg_timeline = run_kg_timeline(conn, config, &kg_sources)?;
+    // Taxonomy + session_start share a single hierarchical fixture so the
+    // tree-walk and the hook critical path see a non-trivial namespace
+    // graph rather than a single flat row.
+    let taxonomy_root = seed_taxonomy_fixture(conn)?;
+    let taxonomy = run_taxonomy(conn, config, &taxonomy_root)?;
+    let session_start = run_session_start(conn, config, &taxonomy_root)?;
     Ok(vec![
         store,
         search,
@@ -179,6 +211,8 @@ pub fn run(conn: &Connection, config: &BenchConfig) -> Result<Vec<OperationResul
         kg_query_d3,
         kg_query_d5,
         kg_timeline,
+        taxonomy,
+        session_start,
     ])
 }
 
@@ -351,6 +385,103 @@ fn run_kg_timeline(
     Ok(percentile_summary(Operation::KgTimeline, &samples))
 }
 
+/// Hierarchical fixture geometry used by `Taxonomy` and `SessionStart`.
+/// `TAXONOMY_FIXTURE_TOP × TAXONOMY_FIXTURE_MID × TAXONOMY_FIXTURE_LEAF`
+/// memories are spread across `TAXONOMY_FIXTURE_TOP × TAXONOMY_FIXTURE_MID`
+/// distinct namespaces under [`TAXONOMY_FIXTURE_ROOT`]. With the current
+/// constants that's 100 memories across 20 nested paths — small enough
+/// to keep the tree-walk inside the 100 ms budget on the M4 reference
+/// baseline, large enough that the assembled tree exercises both
+/// `count` and `subtree_count` accumulation.
+const TAXONOMY_FIXTURE_TOP: usize = 5;
+const TAXONOMY_FIXTURE_MID: usize = 4;
+const TAXONOMY_FIXTURE_LEAF: usize = 5;
+const TAXONOMY_FIXTURE_ROOT: &str = "ai-memory-bench-tax";
+
+/// `db::list` cap inside `mcp::handle_session_start`. The hook clamps
+/// any caller-supplied limit to this floor so the bench drives the same
+/// row budget the Claude Code hook does.
+const SESSION_START_LIST_CAP: usize = 50;
+
+/// Maximum nodes the bench's `db::get_taxonomy` walk pulls per call —
+/// scales with the seeded fixture so the full tree returns rather than
+/// being truncated. Stays well under the in-`db` `TAXONOMY_MAX_LIMIT`
+/// ceiling.
+fn taxonomy_fixture_node_count() -> usize {
+    TAXONOMY_FIXTURE_TOP * TAXONOMY_FIXTURE_MID
+}
+
+fn run_taxonomy(conn: &Connection, config: &BenchConfig, root: &str) -> Result<OperationResult> {
+    let total = config.warmup + config.iterations;
+    let limit = taxonomy_fixture_node_count() * 2;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        let start = Instant::now();
+        let _ = db::get_taxonomy(conn, Some(root), crate::models::MAX_NAMESPACE_DEPTH, limit)?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(Operation::Taxonomy, &samples))
+}
+
+fn run_session_start(
+    conn: &Connection,
+    config: &BenchConfig,
+    root: &str,
+) -> Result<OperationResult> {
+    // Drive the namespaces round-robin so every iteration touches a
+    // populated subtree — `inject_namespace_standard` and the JSON
+    // serialiser both respond to namespace shape, so a single hot
+    // prefix would understate the realistic hook cost.
+    let namespaces: Vec<String> = (0..TAXONOMY_FIXTURE_TOP)
+        .flat_map(|t| (0..TAXONOMY_FIXTURE_MID).map(move |m| format!("{root}/top-{t}/mid-{m}")))
+        .collect();
+    let total = config.warmup + config.iterations;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        let ns = &namespaces[i % namespaces.len()];
+        let params = serde_json::json!({
+            "namespace": ns,
+            "limit": SESSION_START_LIST_CAP,
+        });
+        let start = Instant::now();
+        // `handle_session_start` returns Result<Value, String>; surface
+        // failures so a regression in the hook path fails the bench
+        // rather than silently producing zero-time samples.
+        crate::mcp::handle_session_start(conn, &params, None)
+            .map_err(|e| anyhow::anyhow!("handle_session_start: {e}"))?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(Operation::SessionStart, &samples))
+}
+
+/// Seed the hierarchical fixture used by `Taxonomy` and `SessionStart`.
+/// Lays out `TAXONOMY_FIXTURE_TOP × TAXONOMY_FIXTURE_MID` distinct
+/// namespaces under [`TAXONOMY_FIXTURE_ROOT`], each populated with
+/// `TAXONOMY_FIXTURE_LEAF` memories. Returns the root prefix so the
+/// runners can scope their queries against it. Title prefixes are
+/// disjoint from the existing `kg-src` / `kg-tgt` / `kg-chain-*`
+/// fixtures so all four coexist in the same connection without
+/// upsert collisions.
+fn seed_taxonomy_fixture(conn: &Connection) -> Result<String> {
+    for t in 0..TAXONOMY_FIXTURE_TOP {
+        for m in 0..TAXONOMY_FIXTURE_MID {
+            let ns = format!("{TAXONOMY_FIXTURE_ROOT}/top-{t}/mid-{m}");
+            for l in 0..TAXONOMY_FIXTURE_LEAF {
+                let idx = (t * TAXONOMY_FIXTURE_MID + m) * TAXONOMY_FIXTURE_LEAF + l;
+                let mem = synth_memory(&ns, idx, "tax-leaf");
+                db::insert(conn, &mem)?;
+            }
+        }
+    }
+    Ok(TAXONOMY_FIXTURE_ROOT.to_string())
+}
+
 /// Seed the in-process KG fixture: `KG_FIXTURE_SOURCES` source memories,
 /// each with `KG_FIXTURE_LINKS_PER_SOURCE` outbound links to distinct
 /// targets. Every link sets `valid_from` so `kg_timeline` (which skips
@@ -495,15 +626,18 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
 }
 
 /// Render a results table to a string in the same shape used in the
-/// `PERFORMANCE.md` "Operator Self-Verification" example.
+/// `PERFORMANCE.md` "Operator Self-Verification" example. The label
+/// column is 34 chars wide — enough to fit the longest current label
+/// (`memory_get_taxonomy (full tree)`, 31 chars) without spilling into
+/// the budget column.
 #[must_use]
 pub fn render_table(results: &[OperationResult]) -> String {
     let mut out = String::new();
     out.push_str(
-        "Operation                       Target (p95)   Measured (p95)   p50      p99      Status\n",
+        "Operation                           Target (p95)   Measured (p95)   p50      p99      Status\n",
     );
     out.push_str(
-        "─────────────────────────────────────────────────────────────────────────────────────────\n",
+        "─────────────────────────────────────────────────────────────────────────────────────────────\n",
     );
     for r in results {
         let status_str = match r.status {
@@ -517,7 +651,7 @@ pub fn render_table(results: &[OperationResult]) -> String {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_ms = r.target_p95_ms.round() as i64;
         let line = format!(
-            "{:<30}  < {:>4} ms       {:>7.1} ms       {:>5.1}    {:>5.1}    {}\n",
+            "{:<34}  < {:>4} ms       {:>7.1} ms       {:>5.1}    {:>5.1}    {}\n",
             r.label, target_ms, r.measured_p95_ms, r.measured_p50_ms, r.measured_p99_ms, status_str
         );
         out.push_str(&line);
@@ -557,10 +691,10 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_all_seven_results() {
+    fn run_returns_all_nine_results() {
         let conn = fresh_conn();
         let results = run(&conn, &small_config()).unwrap();
-        assert_eq!(results.len(), 7);
+        assert_eq!(results.len(), 9);
         assert_eq!(results[0].operation, Operation::StoreNoEmbedding);
         assert_eq!(results[1].operation, Operation::SearchFts);
         assert_eq!(results[2].operation, Operation::RecallHot);
@@ -568,6 +702,8 @@ mod tests {
         assert_eq!(results[4].operation, Operation::KgQueryDepth3);
         assert_eq!(results[5].operation, Operation::KgQueryDepth5);
         assert_eq!(results[6].operation, Operation::KgTimeline);
+        assert_eq!(results[7].operation, Operation::Taxonomy);
+        assert_eq!(results[8].operation, Operation::SessionStart);
         for r in &results {
             assert_eq!(r.samples, 30);
             assert!(r.measured_p50_ms <= r.measured_p95_ms);
@@ -621,6 +757,8 @@ mod tests {
         assert!(table.contains("memory_kg_query (depth=3)"));
         assert!(table.contains("memory_kg_query (depth=5)"));
         assert!(table.contains("memory_kg_timeline"));
+        assert!(table.contains("memory_get_taxonomy (full tree)"));
+        assert!(table.contains("memory_session_start"));
         assert!(table.contains("Status"));
     }
 
@@ -634,6 +772,8 @@ mod tests {
         assert!((Operation::KgQueryDepth3.target_p95_ms() - 100.0).abs() < 1e-9);
         assert!((Operation::KgQueryDepth5.target_p95_ms() - 250.0).abs() < 1e-9);
         assert!((Operation::KgTimeline.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::Taxonomy.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::SessionStart.target_p95_ms() - 100.0).abs() < 1e-9);
     }
 
     #[test]
@@ -658,6 +798,53 @@ mod tests {
                 "depth=3 on a {KG_CHAIN_FIXTURE_HOPS}-hop chain must reach exactly 3 follow-on nodes"
             );
         }
+    }
+
+    #[test]
+    fn seed_taxonomy_fixture_populates_nested_namespaces() {
+        let conn = fresh_conn();
+        let root = seed_taxonomy_fixture(&conn).unwrap();
+        // Pull the full tree out of the same path the bench runner uses
+        // so we cover both `seed_taxonomy_fixture` and the
+        // `db::get_taxonomy` shape the runner depends on.
+        let tax = db::get_taxonomy(
+            &conn,
+            Some(&root),
+            crate::models::MAX_NAMESPACE_DEPTH,
+            taxonomy_fixture_node_count() * 2,
+        )
+        .unwrap();
+        // total_count must equal the seeded leaf count — proves both
+        // the fixture and the prefix scoping are honest.
+        let expected_total = TAXONOMY_FIXTURE_TOP * TAXONOMY_FIXTURE_MID * TAXONOMY_FIXTURE_LEAF;
+        assert_eq!(tax.total_count, expected_total);
+        assert!(!tax.truncated, "fixture must fit inside the limit");
+        // Tree must reach the mid-level — top has TAXONOMY_FIXTURE_TOP
+        // children, each with TAXONOMY_FIXTURE_MID grandchildren.
+        assert_eq!(tax.tree.children.len(), TAXONOMY_FIXTURE_TOP);
+        for top in &tax.tree.children {
+            assert_eq!(top.children.len(), TAXONOMY_FIXTURE_MID);
+            for mid in &top.children {
+                assert_eq!(mid.count, TAXONOMY_FIXTURE_LEAF);
+            }
+        }
+    }
+
+    #[test]
+    fn session_start_runner_calls_handle_session_start() {
+        // Smoke test that the runner produces sample latencies and
+        // exercises `mcp::handle_session_start` against the seeded
+        // hierarchical fixture without panicking. A regression that
+        // breaks the hook (e.g. a `db::list` schema change) would
+        // surface here as a failed `Result` from `run_session_start`.
+        let conn = fresh_conn();
+        let root = seed_taxonomy_fixture(&conn).unwrap();
+        let cfg = small_config();
+        let result = run_session_start(&conn, &cfg, &root).unwrap();
+        assert_eq!(result.operation, Operation::SessionStart);
+        assert_eq!(result.samples, cfg.iterations);
+        assert!(result.measured_p95_ms >= 0.0);
+        assert!(result.measured_p50_ms <= result.measured_p95_ms);
     }
 
     #[test]
