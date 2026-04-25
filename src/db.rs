@@ -9,8 +9,9 @@ use std::path::Path;
 
 use crate::models::{
     AGENTS_NAMESPACE, AgentRegistration, Approval, ApproverType, GovernanceDecision,
-    GovernanceLevel, GovernancePolicy, GovernedAction, Memory, MemoryLink, NamespaceCount,
-    PROMOTION_THRESHOLD, PendingAction, Stats, Tier, TierCount, namespace_ancestors,
+    GovernanceLevel, GovernancePolicy, GovernedAction, MAX_NAMESPACE_DEPTH, Memory, MemoryLink,
+    NamespaceCount, PROMOTION_THRESHOLD, PendingAction, Stats, Taxonomy, TaxonomyNode, Tier,
+    TierCount, namespace_ancestors,
 };
 
 /// Computed 4-tuple of visibility prefixes for an agent position (Task 1.5).
@@ -1714,6 +1715,204 @@ pub fn list_namespaces(conn: &Connection) -> Result<Vec<NamespaceCount>> {
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
+}
+
+/// Hard cap on input groups walked when assembling a taxonomy tree.
+/// Even when callers pass a wildly large `limit`, we never walk more
+/// than this many `(namespace, count)` rows — bounds memory + time.
+const TAXONOMY_MAX_LIMIT: usize = 10_000;
+
+/// Build a hierarchical namespace taxonomy (Pillar 1 / Stream A).
+///
+/// Groups live (non-expired) memories by `namespace`, splits each on
+/// `/`, and folds them into a `TaxonomyNode` tree. The returned root
+/// represents `namespace_prefix` (or the synthetic empty-string root if
+/// no prefix is supplied); each child level descends one segment.
+///
+/// `max_depth` is interpreted as "show at most N levels *below the
+/// prefix*". Memories whose namespace would have required descending
+/// past the cutoff still contribute to the `subtree_count` of the
+/// boundary ancestor (their counts are not lost — only the leaf
+/// rendering is suppressed).
+///
+/// `limit` caps the number of input `(namespace, count)` rows we walk
+/// — when truncated, `total_count` still reflects the full prefix
+/// total (a separate aggregation), and `truncated` is set so callers
+/// can warn the user. Hard ceiling: [`TAXONOMY_MAX_LIMIT`].
+pub fn get_taxonomy(
+    conn: &Connection,
+    namespace_prefix: Option<&str>,
+    max_depth: usize,
+    limit: usize,
+) -> Result<Taxonomy> {
+    let now = Utc::now().to_rfc3339();
+    let effective_limit = limit.min(TAXONOMY_MAX_LIMIT);
+    // Clamp depth so callers asking for "everything" can't construct a
+    // pathological deep walk; the namespace validator already rejects
+    // depths > MAX_NAMESPACE_DEPTH on writes.
+    let effective_depth = max_depth.min(MAX_NAMESPACE_DEPTH);
+
+    let prefix = namespace_prefix.unwrap_or("");
+
+    // Total count for the prefix is computed independently of the
+    // truncated row walk so the caller-visible total stays honest even
+    // when `limit` drops rows from the tree.
+    let total_count: usize = if prefix.is_empty() {
+        let v: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE expires_at IS NULL OR expires_at > ?1",
+            params![now],
+            |row| row.get(0),
+        )?;
+        usize::try_from(v).unwrap_or(0)
+    } else {
+        let v: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories
+             WHERE (expires_at IS NULL OR expires_at > ?1)
+               AND (namespace = ?2 OR namespace LIKE ?2 || '/%')",
+            params![now, prefix],
+            |row| row.get(0),
+        )?;
+        usize::try_from(v).unwrap_or(0)
+    };
+
+    // Group rows ordered by count DESC so a small `limit` keeps the
+    // densest namespaces, then alphabetic for stable tie-breaking.
+    let groups: Vec<(String, usize)> = if prefix.is_empty() {
+        let mut stmt = conn.prepare(
+            "SELECT namespace, COUNT(*) FROM memories
+             WHERE expires_at IS NULL OR expires_at > ?1
+             GROUP BY namespace
+             ORDER BY COUNT(*) DESC, namespace ASC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![now, i64::try_from(effective_limit).unwrap_or(i64::MAX)],
+            |row| {
+                let ns: String = row.get(0)?;
+                let c: i64 = row.get(1)?;
+                Ok((ns, usize::try_from(c).unwrap_or(0)))
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT namespace, COUNT(*) FROM memories
+             WHERE (expires_at IS NULL OR expires_at > ?1)
+               AND (namespace = ?2 OR namespace LIKE ?2 || '/%')
+             GROUP BY namespace
+             ORDER BY COUNT(*) DESC, namespace ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![
+                now,
+                prefix,
+                i64::try_from(effective_limit).unwrap_or(i64::MAX)
+            ],
+            |row| {
+                let ns: String = row.get(0)?;
+                let c: i64 = row.get(1)?;
+                Ok((ns, usize::try_from(c).unwrap_or(0)))
+            },
+        )?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    let walked_count: usize = groups.iter().map(|(_, c)| *c).sum();
+    let truncated = walked_count < total_count;
+
+    // Synthesize the root node. `name` is the trailing segment of the
+    // prefix (or empty for the global root) so renderers can label it.
+    let root_name = prefix.rsplit('/').next().unwrap_or("").to_string();
+    let mut root = TaxonomyNode {
+        namespace: prefix.to_string(),
+        name: root_name,
+        count: 0,
+        subtree_count: 0,
+        children: Vec::new(),
+    };
+
+    for (ns, c) in groups {
+        // Compute path segments below the prefix. When prefix is empty,
+        // the whole namespace becomes the suffix; when ns == prefix
+        // exactly, segments is empty and the count lands on the root.
+        let suffix: &str = if prefix.is_empty() {
+            ns.as_str()
+        } else if ns == prefix {
+            ""
+        } else if ns.len() > prefix.len() + 1
+            && ns.starts_with(prefix)
+            && ns.as_bytes()[prefix.len()] == b'/'
+        {
+            &ns[prefix.len() + 1..]
+        } else {
+            // Defensive: SQL filter shouldn't return this, but skip rather
+            // than panic if it ever does (e.g. a stray match like
+            // "alphaone-sibling" matching prefix "alphaone").
+            continue;
+        };
+        let all_segments: Vec<&str> = if suffix.is_empty() {
+            Vec::new()
+        } else {
+            suffix.split('/').collect()
+        };
+        let take = all_segments.len().min(effective_depth);
+        let used = &all_segments[..take];
+        let exact_match_in_view = take == all_segments.len();
+
+        // Walk into the tree. Every ancestor's subtree_count grows by c
+        // — including the root — and only the deepest visible node's
+        // `count` does, and only when it represents the exact namespace
+        // (not a clamped boundary).
+        root.subtree_count += c;
+        if used.is_empty() {
+            root.count += c;
+            continue;
+        }
+
+        let mut path_so_far = prefix.to_string();
+        let mut node = &mut root;
+        for (i, seg) in used.iter().enumerate() {
+            if !path_so_far.is_empty() {
+                path_so_far.push('/');
+            }
+            path_so_far.push_str(seg);
+            let pos = node.children.iter().position(|ch| ch.name == *seg);
+            let idx = if let Some(p) = pos {
+                p
+            } else {
+                node.children.push(TaxonomyNode {
+                    namespace: path_so_far.clone(),
+                    name: (*seg).to_string(),
+                    count: 0,
+                    subtree_count: 0,
+                    children: Vec::new(),
+                });
+                node.children.len() - 1
+            };
+            node = &mut node.children[idx];
+            node.subtree_count += c;
+            let is_leaf = i + 1 == used.len();
+            if is_leaf && exact_match_in_view {
+                node.count += c;
+            }
+        }
+    }
+
+    sort_taxonomy(&mut root);
+
+    Ok(Taxonomy {
+        tree: root,
+        total_count,
+        truncated,
+    })
+}
+
+fn sort_taxonomy(node: &mut TaxonomyNode) {
+    node.children.sort_by(|a, b| a.name.cmp(&b.name));
+    for child in &mut node.children {
+        sort_taxonomy(child);
+    }
 }
 
 /// Register or refresh an agent in the reserved `_agents` namespace.
@@ -4007,6 +4206,160 @@ mod tests {
 
         let ns = list_namespaces(&conn).unwrap();
         assert_eq!(ns.len(), 2);
+    }
+
+    #[test]
+    fn taxonomy_flat_namespaces_only() {
+        // No `/` anywhere — every namespace is a direct child of the root.
+        let conn = test_db();
+        insert(&conn, &make_memory("A", "alpha", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "alpha", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("C", "beta", Tier::Long, 5)).unwrap();
+
+        let tax = get_taxonomy(&conn, None, 8, 1000).unwrap();
+        assert_eq!(tax.total_count, 3);
+        assert!(!tax.truncated);
+        assert_eq!(tax.tree.namespace, "");
+        assert_eq!(tax.tree.subtree_count, 3);
+        assert_eq!(tax.tree.count, 0); // no memories at the synthetic root
+        assert_eq!(tax.tree.children.len(), 2);
+        let alpha = tax
+            .tree
+            .children
+            .iter()
+            .find(|c| c.name == "alpha")
+            .unwrap();
+        assert_eq!(alpha.count, 2);
+        assert_eq!(alpha.subtree_count, 2);
+        assert!(alpha.children.is_empty());
+        let beta = tax.tree.children.iter().find(|c| c.name == "beta").unwrap();
+        assert_eq!(beta.count, 1);
+    }
+
+    #[test]
+    fn taxonomy_hierarchical_tree() {
+        // Mixed depths: tree must aggregate counts up the spine.
+        let conn = test_db();
+        insert(&conn, &make_memory("a", "alphaone", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("b", "alphaone/eng", Tier::Long, 5)).unwrap();
+        insert(
+            &conn,
+            &make_memory("c", "alphaone/eng/platform", Tier::Long, 5),
+        )
+        .unwrap();
+        insert(
+            &conn,
+            &make_memory("d", "alphaone/eng/platform", Tier::Long, 5),
+        )
+        .unwrap();
+        insert(&conn, &make_memory("e", "alphaone/sales", Tier::Long, 5)).unwrap();
+
+        let tax = get_taxonomy(&conn, None, 8, 1000).unwrap();
+        assert_eq!(tax.total_count, 5);
+        assert_eq!(tax.tree.subtree_count, 5);
+        assert_eq!(tax.tree.children.len(), 1);
+
+        let alphaone = &tax.tree.children[0];
+        assert_eq!(alphaone.name, "alphaone");
+        assert_eq!(alphaone.namespace, "alphaone");
+        assert_eq!(alphaone.count, 1); // memory "a" lives at exactly "alphaone"
+        assert_eq!(alphaone.subtree_count, 5);
+        assert_eq!(alphaone.children.len(), 2);
+
+        let eng = alphaone.children.iter().find(|c| c.name == "eng").unwrap();
+        assert_eq!(eng.namespace, "alphaone/eng");
+        assert_eq!(eng.count, 1);
+        assert_eq!(eng.subtree_count, 3);
+        let platform = &eng.children[0];
+        assert_eq!(platform.name, "platform");
+        assert_eq!(platform.namespace, "alphaone/eng/platform");
+        assert_eq!(platform.count, 2);
+        assert_eq!(platform.subtree_count, 2);
+        assert!(platform.children.is_empty());
+    }
+
+    #[test]
+    fn taxonomy_prefix_scopes_subtree() {
+        let conn = test_db();
+        insert(&conn, &make_memory("a", "alphaone/eng", Tier::Long, 5)).unwrap();
+        insert(
+            &conn,
+            &make_memory("b", "alphaone/eng/platform", Tier::Long, 5),
+        )
+        .unwrap();
+        insert(&conn, &make_memory("c", "alphaone/sales", Tier::Long, 5)).unwrap();
+        // Sibling that happens to share a string prefix — must NOT bleed in.
+        insert(&conn, &make_memory("d", "alphaone-sibling", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("e", "other", Tier::Long, 5)).unwrap();
+
+        let tax = get_taxonomy(&conn, Some("alphaone/eng"), 8, 1000).unwrap();
+        assert_eq!(tax.total_count, 2);
+        assert_eq!(tax.tree.namespace, "alphaone/eng");
+        assert_eq!(tax.tree.name, "eng");
+        assert_eq!(tax.tree.count, 1);
+        assert_eq!(tax.tree.subtree_count, 2);
+        assert_eq!(tax.tree.children.len(), 1);
+        assert_eq!(tax.tree.children[0].name, "platform");
+        assert_eq!(tax.tree.children[0].count, 1);
+    }
+
+    #[test]
+    fn taxonomy_depth_clamps_but_preserves_subtree_counts() {
+        let conn = test_db();
+        insert(
+            &conn,
+            &make_memory("a", "alphaone/eng/platform/db", Tier::Long, 5),
+        )
+        .unwrap();
+        insert(
+            &conn,
+            &make_memory("b", "alphaone/eng/platform/api", Tier::Long, 5),
+        )
+        .unwrap();
+
+        let tax = get_taxonomy(&conn, None, 2, 1000).unwrap();
+        assert_eq!(tax.total_count, 2);
+        let alphaone = &tax.tree.children[0];
+        let eng = &alphaone.children[0];
+        // Depth=2 below the empty prefix means we descend exactly two
+        // levels (alphaone → eng); deeper segments are folded into
+        // `eng.subtree_count` without rendering child nodes.
+        assert!(eng.children.is_empty());
+        assert_eq!(eng.subtree_count, 2);
+        assert_eq!(eng.count, 0); // nothing at exactly "alphaone/eng"
+    }
+
+    #[test]
+    fn taxonomy_excludes_expired_memories() {
+        // Mirror of `list_namespaces` semantics — expired rows must not
+        // count toward either the tree or `total_count`.
+        let conn = test_db();
+        let mut alive = make_memory("alive", "alpha", Tier::Long, 5);
+        let mut dead = make_memory("dead", "alpha", Tier::Short, 5);
+        // Force the short-tier memory's expiry into the past.
+        dead.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+        alive.expires_at = None;
+        insert(&conn, &alive).unwrap();
+        insert(&conn, &dead).unwrap();
+
+        let tax = get_taxonomy(&conn, None, 8, 1000).unwrap();
+        assert_eq!(tax.total_count, 1);
+        assert_eq!(tax.tree.children.len(), 1);
+        assert_eq!(tax.tree.children[0].count, 1);
+    }
+
+    #[test]
+    fn taxonomy_truncates_at_limit_but_total_stays_honest() {
+        let conn = test_db();
+        for ns in ["aa", "bb", "cc", "dd", "ee"] {
+            insert(&conn, &make_memory("m", ns, Tier::Long, 5)).unwrap();
+        }
+        let tax = get_taxonomy(&conn, None, 8, 2).unwrap();
+        // Limit drops 3 namespaces from the walk; total_count must
+        // still see all 5 memories so renderers can warn the user.
+        assert_eq!(tax.total_count, 5);
+        assert!(tax.truncated);
+        assert_eq!(tax.tree.children.len(), 2);
     }
 
     #[test]

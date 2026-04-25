@@ -1153,6 +1153,10 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             "/api/v1/namespaces/{ns}/standard",
             delete(handlers::clear_namespace_standard),
         )
+        // Pillar 1 / Stream A — hierarchical namespace taxonomy. REST
+        // mirror of the MCP `memory_get_taxonomy` tool. Query params:
+        // `prefix`, `depth`, `limit` (all optional).
+        .route("/api/v1/taxonomy", get(handlers::get_taxonomy))
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))

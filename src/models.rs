@@ -299,6 +299,45 @@ pub struct NamespaceCount {
     pub count: usize,
 }
 
+/// One node of the hierarchical namespace tree returned by
+/// `memory_get_taxonomy` (Pillar 1 / Stream A).
+///
+/// `count` is the number of memories at *exactly* this namespace;
+/// `subtree_count` is the count of memories at this node plus every
+/// descendant the depth limit allowed us to expand. Children are sorted
+/// alphabetically by `name` so callers get a stable rendering order.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaxonomyNode {
+    /// Full namespace path of this node. Empty string for the synthetic
+    /// root when no `namespace_prefix` is supplied.
+    pub namespace: String,
+    /// Last `/`-delimited segment of `namespace` (display label). Empty
+    /// for the synthetic root.
+    pub name: String,
+    /// Memories whose namespace equals this node's `namespace`.
+    pub count: usize,
+    /// Memories at this node plus all descendants visible within the
+    /// requested `depth`. Memories beneath the depth cutoff still
+    /// contribute to the `subtree_count` of the boundary ancestor.
+    pub subtree_count: usize,
+    /// Direct child nodes, sorted alphabetically by `name`.
+    pub children: Vec<TaxonomyNode>,
+}
+
+/// Result envelope returned by `db::get_taxonomy`.
+///
+/// `total_count` is the global memory count for the prefix (independent
+/// of `depth`/`limit` truncation) so callers can render an honest
+/// "X memories in N namespaces" header even when the tree was
+/// truncated. `truncated` is set when the `limit` parameter forced us
+/// to drop input rows when assembling the tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct Taxonomy {
+    pub tree: TaxonomyNode,
+    pub total_count: usize,
+    pub truncated: bool,
+}
+
 /// Namespace reserved for agent registrations (Task 1.3).
 pub const AGENTS_NAMESPACE: &str = "_agents";
 

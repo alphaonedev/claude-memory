@@ -1835,13 +1835,14 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 36, "expected 36 MCP tools");
+    assert_eq!(tools.len(), 37, "expected 37 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
     assert!(tool_names.contains(&"memory_recall"));
     assert!(tool_names.contains(&"memory_search"));
     assert!(tool_names.contains(&"memory_list"));
+    assert!(tool_names.contains(&"memory_get_taxonomy"));
     assert!(tool_names.contains(&"memory_delete"));
     assert!(tool_names.contains(&"memory_promote"));
     assert!(tool_names.contains(&"memory_forget"));

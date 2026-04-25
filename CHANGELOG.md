@@ -5,9 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.3 (Patch 3)
+## [Unreleased] — v0.6.3 (Patch 4)
 
 ### Added
+
+- **Hierarchical namespace taxonomy (Pillar 1 / Stream A)** — new
+  `memory_get_taxonomy` MCP tool plus REST mirror at
+  `GET /api/v1/taxonomy`. Walks live (non-expired) memories grouped by
+  `namespace`, splits on `/`, and folds them into a `TaxonomyNode` tree.
+  Each node carries `count` (memories at exactly this namespace) and
+  `subtree_count` (count plus every descendant the depth limit allowed
+  us to expand); the response envelope adds `total_count` (an
+  independent aggregation that stays honest even when `limit` drops
+  rows from the walk) and a `truncated` flag. Parameters:
+  `namespace_prefix` (optional, accepts trailing `/`),
+  `depth` (default 8 = `MAX_NAMESPACE_DEPTH`, clamped),
+  `limit` (default 1000, hard ceiling 10000 — densest namespaces win
+  when truncated). Closes the "flat blob" perception gap from charter
+  §"The Demo That Sells It" (charter lines 218–230) and unblocks the
+  taxonomy demo CLI surface deferred to a later iteration. Charter
+  §"Stream A — Hierarchy", lines 320–326.
 
 - **Temporal-validity KG schema (Stream B foundation)** — SQLite schema
   bumps to v15 (`src/db.rs::migrate`). `memory_links` gains four nullable

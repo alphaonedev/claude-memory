@@ -156,6 +156,18 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_get_taxonomy",
+                "description": "Pillar 1 / Stream A — return a hierarchical tree of namespaces with memory counts. Walks the `/`-delimited namespace paths grouped from live memories (expired rows excluded). Each node carries `count` (memories at exactly that namespace) and `subtree_count` (count plus all descendants visible within `depth`); the response also exposes `total_count` for the prefix and a `truncated` flag set when `limit` forced rows to be dropped from the tree.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace_prefix": {"type": "string", "description": "Restrict the tree to memories at this namespace OR any descendant. Omit to walk the full tree. Trailing '/' is tolerated."},
+                        "depth": {"type": "integer", "minimum": 0, "maximum": 8, "default": 8, "description": "Max levels to descend below the prefix. Memories deeper than this still contribute to `subtree_count` of the boundary ancestor."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 10000, "default": 1000, "description": "Cap on `(namespace, count)` rows walked when assembling the tree. Densest namespaces win when truncated."}
+                    }
+                }
+            },
+            {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
                 "inputSchema": {
@@ -1343,6 +1355,36 @@ fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"results": results, "count": results.len()}))
+}
+
+fn handle_get_taxonomy(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    // Defaults match the JSON schema. Trailing '/' is forgiven so MCP
+    // clients can pass either `"alpha"` or `"alpha/"` without an extra
+    // round trip — the underlying validate_namespace rejects the
+    // trailing slash form, so we strip it before validating.
+    let prefix_raw = params
+        .get("namespace_prefix")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let prefix_owned: Option<String> = prefix_raw.map(|s| s.trim_end_matches('/').to_string());
+    if let Some(p) = prefix_owned.as_deref() {
+        validate::validate_namespace(p).map_err(|e| e.to_string())?;
+    }
+    let depth = usize::try_from(params.get("depth").and_then(Value::as_u64).unwrap_or(8))
+        .unwrap_or(usize::MAX)
+        .min(crate::models::MAX_NAMESPACE_DEPTH);
+    let limit = usize::try_from(params.get("limit").and_then(Value::as_u64).unwrap_or(1000))
+        .unwrap_or(usize::MAX)
+        .clamp(1, 10_000);
+
+    let tax =
+        db::get_taxonomy(conn, prefix_owned.as_deref(), depth, limit).map_err(|e| e.to_string())?;
+    Ok(json!({
+        "tree": tax.tree,
+        "total_count": tax.total_count,
+        "truncated": tax.truncated,
+    }))
 }
 
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
@@ -2563,6 +2605,7 @@ fn handle_request(
                 ),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
+                "memory_get_taxonomy" => handle_get_taxonomy(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
                 "memory_promote" => handle_promote(conn, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
@@ -2927,13 +2970,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_36_tools() {
-        // v0.6.0.0 adds memory_notify + memory_inbox + memory_subscribe
-        // + memory_unsubscribe + memory_list_subscriptions on top of the
-        // 31 baseline.
+    fn tool_definitions_returns_37_tools() {
+        // v0.6.3 (Pillar 1 / Stream A) adds memory_get_taxonomy on top
+        // of the 36-tool v0.6.0.0 surface.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 36);
+        assert_eq!(tools.len(), 37);
     }
 
     #[test]

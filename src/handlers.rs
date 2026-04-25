@@ -1847,6 +1847,67 @@ pub async fn list_namespaces(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
+/// Query parameters for `GET /api/v1/taxonomy` (Pillar 1 / Stream A).
+#[derive(Debug, Deserialize)]
+pub struct TaxonomyQuery {
+    /// Restrict to memories at this namespace OR any descendant. Trailing
+    /// `/` is tolerated. Omit to walk the whole tree.
+    pub prefix: Option<String>,
+    /// Max levels to descend below the prefix (defaults to 8 — the
+    /// hierarchy hard cap).
+    pub depth: Option<usize>,
+    /// Cap on the number of `(namespace, count)` rows we walk into the
+    /// tree. Densest namespaces win when truncated. Defaults to 1000.
+    pub limit: Option<usize>,
+}
+
+/// `GET /api/v1/taxonomy` — REST mirror of the MCP `memory_get_taxonomy`
+/// tool. Returns the prefix's hierarchical tree with per-node and
+/// subtree counts, plus an honest `total_count` and a `truncated`
+/// flag when `limit` dropped rows from the walk.
+pub async fn get_taxonomy(
+    State(state): State<Db>,
+    Query(p): Query<TaxonomyQuery>,
+) -> impl IntoResponse {
+    let prefix_owned: Option<String> = p
+        .prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string());
+    if let Some(pref) = prefix_owned.as_deref()
+        && let Err(e) = validate::validate_namespace(pref)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid namespace_prefix: {e}")})),
+        )
+            .into_response();
+    }
+    let depth = p
+        .depth
+        .unwrap_or(crate::models::MAX_NAMESPACE_DEPTH)
+        .min(crate::models::MAX_NAMESPACE_DEPTH);
+    let limit = p.limit.unwrap_or(1000).clamp(1, 10_000);
+    let lock = state.lock().await;
+    match db::get_taxonomy(&lock.0, prefix_owned.as_deref(), depth, limit) {
+        Ok(tax) => Json(json!({
+            "tree": tax.tree,
+            "total_count": tax.total_count,
+            "truncated": tax.truncated,
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn create_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,
