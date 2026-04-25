@@ -2322,6 +2322,62 @@ pub fn kg_timeline(
         .map_err(Into::into)
 }
 
+/// Outcome of [`invalidate_link`] (Pillar 2 / Stream C —
+/// `memory_kg_invalidate`). `valid_until` is the timestamp now stored on
+/// the link; `previous_valid_until` is the prior value, or `None` if
+/// this was the first invalidation. Callers can use the prior value to
+/// distinguish a fresh supersession from an idempotent retry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidateResult {
+    pub valid_until: String,
+    pub previous_valid_until: Option<String>,
+}
+
+/// Mark a KG link as superseded by setting its `valid_until` column
+/// (Pillar 2 / Stream C — `memory_kg_invalidate`). Returns `Ok(None)`
+/// when the `(source_id, target_id, relation)` triple does not match an
+/// existing link. The supplied `valid_until` defaults to the current
+/// wall-clock time in RFC3339 form when omitted; callers needing
+/// historical or future supersession can pass an explicit value.
+///
+/// Idempotent: calling repeatedly overwrites the prior `valid_until`
+/// (the prior value is returned in `previous_valid_until` so callers
+/// can detect the overwrite). The schema does not yet carry an audit
+/// column for the supersession reason; that arrives with v0.7
+/// attestation. Until then, callers should record the rationale in
+/// their own logs or a paired memory.
+pub fn invalidate_link(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+    valid_until: Option<&str>,
+) -> Result<Option<InvalidateResult>> {
+    let stamp = valid_until.map_or_else(|| Utc::now().to_rfc3339(), str::to_string);
+
+    let prior = match conn.query_row(
+        "SELECT valid_until FROM memory_links \
+         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+        params![source_id, target_id, relation],
+        |r| r.get::<_, Option<String>>(0),
+    ) {
+        Ok(v) => v,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    conn.execute(
+        "UPDATE memory_links SET valid_until = ?4 \
+         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+        params![source_id, target_id, relation, &stamp],
+    )?;
+
+    Ok(Some(InvalidateResult {
+        valid_until: stamp,
+        previous_valid_until: prior,
+    }))
+}
+
 /// List all aliases registered for an entity, ordered by registration
 /// time then alphabetical for stable display.
 fn list_entity_aliases(conn: &Connection, entity_id: &str) -> Result<Vec<String>> {
@@ -6152,6 +6208,177 @@ mod tests {
         let conn = test_db();
         let events = kg_timeline(&conn, "nonexistent-id", None, None, None).unwrap();
         assert!(events.is_empty());
+    }
+
+    // -- Pillar 2 / Stream C — kg_invalidate -------------------------------
+
+    #[test]
+    fn invalidate_link_sets_valid_until_to_provided_timestamp() {
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
+        let stamp = "2026-12-31T23:59:59+00:00";
+        let res = invalidate_link(&conn, &src.id, &tgt.id, "related_to", Some(stamp))
+            .unwrap()
+            .expect("link must exist");
+        assert_eq!(res.valid_until, stamp);
+        assert!(res.previous_valid_until.is_none());
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+                params![&src.id, &tgt.id, "related_to"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored.as_deref(), Some(stamp));
+    }
+
+    #[test]
+    fn invalidate_link_defaults_to_now_when_no_timestamp_provided() {
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
+        let res = invalidate_link(&conn, &src.id, &tgt.id, "related_to", None)
+            .unwrap()
+            .expect("link must exist");
+        // The default is wall-clock now; assert it parses as RFC3339 and
+        // is within a small window of the test's "now" (allow 60s skew
+        // to accommodate slow runners).
+        let parsed = chrono::DateTime::parse_from_rfc3339(&res.valid_until)
+            .expect("default valid_until must be RFC3339");
+        let now = chrono::Utc::now();
+        let drift = now.signed_duration_since(parsed.with_timezone(&chrono::Utc));
+        assert!(
+            drift.num_seconds().abs() < 60,
+            "default valid_until {} should be near now {now}",
+            res.valid_until
+        );
+    }
+
+    #[test]
+    fn invalidate_link_returns_none_for_unknown_triple() {
+        let conn = test_db();
+        // No memories or links created.
+        let res = invalidate_link(&conn, "missing-src", "missing-tgt", "related_to", None).unwrap();
+        assert!(res.is_none());
+    }
+
+    #[test]
+    fn invalidate_link_returns_none_when_relation_does_not_match() {
+        // Link exists for ("related_to") but caller asks for ("supersedes").
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
+        let res = invalidate_link(&conn, &src.id, &tgt.id, "supersedes", None).unwrap();
+        assert!(res.is_none(), "must not match across relation values");
+    }
+
+    #[test]
+    fn invalidate_link_overwrites_existing_valid_until_and_reports_prior() {
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
+        let first = "2026-06-01T00:00:00+00:00";
+        let second = "2026-12-01T00:00:00+00:00";
+        let r1 = invalidate_link(&conn, &src.id, &tgt.id, "related_to", Some(first))
+            .unwrap()
+            .unwrap();
+        assert!(r1.previous_valid_until.is_none());
+        let r2 = invalidate_link(&conn, &src.id, &tgt.id, "related_to", Some(second))
+            .unwrap()
+            .unwrap();
+        assert_eq!(r2.previous_valid_until.as_deref(), Some(first));
+        assert_eq!(r2.valid_until, second);
+    }
+
+    #[test]
+    fn invalidate_link_distinguishes_relation_when_multiple_links_share_endpoints() {
+        // Two links between the same pair, different relations. Invalidating
+        // one must not affect the other.
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
+        create_link(&conn, &src.id, &tgt.id, "supersedes").unwrap();
+        let stamp = "2026-07-15T12:00:00+00:00";
+        invalidate_link(&conn, &src.id, &tgt.id, "related_to", Some(stamp))
+            .unwrap()
+            .unwrap();
+        let related: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2 AND relation = 'related_to'",
+                params![&src.id, &tgt.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let supers: Option<String> = conn
+            .query_row(
+                "SELECT valid_until FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2 AND relation = 'supersedes'",
+                params![&src.id, &tgt.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(related.as_deref(), Some(stamp));
+        assert!(
+            supers.is_none(),
+            "the sibling 'supersedes' link must remain valid"
+        );
+    }
+
+    #[test]
+    fn invalidate_link_preserves_other_columns() {
+        // valid_from, observed_by, created_at, signature must not be
+        // touched by the invalidate UPDATE.
+        let conn = test_db();
+        let src = make_memory("inv-s", "test", Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memory_links \
+             (source_id, target_id, relation, created_at, valid_from, observed_by) \
+             VALUES (?1, ?2, 'related_to', ?3, '2026-01-01T00:00:00+00:00', 'agent-x')",
+            params![&src.id, &tgt.id, &now],
+        )
+        .unwrap();
+        invalidate_link(
+            &conn,
+            &src.id,
+            &tgt.id,
+            "related_to",
+            Some("2026-12-31T23:59:59+00:00"),
+        )
+        .unwrap()
+        .unwrap();
+        let (vf, ob, ca): (Option<String>, Option<String>, String) = conn
+            .query_row(
+                "SELECT valid_from, observed_by, created_at FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2 AND relation = 'related_to'",
+                params![&src.id, &tgt.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(vf.as_deref(), Some("2026-01-01T00:00:00+00:00"));
+        assert_eq!(ob.as_deref(), Some("agent-x"));
+        assert_eq!(ca, now);
     }
 
     #[test]

@@ -1835,7 +1835,7 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 41, "expected 41 MCP tools");
+    assert_eq!(tools.len(), 42, "expected 42 MCP tools");
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
@@ -1847,6 +1847,7 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"memory_entity_register"));
     assert!(tool_names.contains(&"memory_entity_get_by_alias"));
     assert!(tool_names.contains(&"memory_kg_timeline"));
+    assert!(tool_names.contains(&"memory_kg_invalidate"));
     assert!(tool_names.contains(&"memory_delete"));
     assert!(tool_names.contains(&"memory_promote"));
     assert!(tool_names.contains(&"memory_forget"));
