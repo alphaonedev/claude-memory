@@ -1161,6 +1161,15 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // mirror of the MCP `memory_check_duplicate` tool. Body:
         // `{title, content, namespace?, threshold?}`.
         .route("/api/v1/check_duplicate", post(handlers::check_duplicate))
+        // Pillar 2 / Stream B — entity registry. REST mirror of the
+        // `memory_entity_register` and `memory_entity_get_by_alias` MCP
+        // tools. POST body: `{canonical_name, namespace, aliases?, metadata?, agent_id?}`.
+        // GET query params: `alias` (required), `namespace?`.
+        .route("/api/v1/entities", post(handlers::entity_register))
+        .route(
+            "/api/v1/entities/by_alias",
+            get(handlers::entity_get_by_alias),
+        )
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))

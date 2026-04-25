@@ -2028,6 +2028,223 @@ pub fn check_duplicate(
     })
 }
 
+/// Register an entity (canonical name + aliases) under a namespace
+/// (Pillar 2 / Stream B).
+///
+/// An entity is stored as a long-tier memory:
+/// - `title = canonical_name`
+/// - `namespace = namespace`
+/// - `tags` includes [`ENTITY_TAG`]
+/// - `metadata.kind = "entity"` (so the resolver can never confuse an
+///   entity with a regular memory that happens to share a title)
+///
+/// Aliases live in the `entity_aliases` side table keyed by
+/// `(entity_id, alias)`.
+///
+/// **Idempotency:** if an entity with this `(canonical_name, namespace)`
+/// already exists, its ID is reused and `aliases` are merged with
+/// `INSERT OR IGNORE`. The returned [`EntityRegistration::created`] is
+/// `false` in that case.
+///
+/// **Collision detection:** if a non-entity memory already occupies
+/// `(title=canonical_name, namespace=namespace)`, the call errors
+/// rather than silently upgrading it (the upsert path on `insert`
+/// would otherwise overwrite the existing row's content/tags). Callers
+/// must rename the entity or its colliding memory.
+///
+/// `extra_metadata` is merged into the entity memory's metadata; any
+/// caller-supplied `kind` field is overwritten with `"entity"` and
+/// `agent_id` is stamped from the caller (NHI provenance) when
+/// `extra_metadata` does not already specify one.
+pub fn entity_register(
+    conn: &Connection,
+    canonical_name: &str,
+    namespace: &str,
+    aliases: &[String],
+    extra_metadata: &serde_json::Value,
+    agent_id: Option<&str>,
+) -> Result<crate::models::EntityRegistration> {
+    use crate::models::{ENTITY_KIND, ENTITY_TAG, EntityRegistration};
+
+    // Look up an existing entity in this namespace by canonical_name +
+    // metadata.kind. If a non-entity memory occupies the same
+    // (title, namespace), surface a hard error instead of upserting.
+    let existing_id: Option<String> = match conn.query_row(
+        "SELECT id FROM memories
+         WHERE namespace = ?1 AND title = ?2
+           AND COALESCE(json_extract(metadata, '$.kind'), '') = ?3",
+        params![namespace, canonical_name, ENTITY_KIND],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(id) => Some(id),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e.into()),
+    };
+
+    let (entity_id, created) = if let Some(id) = existing_id {
+        (id, false)
+    } else {
+        let collision: Option<String> = match conn.query_row(
+            "SELECT id FROM memories
+             WHERE namespace = ?1 AND title = ?2
+               AND COALESCE(json_extract(metadata, '$.kind'), '') != ?3",
+            params![namespace, canonical_name, ENTITY_KIND],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(id) => Some(id),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(e.into()),
+        };
+        if collision.is_some() {
+            anyhow::bail!(
+                "entity_register: title '{canonical_name}' in namespace '{namespace}' is already used by a non-entity memory"
+            );
+        }
+
+        // Build metadata: caller-supplied object merged, kind forced
+        // to "entity", agent_id preserved from caller when not set.
+        let mut meta_map = match extra_metadata {
+            serde_json::Value::Object(m) => m.clone(),
+            _ => serde_json::Map::new(),
+        };
+        meta_map.insert(
+            "kind".to_string(),
+            serde_json::Value::String(ENTITY_KIND.to_string()),
+        );
+        if let Some(a) = agent_id {
+            meta_map
+                .entry("agent_id".to_string())
+                .or_insert(serde_json::Value::String(a.to_string()));
+        }
+        let metadata = serde_json::Value::Object(meta_map);
+
+        let now = Utc::now().to_rfc3339();
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: namespace.to_string(),
+            title: canonical_name.to_string(),
+            content: canonical_name.to_string(),
+            tags: vec![ENTITY_TAG.to_string()],
+            priority: 7,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let id = insert(conn, &mem).context("insert entity memory")?;
+        (id, true)
+    };
+
+    let now = Utc::now().to_rfc3339();
+    {
+        let mut stmt = conn.prepare(
+            "INSERT OR IGNORE INTO entity_aliases (entity_id, alias, created_at)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for alias in aliases {
+            let trimmed = alias.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            stmt.execute(params![entity_id, trimmed, now])?;
+        }
+    }
+
+    let aliases_out = list_entity_aliases(conn, &entity_id)?;
+
+    Ok(EntityRegistration {
+        entity_id,
+        canonical_name: canonical_name.to_string(),
+        namespace: namespace.to_string(),
+        aliases: aliases_out,
+        created,
+    })
+}
+
+/// Resolve an alias to its registered entity (Pillar 2 / Stream B).
+///
+/// When `namespace` is `Some`, only entities in that namespace are
+/// considered. When `None`, all namespaces are searched and the
+/// most-recently-created matching entity wins (deterministic
+/// disambiguation when the same alias was registered in multiple
+/// namespaces).
+///
+/// Returns `Ok(None)` if no entity claims this alias under the given
+/// filter. Returns the full alias set for the resolved entity.
+pub fn entity_get_by_alias(
+    conn: &Connection,
+    alias: &str,
+    namespace: Option<&str>,
+) -> Result<Option<crate::models::EntityRecord>> {
+    use crate::models::{ENTITY_KIND, EntityRecord};
+
+    let trimmed = alias.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let row: std::result::Result<(String, String, String), rusqlite::Error> =
+        if let Some(ns) = namespace {
+            conn.query_row(
+                "SELECT m.id, m.title, m.namespace
+                 FROM entity_aliases ea
+                 JOIN memories m ON m.id = ea.entity_id
+                 WHERE ea.alias = ?1
+                   AND m.namespace = ?2
+                   AND COALESCE(json_extract(m.metadata, '$.kind'), '') = ?3
+                 ORDER BY m.created_at DESC
+                 LIMIT 1",
+                params![trimmed, ns, ENTITY_KIND],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        } else {
+            conn.query_row(
+                "SELECT m.id, m.title, m.namespace
+                 FROM entity_aliases ea
+                 JOIN memories m ON m.id = ea.entity_id
+                 WHERE ea.alias = ?1
+                   AND COALESCE(json_extract(m.metadata, '$.kind'), '') = ?2
+                 ORDER BY m.created_at DESC
+                 LIMIT 1",
+                params![trimmed, ENTITY_KIND],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+        };
+
+    let (entity_id, canonical_name, ns) = match row {
+        Ok(t) => t,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+
+    let aliases = list_entity_aliases(conn, &entity_id)?;
+    Ok(Some(EntityRecord {
+        entity_id,
+        canonical_name,
+        namespace: ns,
+        aliases,
+    }))
+}
+
+/// List all aliases registered for an entity, ordered by registration
+/// time then alphabetical for stable display.
+fn list_entity_aliases(conn: &Connection, entity_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT alias FROM entity_aliases
+         WHERE entity_id = ?1
+         ORDER BY created_at ASC, alias ASC",
+    )?;
+    let aliases: Vec<String> = stmt
+        .query_map(params![entity_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(aliases)
+}
+
 /// Register or refresh an agent in the reserved `_agents` namespace.
 ///
 /// Each agent is stored as a long-tier memory with `title = "agent:<agent_id>"`.
@@ -5362,6 +5579,238 @@ mod tests {
             params!["e1", "Alpha", &now],
         );
         assert!(dup.is_err(), "expected PK uniqueness violation");
+    }
+
+    // -- Pillar 2 / Stream B — entity_register / entity_get_by_alias ------
+
+    #[test]
+    fn entity_register_creates_new_entity_with_aliases() {
+        let conn = test_db();
+        let aliases = vec!["pa".to_string(), "Project A".to_string()];
+        let reg = entity_register(
+            &conn,
+            "Project Alpha",
+            "projects/alpha",
+            &aliases,
+            &serde_json::json!({}),
+            Some("test-agent"),
+        )
+        .unwrap();
+        assert!(reg.created, "first registration must be created=true");
+        assert_eq!(reg.canonical_name, "Project Alpha");
+        assert_eq!(reg.namespace, "projects/alpha");
+        // Aliases inserted in one call share a created_at; the
+        // secondary `alias ASC` sort orders 'P' before 'p'.
+        assert_eq!(reg.aliases, vec!["Project A".to_string(), "pa".to_string()]);
+
+        let m = get(&conn, &reg.entity_id).unwrap().unwrap();
+        assert_eq!(m.title, "Project Alpha");
+        assert_eq!(m.tier.rank(), Tier::Long.rank());
+        assert!(m.tags.contains(&"entity".to_string()));
+        assert_eq!(m.metadata["kind"], "entity");
+        assert_eq!(m.metadata["agent_id"], "test-agent");
+    }
+
+    #[test]
+    fn entity_register_reuses_existing_and_merges_aliases() {
+        let conn = test_db();
+        let first = entity_register(
+            &conn,
+            "Project Alpha",
+            "projects/alpha",
+            &["pa".to_string()],
+            &serde_json::json!({}),
+            Some("a1"),
+        )
+        .unwrap();
+        let second = entity_register(
+            &conn,
+            "Project Alpha",
+            "projects/alpha",
+            &["pa".to_string(), "alpha".to_string()],
+            &serde_json::json!({}),
+            Some("a2"),
+        )
+        .unwrap();
+        assert!(first.created);
+        assert!(!second.created, "second call must reuse the entity");
+        assert_eq!(first.entity_id, second.entity_id);
+        assert_eq!(second.aliases, vec!["pa".to_string(), "alpha".to_string()]);
+    }
+
+    #[test]
+    fn entity_register_errors_on_collision_with_non_entity_memory() {
+        let conn = test_db();
+        let mem = make_memory("Conflict", "projects/alpha", Tier::Long, 5);
+        insert(&conn, &mem).unwrap();
+        let err = entity_register(
+            &conn,
+            "Conflict",
+            "projects/alpha",
+            &[],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("non-entity memory"),
+            "expected collision error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn entity_register_skips_blank_aliases() {
+        let conn = test_db();
+        let reg = entity_register(
+            &conn,
+            "Trim Test",
+            "test",
+            &["".to_string(), "   ".to_string(), "ok".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(reg.aliases, vec!["ok".to_string()]);
+    }
+
+    #[test]
+    fn entity_register_preserves_caller_metadata_keys() {
+        let conn = test_db();
+        let extra = serde_json::json!({"team": "platform", "kind": "ignored"});
+        let reg = entity_register(&conn, "Service X", "svc", &[], &extra, None).unwrap();
+        let m = get(&conn, &reg.entity_id).unwrap().unwrap();
+        assert_eq!(m.metadata["team"], "platform");
+        // Caller's `kind` is overwritten — entity records must always
+        // carry kind=entity for the resolver to find them.
+        assert_eq!(m.metadata["kind"], "entity");
+    }
+
+    #[test]
+    fn entity_get_by_alias_returns_record_with_full_alias_set() {
+        let conn = test_db();
+        let reg = entity_register(
+            &conn,
+            "Project Alpha",
+            "projects/alpha",
+            &["pa".to_string(), "alpha".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        let got = entity_get_by_alias(&conn, "pa", None).unwrap().unwrap();
+        assert_eq!(got.entity_id, reg.entity_id);
+        assert_eq!(got.canonical_name, "Project Alpha");
+        assert_eq!(got.namespace, "projects/alpha");
+        // Same-batch aliases share a created_at; alphabetical
+        // tiebreak puts "alpha" before "pa".
+        assert_eq!(got.aliases, vec!["alpha".to_string(), "pa".to_string()]);
+    }
+
+    #[test]
+    fn entity_get_by_alias_returns_none_for_unknown_alias() {
+        let conn = test_db();
+        let got = entity_get_by_alias(&conn, "missing", None).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn entity_get_by_alias_filters_by_namespace() {
+        let conn = test_db();
+        entity_register(
+            &conn,
+            "Acme",
+            "ns_a",
+            &["a".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        entity_register(
+            &conn,
+            "Acme Corp",
+            "ns_b",
+            &["a".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        let in_a = entity_get_by_alias(&conn, "a", Some("ns_a"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_a.namespace, "ns_a");
+        assert_eq!(in_a.canonical_name, "Acme");
+        let in_b = entity_get_by_alias(&conn, "a", Some("ns_b"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(in_b.namespace, "ns_b");
+        assert_eq!(in_b.canonical_name, "Acme Corp");
+    }
+
+    #[test]
+    fn entity_get_by_alias_without_namespace_picks_most_recent() {
+        let conn = test_db();
+        // Older entity created first.
+        entity_register(
+            &conn,
+            "Older",
+            "ns_old",
+            &["dup".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        // Sleep just enough to guarantee a strictly later created_at.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        entity_register(
+            &conn,
+            "Newer",
+            "ns_new",
+            &["dup".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        let got = entity_get_by_alias(&conn, "dup", None).unwrap().unwrap();
+        assert_eq!(got.canonical_name, "Newer");
+        assert_eq!(got.namespace, "ns_new");
+    }
+
+    #[test]
+    fn entity_get_by_alias_ignores_non_entity_memory_with_matching_alias() {
+        let conn = test_db();
+        // Insert a regular (non-entity) memory and a stray
+        // entity_aliases row pointing at it. The resolver must skip
+        // it because `kind != 'entity'`.
+        let mut mem = make_memory("Decoy", "test", Tier::Long, 5);
+        mem.metadata = serde_json::json!({});
+        let mid = insert(&conn, &mem).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO entity_aliases (entity_id, alias, created_at) VALUES (?1, ?2, ?3)",
+            params![&mid, "decoy", &now],
+        )
+        .unwrap();
+        let got = entity_get_by_alias(&conn, "decoy", None).unwrap();
+        assert!(got.is_none(), "non-entity memories must not resolve");
+    }
+
+    #[test]
+    fn entity_register_idempotent_aliases_are_deduped() {
+        let conn = test_db();
+        let reg = entity_register(
+            &conn,
+            "Dedup",
+            "test",
+            &["x".to_string(), "x".to_string(), "y".to_string()],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        // INSERT OR IGNORE collapses the duplicate "x".
+        assert_eq!(reg.aliases.len(), 2);
+        assert!(reg.aliases.contains(&"x".to_string()));
+        assert!(reg.aliases.contains(&"y".to_string()));
     }
 
     #[test]

@@ -2025,6 +2025,185 @@ pub async fn check_duplicate(
     .into_response()
 }
 
+/// Request body for `POST /api/v1/entities` (Pillar 2 / Stream B).
+#[derive(Debug, Deserialize)]
+pub struct EntityRegisterBody {
+    pub canonical_name: String,
+    pub namespace: String,
+    /// Aliases that should resolve to this entity. Blanks are skipped;
+    /// duplicates collapse via `entity_aliases`'s primary key.
+    #[serde(default)]
+    pub aliases: Vec<String>,
+    /// Arbitrary metadata to merge onto the entity memory. `kind` is
+    /// always overwritten with `"entity"`.
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+    /// Override the resolved NHI for this request's
+    /// `metadata.agent_id`. Falls back to the `X-Agent-Id` header
+    /// when omitted.
+    pub agent_id: Option<String>,
+}
+
+/// Query parameters for `GET /api/v1/entities/by_alias` (Pillar 2 /
+/// Stream B).
+#[derive(Debug, Deserialize)]
+pub struct EntityByAliasQuery {
+    pub alias: String,
+    pub namespace: Option<String>,
+}
+
+/// `POST /api/v1/entities` — REST mirror of the MCP
+/// `memory_entity_register` tool. Idempotent on
+/// `(canonical_name, namespace)`; merges aliases on re-registration.
+pub async fn entity_register(
+    State(state): State<Db>,
+    headers: HeaderMap,
+    Json(body): Json<EntityRegisterBody>,
+) -> impl IntoResponse {
+    if let Err(e) = validate::validate_title(&body.canonical_name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid canonical_name: {e}")})),
+        )
+            .into_response();
+    }
+    if let Err(e) = validate::validate_namespace(&body.namespace) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid namespace: {e}")})),
+        )
+            .into_response();
+    }
+
+    let agent_id = body
+        .agent_id
+        .as_deref()
+        .or_else(|| headers.get("x-agent-id").and_then(|v| v.to_str().ok()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    if let Some(aid) = agent_id.as_deref()
+        && let Err(e) = validate::validate_agent_id(aid)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid agent_id: {e}")})),
+        )
+            .into_response();
+    }
+
+    let extra_metadata = if body.metadata.is_object() {
+        body.metadata.clone()
+    } else {
+        json!({})
+    };
+
+    let lock = state.lock().await;
+    match db::entity_register(
+        &lock.0,
+        &body.canonical_name,
+        &body.namespace,
+        &body.aliases,
+        &extra_metadata,
+        agent_id.as_deref(),
+    ) {
+        Ok(reg) => {
+            let status = if reg.created {
+                StatusCode::CREATED
+            } else {
+                StatusCode::OK
+            };
+            (
+                status,
+                Json(json!({
+                    "entity_id": reg.entity_id,
+                    "canonical_name": reg.canonical_name,
+                    "namespace": reg.namespace,
+                    "aliases": reg.aliases,
+                    "created": reg.created,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            // Title-collision errors carry a stable, recognisable
+            // substring; surface them as 409 Conflict so callers can
+            // distinguish a genuine name clash from internal failure.
+            let msg = e.to_string();
+            if msg.contains("non-entity memory") {
+                return (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response();
+            }
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /api/v1/entities/by_alias?alias=<>&namespace=<>` — REST mirror
+/// of the MCP `memory_entity_get_by_alias` tool. Returns
+/// `{ found: false, ... }` with HTTP 200 when no entity claims the
+/// alias under the filter, so callers don't have to disambiguate
+/// "no match" from a server error.
+pub async fn entity_get_by_alias(
+    State(state): State<Db>,
+    Query(p): Query<EntityByAliasQuery>,
+) -> impl IntoResponse {
+    let alias = p.alias.trim();
+    if alias.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "alias is required"})),
+        )
+            .into_response();
+    }
+    let namespace = p
+        .namespace
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(ns) = namespace
+        && let Err(e) = validate::validate_namespace(ns)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid namespace: {e}")})),
+        )
+            .into_response();
+    }
+
+    let lock = state.lock().await;
+    match db::entity_get_by_alias(&lock.0, alias, namespace) {
+        Ok(Some(rec)) => Json(json!({
+            "found": true,
+            "entity_id": rec.entity_id,
+            "canonical_name": rec.canonical_name,
+            "namespace": rec.namespace,
+            "aliases": rec.aliases,
+        }))
+        .into_response(),
+        Ok(None) => Json(json!({
+            "found": false,
+            "entity_id": null,
+            "canonical_name": null,
+            "namespace": null,
+            "aliases": [],
+        }))
+        .into_response(),
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn create_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,

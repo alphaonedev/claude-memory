@@ -182,6 +182,33 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_entity_register",
+                "description": "Pillar 2 / Stream B — register an entity (canonical name + aliases) under a namespace. Entities are stored as long-tier memories tagged 'entity' with metadata.kind='entity', so the (title, namespace) coordinate is shared with regular memories without ambiguity. Idempotent: re-registering the same canonical_name+namespace reuses the existing entity_id and merges any new aliases. Errors when the namespace+canonical_name already names a non-entity memory.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "canonical_name": {"type": "string", "description": "Display name for the entity. Stored as the entity memory's title."},
+                        "namespace": {"type": "string", "description": "Namespace under which the entity lives. Hierarchy paths (e.g. 'projects/alpha') are accepted."},
+                        "aliases": {"type": "array", "items": {"type": "string"}, "description": "Aliases that should resolve to this entity. Blank entries are skipped; duplicates are de-duped via the entity_aliases primary key."},
+                        "metadata": {"type": "object", "description": "Arbitrary metadata to attach to the entity memory. Caller-supplied 'kind' is overwritten with 'entity'; agent_id is stamped from the NHI caller when not specified."},
+                        "agent_id": {"type": "string", "description": "Override the caller's resolved NHI for the entity memory's metadata.agent_id."}
+                    },
+                    "required": ["canonical_name", "namespace"]
+                }
+            },
+            {
+                "name": "memory_entity_get_by_alias",
+                "description": "Pillar 2 / Stream B — resolve an alias to its registered entity. When 'namespace' is provided, only entities in that namespace are returned. When omitted, the most recently created matching entity wins. Returns null when no entity claims the alias under the given filter.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "alias": {"type": "string", "description": "Alias string to resolve. Whitespace is trimmed."},
+                        "namespace": {"type": "string", "description": "Restrict the resolution to this namespace. Omit to search all namespaces."}
+                    },
+                    "required": ["alias"]
+                }
+            },
+            {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
                 "inputSchema": {
@@ -1459,6 +1486,91 @@ fn handle_check_duplicate(
     }))
 }
 
+fn handle_entity_register(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    let canonical_name = params["canonical_name"]
+        .as_str()
+        .ok_or("canonical_name is required")?;
+    let namespace = params["namespace"]
+        .as_str()
+        .ok_or("namespace is required")?;
+    let aliases: Vec<String> = params["aliases"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let extra_metadata = if params["metadata"].is_object() {
+        params["metadata"].clone()
+    } else {
+        json!({})
+    };
+    let explicit_agent_id = params["agent_id"].as_str();
+
+    validate::validate_title(canonical_name).map_err(|e| e.to_string())?;
+    validate::validate_namespace(namespace).map_err(|e| e.to_string())?;
+    if let Some(aid) = explicit_agent_id {
+        validate::validate_agent_id(aid).map_err(|e| e.to_string())?;
+    }
+
+    let agent_id = crate::identity::resolve_agent_id(explicit_agent_id, mcp_client)
+        .map_err(|e| e.to_string())?;
+
+    let reg = db::entity_register(
+        conn,
+        canonical_name,
+        namespace,
+        &aliases,
+        &extra_metadata,
+        Some(&agent_id),
+    )
+    .map_err(|e| e.to_string())?;
+
+    Ok(json!({
+        "entity_id": reg.entity_id,
+        "canonical_name": reg.canonical_name,
+        "namespace": reg.namespace,
+        "aliases": reg.aliases,
+        "created": reg.created,
+    }))
+}
+
+fn handle_entity_get_by_alias(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let alias = params["alias"].as_str().ok_or("alias is required")?;
+    let namespace = params["namespace"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(ns) = namespace {
+        validate::validate_namespace(ns).map_err(|e| e.to_string())?;
+    }
+
+    match db::entity_get_by_alias(conn, alias, namespace).map_err(|e| e.to_string())? {
+        Some(rec) => Ok(json!({
+            "found": true,
+            "entity_id": rec.entity_id,
+            "canonical_name": rec.canonical_name,
+            "namespace": rec.namespace,
+            "aliases": rec.aliases,
+        })),
+        None => Ok(json!({
+            "found": false,
+            "entity_id": null,
+            "canonical_name": null,
+            "namespace": null,
+            "aliases": [],
+        })),
+    }
+}
+
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
@@ -2679,6 +2791,8 @@ fn handle_request(
                 "memory_list" => handle_list(conn, arguments),
                 "memory_get_taxonomy" => handle_get_taxonomy(conn, arguments),
                 "memory_check_duplicate" => handle_check_duplicate(conn, arguments, embedder),
+                "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
+                "memory_entity_get_by_alias" => handle_entity_get_by_alias(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
                 "memory_promote" => handle_promote(conn, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
@@ -3043,13 +3157,14 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_38_tools() {
-        // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A) and
-        // memory_check_duplicate (Pillar 2 / Stream D) on top of the
-        // 36-tool v0.6.0.0 surface.
+    fn tool_definitions_returns_40_tools() {
+        // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
+        // memory_check_duplicate (Pillar 2 / Stream D), and
+        // memory_entity_register + memory_entity_get_by_alias
+        // (Pillar 2 / Stream B) on top of the 36-tool v0.6.0.0 surface.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 38);
+        assert_eq!(tools.len(), 40);
     }
 
     #[test]
@@ -3058,6 +3173,15 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"memory_check_duplicate"));
+    }
+
+    #[test]
+    fn tool_definitions_include_entity_registry_tools() {
+        let defs = tool_definitions();
+        let tools = defs["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"memory_entity_register"));
+        assert!(names.contains(&"memory_entity_get_by_alias"));
     }
 
     #[test]

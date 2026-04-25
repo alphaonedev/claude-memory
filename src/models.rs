@@ -367,6 +367,42 @@ pub struct DuplicateCheck {
 /// Namespace reserved for agent registrations (Task 1.3).
 pub const AGENTS_NAMESPACE: &str = "_agents";
 
+/// Tag stamped on entity-typed memories so `(title, namespace)` can be
+/// shared across regular memories and entities without ambiguity (Pillar
+/// 2 / Stream B).
+pub const ENTITY_TAG: &str = "entity";
+
+/// Marker written to `metadata.kind` on entity-typed memories. The
+/// db layer keys entity lookups off this field so the alias resolver
+/// never returns a regular memory that happens to share a title with an
+/// entity registered later.
+pub const ENTITY_KIND: &str = "entity";
+
+/// Resolved entity record returned by `db::entity_get_by_alias` and
+/// embedded in the `db::entity_register` response (Pillar 2 / Stream B).
+/// `aliases` is the full alias set for the entity, ordered by
+/// `created_at ASC, alias ASC` for stable display.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRecord {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+}
+
+/// Outcome of `db::entity_register`. `created` is `true` when a new
+/// entity memory was inserted, `false` when an existing entity was
+/// reused (idempotent re-registration that just merged new aliases into
+/// the existing record).
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRegistration {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+    pub created: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Task 1.9 — Governance Enforcement
 // ---------------------------------------------------------------------------
