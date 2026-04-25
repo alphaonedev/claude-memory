@@ -4,6 +4,7 @@
 #![recursion_limit = "256"]
 
 mod autonomy;
+mod bench;
 mod color;
 mod config;
 mod curator;
@@ -176,12 +177,32 @@ enum Command {
     /// between cycles. Auto-tags memories without tags and flags
     /// contradictions against nearby siblings in the same namespace.
     Curator(CuratorArgs),
+    /// v0.6.3 (Pillar 3 / Stream E): run the canonical performance
+    /// workload and print measured p50/p95/p99 against the budgets in
+    /// `PERFORMANCE.md`. Each invocation seeds a disposable temp DB so
+    /// the user's main DB is untouched. Exits non-zero when any p95
+    /// exceeds its budget by more than the published 10% tolerance.
+    Bench(BenchArgs),
     /// v0.7: migrate memories between SAL backends. Gated behind
     /// `--features sal`. Reads pages via `MemoryStore::list`, writes
     /// via `MemoryStore::store`. Idempotent: source ids are preserved
     /// and both adapters upsert on id.
     #[cfg(feature = "sal")]
     Migrate(MigrateArgs),
+}
+
+#[derive(Args)]
+struct BenchArgs {
+    /// Measured iterations per operation. Clamped to `[1, 100_000]`.
+    #[arg(long, default_value_t = bench::DEFAULT_ITERATIONS)]
+    iterations: usize,
+    /// Warmup iterations discarded from the percentile sample.
+    /// Clamped to `[0, 10_000]`.
+    #[arg(long, default_value_t = bench::DEFAULT_WARMUP)]
+    warmup: usize,
+    /// Emit results as JSON instead of the human-readable table.
+    #[arg(long)]
+    json: bool,
 }
 
 #[derive(Args)]
@@ -881,6 +902,7 @@ async fn main() -> Result<()> {
         Command::Backup(a) => cmd_backup(&db_path, &a, j),
         Command::Restore(a) => cmd_restore(&db_path, &a, j),
         Command::Curator(a) => cmd_curator(&db_path, &a, &app_config).await,
+        Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
         Command::Migrate(a) => cmd_migrate(&a).await,
     };
@@ -4373,6 +4395,40 @@ fn cmd_curator_rollback(db_path: &Path, args: &CuratorArgs) -> Result<()> {
     }
 
     unreachable!("cmd_curator_rollback entered without --rollback or --rollback-last");
+}
+
+fn cmd_bench(args: &BenchArgs) -> Result<()> {
+    let iterations = args.iterations.clamp(1, 100_000);
+    let warmup = args.warmup.min(10_000);
+    // Bench always seeds a disposable in-memory DB so the operator's
+    // main DB (and disk) are untouched. SQLite's `:memory:` URL and
+    // WAL-less mode keep the workload bounded by RAM and CPU.
+    let conn = db::open(Path::new(":memory:"))?;
+    let config = bench::BenchConfig {
+        iterations,
+        warmup,
+        namespace: bench::BENCH_NAMESPACE.to_string(),
+    };
+    let results = bench::run(&conn, &config)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "iterations": iterations,
+                "warmup": warmup,
+                "results": results,
+            }))?
+        );
+    } else {
+        print!("{}", bench::render_table(&results));
+    }
+    if results
+        .iter()
+        .any(|r| matches!(r.status, bench::Status::Fail))
+    {
+        anyhow::bail!("bench: at least one operation exceeded its p95 budget by >10%");
+    }
+    Ok(())
 }
 
 fn build_curator_llm(tier: config::FeatureTier) -> Option<llm::OllamaClient> {

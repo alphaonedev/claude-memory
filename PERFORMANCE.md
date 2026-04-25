@@ -65,9 +65,10 @@ reference hardware, not absolute floors for every machine.
 | Component | State | Where |
 |---|---|---|
 | Published budgets | ✅ landed | this file |
-| `ai-memory bench` subcommand | 🚧 Stream E | `src/bench.rs` (planned) |
+| `ai-memory bench` subcommand | ✅ landed (scaffold) | `src/bench.rs` — covers `memory_store` (no embedding), `memory_search` (FTS5), `memory_recall` (hot, depth=1) |
+| Embedding-bound + KG operations in `bench` | 🚧 Stream E follow-up | next iterations of v0.6.3 |
 | `bench.yml` CI workflow | 🚧 Stream F | `.github/workflows/bench.yml` (planned) |
-| Measured numbers in CI history | ⏳ pending | populated once `bench` lands |
+| Measured numbers in CI history | ⏳ pending | populated once `bench.yml` lands |
 
 The status table is updated as each Stream lands within the v0.6.3
 cycle. When measurements begin, this file will gain a "Latest measured"
@@ -75,29 +76,33 @@ column alongside each target.
 
 ## Operator Self-Verification
 
-Once Stream E lands, operators can verify the budgets on their own
-hardware with:
+The `ai-memory bench` subcommand seeds an in-memory disposable
+SQLite database (the operator's main DB is untouched) and reports
+per-operation p50/p95/p99 against the budgets above. Exit code is
+non-zero when any p95 exceeds its budget by more than the published
+10% tolerance, so the same binary is suitable for use in a CI guard
+once `bench.yml` (Stream F) wires it up.
 
 ```
 $ ai-memory bench
-Operation                      Target (p95)   Measured (p95)   Status
-────────────────────────────────────────────────────────────────────────
-memory_session_start hook      < 100 ms       …                …
-memory_recall (hot, depth=1)   <  50 ms       …                …
-memory_store (no embedding)    <  20 ms       …                …
-memory_store (with embedding)  < 200 ms       …                …
-memory_search (FTS5)           < 100 ms       …                …
-memory_check_duplicate         <  50 ms       …                …
-memory_kg_query (depth ≤ 3)    < 100 ms       …                …
-memory_kg_timeline             < 100 ms       …                …
-curator cycle (1k memories)    <  60 s        …                …
-federation ack (W=2 quorum)    <   2 s p99    …                …
+Operation                       Target (p95)   Measured (p95)   p50      p99      Status
+─────────────────────────────────────────────────────────────────────────────────────────
+memory_store (no embedding)     <   20 ms           0.6 ms         0.4      0.8    PASS
+memory_search (FTS5)            <  100 ms           1.9 ms         1.5      2.0    PASS
+memory_recall (hot, depth=1)    <   50 ms          16.5 ms        14.4     21.0    PASS
 ```
 
-The canonical workload is a 1000-memory mix sampled to be
-representative of a long-running Claude Code session. Workload inputs
-land at `benchmarks/v063/canonical_workload.json` alongside the bench
-implementation.
+`--iterations` and `--warmup` (clamped to `[1, 100_000]` and
+`[0, 10_000]` respectively) tune the sample size. `--json` emits the
+same numbers as a single JSON document for downstream tooling.
+
+Operations that depend on the embedder (`memory_store` with
+embedding, `memory_recall` cold/full hybrid), the KG (`memory_kg_query`,
+`memory_kg_timeline`), the curator daemon, and the federation ack path
+are not yet wired into `bench` — they each need fixtures or external
+services that don't belong on the hot path of a `cargo test` run.
+They land in a follow-up Stream E iteration alongside the canonical
+1000-memory workload at `benchmarks/v063/canonical_workload.json`.
 
 ## Why Publish These at All
 
