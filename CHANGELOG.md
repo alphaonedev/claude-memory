@@ -76,6 +76,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Performance Budgets + CI Guard"; budgets are now continuously
   enforced against trunk and PRs.
 
+- **`ai-memory bench` KG coverage (Pillar 3 / Stream E)** —
+  `memory_kg_query` (depth=1) and `memory_kg_timeline` are now driven
+  by the `bench` subcommand against the same in-memory disposable
+  SQLite database used by the embedding-free operations. The runner
+  seeds an in-process KG fixture (50 source memories × 4 outbound
+  links each, every link `valid_from`-stamped so `kg_timeline` sees
+  them) and reports p50/p95/p99 against the 100 ms p95 budgets
+  published in `PERFORMANCE.md`. Local M4 measurements: `kg_query`
+  p95 ~0.7 ms, `kg_timeline` p95 ~0.1 ms — both PASS, both well
+  inside the 10% tolerance enforced by the `bench.yml` CI guard.
+  No new dependencies. Closes the KG half of the iter-0017 follow-up
+  ask; embedding-bound paths still need a fixture decision and are
+  tracked separately.
+
 - **Per-tool MCP tracing spans (Pillar 3 / Stream E)** — every
   `tools/call` dispatch now runs inside an `info`-level
   `mcp_tool_call` span carrying the tool name and JSON-RPC id. After
