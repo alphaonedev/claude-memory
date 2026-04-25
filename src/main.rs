@@ -425,6 +425,14 @@ struct ServeArgs {
     /// Optional mTLS client key for outbound federation POSTs.
     #[arg(long)]
     quorum_client_key: Option<PathBuf>,
+    /// Optional root CA cert to trust for outbound federation HTTPS.
+    /// Required whenever peers present a cert NOT rooted in Mozilla's
+    /// `webpki-roots` bundle (self-signed, private CA, ephemeral test
+    /// CA, etc.) — without this, the reqwest rustls-tls client rejects
+    /// peer certs and every quorum write times out as `quorum_not_met`.
+    /// See #333.
+    #[arg(long)]
+    quorum_ca_cert: Option<PathBuf>,
     /// v0.6.0.1 (#320) — how often, in seconds, the daemon pulls peers
     /// for any updates it missed while offline or partitioned. 0 disables
     /// the catchup loop entirely. Default 30s keeps a post-partition
@@ -927,15 +935,38 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             .await?;
             match build {
                 Ok(emb) => {
-                    tracing::info!("embedder loaded ({})", emb.model_description());
+                    tracing::info!(
+                        "embedder loaded ({}) — tier={} semantic recall enabled",
+                        emb.model_description(),
+                        feature_tier.as_str()
+                    );
                     Some(emb)
                 }
                 Err(e) => {
-                    tracing::warn!("embedder failed to load: {e}; daemon runs keyword-only");
+                    // v0.6.2 (#327): make embedder load failures loud. The
+                    // prior WARN level was easy to miss in DO droplet logs,
+                    // which led to scenario-18 black-holing (semantic recall
+                    // falling back to keyword-only without the operator
+                    // noticing). An ERROR-level log with an obvious marker
+                    // surfaces this immediately in `journalctl -u ai-memory`
+                    // or tail -f /var/log/ai-memory-serve.log.
+                    tracing::error!(
+                        "⚠️  EMBEDDER LOAD FAILED — tier={} requested semantic features, \
+                         but embedder init errored: {e}. Daemon falls back to keyword-only. \
+                         Semantic recall, sync_push embedding refresh (#322), and HNSW index \
+                         will be NO-OPS. Check network egress to HuggingFace Hub + available \
+                         memory for model weights. To force keyword-only explicitly (silences \
+                         this error), set `tier = \"keyword\"` in config.toml.",
+                        feature_tier.as_str()
+                    );
                     None
                 }
             }
         } else {
+            tracing::info!(
+                "embedder disabled — tier={} keyword-only (FTS5); semantic recall not wired",
+                feature_tier.as_str()
+            );
             None
         };
     let vector_index = if embedder.is_some() {
@@ -962,6 +993,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         std::time::Duration::from_millis(args.quorum_timeout_ms),
         args.quorum_client_cert.as_deref(),
         args.quorum_client_key.as_deref(),
+        args.quorum_ca_cert.as_deref(),
         format!("host:{}", gethostname::gethostname().to_string_lossy()),
     )
     .context("federation config")?;
@@ -992,6 +1024,8 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         embedder: Arc::new(embedder),
         vector_index: Arc::new(Mutex::new(vector_index)),
         federation: Arc::new(federation),
+        tier_config: Arc::new(tier_config.clone()),
+        scoring: Arc::new(app_config.effective_scoring()),
     };
     let state = db_state;
 
@@ -1088,13 +1122,43 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
             get(handlers::detect_contradictions),
         )
         .route("/api/v1/links", post(handlers::create_link))
+        .route("/api/v1/links", delete(handlers::delete_link))
         .route("/api/v1/links/{id}", get(handlers::get_links))
-        .route("/api/v1/namespaces", get(handlers::list_namespaces))
+        // HTTP parity for MCP-only tools. The `/api/v1/namespaces` surface
+        // serves three verbs: GET lists namespaces OR (when ?namespace=…)
+        // fetches the namespace standard, POST sets a standard, DELETE
+        // clears one. S34/S35 use the query-string form; the path form
+        // (`/api/v1/namespaces/{ns}/standard`) is kept for MCP-tool parity.
+        .route(
+            "/api/v1/namespaces",
+            get(handlers::get_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces",
+            post(handlers::set_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces",
+            delete(handlers::clear_namespace_standard_qs),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            post(handlers::set_namespace_standard),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            get(handlers::get_namespace_standard),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/standard",
+            delete(handlers::clear_namespace_standard),
+        )
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))
         .route("/api/v1/import", post(handlers::import_memories))
         .route("/api/v1/archive", get(handlers::list_archive))
+        .route("/api/v1/archive", post(handlers::archive_by_ids))
         .route("/api/v1/archive", delete(handlers::purge_archive))
         .route(
             "/api/v1/archive/{id}/restore",
@@ -1117,6 +1181,14 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // and streaming land in v0.8.0.
         .route("/api/v1/sync/push", post(handlers::sync_push))
         .route("/api/v1/sync/since", get(handlers::sync_since))
+        // HTTP parity for MCP-only tools.
+        .route("/api/v1/capabilities", get(handlers::get_capabilities))
+        .route("/api/v1/notify", post(handlers::notify))
+        .route("/api/v1/inbox", get(handlers::get_inbox))
+        .route("/api/v1/subscriptions", post(handlers::subscribe))
+        .route("/api/v1/subscriptions", delete(handlers::unsubscribe))
+        .route("/api/v1/subscriptions", get(handlers::list_subscriptions))
+        .route("/api/v1/session/start", post(handlers::session_start))
         .layer(axum::middleware::from_fn_with_state(
             api_key_state,
             handlers::api_key_auth,
@@ -1281,6 +1353,24 @@ async fn load_fingerprint_allowlist(path: &Path) -> Result<std::collections::Has
         }
         // Accept a leading `sha256:` marker for forward-compat with richer formats.
         let hex_part = line.strip_prefix("sha256:").unwrap_or(line);
+        // Ultrareview #338: reject any non-hex, non-colon character —
+        // including embedded whitespace/tabs. Previously the parser
+        // stripped only `:` and relied on the length check to catch
+        // whitespace, but silent acceptance of copy-paste artefacts
+        // (e.g. soft-wraps producing internal spaces) would produce
+        // misleading parse errors further down rather than a clear
+        // "whitespace not allowed" signal. Keep it strict.
+        if let Some(bad) = hex_part
+            .chars()
+            .find(|c| !c.is_ascii_hexdigit() && *c != ':')
+        {
+            anyhow::bail!(
+                "mTLS allowlist line {}: unexpected character {:?} — \
+                 entries must be 64 hex chars with optional `:` separators",
+                lineno + 1,
+                bad
+            );
+        }
         let hex_clean: String = hex_part.chars().filter(|c| *c != ':').collect();
         if hex_clean.len() != 64 {
             anyhow::bail!(
@@ -3104,31 +3194,46 @@ async fn cmd_sync_daemon(
     // the trust anchor, so fingerprint pinning of the peer's server
     // cert is a Layer 2b refinement tracked in #224.
     let _ = rustls::crypto::ring::default_provider().install_default();
+    // Ultrareview #336: --insecure-skip-server-verify must be gated
+    // behind a compensating control. When server-cert verification is
+    // disabled, require the daemon to present a client cert so at
+    // least the peer authenticates US via its mTLS allowlist. Without
+    // either side of the handshake verified, the connection is an
+    // open MITM surface.
+    if args.insecure_skip_server_verify && (args.client_cert.is_none() || args.client_key.is_none())
+    {
+        anyhow::bail!(
+            "sync-daemon: --insecure-skip-server-verify requires both --client-cert \
+             and --client-key as a compensating mTLS control. Running with neither side \
+             of the TLS handshake verified is an open MITM surface and is refused."
+        );
+    }
+
     let client = if let (Some(cert_path), Some(key_path)) = (&args.client_cert, &args.client_key) {
         // mTLS path — daemon presents client cert; the peer's
         // FingerprintAllowlistVerifier authenticates us. Server-cert
         // pinning on this side is Layer 2b (post-v0.6.0).
         let rustls_config = build_rustls_client_config(cert_path, key_path).await?;
-        reqwest::Client::builder()
+        let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
-            .use_preconfigured_tls(rustls_config)
-            .build()?
-    } else {
-        // No client cert — server cert verification is the only
-        // remaining trust anchor. Default to system trust roots
-        // (the secure path) UNLESS the operator explicitly opts in
-        // to the insecure mode (red-team #232 — was silent MITM
-        // risk before v0.6.0).
-        let mut builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+            .use_preconfigured_tls(rustls_config);
         if args.insecure_skip_server_verify {
             tracing::warn!(
-                "sync-daemon: --insecure-skip-server-verify set — peer server \
-                 certificates will NOT be validated. MITM attacks possible. \
-                 Do NOT use in production (red-team #232)."
+                "sync-daemon: --insecure-skip-server-verify set with --client-cert — \
+                 peer server certificates will NOT be validated; peer authenticates us \
+                 via mTLS allowlist (compensating control). Do NOT use in production."
             );
             builder = builder.danger_accept_invalid_certs(true);
         }
         builder.build()?
+    } else {
+        // No client cert — server cert verification is the only
+        // remaining trust anchor. Default to system trust roots
+        // (the secure path). --insecure-skip-server-verify without
+        // mTLS was refused above.
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()?
     };
 
     tracing::info!(

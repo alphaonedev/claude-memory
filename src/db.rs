@@ -169,7 +169,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 13;
+const CURRENT_SCHEMA_VERSION: i64 = 14;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -474,6 +474,43 @@ fn migrate(conn: &Connection) -> Result<()> {
             )?;
         }
 
+        if version < 14 {
+            // Ultrareview #342: list / search / recall queries filter by
+            // `json_extract(metadata, '$.agent_id') = ?`, which SQLite
+            // cannot index. On large mesh peers this degenerates to a
+            // full table scan per request and a DoS vector — a single
+            // authenticated client hitting `/memories?agent_id=X` in a
+            // loop pegs CPU and blocks other queries on the shared
+            // connection. Add a VIRTUAL generated column so the
+            // comparison becomes a real column lookup the query planner
+            // can serve from an index.
+            //
+            // Ultrareview #353: also add `created_at` index so export
+            // and snapshot queries stop scanning + sorting full table.
+            let has_agent_id_idx: bool = conn
+                .prepare("SELECT agent_id_idx FROM memories LIMIT 0")
+                .is_ok();
+            if !has_agent_id_idx {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN agent_id_idx TEXT \
+                     GENERATED ALWAYS AS (\
+                         CASE WHEN json_valid(metadata) \
+                         THEN json_extract(metadata, '$.agent_id') \
+                         ELSE NULL END\
+                     ) VIRTUAL",
+                    [],
+                )?;
+            }
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_agent_id ON memories(agent_id_idx)",
+                [],
+            )?;
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_memories_created_at ON memories(created_at)",
+                [],
+            )?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -526,10 +563,16 @@ fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
 }
 
 /// Insert with upsert on title+namespace. Returns the ID (existing or new).
+///
+/// Ultrareview #352: collapses the previous `INSERT`/`ON CONFLICT` +
+/// separate `SELECT` into a single `INSERT ... RETURNING id`. Another
+/// concurrent writer could otherwise slot in between the two statements
+/// and the `SELECT` would return the wrong row id. `SQLite` 3.35+
+/// supports `RETURNING`; it executes atomically within the `INSERT`.
 pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
-    conn.execute(
+    let actual_id: String = conn.query_row(
         "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
@@ -554,18 +597,14 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                     json_extract(memories.metadata, '$.agent_id')
                 )
                 ELSE excluded.metadata
-            END",
+            END
+         RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json,
         ],
-    )?;
-    // Return the actual ID (could be the existing one on conflict)
-    let actual_id: String = conn.query_row(
-        "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
-        params![mem.title, mem.namespace],
         |r| r.get(0),
     )?;
     Ok(actual_id)
@@ -719,28 +758,41 @@ pub fn update(
     let metadata_json = serde_json::to_string(metadata)?;
     let now = Utc::now().to_rfc3339();
 
-    // Check for title+namespace collision with a DIFFERENT memory
-    if new_title != existing.title || namespace != existing.namespace {
-        let collision: Option<String> = conn
-            .query_row(
-                "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2 AND id != ?3",
-                params![new_title, namespace, id],
-                |r| r.get(0),
-            )
-            .ok();
-        if let Some(other_id) = collision {
-            anyhow::bail!(
-                "title '{new_title}' already exists in namespace '{namespace}' (memory {other_id})"
-            );
-        }
-    }
-
-    conn.execute(
+    // Ultrareview #354: rely on the UNIQUE INDEX on (title, namespace)
+    // to enforce collision atomically at the DB layer. The previous
+    // check-then-update sequence had a race — another transaction
+    // could insert a colliding row between the SELECT and the UPDATE,
+    // and the UPDATE would surface as a generic SQLite constraint
+    // error to the caller. Now the collision check is inline: the
+    // UPDATE fails with a well-scoped UniqueViolation, and we re-
+    // query the colliding row's id only on that specific error for
+    // the friendly message.
+    let update_res = conn.execute(
         "UPDATE memories SET tier=?1, namespace=?2, title=?3, content=?4, tags=?5, priority=?6, confidence=?7, updated_at=?8, expires_at=?9, metadata=?10
          WHERE id=?11",
         params![effective_tier.as_str(), namespace, new_title, new_content, tags_json, priority, confidence, now, expires_at, metadata_json, id],
-    )?;
-    Ok((true, content_changed))
+    );
+    match update_res {
+        Ok(_) => Ok((true, content_changed)),
+        Err(rusqlite::Error::SqliteFailure(err, _))
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            let other: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2 AND id != ?3",
+                    params![new_title, namespace, id],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(other_id) = other {
+                anyhow::bail!(
+                    "title '{new_title}' already exists in namespace '{namespace}' (memory {other_id})"
+                );
+            }
+            Err(anyhow::anyhow!("update failed with constraint violation"))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
@@ -751,6 +803,68 @@ pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
     )?;
     let changed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
     Ok(changed > 0)
+}
+
+/// Move a memory from `memories` to `archived_memories`. Used by the
+/// HTTP `/api/v1/archive` explicit-archive endpoint (S29) and by
+/// `sync_push` when a peer pushes an `archives: [id]` record.
+///
+/// Unlike `gc(archive=true)` this does not filter on `expires_at` — the
+/// caller is explicitly asking for the row to be archived right now.
+///
+/// Returns `true` if a row was moved, `false` if no live memory existed
+/// with this id (e.g. it was already archived or never written locally).
+/// A missing-on-peer id is expected during normal fanout and callers
+/// treat it as a no-op.
+///
+/// # Errors
+///
+/// Returns an error if the INSERT-SELECT or DELETE fails.
+pub fn archive_memory(conn: &Connection, id: &str, reason: Option<&str>) -> Result<bool> {
+    let now = Utc::now().to_rfc3339();
+    let reason = reason.unwrap_or("archive");
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result = (|| -> Result<bool> {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM memories WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            return Ok(false);
+        }
+        conn.execute(
+            "INSERT OR REPLACE INTO archived_memories
+             (id, tier, namespace, title, content, tags, priority, confidence,
+              source, access_count, created_at, updated_at, last_accessed_at,
+              expires_at, archived_at, archive_reason, metadata)
+             SELECT id, tier, namespace, title, content, tags, priority, confidence,
+                    source, access_count, created_at, updated_at, last_accessed_at,
+                    expires_at, ?1, ?2, metadata
+             FROM memories WHERE id = ?3",
+            params![now, reason, id],
+        )?;
+        // Clean up namespace_meta — mirrors `delete`'s cleanup so an archived
+        // row is not still referenced as the namespace standard.
+        conn.execute(
+            "DELETE FROM namespace_meta WHERE standard_id = ?1",
+            params![id],
+        )?;
+        let removed = conn.execute("DELETE FROM memories WHERE id = ?1", params![id])?;
+        Ok(removed > 0)
+    })();
+    match result {
+        Ok(moved) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(moved)
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Count memories that would be deleted by forget (for `dry_run`).
@@ -889,7 +1003,7 @@ pub fn list(
            AND (?5 IS NULL OR created_at >= ?5)
            AND (?6 IS NULL OR created_at <= ?6)
            AND (?7 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?7))
-           AND (?10 IS NULL OR json_extract(metadata, '$.agent_id') = ?10)
+           AND (?10 IS NULL OR agent_id_idx = ?10)
          ORDER BY priority DESC, updated_at DESC
          LIMIT ?8 OFFSET ?9",
     )?;
@@ -945,7 +1059,7 @@ pub fn search(
            AND (?6 IS NULL OR m.created_at >= ?6)
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
-           AND (?10 IS NULL OR json_extract(m.metadata, '$.agent_id') = ?10)
+           AND (?10 IS NULL OR m.agent_id_idx = ?10)
            {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
@@ -1475,7 +1589,17 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
         })
         .map(|token| {
             // Strip FTS5 special characters to prevent injection.
-            // Hyphens are allowed inside words (e.g. "well-known").
+            // Hyphens are allowed inside words (e.g. "well-known"): the
+            // unicode61 tokenizer treats `-` as a separator when indexing,
+            // so `foo-bar` indexes as `foo` + `bar`. Keeping the hyphen in
+            // the per-token phrase (below we wrap each token in `"…"`)
+            // produces a phrase query that FTS5 evaluates by matching the
+            // hyphen-split component terms in order — which is exactly
+            // what callers expect when searching for hyphenated content.
+            // Dropping the `'-'` filter here fixes scenario S28 without
+            // reopening the `+`/`-` exclusion-injection hole (every token
+            // is already phrase-quoted before being joined, so `-` cannot
+            // reach FTS5 as a prefix operator).
             let clean: String = token
                 .chars()
                 .filter(|c| {
@@ -1489,7 +1613,6 @@ fn sanitize_fts_query(input: &str, use_or: bool) -> String {
                         && *c != ':'
                         && *c != '|'
                         && *c != '+'
-                        && *c != '-'
                 })
                 .collect();
             if clean.is_empty() {
@@ -1961,19 +2084,34 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
 }
 
 /// Insert with timestamp-aware conflict resolution for sync.
-/// Only overwrites if the incoming memory is newer (by `updated_at`).
+/// Only overwrites if the incoming memory is newer (by `updated_at`,
+/// tiebroken by memory.id for a total order across peers —
+/// ultrareview #344, #345).
+///
+/// Rationale: ISO 8601 / RFC 3339 strings compare lexicographically
+/// as long as all timestamps carry consistent precision + Z suffix.
+/// Equal timestamps (common when two nodes edit in the same ms, or
+/// when NTP aligns clocks) previously produced non-deterministic
+/// winners per peer, causing permanent mesh divergence. Adding the
+/// memory.id tiebreaker yields a total order every peer agrees on.
 pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
-    conn.execute(
+    let actual_id: String = conn.query_row(
         "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(title, namespace) DO UPDATE SET
-            content = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.content ELSE memories.content END,
-            tags = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.tags ELSE memories.tags END,
+            content = CASE WHEN excluded.updated_at > memories.updated_at
+                             OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                           THEN excluded.content ELSE memories.content END,
+            tags = CASE WHEN excluded.updated_at > memories.updated_at
+                          OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                        THEN excluded.tags ELSE memories.tags END,
             priority = MAX(memories.priority, excluded.priority),
             confidence = MAX(memories.confidence, excluded.confidence),
-            source = CASE WHEN excluded.updated_at > memories.updated_at THEN excluded.source ELSE memories.source END,
+            source = CASE WHEN excluded.updated_at > memories.updated_at
+                            OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                          THEN excluded.source ELSE memories.source END,
             tier = CASE WHEN excluded.tier = 'long' THEN 'long'
                         WHEN memories.tier = 'long' THEN 'long'
                         WHEN excluded.tier = 'mid' THEN 'mid'
@@ -1987,25 +2125,24 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
                 WHEN json_extract(memories.metadata, '$.agent_id') IS NOT NULL
                 THEN json_set(
                     CASE WHEN excluded.updated_at > memories.updated_at
+                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                          THEN excluded.metadata
                          ELSE memories.metadata END,
                     '$.agent_id',
                     json_extract(memories.metadata, '$.agent_id')
                 )
                 ELSE CASE WHEN excluded.updated_at > memories.updated_at
+                               OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                           THEN excluded.metadata
                           ELSE memories.metadata END
-            END",
+            END
+         RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json,
         ],
-    )?;
-    let actual_id: String = conn.query_row(
-        "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2",
-        params![mem.title, mem.namespace],
         |r| r.get(0),
     )?;
     Ok(actual_id)
@@ -2229,7 +2366,17 @@ pub fn recall_hybrid(
                 continue;
             }
             let cosine = f64::from(1.0 - hit.distance);
-            if cosine > 0.3
+            // v0.6.2 (S18 iteration): cosine gate relaxed 0.3 → 0.2.
+            // Scenario-18 caught a real-world miss at the old ceiling:
+            // semantically-related pairs with varied phrasing ("morning
+            // outdoor exercise routine" vs. "brisk uphill strides along
+            // the ridge line trails") landed at 0.25-0.29 cosine and
+            // silently fell below 0.3, returning zero semantic hits.
+            // 0.2 keeps clearly-unrelated content out (random noise
+            // hovers near 0) while admitting legitimate semantic
+            // associations; the blended score + FTS component still
+            // rank relevance on the way out.
+            if cosine > 0.2
                 && let Some(mem) = get(conn, &hit.id)?
             {
                 // Apply namespace/expiry/tag filters. Task 1.12: when
@@ -2309,7 +2456,8 @@ pub fn recall_hybrid(
                     query_embedding,
                     &emb,
                 ));
-                if cosine > 0.3 {
+                // v0.6.2 (S18): see matching note above at the HNSW gate.
+                if cosine > 0.2 {
                     scored.insert(mem.id.clone(), (mem, 0.0, cosine));
                 }
             }
@@ -2585,6 +2733,33 @@ pub fn get_namespace_parent(conn: &Connection, namespace: &str) -> Option<String
     .ok()
 }
 
+/// v0.6.2 (S35): read the full `namespace_meta` row for a namespace so the
+/// caller can fan it out to peers. Returns `None` when no standard is set.
+/// Mirrors the (`namespace`, `standard_id`, `parent_namespace`, `updated_at`)
+/// tuple used by `set_namespace_standard`.
+#[allow(clippy::unnecessary_wraps)]
+pub fn get_namespace_meta_entry(
+    conn: &Connection,
+    namespace: &str,
+) -> Result<Option<crate::models::NamespaceMetaEntry>> {
+    let row = conn
+        .query_row(
+            "SELECT namespace, standard_id, parent_namespace, updated_at
+             FROM namespace_meta WHERE namespace = ?1",
+            params![namespace],
+            |r| {
+                Ok(crate::models::NamespaceMetaEntry {
+                    namespace: r.get(0)?,
+                    standard_id: r.get(1)?,
+                    parent_namespace: r.get(2)?,
+                    updated_at: r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                })
+            },
+        )
+        .ok();
+    Ok(row)
+}
+
 /// Clear the standard for a namespace.
 pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bool> {
     let changed = conn.execute(
@@ -2742,6 +2917,49 @@ pub fn queue_pending_action(
         ],
     )?;
     Ok(id)
+}
+
+/// v0.6.2 (S34): upsert a `pending_actions` row from a canonical `PendingAction`
+/// struct — used by `sync_push` to apply a peer-originated pending row so
+/// governance state is cluster-consistent. Preserves `approvals` and
+/// decision fields verbatim so re-plays converge. Uses `INSERT ... ON
+/// CONFLICT(id) DO UPDATE` because the originator's id is stable across
+/// peers (unlike `queue_pending_action` which mints a fresh UUID per
+/// queue call).
+pub fn upsert_pending_action(conn: &Connection, pa: &PendingAction) -> Result<()> {
+    let payload_json = serde_json::to_string(&pa.payload)?;
+    let approvals_json = serde_json::to_string(&pa.approvals)?;
+    conn.execute(
+        "INSERT INTO pending_actions
+         (id, action_type, memory_id, namespace, payload, requested_by,
+          requested_at, status, decided_by, decided_at, approvals)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         ON CONFLICT(id) DO UPDATE SET
+            action_type  = excluded.action_type,
+            memory_id    = excluded.memory_id,
+            namespace    = excluded.namespace,
+            payload      = excluded.payload,
+            requested_by = excluded.requested_by,
+            requested_at = excluded.requested_at,
+            status       = excluded.status,
+            decided_by   = excluded.decided_by,
+            decided_at   = excluded.decided_at,
+            approvals    = excluded.approvals",
+        params![
+            pa.id,
+            pa.action_type,
+            pa.memory_id,
+            pa.namespace,
+            payload_json,
+            pa.requested_by,
+            pa.requested_at,
+            pa.status,
+            pa.decided_by,
+            pa.decided_at,
+            approvals_json,
+        ],
+    )?;
+    Ok(())
 }
 
 pub fn list_pending_actions(
@@ -3646,6 +3864,55 @@ mod tests {
     }
 
     #[test]
+    fn archive_memory_moves_live_row_to_archive() {
+        // S29 — explicit archive endpoint must move the row out of
+        // `memories` and into `archived_memories` with the caller-supplied
+        // reason. Unlike gc(archive=true), this is NOT gated on
+        // `expires_at` — the caller is asking for it right now.
+        let conn = test_db();
+        let mem = make_memory("Archive me", "s29", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+
+        let moved = archive_memory(&conn, &id, Some("explicit")).unwrap();
+        assert!(moved, "live row must be archived on first call");
+        assert!(
+            get(&conn, &id).unwrap().is_none(),
+            "row must be removed from active table"
+        );
+
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0]["id"], id);
+        assert_eq!(archived[0]["archive_reason"], "explicit");
+
+        // Second call is a no-op — row is already out of `memories`.
+        let second = archive_memory(&conn, &id, Some("explicit")).unwrap();
+        assert!(
+            !second,
+            "second archive call must report no-op (no live row)"
+        );
+    }
+
+    #[test]
+    fn archive_memory_missing_id_returns_false() {
+        // Peers that never saw M1 must no-op, not error, on sync_push
+        // archives fanout.
+        let conn = test_db();
+        let moved = archive_memory(&conn, "nonexistent-id", None).unwrap();
+        assert!(!moved);
+    }
+
+    #[test]
+    fn archive_memory_default_reason_is_archive() {
+        let conn = test_db();
+        let mem = make_memory("Default reason", "s29", Tier::Long, 5);
+        let id = insert(&conn, &mem).unwrap();
+        assert!(archive_memory(&conn, &id, None).unwrap());
+        let archived = list_archived(&conn, None, 10, 0).unwrap();
+        assert_eq!(archived[0]["archive_reason"], "archive");
+    }
+
+    #[test]
     fn export_all_and_links() {
         let conn = test_db();
         let id1 = insert(&conn, &make_memory("Export A", "test", Tier::Long, 5)).unwrap();
@@ -3727,12 +3994,18 @@ mod tests {
         // Empty input returns placeholder
         let sanitized3 = sanitize_fts_query("", true);
         assert_eq!(sanitized3, "\"_empty_\"");
-        // + and - prefix operators are stripped (prevents exclusion injection)
+        // `+` prefix operator is stripped (prevents exclusion injection);
+        // `-` is now preserved inside phrase-quoted tokens so hyphenated
+        // content ("well-known", "foo-bar") searches correctly against
+        // the unicode61 tokenizer. Phrase-quoting keeps `-` from reaching
+        // FTS5 as a prefix operator, closing the injection hole.
         let sanitized4 = sanitize_fts_query("-secret +required", true);
-        assert!(!sanitized4.contains('-'));
         assert!(!sanitized4.contains('+'));
         assert!(sanitized4.contains("secret"));
         assert!(sanitized4.contains("required"));
+        // Hyphenated tokens pass through as phrase searches.
+        let sanitized5 = sanitize_fts_query("well-known", true);
+        assert!(sanitized5.contains("well-known"));
     }
 
     #[test]

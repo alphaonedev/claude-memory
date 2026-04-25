@@ -86,7 +86,7 @@ All three interfaces share the same database (`src/db.rs`) and validation (`src/
 Recall is multi-stage and **never read-only** — every recall mutates the database:
 
 1. **FTS5 keyword search** — fuzzy OR query, scored by `fts.rank + priority*0.5 + access_count*0.1 + confidence*2.0 + tier_bonus + recency_factor`
-2. **Semantic search** — cosine similarity via HNSW index (or linear scan fallback), threshold >0.3
+2. **Semantic search** — cosine similarity via HNSW index (or linear scan fallback), threshold >0.2 (relaxed from 0.3 in v0.6.2 Patch 2 after scenario-18 caught a miss at 0.25-0.29 cosine for legitimately-related content)
 3. **Adaptive blending** — `final = semantic_weight * cosine + (1 - semantic_weight) * norm_fts`. Semantic weight varies 0.50 (short content ≤500 chars) → 0.15 (long content ≥5000 chars) because embeddings lose information on long text
 4. **Touch operations** (atomic) — increment `access_count`, extend TTL (1h short / 1d mid), auto-promote mid→long at 5 accesses, increment priority every 10 accesses
 

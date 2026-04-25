@@ -32,6 +32,11 @@ const VALID_SOURCES: &[&str] = &[
     "consolidation",
     "system",
     "chaos",
+    // v0.6.2 (S32): `handle_notify` stamps source="notify" on inbox rows.
+    // Without this entry, peers reject the notify in `sync_push`'s
+    // `validate_memory` — the notify lands on the sender's inbox but
+    // never reaches the target's inbox on peer nodes.
+    "notify",
 ];
 const VALID_RELATIONS: &[&str] = &["related_to", "supersedes", "contradicts", "derived_from"];
 

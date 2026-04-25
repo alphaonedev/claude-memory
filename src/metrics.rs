@@ -43,6 +43,15 @@ pub struct Metrics {
     pub curator_cycles_total: IntCounter,
     pub curator_operations_total: IntCounterVec,
     pub curator_cycle_duration_seconds: HistogramVec,
+    /// Ultrareview #343: count of post-quorum fanout tasks whose
+    /// outcome could not be observed (shutdown, panic, or the
+    /// spawned task erred). Non-zero indicates mesh divergence risk.
+    pub federation_fanout_dropped_total: IntCounterVec,
+    /// S40 (v0.6.2 Patch 2): count of peer POST retries, labeled by
+    /// final outcome. `ok` = retry recovered the row; `fail` = both
+    /// attempts failed (peer likely truly down); `id_drift` = retry
+    /// observed the same peer id-drift as attempt 1.
+    pub federation_fanout_retry_total: IntCounterVec,
 }
 
 /// Lazily-built process-global metrics handle.
@@ -164,6 +173,28 @@ impl Metrics {
         )?;
         registry.register(Box::new(curator_cycle_duration_seconds.clone()))?;
 
+        let federation_fanout_dropped_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "ai_memory_federation_fanout_dropped_total",
+                "Post-quorum fanout tasks whose outcome could not be observed. \
+                 reason=shutdown|panic|join_error. Non-zero indicates mesh divergence risk.",
+            ),
+            &["reason"],
+        )?;
+        registry.register(Box::new(federation_fanout_dropped_total.clone()))?;
+
+        let federation_fanout_retry_total = IntCounterVec::new(
+            prometheus::Opts::new(
+                "ai_memory_federation_fanout_retry_total",
+                "Peer POSTs that hit a transient failure on first attempt and \
+                 were retried once via the Idempotency-Key path. \
+                 outcome=ok|fail|id_drift. Non-zero ok indicates the retry \
+                 recovered a row that would otherwise be missing on a peer.",
+            ),
+            &["outcome"],
+        )?;
+        registry.register(Box::new(federation_fanout_retry_total.clone()))?;
+
         Ok(Self {
             registry,
             store_total,
@@ -179,6 +210,8 @@ impl Metrics {
             curator_cycles_total,
             curator_operations_total,
             curator_cycle_duration_seconds,
+            federation_fanout_dropped_total,
+            federation_fanout_retry_total,
         })
     }
 }

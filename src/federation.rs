@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
-use crate::models::Memory;
+use crate::models::{Memory, MemoryLink, NamespaceMetaEntry, PendingAction, PendingDecision};
 use crate::replication::{AckTracker, QuorumError, QuorumFailureReason, QuorumPolicy};
 
 /// Configured-at-serve federation state. Parsed from
@@ -77,10 +77,26 @@ impl FederationConfig {
         timeout: Duration,
         client_cert_path: Option<&std::path::Path>,
         client_key_path: Option<&std::path::Path>,
+        ca_cert_path: Option<&std::path::Path>,
         sender_agent_id: String,
     ) -> anyhow::Result<Option<Self>> {
         if quorum_writes == 0 || peer_urls.is_empty() {
             return Ok(None);
+        }
+        // Ultrareview #341: reject duplicate peer URLs at build time.
+        // If the same peer URL appears twice under different indices,
+        // both would count as distinct ack sources and the quorum
+        // guarantee is violated. Normalize (trim trailing slash,
+        // lowercase scheme+host) before comparing.
+        let mut seen_urls: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for raw in peer_urls {
+            let normalized = raw.trim_end_matches('/').to_ascii_lowercase();
+            if !seen_urls.insert(normalized.clone()) {
+                return Err(anyhow::anyhow!(
+                    "duplicate peer URL in --quorum-peers: {raw} (normalized: {normalized}) \
+                     — duplicates would let a single peer contribute to quorum more than once"
+                ));
+            }
         }
         let n = 1 + peer_urls.len(); // local node + remotes
         let policy = QuorumPolicy::new(n, quorum_writes, timeout, Duration::from_secs(30))
@@ -128,6 +144,20 @@ impl FederationConfig {
             .timeout(timeout)
             .connect_timeout(Duration::from_secs(2))
             .use_rustls_tls();
+        // --quorum-ca-cert: trust a caller-supplied root CA for outbound
+        // federation POSTs. Required whenever peers present a cert NOT
+        // rooted in webpki-roots (Mozilla CA bundle) — e.g. a self-
+        // signed / ephemeral CA generated for an isolated test fleet.
+        // Without this, reqwest's rustls-tls feature (webpki-roots
+        // only) rejects the peer cert and every quorum write times
+        // out as quorum_not_met. See alphaonedev/ai-memory-mcp#333.
+        if let Some(ca_path) = ca_cert_path {
+            let ca_pem = std::fs::read(ca_path)
+                .map_err(|e| anyhow::anyhow!("read --quorum-ca-cert: {e}"))?;
+            let ca = reqwest::Certificate::from_pem(&ca_pem)
+                .map_err(|e| anyhow::anyhow!("parse --quorum-ca-cert: {e}"))?;
+            client_builder = client_builder.add_root_certificate(ca);
+        }
         if let (Some(cert), Some(key)) = (client_cert_path, client_key_path) {
             let cert_pem =
                 std::fs::read(cert).map_err(|e| anyhow::anyhow!("read --client-cert: {e}"))?;
@@ -190,7 +220,7 @@ pub async fn broadcast_store_quorum(
         let mem_id = mem.id.clone();
         let payload = body.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &mem_id).await;
+            let outcome = post_and_classify(&client, &url, &payload, &mem_id, Some(&mem_id)).await;
             (id, outcome)
         });
     }
@@ -245,6 +275,11 @@ pub async fn broadcast_store_quorum(
     // the detached tasks are logged but otherwise ignored — the caller
     // has already met quorum by the time we detach.
     if !joins.is_empty() {
+        // Ultrareview #343: emit a metric on detach-task failures so
+        // mesh divergence is observable. The detach task itself is
+        // still fire-and-forget — a full shutdown-drain would require
+        // plumbing a shared JoinSet into AppState; tracked separately.
+        let mem_id = mem.id.clone();
         tokio::spawn(async move {
             while let Some(res) = joins.join_next().await {
                 match res {
@@ -255,14 +290,26 @@ pub async fn broadcast_store_quorum(
                         tracing::warn!(
                             "federation: post-quorum id-drift from {peer_id} (peer rewrote id)"
                         );
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["id_drift"])
+                            .inc();
                     }
                     Ok((peer_id, AckOutcome::Fail(reason))) => {
-                        tracing::debug!(
-                            "federation: post-quorum peer {peer_id} did not ack: {reason}"
+                        tracing::warn!(
+                            "federation: post-quorum peer {peer_id} did not ack for {mem_id}: {reason}"
                         );
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["peer_fail"])
+                            .inc();
                     }
                     Err(e) => {
-                        tracing::warn!("federation: post-quorum join error: {e}");
+                        tracing::warn!("federation: post-quorum join error for {mem_id}: {e}");
+                        crate::metrics::registry()
+                            .federation_fanout_dropped_total
+                            .with_label_values(&["join_error"])
+                            .inc();
                     }
                 }
             }
@@ -284,13 +331,27 @@ enum AckOutcome {
     Fail(String),
 }
 
-async fn post_and_classify(
+/// Single-attempt POST to a peer, classifying the response into an
+/// `AckOutcome`. No retries — callers that want retry-on-transient-fail
+/// should use [`post_and_classify`].
+async fn post_once(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
     expected_id: &str,
+    idempotency_key: Option<&str>,
 ) -> AckOutcome {
-    match client.post(url).json(body).send().await {
+    // Ultrareview #346: attach an idempotency key so peers can dedupe
+    // on retry. If a tokio::timeout fires locally but the HTTP POST
+    // already reached the peer, the peer applies the write once; a
+    // subsequent catchup sync carrying the same memory.id will be a
+    // no-op via `insert_if_newer`. The key is set from the outgoing
+    // memory id by default, which is stable across retries.
+    let mut req = client.post(url).json(body);
+    if let Some(key) = idempotency_key {
+        req = req.header("Idempotency-Key", key);
+    }
+    match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             match resp.json::<serde_json::Value>().await {
                 Ok(v) => {
@@ -312,6 +373,158 @@ async fn post_and_classify(
         Ok(resp) => AckOutcome::Fail(format!("http {}", resp.status())),
         Err(e) => AckOutcome::Fail(format!("network: {e}")),
     }
+}
+
+/// Backoff before the single retry attempt in [`post_and_classify`].
+/// Short enough to fit both attempts inside the default 2s ack deadline
+/// plus the per-request client timeout; long enough to let a transient
+/// peer-side SQLite-mutex contention or network flap clear.
+const FANOUT_RETRY_BACKOFF: Duration = Duration::from_millis(250);
+
+/// POST to a peer with a single retry on transient failure.
+///
+/// v0.6.2 Patch 2 (S40): v3r26 hermes-tls scenario-40 had node-2 see
+/// 499/500 bulk rows. Same scenario on ironclaw-tls passed 500/500/500.
+/// Root cause: under W=2/N=4 quorum the leader returns 200 once two peers
+/// ack. The third peer's POST runs in the post-quorum detach task. If
+/// that POST fails (transient network flap, peer 5xx under concurrent
+/// SQLite-mutex contention, TLS handshake reset), it was previously
+/// fire-and-forget — the row stayed permanently missing on that peer
+/// until a sync-daemon caught it up. The harness runs no sync daemon,
+/// so one missed POST = one permanently missing row.
+///
+/// Fix: retry once on `AckOutcome::Fail`. The Idempotency-Key header
+/// ensures a partial-apply race (peer received the first POST but the
+/// response was lost) deduplicates to a no-op on the peer side via
+/// `insert_if_newer`. `IdDrift` is NOT retried — it indicates the peer
+/// semantically disagreed about the id, not a transient failure, so
+/// retrying would just observe the same disagreement.
+///
+/// Quorum contract is unchanged: callers still observe a single
+/// `AckOutcome` per peer, now reflecting the best of two attempts.
+async fn post_and_classify(
+    client: &reqwest::Client,
+    url: &str,
+    body: &serde_json::Value,
+    expected_id: &str,
+    idempotency_key: Option<&str>,
+) -> AckOutcome {
+    match post_once(client, url, body, expected_id, idempotency_key).await {
+        AckOutcome::Ack => AckOutcome::Ack,
+        AckOutcome::IdDrift => AckOutcome::IdDrift,
+        AckOutcome::Fail(first_reason) => {
+            tokio::time::sleep(FANOUT_RETRY_BACKOFF).await;
+            match post_once(client, url, body, expected_id, idempotency_key).await {
+                AckOutcome::Ack => {
+                    tracing::debug!(
+                        "federation: peer POST retry succeeded for {expected_id} (first attempt: {first_reason})"
+                    );
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["ok"])
+                        .inc();
+                    AckOutcome::Ack
+                }
+                AckOutcome::IdDrift => {
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["id_drift"])
+                        .inc();
+                    AckOutcome::IdDrift
+                }
+                AckOutcome::Fail(retry_reason) => {
+                    crate::metrics::registry()
+                        .federation_fanout_retry_total
+                        .with_label_values(&["fail"])
+                        .inc();
+                    AckOutcome::Fail(format!("first: {first_reason}; retry: {retry_reason}"))
+                }
+            }
+        }
+    }
+}
+
+/// v0.6.2 Patch 2 (S40): post-fanout catchup for `bulk_create`.
+///
+/// After the per-row `broadcast_store_quorum` fanouts complete, issue a
+/// single batched `sync_push` per peer with *every* row the leader just
+/// committed. Peer-side `insert_if_newer` is idempotent, so rows that
+/// already landed via the per-row fanout are no-ops on the peer; rows
+/// that a peer missed (post-quorum detach failure + retry both failed,
+/// or post-quorum detach timed out on that peer) are applied.
+///
+/// ## Why a catchup batch in addition to retry-once?
+///
+/// v3r26 hermes-tls S40 and v3r27 ironclaw-off S40 both showed a
+/// single row missing on one specific peer (499/500) despite the
+/// retry-once fix in [`post_and_classify`]. Retry-once is a probability
+/// improver, not a guarantee: a peer under sustained SQLite-mutex
+/// contention can drop two consecutive POSTs inside the ~250ms retry
+/// window. A terminal batched catchup closes that last gap at O(1)
+/// extra POST per peer instead of O(N) retries per row.
+///
+/// ## Safety
+///
+/// - Idempotent: peer's `insert_if_newer` matches on `id` + `updated_at`
+///   and no-ops on already-applied rows.
+/// - Quorum contract unchanged: the catchup runs AFTER quorum has been
+///   met and the HTTP response shape decided. It cannot weaken any
+///   guarantee; it only strengthens eventual consistency.
+/// - Non-blocking for caller semantics: errors are logged and returned
+///   but the leader still returns 200 to the client. The `bulk_create`
+///   HTTP contract only promises local commit + W-1 peer acks, and
+///   those have already landed by the time this is called.
+///
+/// Returns a map of `peer_id -> error string` for peers where the
+/// catchup POST itself failed (logged by the caller). A successful
+/// catchup POST appears in the map as an empty string or is omitted.
+pub async fn bulk_catchup_push(
+    config: &FederationConfig,
+    memories: &[Memory],
+) -> Vec<(String, String)> {
+    if memories.is_empty() || config.peers.is_empty() {
+        return Vec::new();
+    }
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": memories,
+        "dry_run": false,
+    });
+    let mut joins: JoinSet<(String, Result<(), String>)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let id = peer.id.clone();
+        let payload = body.clone();
+        joins.spawn(async move {
+            let mut req = client.post(&url).json(&payload);
+            // No Idempotency-Key on the batch — the batch is itself an
+            // idempotent replay, and the peer's `insert_if_newer`
+            // dedupes per row by (id, updated_at).
+            req = req.header("X-Catchup", "bulk");
+            let outcome = match req.send().await {
+                Ok(resp) if resp.status().is_success() => Ok(()),
+                Ok(resp) => Err(format!("http {}", resp.status())),
+                Err(e) => Err(format!("network: {e}")),
+            };
+            (id, outcome)
+        });
+    }
+    let mut errors = Vec::new();
+    while let Some(res) = joins.join_next().await {
+        match res {
+            Ok((peer_id, Err(err))) => {
+                tracing::warn!("bulk_catchup_push: peer {peer_id} failed: {err}");
+                errors.push((peer_id, err));
+            }
+            Ok((_, Ok(()))) => {}
+            Err(e) => {
+                tracing::warn!("bulk_catchup_push: join error: {e:?}");
+                errors.push(("unknown".to_string(), e.to_string()));
+            }
+        }
+    }
+    errors
 }
 
 /// Classify an `AckTracker` into either a committed quorum (`Ok(n)`) or
@@ -359,7 +572,8 @@ pub async fn broadcast_delete_quorum(
         let payload = body.clone();
         let target_id = id.to_string();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &target_id).await;
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
             (peer_id, outcome)
         });
     }
@@ -396,6 +610,712 @@ pub async fn broadcast_delete_quorum(
                 if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
                     tracing::debug!(
                         "federation: post-quorum delete peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S29): fan out a just-archived memory id to every peer. Payload
+/// rides on `sync_push` via `archives: [id]`, mirroring the shape used
+/// by `broadcast_delete_quorum` for deletions. On the receiving peer,
+/// `sync_push` calls `db::archive_memory` to move the row into
+/// `archived_memories` — unlike the delete path this is a soft removal
+/// (the row remains queryable via `/api/v1/archive`).
+///
+/// Same quorum contract as `broadcast_store_quorum` / `broadcast_delete_quorum`.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` if the internal tracker Arc cannot
+/// be unwrapped (only occurs under a pathological detach race).
+pub async fn broadcast_archive_quorum(
+    config: &FederationConfig,
+    id: &str,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "archives": [id],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = id.to_string();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!("federation: archive peer {peer_id} failed for {id}: {reason}");
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: archive peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum archive peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S29): fan out a just-restored memory id to every peer. Payload
+/// rides on `sync_push` via `restores: [id]`, mirroring the shape used by
+/// `broadcast_archive_quorum`. On the receiving peer, `sync_push` moves
+/// the row from `archived_memories` back into `memories` via
+/// `db::restore_archived`. If the peer never saw the archive or the row
+/// isn't in its archive table, the sync call no-ops (same missing-on-peer
+/// posture used for archives and deletions).
+///
+/// Same quorum contract as `broadcast_store_quorum` / `broadcast_archive_quorum`.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` if the internal tracker Arc cannot
+/// be unwrapped (only occurs under a pathological detach race).
+pub async fn broadcast_restore_quorum(
+    config: &FederationConfig,
+    id: &str,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "restores": [id],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = id.to_string();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!("federation: restore peer {peer_id} failed for {id}: {reason}");
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: restore peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum restore peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (#325): fan out a just-committed memory link to every peer.
+/// Payload rides on `sync_push` via `links: [link]`. Same quorum contract
+/// as `broadcast_store_quorum`.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` if the internal tracker Arc cannot
+/// be unwrapped (only occurs under a pathological detach race).
+pub async fn broadcast_link_quorum(
+    config: &FederationConfig,
+    link: &MemoryLink,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "links": [link],
+        "dry_run": false,
+    });
+    let log_id = format!("{}→{}", link.source_id, link.target_id);
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let log_id = log_id.clone();
+        joins.spawn(async move {
+            let outcome = post_and_classify(&client, &url, &payload, &log_id, Some(&log_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!("federation: link peer {peer_id} failed for {log_id}: {reason}");
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: link peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum link peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (#326): fan out a consolidation in a single `sync_push` — the new
+/// consolidated memory + the source ids being deleted. Mirrors the local
+/// semantics of `db::consolidate` (insert new + delete sources) so peers
+/// end up in the same terminal state as the originator.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_consolidate_quorum(
+    config: &FederationConfig,
+    new_mem: &Memory,
+    source_ids: &[String],
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [new_mem],
+        "deletions": source_ids,
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = new_mem.id.clone();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: consolidate peer {peer_id} failed for {}: {reason}",
+                    new_mem.id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: consolidate peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum consolidate peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S34): fan out a just-created pending-action row to every peer
+/// via `sync_push.pendings`. Callers pass the fully-hydrated `PendingAction`
+/// read from their local `pending_actions` table so peers can upsert it
+/// with the same id / status / approvals tuple the originator has. Mirrors
+/// the quorum semantics of `broadcast_store_quorum` — local pending row
+/// is already persisted at call time; peer acks are counted against
+/// `policy.write_quorum`.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_pending_quorum(
+    config: &FederationConfig,
+    pending: &PendingAction,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "pendings": [pending],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = pending.id.clone();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: pending peer {peer_id} failed for {}: {reason}",
+                    pending.id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: pending peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum pending peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S34): fan out a pending-action decision (approve/reject) to
+/// peers via `sync_push.pending_decisions`. Without this, an approve on
+/// node-2 leaves the row in `status='pending'` on node-1 and the caller
+/// sees inconsistent governance state across the cluster. Peers apply
+/// via `db::decide_pending_action` which is a no-op on already-decided
+/// rows — replay-safe.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_pending_decision_quorum(
+    config: &FederationConfig,
+    decision: &PendingDecision,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "pending_decisions": [decision],
+        "dry_run": false,
+    });
+
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target_id = decision.id.clone();
+        joins.spawn(async move {
+            let outcome =
+                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: pending-decision peer {peer_id} failed for {}: {reason}",
+                    decision.id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: pending-decision peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum pending-decision peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S35): fan out a `namespace_meta` row (the `(namespace,
+/// standard_id, parent_namespace)` tuple set by `set_namespace_standard`)
+/// to peers via `sync_push.namespace_meta`. Without this, peers see the
+/// standard memory (already fanned out via `broadcast_store_quorum`) but
+/// not the meta row tying it to a namespace + parent — so the
+/// parent-chain walk on the peer falls through to `auto_detect_parent`
+/// and can return a different ancestor than the originator.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_namespace_meta_quorum(
+    config: &FederationConfig,
+    entry: &NamespaceMetaEntry,
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "namespace_meta": [entry],
+        "dry_run": false,
+    });
+
+    let target_id = entry.namespace.clone();
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target = target_id.clone();
+        joins.spawn(async move {
+            let outcome = post_and_classify(&client, &url, &payload, &target, Some(&target)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: namespace_meta peer {peer_id} failed for {}: {reason}",
+                    entry.namespace
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: namespace_meta peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum namespace_meta peer {peer_id} did not ack: {reason}"
+                    );
+                }
+            }
+        });
+    }
+
+    let tracker = Arc::try_unwrap(tracker)
+        .map_err(|_| QuorumError::LocalWriteFailed {
+            detail: "tracker arc still referenced at finalise".to_string(),
+        })?
+        .into_inner();
+    Ok(tracker)
+}
+
+/// v0.6.2 (S35 follow-up): fan out a namespace-standard *clear* to peers
+/// via `sync_push.namespace_meta_clears`. PR #363 shipped set-side fanout
+/// via `broadcast_namespace_meta_quorum` but left the clear path local-only
+/// — alice clearing on node-1 didn't propagate to bob on node-2, so the
+/// scenario-35 cross-peer clear assertion failed.
+///
+/// Same quorum contract as the set broadcast: local-write pre-counted, one
+/// POST per peer, `sync_push` bodies stuffed with the list of cleared
+/// namespaces, first W-of-N acks win.
+///
+/// # Errors
+///
+/// Returns `QuorumError::LocalWriteFailed` on pathological detach race.
+pub async fn broadcast_namespace_meta_clear_quorum(
+    config: &FederationConfig,
+    namespaces: &[String],
+) -> Result<AckTracker, QuorumError> {
+    let now = Instant::now();
+    let tracker = Arc::new(Mutex::new(AckTracker::new(config.policy.clone(), now)));
+    tracker.lock().await.record_local();
+
+    let body = serde_json::json!({
+        "sender_agent_id": config.sender_agent_id,
+        "memories": [],
+        "namespace_meta_clears": namespaces,
+        "dry_run": false,
+    });
+
+    // Use the joined namespace list as the ack-classifier's `target_id` so
+    // post-quorum logs carry enough context to trace back to the operation.
+    let target_id = namespaces.join(",");
+    let mut joins: JoinSet<(String, AckOutcome)> = JoinSet::new();
+    for peer in &config.peers {
+        let client = config.client.clone();
+        let url = peer.sync_push_url.clone();
+        let peer_id = peer.id.clone();
+        let payload = body.clone();
+        let target = target_id.clone();
+        joins.spawn(async move {
+            let outcome = post_and_classify(&client, &url, &payload, &target, Some(&target)).await;
+            (peer_id, outcome)
+        });
+    }
+
+    let deadline = now + config.policy.ack_timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, joins.join_next()).await {
+            Ok(Some(Ok((peer_id, AckOutcome::Ack)))) => {
+                tracker.lock().await.record_peer_ack(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::IdDrift)))) => {
+                tracker.lock().await.record_id_drift(peer_id);
+            }
+            Ok(Some(Ok((peer_id, AckOutcome::Fail(reason))))) => {
+                tracing::warn!(
+                    "federation: namespace_meta_clear peer {peer_id} failed for [{}]: {reason}",
+                    target_id
+                );
+            }
+            Ok(Some(Err(e))) => {
+                tracing::warn!("federation: namespace_meta_clear peer join error: {e}");
+            }
+            Ok(None) | Err(_) => break,
+        }
+        if tracker.lock().await.is_quorum_met(Instant::now()) {
+            break;
+        }
+    }
+
+    if !joins.is_empty() {
+        tokio::spawn(async move {
+            while let Some(res) = joins.join_next().await {
+                if let Ok((peer_id, AckOutcome::Fail(reason))) = res {
+                    tracing::debug!(
+                        "federation: post-quorum namespace_meta_clear peer {peer_id} did not ack: {reason}"
                     );
                 }
             }
@@ -659,6 +1579,11 @@ mod tests {
         Ack,
         Fail,
         Hang,
+        /// Return HTTP 500 on the first `fail_until` calls, then 200.
+        /// Used to exercise the S40 retry-once path.
+        FailThenAck {
+            fail_until: usize,
+        },
     }
 
     #[derive(Clone)]
@@ -671,7 +1596,7 @@ mod tests {
         axum::extract::State(state): axum::extract::State<MockState>,
         AxumJson(_body): AxumJson<serde_json::Value>,
     ) -> (StatusCode, AxumJson<serde_json::Value>) {
-        state.count.fetch_add(1, Ordering::Relaxed);
+        let call = state.count.fetch_add(1, Ordering::Relaxed) + 1;
         match state.behaviour {
             MockBehaviour::Ack => (
                 StatusCode::OK,
@@ -684,6 +1609,19 @@ mod tests {
             MockBehaviour::Hang => {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 (StatusCode::OK, AxumJson(serde_json::json!({"applied":1})))
+            }
+            MockBehaviour::FailThenAck { fail_until } => {
+                if call <= fail_until {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        AxumJson(serde_json::json!({"error":"stub transient failure"})),
+                    )
+                } else {
+                    (
+                        StatusCode::OK,
+                        AxumJson(serde_json::json!({"applied":1,"noop":0,"skipped":0})),
+                    )
+                }
             }
         }
     }
@@ -784,6 +1722,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn transient_peer_failure_is_retried_once() {
+        // S40 regression guard: a transient 5xx from a peer on the
+        // first POST must be retried exactly once. Previously the post
+        // was fire-and-forget — one peer that 5xx'd a single bulk row
+        // left that row permanently missing on that peer (v3r26
+        // hermes-tls scenario-40: node-2 saw 499/500).
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_store_quorum(&cfg, &sample_memory())
+            .await
+            .unwrap();
+        // Retry backoff is 250ms + retry round-trip; poll up to 2s.
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            1,
+            "peer-1 acked first time, no retry"
+        );
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            2,
+            "peer-2 must see exactly two attempts (first fail, retry ack)"
+        );
+    }
+
+    #[tokio::test]
+    async fn persistent_peer_failure_stops_after_one_retry() {
+        // Retry policy is exactly one retry — a peer that stays down
+        // must NOT be called more than twice per row (no infinite
+        // backoff, no thundering herd on a wedged peer).
+        let (url1, _) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_store_quorum(&cfg, &sample_memory())
+            .await
+            .unwrap();
+        // Wait long enough that any further retries would have fired.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            2,
+            "persistently-failing peer must be called exactly twice (1 + 1 retry)"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_hits_every_peer_once() {
+        // S40 catchup: verify the terminal batch POST reaches every
+        // peer exactly once, with the full row set in a single request.
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let mems = vec![sample_memory(), sample_memory(), sample_memory()];
+        let errors = bulk_catchup_push(&cfg, &mems).await;
+        assert!(
+            errors.is_empty(),
+            "catchup must succeed on healthy peers, got {errors:?}"
+        );
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            1,
+            "peer-1 must receive exactly one catchup batch"
+        );
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            1,
+            "peer-2 must receive exactly one catchup batch"
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_reports_peer_failures() {
+        // Catchup errors must be surfaced to the caller for logging —
+        // quorum was already met upstream, so the HTTP contract holds,
+        // but the leader should record which peers fell behind.
+        let (url1, _) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, _) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let mems = vec![sample_memory()];
+        let errors = bulk_catchup_push(&cfg, &mems).await;
+        assert_eq!(errors.len(), 1, "exactly one peer failed the catchup");
+        assert!(
+            errors[0].1.contains("500") || errors[0].1.contains("http"),
+            "error must name the HTTP failure, got {:?}",
+            errors[0]
+        );
+    }
+
+    #[tokio::test]
+    async fn bulk_catchup_push_empty_inputs_are_noop() {
+        // No rows + no peers → no work, no panics, no POSTs.
+        let cfg = build_config(vec![], 1, 500);
+        assert!(bulk_catchup_push(&cfg, &[]).await.is_empty());
+
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1], 1, 500);
+        assert!(bulk_catchup_push(&cfg, &[]).await.is_empty());
+        assert_eq!(
+            count1.load(Ordering::Relaxed),
+            0,
+            "no catchup POST must fire when the row set is empty"
+        );
+    }
+
+    #[tokio::test]
     async fn partition_minority_fails_quorum() {
         // N = 3, W = 3. Two peers fail → cannot meet quorum.
         let (url1, _) = spawn_mock_peer(MockBehaviour::Fail).await;
@@ -851,6 +1900,7 @@ mod tests {
             Duration::from_millis(500),
             None,
             None,
+            None,
             "ai:test".to_string(),
         )
         .unwrap();
@@ -863,6 +1913,7 @@ mod tests {
             2,
             &[],
             Duration::from_millis(500),
+            None,
             None,
             None,
             "ai:test".to_string(),
@@ -883,5 +1934,43 @@ mod tests {
         assert_eq!(payload.got, 1);
         assert_eq!(payload.needed, 3);
         assert_eq!(payload.reason, "timeout");
+    }
+
+    // --- broadcast_archive_quorum tests (S29) ---
+
+    #[tokio::test]
+    async fn archive_quorum_two_peers_ack_meets_quorum() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let tracker = broadcast_archive_quorum(&cfg, "mem-s29").await.unwrap();
+        let result = finalise_quorum(&tracker);
+        assert!(result.is_ok(), "expected quorum met, got {result:?}");
+        // Let detached fanout complete so both peers are observed.
+        for _ in 0..20 {
+            if count1.load(Ordering::Relaxed) == 1 && count2.load(Ordering::Relaxed) == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count1.load(Ordering::Relaxed), 1);
+        assert_eq!(count2.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn archive_quorum_partition_minority_fails() {
+        // N = 3, W = 3. Two peers fail → archive quorum cannot be met.
+        let (url1, _) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let (url2, _) = spawn_mock_peer(MockBehaviour::Fail).await;
+        let cfg = build_config(vec![url1, url2], 3, 500);
+        let tracker = broadcast_archive_quorum(&cfg, "mem-s29").await.unwrap();
+        let err = finalise_quorum(&tracker).unwrap_err();
+        match err {
+            QuorumError::QuorumNotMet { got, needed, .. } => {
+                assert_eq!(got, 1);
+                assert_eq!(needed, 3);
+            }
+            other => panic!("expected QuorumNotMet, got {other:?}"),
+        }
     }
 }

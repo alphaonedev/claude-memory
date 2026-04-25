@@ -19,3 +19,4 @@ benchmarks/longmemeval/results/
 
 # Local scratch (never committed)
 /backup/
+.claude/

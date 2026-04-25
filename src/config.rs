@@ -199,6 +199,10 @@ impl TierConfig {
                 contradiction_analysis: has_llm,
                 cross_encoder_reranking: self.cross_encoder,
                 memory_reflection: self.cross_encoder && has_llm,
+                // Default false — the HTTP/MCP capabilities handler
+                // overwrites this with the live runtime state when it
+                // has access to the embedder handle.
+                embedder_loaded: false,
             },
             models: CapabilityModels {
                 embedding: self
@@ -244,6 +248,20 @@ pub struct CapabilityFeatures {
     pub contradiction_analysis: bool,
     pub cross_encoder_reranking: bool,
     pub memory_reflection: bool,
+    /// v0.6.2 (S18): runtime-observed embedder state. `semantic_search`
+    /// above reflects *configured* capability (derived from the tier's
+    /// `embedding_model` setting). `embedder_loaded` reflects *actual*
+    /// state after `Embedder::load()` attempted to materialize the
+    /// `HuggingFace` model on startup. When an operator configures the
+    /// `semantic` tier but the model download or mmap fails (offline
+    /// runner, read-only fs, missing tokens), `semantic_search=true`
+    /// would mislead. This flag exposes the truth so setup scripts can
+    /// assert the daemon is actually ready for semantic recall before
+    /// dispatching scenarios. Default false; populated by
+    /// `handle_capabilities` when the HTTP/MCP wrapper hands in the
+    /// live embedder handle.
+    #[serde(default)]
+    pub embedder_loaded: bool,
 }
 
 /// Model identifiers exposed in the capabilities report.
