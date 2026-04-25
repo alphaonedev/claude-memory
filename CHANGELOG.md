@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — v0.6.3 (Patch 3)
 
+### Added
+
+- **Performance budgets published** — new `PERFORMANCE.md` at the repo
+  root carries the authoritative p95/p99 latency contract for every
+  hot-path operation (verbatim from the v0.6.3 grand-slam charter):
+  `memory_session_start` hook, `memory_recall` hot/cold,
+  `memory_store` with/without embedding, `memory_search`,
+  `memory_check_duplicate`, `memory_kg_query` (depth ≤ 3 / ≤ 5),
+  `memory_kg_timeline`, `memory_get_taxonomy`, `curator cycle`, and
+  `federation ack`. Documents the **>10% p95 breach fails CI**
+  threshold (p99 informational until the v0.6.3 soak window closes),
+  the Apple M4 / 32 GB / NVMe SSD reference hardware baseline (with a
+  note on Linux x86_64 CI parity), and a status table flagging the
+  bench tool (Stream E) and `bench.yml` workflow (Stream F) as still
+  in-flight. Closes Pillar 3 / Stream F doc deliverable from the
+  v0.6.3 charter.
+
 ### Fixed
 
 - **[#358]** mTLS allowlist parser now tolerates inline trailing `#`
