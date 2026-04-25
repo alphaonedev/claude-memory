@@ -1739,6 +1739,10 @@ const TAXONOMY_MAX_LIMIT: usize = 10_000;
 /// — when truncated, `total_count` still reflects the full prefix
 /// total (a separate aggregation), and `truncated` is set so callers
 /// can warn the user. Hard ceiling: [`TAXONOMY_MAX_LIMIT`].
+// Body is intentionally one logical pipeline (SQL aggregation → tree
+// assembly → root materialisation); pulling helpers out hurts
+// readability more than it helps.
+#[allow(clippy::too_many_lines)]
 pub fn get_taxonomy(
     conn: &Connection,
     namespace_prefix: Option<&str>,

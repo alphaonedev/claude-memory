@@ -1415,10 +1415,10 @@ fn handle_check_duplicate(
     // Float defaults are awkward in JSON schema land — accept either an
     // explicit threshold or fall back to the tuned default. The hard
     // floor is enforced inside `db::check_duplicate`.
+    #[allow(clippy::cast_possible_truncation)]
     let threshold = params["threshold"]
         .as_f64()
-        .map(|t| t as f32)
-        .unwrap_or(db::DUPLICATE_THRESHOLD_DEFAULT);
+        .map_or(db::DUPLICATE_THRESHOLD_DEFAULT, |t| t as f32);
 
     validate::validate_title(title).map_err(|e| e.to_string())?;
     validate::validate_content(content).map_err(|e| e.to_string())?;
