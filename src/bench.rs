@@ -11,10 +11,17 @@
 //! Coverage in this build:
 //! - Embedding-free CRUD: `memory_store` (no embedding), `memory_search`
 //!   (FTS5), `memory_recall` (hot, depth=1).
-//! - Knowledge-graph traversal: `memory_kg_query` (depth=1) and
-//!   `memory_kg_timeline`. Both seed an in-process fixture (50 sources
-//!   × 4 outbound links each, all with explicit `valid_from`) so the
-//!   bench runs without any external service.
+//! - Knowledge-graph traversal:
+//!     - `memory_kg_query` (depth=1) and `memory_kg_timeline` against a
+//!       fan-out fixture (50 sources × 4 outbound links each, every
+//!       link `valid_from`-stamped).
+//!     - `memory_kg_query` (depth=3, depth=5) against a chain fixture
+//!       (50 chains × 5 hops each = 300 memories + 250 links). depth=3
+//!       hits the "depth ≤ 3" 100 ms budget bucket; depth=5 hits the
+//!       "depth ≤ 5" 250 ms tail-case bucket.
+//!
+//! Both fixtures live in the same in-process disposable `SQLite` — no
+//! external service required.
 //!
 //! Embedding-bound paths (`memory_store` with embedding,
 //! `memory_recall` cold/full hybrid) still require an embedder process
@@ -56,6 +63,15 @@ pub enum Operation {
     /// `memory_kg_query` recursive-CTE traversal at depth=1 (the
     /// shallowest path through the depth ≤ 3 budget bucket).
     KgQueryDepth1,
+    /// `memory_kg_query` recursive-CTE traversal at depth=3 (the
+    /// deepest path inside the "depth ≤ 3" 100 ms budget bucket). Driven
+    /// against a chain fixture so the recursive CTE actually visits
+    /// three hops per query.
+    KgQueryDepth3,
+    /// `memory_kg_query` recursive-CTE traversal at depth=5 (the tail
+    /// case for the "depth ≤ 5" 250 ms budget bucket). Driven against
+    /// the same chain fixture as depth=3.
+    KgQueryDepth5,
     /// `memory_kg_timeline` — ordered timeline for a single source.
     KgTimeline,
 }
@@ -68,15 +84,19 @@ impl Operation {
             Self::SearchFts => "memory_search (FTS5)",
             Self::RecallHot => "memory_recall (hot, depth=1)",
             Self::KgQueryDepth1 => "memory_kg_query (depth=1)",
+            Self::KgQueryDepth3 => "memory_kg_query (depth=3)",
+            Self::KgQueryDepth5 => "memory_kg_query (depth=5)",
             Self::KgTimeline => "memory_kg_timeline",
         }
     }
 
     /// p95 budget in milliseconds, sourced from `PERFORMANCE.md`.
     ///
-    /// `KgQueryDepth1` is bucketed under "depth ≤ 3" (100 ms) — its
-    /// budget collapses with `SearchFts` and `KgTimeline` despite
-    /// belonging to a different table row.
+    /// `KgQueryDepth1` and `KgQueryDepth3` both fall in the
+    /// "depth ≤ 3" (100 ms) bucket; `KgQueryDepth5` is the tail case
+    /// at "depth ≤ 5" (250 ms). `SearchFts` and `KgTimeline` happen to
+    /// share the same numeric budget as the depth ≤ 3 bucket despite
+    /// belonging to different table rows in `PERFORMANCE.md`.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub fn target_p95_ms(self) -> f64 {
@@ -85,6 +105,8 @@ impl Operation {
             Self::SearchFts => 100.0,
             Self::RecallHot => 50.0,
             Self::KgQueryDepth1 => 100.0,
+            Self::KgQueryDepth3 => 100.0,
+            Self::KgQueryDepth5 => 250.0,
             Self::KgTimeline => 100.0,
         }
     }
@@ -143,8 +165,21 @@ pub fn run(conn: &Connection, config: &BenchConfig) -> Result<Vec<OperationResul
     let recall = run_recall_hot(conn, config)?;
     let kg_sources = seed_kg_fixture(conn, &config.namespace)?;
     let kg_query = run_kg_query_depth1(conn, config, &kg_sources)?;
+    let kg_chain_sources = seed_kg_chain_fixture(conn, &config.namespace)?;
+    let kg_query_d3 =
+        run_kg_query_chain(conn, config, &kg_chain_sources, Operation::KgQueryDepth3, 3)?;
+    let kg_query_d5 =
+        run_kg_query_chain(conn, config, &kg_chain_sources, Operation::KgQueryDepth5, 5)?;
     let kg_timeline = run_kg_timeline(conn, config, &kg_sources)?;
-    Ok(vec![store, search, recall, kg_query, kg_timeline])
+    Ok(vec![
+        store,
+        search,
+        recall,
+        kg_query,
+        kg_query_d3,
+        kg_query_d5,
+        kg_timeline,
+    ])
 }
 
 fn run_store_no_embedding(conn: &Connection, config: &BenchConfig) -> Result<OperationResult> {
@@ -236,6 +271,15 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
 const KG_FIXTURE_SOURCES: usize = 50;
 const KG_FIXTURE_LINKS_PER_SOURCE: usize = 4;
 
+/// Linear-chain fixture geometry for the depth=3 / depth=5 runners.
+/// `KG_CHAIN_FIXTURE_CHAINS` chains × `KG_CHAIN_FIXTURE_HOPS` hops yields
+/// `chains * (hops + 1)` memories and `chains * hops` links — so 50 × 5
+/// matches the fan-out fixture's order of magnitude (300 memories +
+/// 250 links). depth=5 reaches every node in a chain; depth=3 reaches
+/// the first three follow-on hops.
+const KG_CHAIN_FIXTURE_CHAINS: usize = 50;
+const KG_CHAIN_FIXTURE_HOPS: usize = 5;
+
 fn run_kg_query_depth1(
     conn: &Connection,
     config: &BenchConfig,
@@ -257,6 +301,31 @@ fn run_kg_query_depth1(
         }
     }
     Ok(percentile_summary(Operation::KgQueryDepth1, &samples))
+}
+
+fn run_kg_query_chain(
+    conn: &Connection,
+    config: &BenchConfig,
+    sources: &[String],
+    operation: Operation,
+    max_depth: usize,
+) -> Result<OperationResult> {
+    debug_assert!(
+        !sources.is_empty(),
+        "kg_query chain bench requires a seeded fixture"
+    );
+    let total = config.warmup + config.iterations;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        let src = &sources[i % sources.len()];
+        let start = Instant::now();
+        let _ = db::kg_query(conn, src, max_depth, None, None, None)?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(operation, &samples))
 }
 
 fn run_kg_timeline(
@@ -306,6 +375,33 @@ fn seed_kg_fixture(conn: &Connection, namespace: &str) -> Result<Vec<String>> {
             db::create_link(conn, &src_id, &tgt_id, "related_to")?;
         }
         sources.push(src_id);
+    }
+    Ok(sources)
+}
+
+/// Seed the linear-chain KG fixture used by the depth=3 / depth=5
+/// runners: `KG_CHAIN_FIXTURE_CHAINS` chains, each
+/// `KG_CHAIN_FIXTURE_HOPS` links long. Every node and link uses titles
+/// disjoint from the fan-out fixture's `kg-src` / `kg-tgt` prefixes, so
+/// both fixtures coexist in the same connection without colliding on
+/// the `(title, namespace)` upsert. Returns the source IDs (one per
+/// chain) so the runners can drive `kg_query` against them.
+fn seed_kg_chain_fixture(conn: &Connection, namespace: &str) -> Result<Vec<String>> {
+    let mut sources = Vec::with_capacity(KG_CHAIN_FIXTURE_CHAINS);
+    for c in 0..KG_CHAIN_FIXTURE_CHAINS {
+        let mut prev_id = {
+            let head = synth_memory(namespace, c, "kg-chain-src");
+            db::insert(conn, &head)?
+        };
+        let chain_head_id = prev_id.clone();
+        for h in 0..KG_CHAIN_FIXTURE_HOPS {
+            let node_idx = c * KG_CHAIN_FIXTURE_HOPS + h;
+            let next = synth_memory(namespace, node_idx, "kg-chain-node");
+            let next_id = db::insert(conn, &next)?;
+            db::create_link(conn, &prev_id, &next_id, "related_to")?;
+            prev_id = next_id;
+        }
+        sources.push(chain_head_id);
     }
     Ok(sources)
 }
@@ -461,15 +557,17 @@ mod tests {
     }
 
     #[test]
-    fn run_returns_all_five_results() {
+    fn run_returns_all_seven_results() {
         let conn = fresh_conn();
         let results = run(&conn, &small_config()).unwrap();
-        assert_eq!(results.len(), 5);
+        assert_eq!(results.len(), 7);
         assert_eq!(results[0].operation, Operation::StoreNoEmbedding);
         assert_eq!(results[1].operation, Operation::SearchFts);
         assert_eq!(results[2].operation, Operation::RecallHot);
         assert_eq!(results[3].operation, Operation::KgQueryDepth1);
-        assert_eq!(results[4].operation, Operation::KgTimeline);
+        assert_eq!(results[4].operation, Operation::KgQueryDepth3);
+        assert_eq!(results[5].operation, Operation::KgQueryDepth5);
+        assert_eq!(results[6].operation, Operation::KgTimeline);
         for r in &results {
             assert_eq!(r.samples, 30);
             assert!(r.measured_p50_ms <= r.measured_p95_ms);
@@ -520,6 +618,8 @@ mod tests {
         assert!(table.contains("memory_search (FTS5)"));
         assert!(table.contains("memory_recall (hot, depth=1)"));
         assert!(table.contains("memory_kg_query (depth=1)"));
+        assert!(table.contains("memory_kg_query (depth=3)"));
+        assert!(table.contains("memory_kg_query (depth=5)"));
         assert!(table.contains("memory_kg_timeline"));
         assert!(table.contains("Status"));
     }
@@ -531,7 +631,33 @@ mod tests {
         assert!((Operation::SearchFts.target_p95_ms() - 100.0).abs() < 1e-9);
         assert!((Operation::RecallHot.target_p95_ms() - 50.0).abs() < 1e-9);
         assert!((Operation::KgQueryDepth1.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::KgQueryDepth3.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::KgQueryDepth5.target_p95_ms() - 250.0).abs() < 1e-9);
         assert!((Operation::KgTimeline.target_p95_ms() - 100.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn seed_kg_chain_fixture_traverses_to_max_depth() {
+        let conn = fresh_conn();
+        let sources = seed_kg_chain_fixture(&conn, "kg-chain-fixture-test").unwrap();
+        assert_eq!(sources.len(), KG_CHAIN_FIXTURE_CHAINS);
+        // Every chain must yield exactly `KG_CHAIN_FIXTURE_HOPS` reachable
+        // nodes at depth=KG_CHAIN_FIXTURE_HOPS — that's what justifies the
+        // depth=5 budget bucket. depth=3 must reach exactly 3 nodes.
+        for src in &sources {
+            let depth5 = db::kg_query(&conn, src, KG_CHAIN_FIXTURE_HOPS, None, None, None).unwrap();
+            assert_eq!(
+                depth5.len(),
+                KG_CHAIN_FIXTURE_HOPS,
+                "depth={KG_CHAIN_FIXTURE_HOPS} on a {KG_CHAIN_FIXTURE_HOPS}-hop chain must reach every node"
+            );
+            let depth3 = db::kg_query(&conn, src, 3, None, None, None).unwrap();
+            assert_eq!(
+                depth3.len(),
+                3,
+                "depth=3 on a {KG_CHAIN_FIXTURE_HOPS}-hop chain must reach exactly 3 follow-on nodes"
+            );
+        }
     }
 
     #[test]

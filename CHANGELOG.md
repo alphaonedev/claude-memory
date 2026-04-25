@@ -76,6 +76,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Performance Budgets + CI Guard"; budgets are now continuously
   enforced against trunk and PRs.
 
+- **`ai-memory bench` KG depth=3 + depth=5 coverage (Pillar 3 / Stream E)**
+  — `memory_kg_query` is now exercised at the deepest hop of both
+  documented budget buckets: depth=3 against the "depth ≤ 3" 100 ms
+  p95 row and depth=5 against the "depth ≤ 5" 250 ms tail-case row in
+  `PERFORMANCE.md`. The runner seeds a second in-process fixture (50
+  chains × 5 hops each = 300 memories + 250 links) so the recursive
+  CTE actually traverses three / five hops per query rather than
+  collapsing to a single hop on the existing fan-out fixture. Local M4
+  measurements: depth=3 p95 ~0.6 ms, depth=5 p95 ~0.7 ms — both PASS,
+  both well inside the 10% tolerance enforced by `bench.yml`. No new
+  dependencies. Completes the KG half of Stream E; embedding-bound
+  paths still need a fixture decision and remain tracked separately.
+
 - **`ai-memory bench` KG coverage (Pillar 3 / Stream E)** —
   `memory_kg_query` (depth=1) and `memory_kg_timeline` are now driven
   by the `bench` subcommand against the same in-memory disposable
