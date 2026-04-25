@@ -223,6 +223,20 @@ fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_kg_invalidate",
+                "description": "Pillar 2 / Stream C — mark a KG link as superseded by setting its `valid_until` column. The link is identified by the (source_id, target_id, relation) triple (memory_links has no separate id column). When `valid_until` is omitted, the current wall-clock time is used. Idempotent: repeated calls overwrite the prior value and the response reports `previous_valid_until` so callers can detect the overwrite. Returns `found: false` when no link matches the triple.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string", "description": "Source memory ID of the link to invalidate."},
+                        "target_id": {"type": "string", "description": "Target memory ID of the link to invalidate."},
+                        "relation": {"type": "string", "description": "Relation label of the link (e.g. 'related_to', 'supersedes', 'derived_from'). Must be a recognized relation."},
+                        "valid_until": {"type": "string", "description": "RFC3339 timestamp marking when the assertion stops being valid. Defaults to the current time when omitted."}
+                    },
+                    "required": ["source_id", "target_id", "relation"]
+                }
+            },
+            {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
                 "inputSchema": {
@@ -1633,6 +1647,43 @@ fn handle_kg_timeline(conn: &rusqlite::Connection, params: &Value) -> Result<Val
     }))
 }
 
+fn handle_kg_invalidate(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let source_id = params["source_id"]
+        .as_str()
+        .ok_or("source_id is required")?;
+    let target_id = params["target_id"]
+        .as_str()
+        .ok_or("target_id is required")?;
+    let relation = params["relation"].as_str().ok_or("relation is required")?;
+    validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
+    let valid_until = params["valid_until"]
+        .as_str()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(ts) = valid_until {
+        validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
+    }
+
+    match db::invalidate_link(conn, source_id, target_id, relation, valid_until)
+        .map_err(|e| e.to_string())?
+    {
+        Some(res) => Ok(json!({
+            "found": true,
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+            "valid_until": res.valid_until,
+            "previous_valid_until": res.previous_valid_until,
+        })),
+        None => Ok(json!({
+            "found": false,
+            "source_id": source_id,
+            "target_id": target_id,
+            "relation": relation,
+        })),
+    }
+}
+
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
@@ -2856,6 +2907,7 @@ fn handle_request(
                 "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
                 "memory_entity_get_by_alias" => handle_entity_get_by_alias(conn, arguments),
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
+                "memory_kg_invalidate" => handle_kg_invalidate(conn, arguments),
                 "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
                 "memory_promote" => handle_promote(conn, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
@@ -3220,15 +3272,16 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_41_tools() {
+    fn tool_definitions_returns_42_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
-        // (Pillar 2 / Stream B), and memory_kg_timeline (Pillar 2 /
-        // Stream C) on top of the 36-tool v0.6.0.0 surface.
+        // (Pillar 2 / Stream B), and memory_kg_timeline +
+        // memory_kg_invalidate (Pillar 2 / Stream C) on top of the
+        // 36-tool v0.6.0.0 surface.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 41);
+        assert_eq!(tools.len(), 42);
     }
 
     #[test]
@@ -3254,6 +3307,14 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
         assert!(names.contains(&"memory_kg_timeline"));
+    }
+
+    #[test]
+    fn tool_definitions_include_kg_invalidate() {
+        let defs = tool_definitions();
+        let tools = defs["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"memory_kg_invalidate"));
     }
 
     #[test]

@@ -1174,6 +1174,12 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         // `memory_kg_timeline` tool. Query params: `source_id` (required),
         // `since?`, `until?`, `limit?`.
         .route("/api/v1/kg/timeline", get(handlers::kg_timeline))
+        // Pillar 2 / Stream C — KG link supersession. REST mirror of the
+        // MCP `memory_kg_invalidate` tool. POST body:
+        // `{source_id, target_id, relation, valid_until?}`. 200 when the
+        // link existed (with `previous_valid_until`); 404 when no link
+        // matches the triple.
+        .route("/api/v1/kg/invalidate", post(handlers::kg_invalidate))
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))

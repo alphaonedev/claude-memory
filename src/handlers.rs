@@ -2283,6 +2283,87 @@ pub async fn kg_timeline(
     }
 }
 
+/// JSON body for `POST /api/v1/kg/invalidate` (Pillar 2 / Stream C —
+/// `memory_kg_invalidate`). The link is identified by its composite
+/// key; `valid_until` defaults to wall-clock now when omitted.
+#[derive(Debug, Deserialize)]
+pub struct KgInvalidateBody {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    pub valid_until: Option<String>,
+}
+
+/// `POST /api/v1/kg/invalidate` — REST mirror of `memory_kg_invalidate`.
+/// 200 with `{found: true, …, previous_valid_until}` when the link
+/// existed; 404 with `{found: false}` when no link matches the triple.
+pub async fn kg_invalidate(
+    State(state): State<Db>,
+    Json(body): Json<KgInvalidateBody>,
+) -> impl IntoResponse {
+    if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    let valid_until = body
+        .valid_until
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(ts) = valid_until
+        && let Err(e) = validate::validate_expires_at_format(ts)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid valid_until: {e}")})),
+        )
+            .into_response();
+    }
+
+    let lock = state.lock().await;
+    match db::invalidate_link(
+        &lock.0,
+        &body.source_id,
+        &body.target_id,
+        &body.relation,
+        valid_until,
+    ) {
+        Ok(Some(res)) => (
+            StatusCode::OK,
+            Json(json!({
+                "found": true,
+                "source_id": body.source_id,
+                "target_id": body.target_id,
+                "relation": body.relation,
+                "valid_until": res.valid_until,
+                "previous_valid_until": res.previous_valid_until,
+            })),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "found": false,
+                "source_id": body.source_id,
+                "target_id": body.target_id,
+                "relation": body.relation,
+            })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("handler error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": "internal server error"})),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn create_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,
