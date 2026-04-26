@@ -8141,9 +8141,12 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
     )
     .unwrap();
 
-    // Start peer B's serve with mTLS + allowlist.
+    // Start peer B's serve with mTLS + allowlist. Wrap in a ChildGuard
+    // so an assert panic anywhere below still kills the spawned daemon
+    // and unlinks the temp fixture files (DBs, certs, keys, allowlist)
+    // during unwind. Bare `Child` would orphan the server to PID 1.
     let port_b = free_port();
-    let mut serve_b = cmd(bin)
+    let serve_b_child = cmd(bin)
         .args([
             "--db",
             db_b.to_str().unwrap(),
@@ -8161,6 +8164,17 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let _serve_b = ChildGuard::new(serve_b_child).with_cleanup([
+        db_a.clone(),
+        db_b.clone(),
+        server_cert.clone(),
+        server_key.clone(),
+        peer_a_cert.clone(),
+        peer_a_key.clone(),
+        peer_c_cert.clone(),
+        peer_c_key.clone(),
+        allowlist_path.clone(),
+    ]);
 
     // Build a reqwest::blocking client presenting peer-A's cert. We use
     // reqwest (rustls-tls backend) instead of `curl --cert` because
@@ -8209,7 +8223,9 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
     );
 
     // Start the sync-daemon on peer A with peer-A's client cert.
-    let mut daemon_ok = cmd(bin)
+    // Same ChildGuard pattern: an unwrap on the cmd output below could
+    // panic, and we don't want a leaked sync-daemon if it does.
+    let daemon_ok_child = cmd(bin)
         .args([
             "--db",
             db_a.to_str().unwrap(),
@@ -8229,6 +8245,7 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
+    let daemon_ok = ChildGuard::new(daemon_ok_child);
 
     // Positive case: memory should propagate to peer A.
     let mut found = false;
@@ -8255,8 +8272,11 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
             }
         }
     }
-    let _ = daemon_ok.kill();
-    let _ = daemon_ok.wait();
+    // Stop the sync-daemon explicitly before negative-case probing so
+    // it isn't still polling port_b on its 1s interval while peer-C
+    // attempts its handshake. Explicit drop runs the same cleanup the
+    // unwind path would.
+    drop(daemon_ok);
 
     assert!(
         found,
@@ -8274,22 +8294,82 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
         neg
     );
 
-    let _ = serve_b.kill();
-    let _ = serve_b.wait();
+    // _serve_b drops at end of scope: kills the daemon, reaps it, and
+    // unlinks every temp file in the cleanup list. No manual kill or
+    // remove_file needed.
+}
 
-    for p in [
-        &db_a,
-        &db_b,
-        &server_cert,
-        &server_key,
-        &peer_a_cert,
-        &peer_a_key,
-        &peer_c_cert,
-        &peer_c_key,
-        &allowlist_path,
-    ] {
-        let _ = std::fs::remove_file(p);
+#[cfg(unix)]
+#[test]
+fn test_child_guard_kills_daemon_on_assert_panic() {
+    // Regression: pre-fix, an `assert!` panic between spawn and the
+    // manual cleanup at the bottom of a test would orphan the spawned
+    // `ai-memory ... serve` daemon to PID 1. ChildGuard fixes this by
+    // killing + reaping in `Drop`, which runs during unwind.
+    //
+    // This test simulates that path: spawn a real serve daemon, wrap
+    // it in a ChildGuard, force a panic, catch the unwind, then verify
+    // via `kill -0` that the spawned PID is gone.
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db = dir.join(format!(
+        "ai-memory-childguard-regression-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let port = free_port();
+
+    // The PID is captured before the panic so the post-unwind block
+    // can probe it. AtomicU32::new(0) sentinel since 0 is never a real
+    // PID.
+    let captured_pid = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let captured_pid_inner = captured_pid.clone();
+    let db_for_inner = db.clone();
+
+    let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let child = cmd(bin)
+            .args([
+                "--db",
+                db_for_inner.to_str().unwrap(),
+                "serve",
+                "--port",
+                &port.to_string(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        captured_pid_inner.store(child.id(), std::sync::atomic::Ordering::SeqCst);
+        let _g = ChildGuard::new(child).with_cleanup([db_for_inner.clone()]);
+        // Wait for serve to be live so we're testing real-process
+        // cleanup, not a race between spawn and Drop.
+        assert!(wait_for_health(port), "serve never came up");
+        // Force the exact failure mode pre-fix would leak on.
+        panic!("forced panic to verify ChildGuard cleanup on unwind");
+    }));
+
+    // Forced panic must have surfaced as Err.
+    assert!(res.is_err(), "expected forced panic; got Ok");
+
+    let pid = captured_pid.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(pid > 0, "child PID was never captured");
+
+    // Give the OS a beat to reap the killed child. `kill -0 <pid>`
+    // returns success while the PID is alive, failure once it's gone.
+    let mut alive = true;
+    for _ in 0..50 {
+        let status = std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .status();
+        if !matches!(status, Ok(s) if s.success()) {
+            alive = false;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    assert!(
+        !alive,
+        "ChildGuard did not reap the spawned daemon on panic — PID {pid} still alive"
+    );
 }
 
 #[test]
@@ -8401,6 +8481,51 @@ fn curl_delete(port: u16, path: &str, agent_id: Option<&str>) -> String {
         .output()
         .unwrap();
     String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// RAII guard for any spawned child process used by the integration
+/// tests. On `Drop` it kills the child, reaps it, then unlinks any
+/// associated temp files.
+///
+/// `std::process::Child` does NOT kill the underlying process when
+/// dropped on Unix — the docs explicitly say so. Tests that spawn a
+/// daemon and rely on a manual `kill()` at the end of the function
+/// leak the daemon to PID 1 whenever any earlier `assert!` panics:
+/// the unwinder drops the `Child` (no-op) and the test binary exits,
+/// orphaning the server. Wrap the `Child` in a guard to make cleanup
+/// unwind-safe.
+struct ChildGuard {
+    child: Option<std::process::Child>,
+    cleanup_paths: Vec<std::path::PathBuf>,
+}
+
+impl ChildGuard {
+    fn new(child: std::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            cleanup_paths: Vec::new(),
+        }
+    }
+
+    fn with_cleanup<I>(mut self, paths: I) -> Self
+    where
+        I: IntoIterator<Item = std::path::PathBuf>,
+    {
+        self.cleanup_paths.extend(paths);
+        self
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        for p in &self.cleanup_paths {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }
 
 struct DaemonGuard {
