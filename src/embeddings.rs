@@ -756,13 +756,14 @@ fn load_from_fallback_succeeds_when_files_present() {
     // Serialize on a global mutex — env::set_var is process-wide and would
     // race with parallel tests that also touch HOME.
     static LOCK: Mutex<()> = Mutex::new(());
-    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let tmp = std::env::temp_dir().join(format!(
-        "ai-memory-w12h-fallback-{}",
-        std::process::id()
-    ));
-    let model_dir = tmp.join(".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/main");
+    let tmp = std::env::temp_dir().join(format!("ai-memory-w12h-fallback-{}", std::process::id()));
+    let model_dir = tmp.join(
+        ".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/main",
+    );
     std::fs::create_dir_all(&model_dir).expect("mk model dir");
     for name in ["config.json", "tokenizer.json", "model.safetensors"] {
         std::fs::write(model_dir.join(name), b"{}").expect("write placeholder");
