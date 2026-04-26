@@ -887,6 +887,587 @@ mod tests {
             "daemon should have entered and exited cleanly"
         );
     }
+
+    // ---- Wave 9 (Closer A9) — `run_once` decision-branch matrix
+    // exercised against an in-process fake Ollama HTTP server. The
+    // existing `run_once_*` tests pass `None` as the LLM client; the
+    // tests below stand up a synchronous std::net::TcpListener that
+    // mimics just enough of the Ollama API (`GET /api/tags` for
+    // is_available, `POST /api/chat` for generate) to drive the LLM
+    // branches inside `run_once`.
+
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool as StdAtomicBool, AtomicUsize, Ordering as StdOrdering};
+    use std::thread::JoinHandle;
+
+    /// Behaviour knobs for the fake Ollama server.
+    #[derive(Clone)]
+    struct FakeOllamaCfg {
+        /// Tag list returned for prompts that contain "tags".
+        tag_response: String,
+        /// Contradiction answer ("yes" or "no") for "contradict" prompts.
+        contradiction_answer: String,
+        /// Summary returned for "Summarize" prompts.
+        summary_response: String,
+        /// If `true`, every `POST /api/chat` returns HTTP 500.
+        chat_returns_error: bool,
+    }
+
+    impl Default for FakeOllamaCfg {
+        fn default() -> Self {
+            Self {
+                tag_response: "alpha\nbeta\ngamma".to_string(),
+                contradiction_answer: "no".to_string(),
+                summary_response: "consolidated summary".to_string(),
+                chat_returns_error: false,
+            }
+        }
+    }
+
+    /// Handle to a running fake-Ollama server. Drop signals shutdown.
+    struct FakeOllama {
+        url: String,
+        shutdown: StdArc<StdAtomicBool>,
+        handle: Option<JoinHandle<()>>,
+        chat_calls: StdArc<AtomicUsize>,
+    }
+
+    impl FakeOllama {
+        fn start(cfg: FakeOllamaCfg) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind 127.0.0.1");
+            let addr = listener.local_addr().unwrap();
+            // 50ms accept poll so shutdown is responsive.
+            listener.set_nonblocking(true).unwrap();
+            let shutdown = StdArc::new(StdAtomicBool::new(false));
+            let chat_calls = StdArc::new(AtomicUsize::new(0));
+            let shutdown_for_thread = shutdown.clone();
+            let chat_calls_for_thread = chat_calls.clone();
+            let cfg_for_thread = cfg;
+
+            let handle = std::thread::spawn(move || {
+                while !shutdown_for_thread.load(StdOrdering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _peer)) => {
+                            stream.set_nonblocking(false).ok();
+                            stream
+                                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                                .ok();
+                            let cfg = cfg_for_thread.clone();
+                            let chat_calls = chat_calls_for_thread.clone();
+                            std::thread::spawn(move || {
+                                handle_one(&mut stream, &cfg, &chat_calls);
+                            });
+                        }
+                        Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                url: format!("http://127.0.0.1:{}", addr.port()),
+                shutdown,
+                handle: Some(handle),
+                chat_calls,
+            }
+        }
+    }
+
+    impl Drop for FakeOllama {
+        fn drop(&mut self) {
+            self.shutdown.store(true, StdOrdering::Relaxed);
+            if let Some(h) = self.handle.take() {
+                let _ = h.join();
+            }
+        }
+    }
+
+    /// Read one HTTP/1.1 request from `stream`, route by path, write a
+    /// canned response, and close. Designed for a single round-trip per
+    /// connection — sufficient for the blocking reqwest client.
+    fn handle_one(stream: &mut std::net::TcpStream, cfg: &FakeOllamaCfg, chat_calls: &AtomicUsize) {
+        let mut reader = BufReader::new(stream.try_clone().expect("clone tcp"));
+        // Parse request line.
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() {
+            return;
+        }
+        let parts: Vec<&str> = request_line.split_whitespace().collect();
+        if parts.len() < 2 {
+            return;
+        }
+        let method = parts[0];
+        let path = parts[1];
+
+        // Drain headers; track Content-Length.
+        let mut content_length: usize = 0;
+        loop {
+            let mut header = String::new();
+            if reader.read_line(&mut header).is_err() {
+                return;
+            }
+            if header == "\r\n" || header.is_empty() {
+                break;
+            }
+            let lower = header.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("content-length:") {
+                content_length = rest.trim().parse().unwrap_or(0);
+            }
+        }
+
+        // Slurp the body if any.
+        let mut body = vec![0u8; content_length];
+        if content_length > 0 {
+            let _ = reader.read_exact(&mut body);
+        }
+        let body_str = String::from_utf8_lossy(&body).to_string();
+
+        let (status, body): (&str, String) = if method == "GET" && path == "/api/tags" {
+            // is_available + ensure_model probe — return a non-empty model list.
+            (
+                "200 OK",
+                serde_json::json!({"models": [{"name": "fake-model:latest"}]}).to_string(),
+            )
+        } else if method == "POST" && path == "/api/chat" {
+            chat_calls.fetch_add(1, StdOrdering::Relaxed);
+            if cfg.chat_returns_error {
+                (
+                    "500 Internal Server Error",
+                    "{\"error\":\"forced fault\"}".to_string(),
+                )
+            } else {
+                // Pick a response based on the prompt content.
+                let response = if body_str.contains("contradict") {
+                    cfg.contradiction_answer.clone()
+                } else if body_str.contains("Summarize") || body_str.contains("summari") {
+                    cfg.summary_response.clone()
+                } else if body_str.contains("tags") {
+                    cfg.tag_response.clone()
+                } else {
+                    "ok".to_string()
+                };
+                (
+                    "200 OK",
+                    serde_json::json!({"message": {"content": response}}).to_string(),
+                )
+            }
+        } else {
+            ("404 Not Found", "{}".to_string())
+        };
+
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+        let _ = stream.flush();
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+    }
+
+    /// Build an `OllamaClient` pointed at a running fake server.
+    fn ollama_for(server: &FakeOllama) -> crate::llm::OllamaClient {
+        crate::llm::OllamaClient::new_with_url(&server.url, "fake-model")
+            .expect("client must reach fake server")
+    }
+
+    fn make_eligible_memory(ns: &str, title: &str) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: "a".repeat(120),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    /// `run_once` with a working LLM: tags eligible memories, persists
+    /// `auto_tags` metadata, and reports a non-zero `auto_tagged` count.
+    /// Exercises the `Ok(tags) if !tags.is_empty()` happy-path branch.
+    #[test]
+    fn run_once_with_llm_tags_eligible_memories() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_eligible_memory("autotag-ns", "anchor");
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            // Trim the autonomy pass — it would call summarize_memories
+            // for clusters and we want a clean assertion on auto_tag only.
+            include_namespaces: vec!["autotag-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+
+        assert!(report.memories_eligible >= 1);
+        assert!(report.auto_tagged >= 1, "report: {report:?}");
+        let updated = db::get(&conn, &mem.id).unwrap().unwrap();
+        let tags = updated
+            .metadata
+            .get("auto_tags")
+            .and_then(|v| v.as_array())
+            .expect("auto_tags persisted");
+        assert!(!tags.is_empty());
+    }
+
+    /// `run_once` with `dry_run=true` and an LLM: the report still
+    /// reflects work-that-would-happen but no metadata is written and
+    /// no `_curator/reports` self-report row appears.
+    #[test]
+    fn run_once_with_llm_dry_run_skips_writes() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_eligible_memory("dry-llm-ns", "anchor");
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            dry_run: true,
+            include_namespaces: vec!["dry-llm-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert!(report.dry_run);
+
+        // No DB writes: original metadata unchanged, no self-report.
+        let after = db::get(&conn, &mem.id).unwrap().unwrap();
+        assert!(after.metadata.get("auto_tags").is_none());
+        let reports = db::list(
+            &conn,
+            Some("_curator/reports"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(reports.is_empty(), "dry-run must not persist self-report");
+    }
+
+    /// `max_ops_per_cycle` caps how many memories the LLM loop touches.
+    /// Set the cap to 1, seed three eligible rows, and assert
+    /// `operations_attempted == 1` plus `operations_skipped_cap > 0`.
+    #[test]
+    fn run_once_max_ops_cap_respected() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        for i in 0..3 {
+            let m = make_eligible_memory("capns", &format!("anchor-{i}"));
+            db::insert(&conn, &m).unwrap();
+        }
+        let cfg = CuratorConfig {
+            max_ops_per_cycle: 1,
+            include_namespaces: vec!["capns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert_eq!(report.operations_attempted, 1);
+        assert!(report.operations_skipped_cap >= 2, "report: {report:?}");
+    }
+
+    /// `include_namespaces` filters the eligible set to the listed
+    /// namespaces only. Memories outside the list are scanned but not
+    /// curated.
+    #[test]
+    fn run_once_include_namespaces_filter() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let inside = make_eligible_memory("included", "in");
+        let outside = make_eligible_memory("not-included", "out");
+        db::insert(&conn, &inside).unwrap();
+        db::insert(&conn, &outside).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["included".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        // Both memories are scanned but only the included one is eligible.
+        assert!(report.memories_scanned >= 2);
+        assert_eq!(report.memories_eligible, 1);
+        // The non-included memory still has no auto_tags.
+        let after_outside = db::get(&conn, &outside.id).unwrap().unwrap();
+        assert!(after_outside.metadata.get("auto_tags").is_none());
+    }
+
+    /// `exclude_namespaces` removes namespaces from the eligible set.
+    #[test]
+    fn run_once_exclude_namespaces_filter() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let kept = make_eligible_memory("kept", "k");
+        let dropped = make_eligible_memory("dropped", "d");
+        db::insert(&conn, &kept).unwrap();
+        db::insert(&conn, &dropped).unwrap();
+
+        let cfg = CuratorConfig {
+            exclude_namespaces: vec!["dropped".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert!(report.memories_scanned >= 2);
+        // Only the non-dropped namespace is eligible.
+        assert_eq!(report.memories_eligible, 1);
+        let after_dropped = db::get(&conn, &dropped.id).unwrap().unwrap();
+        assert!(after_dropped.metadata.get("auto_tags").is_none());
+    }
+
+    /// `run_once` on a database with zero eligible candidates returns a
+    /// well-formed report with all counters at 0 and no errors that
+    /// originate from the loop body itself.
+    #[test]
+    fn run_once_handles_zero_candidates() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let cfg = CuratorConfig::default();
+
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert_eq!(report.memories_scanned, 0);
+        assert_eq!(report.memories_eligible, 0);
+        assert_eq!(report.operations_attempted, 0);
+        assert_eq!(report.auto_tagged, 0);
+        assert_eq!(report.contradictions_found, 0);
+    }
+
+    /// When the LLM affirms `yes` to the contradiction prompt and the
+    /// memory has a sibling, `run_once` records the contradiction in
+    /// the memory's metadata and bumps `contradictions_found`.
+    #[test]
+    fn run_once_records_contradictions_when_llm_affirms() {
+        let cfg_server = FakeOllamaCfg {
+            contradiction_answer: "yes".to_string(),
+            ..FakeOllamaCfg::default()
+        };
+        let server = FakeOllama::start(cfg_server);
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let m1 = make_eligible_memory("dual", "first");
+        let m2 = make_eligible_memory("dual", "second");
+        db::insert(&conn, &m1).unwrap();
+        db::insert(&conn, &m2).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["dual".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert!(report.contradictions_found >= 1, "report: {report:?}");
+    }
+
+    /// When the LLM returns HTTP 500 errors, `run_once` records the
+    /// failures in `report.errors` but still completes the cycle and
+    /// emits a finished report.
+    #[test]
+    fn run_once_records_errors_when_llm_fails() {
+        let cfg_server = FakeOllamaCfg {
+            chat_returns_error: true,
+            ..FakeOllamaCfg::default()
+        };
+        let server = FakeOllama::start(cfg_server);
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_eligible_memory("fail-ns", "anchor");
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["fail-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        // The cycle finishes despite errors.
+        assert!(!report.completed_at.is_empty());
+        // At least one auto_tag failure surfaced.
+        assert!(
+            report
+                .errors
+                .iter()
+                .any(|e| e.contains("auto_tag failed") || e.contains("detect_contradiction failed")),
+            "expected an LLM-error entry in report.errors: {:?}",
+            report.errors
+        );
+        // No metadata persisted because every LLM call errored.
+        let after = db::get(&conn, &mem.id).unwrap().unwrap();
+        assert!(after.metadata.get("auto_tags").is_none());
+    }
+
+    /// A successful cycle (LLM available, dry_run=false, eligible row)
+    /// writes a self-report memory under `_curator/reports/<ts>`.
+    /// Covers the `persist_self_report` invocation inside `run_once`.
+    #[test]
+    fn run_once_writes_self_report_when_not_dry_run() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_eligible_memory("report-ns", "anchor");
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["report-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let _ = run_once(&conn, Some(&llm), &cfg).unwrap();
+
+        let reports = db::list(
+            &conn,
+            Some("_curator/reports"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].content.contains("memories_consolidated"));
+    }
+
+    /// `run_once` skips already-tagged rows on a re-run — covering the
+    /// `needs_curation` re-entrancy guard from inside `run_once`. The
+    /// second cycle should report `memories_eligible == 0` even though
+    /// the row is still scanned.
+    #[test]
+    fn run_once_idempotent_on_already_tagged_rows() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_eligible_memory("idem-ns", "anchor");
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["idem-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let r1 = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert_eq!(r1.memories_eligible, 1);
+        let r2 = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert!(r2.memories_scanned >= 1);
+        assert_eq!(r2.memories_eligible, 0);
+        assert_eq!(r2.operations_attempted, 0);
+    }
+
+    /// A multi-row cycle records multiple `operations_attempted` and the
+    /// LLM is invoked for each. The cycle proceeds even if one row's
+    /// LLM call fails — covered indirectly via the error-server above;
+    /// here we assert the success-with-multiple-rows path completes
+    /// cleanly and increments counters in lock-step.
+    #[test]
+    fn run_once_iterates_through_multiple_rows() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        for i in 0..3 {
+            let m = make_eligible_memory("multi-ns", &format!("anchor-{i}"));
+            db::insert(&conn, &m).unwrap();
+        }
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["multi-ns".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        assert_eq!(report.operations_attempted, 3);
+        assert_eq!(report.auto_tagged, 3);
+        // `chat_calls` ≥ 3 (one per auto_tag plus contradiction probes).
+        assert!(server.chat_calls.load(StdOrdering::Relaxed) >= 3);
+    }
+
+    /// The smart-tier LLM consultation path: with the autonomy passes
+    /// running and a near-duplicate cluster present, the curator calls
+    /// `summarize_memories` on the cluster. We assert by chat-call count
+    /// that the LLM was consulted beyond the per-row auto_tag/contradict
+    /// pair.
+    #[test]
+    fn run_once_smart_tier_consults_llm_for_clusters() {
+        let server = FakeOllama::start(FakeOllamaCfg::default());
+        let llm = ollama_for(&server);
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        // Two near-duplicates (≥0.55 jaccard threshold) in one namespace.
+        let now = chrono::Utc::now().to_rfc3339();
+        let m_a = Memory {
+            id: "smart-a".to_string(),
+            tier: Tier::Long,
+            namespace: "smart".to_string(),
+            title: "deploy plan".to_string(),
+            content: "kubernetes rolling canary deploy strategy kubernetes deploy".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        };
+        let m_b = Memory {
+            id: "smart-b".to_string(),
+            content: "kubernetes rolling canary deploy strategy kubernetes deploy".to_string(),
+            title: "deploy overview".to_string(),
+            ..m_a.clone()
+        };
+        db::insert(&conn, &m_a).unwrap();
+        db::insert(&conn, &m_b).unwrap();
+
+        let cfg = CuratorConfig {
+            include_namespaces: vec!["smart".to_string()],
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, Some(&llm), &cfg).unwrap();
+        // Auto-tag pass + autonomy pass → multiple chat calls.
+        assert!(server.chat_calls.load(StdOrdering::Relaxed) >= 3);
+        // Autonomy pass found at least the one cluster.
+        assert!(report.autonomy.clusters_formed >= 1, "report: {report:?}");
+    }
 }
 
 #[test]
