@@ -28,9 +28,10 @@
 //! and are tracked as follow-up Stream E work — they don't belong on
 //! the hot path of a `cargo test` invocation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::db;
@@ -50,8 +51,16 @@ pub const DEFAULT_ITERATIONS: usize = 200;
 /// Default warmup iterations discarded from the percentile sample.
 pub const DEFAULT_WARMUP: usize = 20;
 
+/// Default tolerance applied when comparing a fresh run against a
+/// `--baseline` JSON file: a measured p95 may grow by this percentage
+/// before the run is flagged as a regression. Independent of
+/// [`P95_TOLERANCE`] (which guards against the absolute budget). The
+/// baseline guard catches drift that stays inside the absolute budget
+/// but trends in the wrong direction across releases.
+pub const DEFAULT_REGRESSION_THRESHOLD_PCT: f64 = 10.0;
+
 /// Hot-path operations covered by this iteration of the bench tool.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Operation {
     /// `memory_store` without embedding — pure `SQLite` write path.
@@ -112,7 +121,7 @@ impl Operation {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
     Pass,
@@ -525,13 +534,122 @@ pub fn render_table(results: &[OperationResult]) -> String {
     out
 }
 
+/// Subset of [`OperationResult`] retained when loading a previous run
+/// for `--baseline` comparison. Only the fields the regression check
+/// actually consumes are required, so any superset of those fields
+/// (the full `bench --json` output included) deserializes cleanly.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BaselineRecord {
+    pub operation: Operation,
+    pub measured_p95_ms: f64,
+}
+
+/// Top-level shape of a `bench --json` payload, used to thread the
+/// `results` array out for [`load_baseline`]. The other top-level
+/// fields (`iterations`, `warmup`, anything future runs add) are
+/// ignored on purpose so older / newer JSON shapes load without
+/// migration churn.
+#[derive(Debug, Clone, Deserialize)]
+struct BaselineFile {
+    results: Vec<BaselineRecord>,
+}
+
+/// Per-operation regression row produced by
+/// [`compare_against_baseline`].
+#[derive(Debug, Clone, Serialize)]
+pub struct Regression {
+    pub operation: Operation,
+    /// Pretty label, duplicated for JSON consumers.
+    pub label: &'static str,
+    pub baseline_p95_ms: f64,
+    pub measured_p95_ms: f64,
+    pub delta_pct: f64,
+    pub threshold_pct: f64,
+    pub regressed: bool,
+}
+
+/// Load a previously emitted `bench --json` payload from disk.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read or the JSON cannot be
+/// parsed into the [`BaselineFile`] shape.
+pub fn load_baseline(path: &Path) -> Result<Vec<BaselineRecord>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read baseline file: {}", path.display()))?;
+    let file: BaselineFile = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse baseline JSON: {}", path.display()))?;
+    Ok(file.results)
+}
+
+/// Compare a fresh run against a baseline. Operations missing from the
+/// baseline are skipped silently (e.g. a new bench row added since the
+/// baseline was captured). The returned `Vec` preserves the order of
+/// `current` and only includes ops present in both.
+#[must_use]
+pub fn compare_against_baseline(
+    current: &[OperationResult],
+    baseline: &[BaselineRecord],
+    threshold_pct: f64,
+) -> Vec<Regression> {
+    let mut out = Vec::with_capacity(current.len());
+    for r in current {
+        let Some(b) = baseline.iter().find(|b| b.operation == r.operation) else {
+            continue;
+        };
+        // Treat a non-positive baseline as "no signal" so we never
+        // divide by zero or produce a nonsense -100% delta. Any current
+        // measurement against a zero baseline is reported as 0% delta
+        // rather than infinity — the absolute-budget guard already
+        // catches actual breakage.
+        let delta_pct = if b.measured_p95_ms > 0.0 {
+            (r.measured_p95_ms - b.measured_p95_ms) / b.measured_p95_ms * 100.0
+        } else {
+            0.0
+        };
+        let regressed = delta_pct > threshold_pct;
+        out.push(Regression {
+            operation: r.operation,
+            label: r.operation.label(),
+            baseline_p95_ms: b.measured_p95_ms,
+            measured_p95_ms: r.measured_p95_ms,
+            delta_pct,
+            threshold_pct,
+            regressed,
+        });
+    }
+    out
+}
+
+/// Render a regression table to a string, mirroring the layout of
+/// [`render_table`].
+#[must_use]
+pub fn render_regression_table(rows: &[Regression]) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "Operation                       Baseline (p95)   Measured (p95)   Delta     Status\n",
+    );
+    out.push_str(
+        "─────────────────────────────────────────────────────────────────────────────────\n",
+    );
+    for r in rows {
+        let status_str = if r.regressed { "REGRESSION" } else { "OK" };
+        let line = format!(
+            "{:<30}  {:>10.1} ms     {:>10.1} ms    {:>+6.1}%   {}\n",
+            r.label, r.baseline_p95_ms, r.measured_p95_ms, r.delta_pct, status_str
+        );
+        out.push_str(&line);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db;
 
     fn fresh_conn() -> Connection {
-        db::open(std::path::Path::new(":memory:")).unwrap()
+        db::open(Path::new(":memory:")).unwrap()
     }
 
     fn small_config() -> BenchConfig {
@@ -681,5 +799,155 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn synthetic_result(op: Operation, p95: f64) -> OperationResult {
+        OperationResult {
+            operation: op,
+            label: op.label(),
+            target_p95_ms: op.target_p95_ms(),
+            measured_p50_ms: p95 / 2.0,
+            measured_p95_ms: p95,
+            measured_p99_ms: p95 * 1.1,
+            samples: 100,
+            status: Status::Pass,
+        }
+    }
+
+    fn synthetic_baseline(op: Operation, p95: f64) -> BaselineRecord {
+        BaselineRecord {
+            operation: op,
+            measured_p95_ms: p95,
+        }
+    }
+
+    #[test]
+    fn baseline_compare_flags_above_threshold() {
+        // 12% slowdown over baseline at default 10% threshold → REGRESSION.
+        let current = vec![synthetic_result(Operation::StoreNoEmbedding, 11.2)];
+        let baseline = vec![synthetic_baseline(Operation::StoreNoEmbedding, 10.0)];
+        let rows = compare_against_baseline(&current, &baseline, 10.0);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].regressed);
+        assert!((rows[0].delta_pct - 12.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_compare_passes_within_threshold() {
+        // 8% slowdown over baseline at default 10% threshold → OK.
+        let current = vec![synthetic_result(Operation::StoreNoEmbedding, 10.8)];
+        let baseline = vec![synthetic_baseline(Operation::StoreNoEmbedding, 10.0)];
+        let rows = compare_against_baseline(&current, &baseline, 10.0);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].regressed);
+    }
+
+    #[test]
+    fn baseline_compare_speedup_is_negative_delta() {
+        // Faster than baseline → negative delta, never a regression.
+        let current = vec![synthetic_result(Operation::SearchFts, 8.0)];
+        let baseline = vec![synthetic_baseline(Operation::SearchFts, 10.0)];
+        let rows = compare_against_baseline(&current, &baseline, 10.0);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].regressed);
+        assert!((rows[0].delta_pct + 20.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn baseline_compare_skips_ops_missing_in_baseline() {
+        // A new op added since the baseline was captured shouldn't crash
+        // or appear as a regression.
+        let current = vec![
+            synthetic_result(Operation::StoreNoEmbedding, 10.0),
+            synthetic_result(Operation::KgQueryDepth5, 200.0),
+        ];
+        let baseline = vec![synthetic_baseline(Operation::StoreNoEmbedding, 10.0)];
+        let rows = compare_against_baseline(&current, &baseline, 10.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].operation, Operation::StoreNoEmbedding);
+    }
+
+    #[test]
+    fn baseline_compare_handles_zero_baseline() {
+        // Pathological zero baseline: report 0% delta rather than
+        // dividing by zero. Absolute-budget guard still catches
+        // genuinely-broken measurements.
+        let current = vec![synthetic_result(Operation::SearchFts, 5.0)];
+        let baseline = vec![synthetic_baseline(Operation::SearchFts, 0.0)];
+        let rows = compare_against_baseline(&current, &baseline, 10.0);
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].regressed);
+        assert!((rows[0].delta_pct - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn load_baseline_round_trips_json_payload() {
+        // Mirror the shape `bench --json` actually emits — it must
+        // round-trip through `load_baseline` so CI artifacts work as
+        // baselines without preprocessing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("baseline.json");
+        let payload = serde_json::json!({
+            "iterations": 200,
+            "warmup": 20,
+            "results": [
+                {
+                    "operation": "store_no_embedding",
+                    "label": "memory_store (no embedding)",
+                    "target_p95_ms": 20.0,
+                    "measured_p50_ms": 4.0,
+                    "measured_p95_ms": 9.0,
+                    "measured_p99_ms": 11.0,
+                    "samples": 200,
+                    "status": "pass"
+                },
+                {
+                    "operation": "search_fts",
+                    "label": "memory_search (FTS5)",
+                    "target_p95_ms": 100.0,
+                    "measured_p50_ms": 12.0,
+                    "measured_p95_ms": 31.0,
+                    "measured_p99_ms": 45.0,
+                    "samples": 200,
+                    "status": "pass"
+                }
+            ]
+        });
+        std::fs::write(&path, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+        let loaded = load_baseline(&path).unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert_eq!(loaded[0].operation, Operation::StoreNoEmbedding);
+        assert!((loaded[0].measured_p95_ms - 9.0).abs() < 1e-9);
+        assert_eq!(loaded[1].operation, Operation::SearchFts);
+        assert!((loaded[1].measured_p95_ms - 31.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn render_regression_table_marks_regressions() {
+        let rows = vec![
+            Regression {
+                operation: Operation::StoreNoEmbedding,
+                label: Operation::StoreNoEmbedding.label(),
+                baseline_p95_ms: 10.0,
+                measured_p95_ms: 12.0,
+                delta_pct: 20.0,
+                threshold_pct: 10.0,
+                regressed: true,
+            },
+            Regression {
+                operation: Operation::SearchFts,
+                label: Operation::SearchFts.label(),
+                baseline_p95_ms: 30.0,
+                measured_p95_ms: 31.0,
+                delta_pct: 3.3,
+                threshold_pct: 10.0,
+                regressed: false,
+            },
+        ];
+        let table = render_regression_table(&rows);
+        assert!(table.contains("memory_store (no embedding)"));
+        assert!(table.contains("memory_search (FTS5)"));
+        assert!(table.contains("REGRESSION"));
+        assert!(table.contains("OK"));
     }
 }
