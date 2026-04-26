@@ -429,6 +429,180 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // W12-H — escape_toon char-by-char + format_value branch coverage
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn escape_toon_pipe() {
+        let s = escape_toon("a|b");
+        assert_eq!(s, "a\\|b");
+    }
+
+    #[test]
+    fn escape_toon_newline() {
+        let s = escape_toon("a\nb");
+        assert_eq!(s, "a\\nb");
+    }
+
+    #[test]
+    fn escape_toon_carriage_return() {
+        let s = escape_toon("a\rb");
+        assert_eq!(s, "a\\rb");
+    }
+
+    #[test]
+    fn escape_toon_backslash() {
+        let s = escape_toon("a\\b");
+        // Backslash is doubled first, so `\` → `\\`.
+        assert_eq!(s, "a\\\\b");
+    }
+
+    #[test]
+    fn escape_toon_colon() {
+        let s = escape_toon("a:b");
+        assert_eq!(s, "a\\:b");
+    }
+
+    #[test]
+    fn escape_toon_no_special_chars_passthrough() {
+        let s = escape_toon("plain text 123");
+        assert_eq!(s, "plain text 123");
+    }
+
+    #[test]
+    fn escape_toon_multiple_specials() {
+        let s = escape_toon("a|b:c\nd");
+        assert!(s.contains("\\|"));
+        assert!(s.contains("\\:"));
+        assert!(s.contains("\\n"));
+    }
+
+    #[test]
+    fn format_value_null_is_empty() {
+        let resp = json!({
+            "memories": [{"id": null, "title": "t"}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        // First field (id) is null → empty string before pipe.
+        assert!(row.starts_with("|t|"), "got: {row}");
+    }
+
+    #[test]
+    fn format_value_bool_serializes_as_zero_one() {
+        // Bool → "1" or "0" via format_value. Use a synthetic field.
+        let resp = json!({
+            "memories": [{"id": "x", "title": true}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(row.contains("|1|"), "true → 1; got: {row}");
+    }
+
+    #[test]
+    fn format_value_bool_false() {
+        let resp = json!({
+            "memories": [{"id": "x", "title": false}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(row.contains("|0|"), "false → 0; got: {row}");
+    }
+
+    #[test]
+    fn format_value_object_empty_is_empty_string() {
+        // Empty metadata object → empty string in TOON output.
+        let resp = json!({
+            "memories": [{
+                "id": "x", "title": "t", "tier": "long", "namespace": "n",
+                "priority": 1, "confidence": 1.0, "score": 0.5, "access_count": 0,
+                "tags": [], "source": "", "created_at": "", "updated_at": "",
+                "metadata": {}
+            }],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Metadata column (last) is empty.
+        let row = toon.lines().last().unwrap();
+        assert!(row.ends_with('|') || row.ends_with("||"), "got: {row}");
+    }
+
+    #[test]
+    fn format_value_object_non_empty_serialized_json() {
+        let resp = json!({
+            "memories": [{
+                "id": "x", "title": "t", "tier": "long", "namespace": "n",
+                "priority": 1, "confidence": 1.0, "score": 0.5, "access_count": 0,
+                "tags": [], "source": "", "created_at": "", "updated_at": "",
+                "metadata": {"k": "v"}
+            }],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Object becomes JSON-serialized + escaped (`:` → `\:`).
+        assert!(toon.contains("k") && toon.contains("v"));
+    }
+
+    #[test]
+    fn standards_section_emitted_when_present() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "standard": {"id": "s1", "title": "policy", "content": "be nice"}
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("standards[id|title|content]:"));
+        assert!(toon.contains("s1"));
+    }
+
+    #[test]
+    fn standards_array_emitted_when_present() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "standards": [
+                {"id": "s1", "title": "p1", "content": "c1"},
+                {"id": "s2", "title": "p2", "content": "c2"},
+            ],
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("standards["));
+        assert!(toon.contains("s1"));
+        assert!(toon.contains("s2"));
+    }
+
+    #[test]
+    fn meta_line_includes_token_budget() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "tokens_used": 100,
+            "budget_tokens": 500,
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("tokens_used:100"));
+        assert!(toon.contains("budget_tokens:500"));
+    }
+
+    #[test]
+    fn search_to_toon_passes_through_when_memories_present() {
+        // When both `results` and `memories` exist, `memories_to_toon` is
+        // called directly without normalizing.
+        let resp = json!({
+            "memories": [{"id": "a", "title": "t1"}],
+            "results": [{"id": "b", "title": "t2"}],
+            "count": 1,
+        });
+        let toon = search_to_toon(&resp, true);
+        // Should use `memories` path, not `results`.
+        assert!(toon.contains("a"));
+        assert!(toon.contains("t1"));
+    }
+
     #[test]
     fn test_toon_round_trip_preserves_visible_fields() {
         // No bidirectional parser exists in-tree (TOON is one-way for

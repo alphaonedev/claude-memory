@@ -385,4 +385,76 @@ mod tests {
         // Same race-tolerant assertion as above.
         assert!(after >= before + 1);
     }
+
+    // -----------------------------------------------------------------
+    // W12-H — additional helpers + render shape pinning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn record_store_err_path() {
+        record_store("short", false);
+        let text = render();
+        assert!(text.contains("ai_memory_store_total{result=\"err\",tier=\"short\""));
+    }
+
+    #[test]
+    fn record_recall_emits_latency_histogram() {
+        record_recall("keyword", 0.5);
+        let text = render();
+        assert!(text.contains("ai_memory_recall_total{mode=\"keyword\""));
+        assert!(text.contains("ai_memory_recall_latency_seconds"));
+    }
+
+    #[test]
+    fn record_autonomy_hook_err_path() {
+        record_autonomy_hook("contradiction", false);
+        let text = render();
+        assert!(
+            text.contains("ai_memory_autonomy_hook_total{kind=\"contradiction\",result=\"err\"")
+        );
+    }
+
+    #[test]
+    fn render_emits_help_and_type_lines() {
+        // Tickle one series, then render and assert prom-format HELP/TYPE lines.
+        record_store("mid", true);
+        let text = render();
+        assert!(text.contains("# HELP ai_memory_store_total"));
+        assert!(text.contains("# TYPE ai_memory_store_total counter"));
+    }
+
+    #[test]
+    fn fanout_dropped_counter_increments() {
+        registry()
+            .federation_fanout_dropped_total
+            .with_label_values(&["shutdown"])
+            .inc();
+        let text = render();
+        assert!(text.contains("ai_memory_federation_fanout_dropped_total{reason=\"shutdown\""));
+    }
+
+    #[test]
+    fn fanout_retry_counter_outcome_labels() {
+        // All three outcome labels exercised — `ok`, `fail`, `id_drift`.
+        for outcome in ["ok", "fail", "id_drift"] {
+            registry()
+                .federation_fanout_retry_total
+                .with_label_values(&[outcome])
+                .inc();
+        }
+        let text = render();
+        assert!(text.contains("ai_memory_federation_fanout_retry_total"));
+    }
+
+    #[test]
+    fn curator_cycle_duration_histogram_buckets() {
+        // Just observe — confirms registry accepts the value and surfaces
+        // the histogram in /metrics output.
+        registry()
+            .curator_cycle_duration_seconds
+            .with_label_values(&["false"])
+            .observe(0.42);
+        let text = render();
+        assert!(text.contains("ai_memory_curator_cycle_duration_seconds"));
+    }
 }

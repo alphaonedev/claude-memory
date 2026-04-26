@@ -1125,4 +1125,134 @@ mod tests {
         assert_eq!(ApproverType::Agent("a".into()).kind(), "agent");
         assert_eq!(ApproverType::Consensus(3).kind(), "consensus");
     }
+
+    // -----------------------------------------------------------------
+    // W12-H — additional small-module pinning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_metadata_is_empty_object() {
+        let v = default_metadata();
+        assert!(v.is_object());
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn governed_action_as_str_pinned() {
+        assert_eq!(GovernedAction::Store.as_str(), "store");
+        assert_eq!(GovernedAction::Delete.as_str(), "delete");
+        assert_eq!(GovernedAction::Promote.as_str(), "promote");
+    }
+
+    #[test]
+    fn governance_decision_equality() {
+        assert_eq!(GovernanceDecision::Allow, GovernanceDecision::Allow);
+        assert_ne!(
+            GovernanceDecision::Deny("a".into()),
+            GovernanceDecision::Deny("b".into()),
+        );
+        assert_eq!(
+            GovernanceDecision::Pending("p1".into()),
+            GovernanceDecision::Pending("p1".into())
+        );
+    }
+
+    #[test]
+    fn vector_clock_observe_monotonic() {
+        let mut vc = VectorClock::default();
+        vc.observe("peer-a", "2026-04-01T00:00:00+00:00");
+        vc.observe("peer-a", "2026-05-01T00:00:00+00:00");
+        // Older never overwrites newer.
+        vc.observe("peer-a", "2026-03-01T00:00:00+00:00");
+        assert_eq!(vc.latest_from("peer-a"), Some("2026-05-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn vector_clock_latest_from_unknown_is_none() {
+        let vc = VectorClock::default();
+        assert!(vc.latest_from("never-seen").is_none());
+    }
+
+    #[test]
+    fn vector_clock_serde_roundtrip() {
+        let mut vc = VectorClock::default();
+        vc.observe("p1", "2026-04-01T00:00:00+00:00");
+        vc.observe("p2", "2026-04-02T00:00:00+00:00");
+        let json = serde_json::to_string(&vc).unwrap();
+        let back: VectorClock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(back, vc);
+    }
+
+    #[test]
+    fn namespace_parent_with_trailing_slash() {
+        // "a/" splits to parent="a" and tail="". The function returns the
+        // parent regardless of whether the final segment is empty.
+        assert_eq!(namespace_parent("a/"), Some("a".to_string()));
+    }
+
+    #[test]
+    fn namespace_depth_skips_empty_segments() {
+        // Multiple slashes do not inflate the depth count.
+        assert_eq!(namespace_depth("a//b"), 2);
+        assert_eq!(namespace_depth("/a"), 1);
+        assert_eq!(namespace_depth("a/"), 1);
+    }
+
+    #[test]
+    fn namespace_ancestors_two_levels() {
+        // Two-level namespace produces self + parent.
+        assert_eq!(
+            namespace_ancestors("a/b"),
+            vec!["a/b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn memory_serde_roundtrip_minimal() {
+        let m = Memory {
+            id: "abc".into(),
+            tier: Tier::Mid,
+            namespace: "global".into(),
+            title: "t".into(),
+            content: "c".into(),
+            tags: vec!["x".into()],
+            priority: 5,
+            confidence: 0.9,
+            source: "api".into(),
+            access_count: 0,
+            created_at: "2026-04-01T00:00:00+00:00".into(),
+            updated_at: "2026-04-01T00:00:00+00:00".into(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: default_metadata(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Memory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, m.id);
+        assert_eq!(back.tier, Tier::Mid);
+    }
+
+    #[test]
+    fn approver_type_kind_for_each_variant() {
+        // Hits all three discriminant arms. Mirrors the existing test but
+        // ensures we cover a Consensus(0) which is the lower edge.
+        assert_eq!(ApproverType::Human.kind(), "human");
+        assert_eq!(ApproverType::Agent(String::new()).kind(), "agent");
+        assert_eq!(ApproverType::Consensus(0).kind(), "consensus");
+    }
+
+    #[test]
+    fn governance_partial_policy_with_approver() {
+        // Partial policy with `approver` set and other fields defaulted.
+        let json = serde_json::json!({
+            "write": "owner",
+            "approver": {"agent": "alice"}
+        });
+        let parsed: GovernancePolicy = serde_json::from_value(json).expect("parses");
+        assert_eq!(parsed.write, GovernanceLevel::Owner);
+        assert_eq!(parsed.approver, ApproverType::Agent("alice".to_string()));
+        assert_eq!(parsed.promote, GovernanceLevel::Any);
+        assert_eq!(parsed.delete, GovernanceLevel::Owner);
+    }
 }

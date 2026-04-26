@@ -154,4 +154,77 @@ mod tests {
         assert_eq!(json["code"], "TEST");
         assert_eq!(json["message"], "test msg");
     }
+
+    // -----------------------------------------------------------------
+    // W12-H — variant-by-variant display + into_response coverage
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn error_display_validation() {
+        let err = MemoryError::ValidationFailed("bad input".into());
+        let s = format!("{err}");
+        assert!(s.contains("VALIDATION_FAILED"));
+        assert!(s.contains("bad input"));
+    }
+
+    #[test]
+    fn error_display_database() {
+        let err = MemoryError::DatabaseError("conn refused".into());
+        let s = format!("{err}");
+        assert!(s.contains("DATABASE_ERROR"));
+        assert!(s.contains("conn refused"));
+    }
+
+    #[test]
+    fn error_display_conflict() {
+        let err = MemoryError::Conflict("dup".into());
+        let s = format!("{err}");
+        assert!(s.contains("CONFLICT"));
+        assert!(s.contains("dup"));
+    }
+
+    #[test]
+    fn error_message_database_and_conflict() {
+        assert_eq!(MemoryError::DatabaseError("oops".into()).message(), "oops");
+        assert_eq!(MemoryError::Conflict("c".into()).message(), "c");
+    }
+
+    #[test]
+    fn from_rusqlite_error_maps_to_database() {
+        let rusqlite_err = rusqlite::Error::InvalidQuery;
+        let err: MemoryError = rusqlite_err.into();
+        assert_eq!(err.code(), "DATABASE_ERROR");
+    }
+
+    #[test]
+    fn into_response_carries_status_and_body() {
+        use axum::response::IntoResponse;
+        let err = MemoryError::NotFound("missing".into());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn into_response_validation_status() {
+        use axum::response::IntoResponse;
+        let err = MemoryError::ValidationFailed("v".into());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn into_response_database_status() {
+        use axum::response::IntoResponse;
+        let err = MemoryError::DatabaseError("d".into());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn into_response_conflict_status() {
+        use axum::response::IntoResponse;
+        let err = MemoryError::Conflict("c".into());
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
 }

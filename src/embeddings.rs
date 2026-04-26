@@ -630,6 +630,100 @@ fn cache_evicts_least_recently_used() {
     assert!((sim - expected).abs() < 1e-5);
 }
 
+// -----------------------------------------------------------------
+// W12-H — for_model + cosine corner cases
+// -----------------------------------------------------------------
+
+#[cfg(test)]
+mod w12h_extra_tests {
+    use super::*;
+
+    #[test]
+    fn for_model_nomic_without_ollama_client_errors() {
+        // NomicEmbedV15 requires an Ollama client; missing one errors.
+        let res = Embedder::for_model(EmbeddingModel::NomicEmbedV15, None);
+        match res {
+            Err(e) => {
+                let err = e.to_string();
+                assert!(
+                    err.contains("Ollama") || err.contains("nomic"),
+                    "expected ollama error msg, got: {err}"
+                );
+            }
+            Ok(_) => panic!("expected NomicEmbedV15 without client to error"),
+        }
+    }
+
+    #[test]
+    fn cosine_similarity_both_zero_returns_zero() {
+        let a = vec![0.0_f32; 3];
+        let b = vec![0.0_f32; 3];
+        let sim = Embedder::cosine_similarity(&a, &b);
+        // denom is ~0 → returns 0.0 by guard.
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn cosine_similarity_negative_values() {
+        let a = vec![1.0_f32, 2.0, 3.0];
+        let b = vec![-1.0_f32, -2.0, -3.0];
+        let sim = Embedder::cosine_similarity(&a, &b);
+        assert!((sim + 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn cosine_similarity_empty_vectors() {
+        let a: Vec<f32> = vec![];
+        let b: Vec<f32> = vec![];
+        let sim = Embedder::cosine_similarity(&a, &b);
+        // Equal length (both 0) → no early return; norms are 0; denom guard → 0.
+        assert_eq!(sim, 0.0);
+    }
+
+    #[test]
+    fn fuse_zero_weight_returns_pure_secondary() {
+        let p = vec![1.0_f32, 0.0];
+        let s = vec![0.0_f32, 1.0];
+        let f = Embedder::fuse(&p, &s, 0.0);
+        assert!((f[0] - 0.0).abs() < 1e-6);
+        assert!((f[1] - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fuse_empty_vectors_returns_empty() {
+        let p: Vec<f32> = vec![];
+        let s: Vec<f32> = vec![];
+        let f = Embedder::fuse(&p, &s, 0.5);
+        assert!(f.is_empty());
+    }
+
+    #[test]
+    fn embedding_dim_constant_pinned() {
+        assert_eq!(EMBEDDING_DIM, MINILM_DIM);
+        assert_eq!(MINILM_DIM, 384);
+        assert_eq!(NOMIC_DIM, 768);
+    }
+
+    #[test]
+    fn fuse_dimension_mismatch_secondary_longer() {
+        // Inverse of the existing test — ensures the early return triggers
+        // regardless of which side is shorter.
+        let p = vec![1.0_f32, 2.0];
+        let s = vec![3.0_f32, 4.0, 5.0]; // longer
+        let f = Embedder::fuse(&p, &s, 0.5);
+        assert_eq!(f, p);
+    }
+
+    #[test]
+    fn cosine_similarity_dimension_mismatch_inverse() {
+        // Verify guard fires for either ordering.
+        let a = vec![1.0_f32, 0.0];
+        let b = vec![1.0_f32, 0.0, 0.0];
+        let sim = Embedder::cosine_similarity(&a, &b);
+        assert_eq!(sim, 0.0);
+    }
+}
+
 #[test]
 fn embedder_returns_unreachable_when_model_path_missing() {
     // Test that load_from_fallback returns an error when model files
@@ -650,4 +744,45 @@ fn embedder_returns_unreachable_when_model_path_missing() {
             );
         }
     }
+}
+
+#[test]
+fn load_from_fallback_succeeds_when_files_present() {
+    // Set HOME to a temp dir that has the expected fallback structure
+    // populated with placeholder files. This exercises the Ok-branch
+    // (lines 272-273) without requiring real model files — Tokenizer
+    // loading is not part of `load_from_fallback`.
+    use std::sync::Mutex;
+    // Serialize on a global mutex — env::set_var is process-wide and would
+    // race with parallel tests that also touch HOME.
+    static LOCK: Mutex<()> = Mutex::new(());
+    let _guard = LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+
+    let tmp = std::env::temp_dir().join(format!(
+        "ai-memory-w12h-fallback-{}",
+        std::process::id()
+    ));
+    let model_dir = tmp.join(".cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/main");
+    std::fs::create_dir_all(&model_dir).expect("mk model dir");
+    for name in ["config.json", "tokenizer.json", "model.safetensors"] {
+        std::fs::write(model_dir.join(name), b"{}").expect("write placeholder");
+    }
+    let prev = std::env::var("HOME").ok();
+    // SAFETY: serialized via LOCK above; no other thread mutates HOME.
+    unsafe {
+        std::env::set_var("HOME", &tmp);
+    }
+    let result = Embedder::load_from_fallback();
+    // Restore HOME before any assertion that could panic.
+    unsafe {
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    let (cfg, tok, w) = result.expect("placeholder files satisfy load_from_fallback");
+    assert!(cfg.ends_with("config.json"));
+    assert!(tok.ends_with("tokenizer.json"));
+    assert!(w.ends_with("model.safetensors"));
 }

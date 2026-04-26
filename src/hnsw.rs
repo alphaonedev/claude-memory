@@ -327,6 +327,88 @@ mod tests {
         assert!(ids.contains(&"gamma"));
     }
 
+    // -----------------------------------------------------------------
+    // W12-H — small edge cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn empty_index_len_is_zero() {
+        let idx = VectorIndex::empty();
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn build_with_empty_entries_search_empty() {
+        let idx = VectorIndex::build(Vec::new());
+        assert_eq!(idx.len(), 0);
+        let results = idx.search(&[1.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_with_k_zero_returns_empty() {
+        let entries = vec![("a".into(), make_embedding(&[1.0, 0.0, 0.0]))];
+        let idx = VectorIndex::build(entries);
+        let results = idx.search(&make_embedding(&[1.0, 0.0, 0.0]), 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn rebuild_on_empty_does_not_crash() {
+        let idx = VectorIndex::empty();
+        idx.rebuild();
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn insert_increases_len() {
+        let idx = VectorIndex::empty();
+        idx.insert("a".into(), make_embedding(&[1.0, 0.0, 0.0]));
+        idx.insert("b".into(), make_embedding(&[0.0, 1.0, 0.0]));
+        assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn embedding_point_distance_orthogonal() {
+        let a = EmbeddingPoint(vec![1.0, 0.0, 0.0]);
+        let b = EmbeddingPoint(vec![0.0, 1.0, 0.0]);
+        // 1 - dot = 1 - 0 = 1
+        assert!((a.distance(&b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_point_distance_identical_is_zero() {
+        let a = EmbeddingPoint(make_embedding(&[1.0, 1.0, 1.0]));
+        // 1 - 1 = 0 (L2-normalised)
+        assert!(a.distance(&a).abs() < 1e-6);
+    }
+
+    #[test]
+    fn remove_on_empty_index_is_noop() {
+        let idx = VectorIndex::empty();
+        idx.remove("nonexistent");
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn insert_triggers_auto_rebuild_at_threshold() {
+        // REBUILD_THRESHOLD = 200. Inserting that many into a fresh index
+        // exercises the auto-rebuild branch in `insert`.
+        let idx = VectorIndex::empty();
+        for i in 0..205_usize {
+            let mut v = vec![0.0_f32; 8];
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            v[i % 8] = 1.0 + f * 0.001;
+            idx.insert(format!("id-{i}"), make_embedding(&v));
+        }
+        assert_eq!(idx.len(), 205);
+        // After auto-rebuild, search still works — top-k returns hits.
+        let q = make_embedding(&[1.0_f32; 8]);
+        let hits = idx.search(&q, 5);
+        assert_eq!(hits.len(), 5);
+    }
+
     #[test]
     fn test_rebuild_after_batch_insert_settles() {
         // Start empty, batch-insert N entries, force a rebuild, then assert
