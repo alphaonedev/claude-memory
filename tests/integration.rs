@@ -7254,7 +7254,10 @@ fn test_budget_unlimited_returns_all() {
     let v = recall_with_budget(bin, &db, "alpha", None);
     assert_eq!(v["count"], 3);
     assert!(v["tokens_used"].as_u64().unwrap() > 0);
-    assert!(v.get("budget_tokens").is_none_or(serde_json::Value::is_null));
+    assert!(
+        v.get("budget_tokens")
+            .is_none_or(serde_json::Value::is_null)
+    );
     let _ = std::fs::remove_file(&db);
 }
 
@@ -10702,83 +10705,476 @@ fn http_smoke_matrix_phases_1_3() {
     }
 }
 
-/// HTTP endpoint smoke matrix Phase 4 (complex semantic/federated paths).
-/// Documents and tests endpoints that are deferred to follow-up per Justice of HTTP.
+/// HTTP endpoint integration tests for Phase 4 (complex semantic/federated endpoints).
+///
+/// This suite replaces the weak non-500 smoke checks with substantive tests verifying:
+/// 1. Specific HTTP status codes (200, 201, 204, etc.)
+/// 2. Response body shape and required fields
+/// 3. Side-effect verification where applicable
+///
+/// Tier-gated endpoints (/search and /recall with semantic mode) are gated on the
+/// binary being built with --features semantic. Keyword-tier fallback is tested by default.
 #[test]
-fn http_smoke_matrix_phase_4_deferred() {
-    // Phase 4: Complex semantic/federated endpoints (recall, search, bulk, consolidate,
-    // sync, import, archive). These endpoints are tested for route availability and
-    // basic error handling. Full semantic/federated testing deferred to v0.6.4 per
-    // Justice of HTTP opinion.
+fn http_phase4_search_memories() {
     let d = DaemonGuard::spawn();
 
-    // Search, Recall, Bulk Create — check endpoints don't 500
-    assert!(curl_get(d.port, "/api/v1/search?query=test").0 != "500");
-    assert!(
-        curl_post(
-            d.port,
-            "/api/v1/recall",
-            &serde_json::json!({"context": "test", "limit": 10}),
-            None
-        )
-        .0 != "500"
+    // Seed a test memory to search against
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "phase4-search-test",
+            "content": "test memory for phase 4 search endpoint",
+            "namespace": "phase4-test",
+            "tier": "mid",
+            "tags": ["phase4"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
     );
-    assert!(curl_get(d.port, "/api/v1/recall?context=test&limit=10").0 != "500");
-    assert!(
-        curl_post(
-            d.port,
-            "/api/v1/memories/bulk",
-            &serde_json::json!({"memories": []}),
-            Some("ai:smoke-agent")
-        )
-        .0 != "500"
-    );
-    assert!(
-        curl_post(
-            d.port,
-            "/api/v1/consolidate",
-            &serde_json::json!({"ids": [], "title": "test"}),
-            None
-        )
-        .0 != "500"
-    );
+    assert_eq!(code, "201", "create memory for search: {body}");
 
-    // Archive, Import, Sync — must return 200 for empty/valid payloads
+    // Test search with query
+    let (code, body) = curl_get(d.port, "/api/v1/search?q=phase4");
+    assert_eq!(code, "200", "search status code: {body}");
+    assert!(body.get("results").is_some(), "search.results: {body}");
+    assert!(body.get("count").is_some(), "search.count: {body}");
+    assert!(body.get("query").is_some(), "search.query: {body}");
+
+    // Test search with multiple parameters
+    let (code, body) = curl_get(
+        d.port,
+        "/api/v1/search?q=test&limit=10&namespace=phase4-test",
+    );
+    assert_eq!(code, "200", "search with params: {body}");
+    assert!(body["results"].is_array(), "results is array: {body}");
+}
+
+#[test]
+fn http_phase4_recall_memories_post() {
+    let d = DaemonGuard::spawn();
+
+    // Seed a test memory
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "phase4-recall-test",
+            "content": "test memory for phase 4 recall endpoint",
+            "namespace": "phase4-test",
+            "tier": "mid",
+            "tags": ["phase4", "recall"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+
+    // Test recall via POST
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/recall",
+        &serde_json::json!({
+            "context": "test memory recall",
+            "limit": 10
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "200", "recall status code: {body}");
+    assert!(body.get("memories").is_some(), "recall.memories: {body}");
+    assert!(body.get("count").is_some(), "recall.count: {body}");
+    assert!(body.get("mode").is_some(), "recall.mode: {body}");
     assert!(
-        curl_post(
-            d.port,
-            "/api/v1/archive",
-            &serde_json::json!({"ids": []}),
-            None
-        )
-        .0 != "500"
+        body.get("tokens_used").is_some(),
+        "recall.tokens_used: {body}"
     );
-    assert_eq!(curl_get(d.port, "/api/v1/archive").0, "200");
-    assert!(curl_post(d.port, "/api/v1/archive", &serde_json::json!(null), None).0 != "500");
+    assert!(body["memories"].is_array(), "memories is array: {body}");
+}
+
+#[test]
+fn http_phase4_recall_memories_get() {
+    let d = DaemonGuard::spawn();
+
+    // Seed a test memory
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "phase4-recall-get-test",
+            "content": "test memory for phase 4 recall GET endpoint",
+            "namespace": "phase4-test",
+            "tier": "mid",
+            "tags": ["phase4"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+
+    // Test recall via GET
+    let (code, body) = curl_get(d.port, "/api/v1/recall?context=test&limit=10");
+    assert_eq!(code, "200", "recall GET status code: {body}");
+    assert!(body.get("memories").is_some(), "recall.memories: {body}");
+    assert!(body.get("count").is_some(), "recall.count: {body}");
+}
+
+#[test]
+fn http_phase4_bulk_create() {
+    let d = DaemonGuard::spawn();
+
+    // Create multiple memories in one request
+    let memories = vec![
+        serde_json::json!({
+            "title": "bulk-1",
+            "content": "first bulk memory",
+            "namespace": "bulk-test",
+            "tier": "mid",
+            "tags": ["bulk"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        serde_json::json!({
+            "title": "bulk-2",
+            "content": "second bulk memory",
+            "namespace": "bulk-test",
+            "tier": "mid",
+            "tags": ["bulk"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+    ];
+
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/memories/bulk",
+        &serde_json::Value::Array(memories),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "200", "bulk_create status code: {body}");
+    assert!(body.get("created").is_some(), "bulk_create.created: {body}");
+    assert!(body.get("errors").is_some(), "bulk_create.errors: {body}");
+    assert_eq!(body["created"], 2, "should create 2 memories: {body}");
+}
+
+#[test]
+fn http_phase4_consolidate_memories() {
+    let d = DaemonGuard::spawn();
+
+    // Create two memories to consolidate
+    let (code, mem1_body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "consolidate-1",
+            "content": "first memory to consolidate",
+            "namespace": "consolidate-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+    let mem1_id = mem1_body["id"].as_str().unwrap().to_string();
+
+    let (code, mem2_body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "consolidate-2",
+            "content": "second memory to consolidate",
+            "namespace": "consolidate-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+    let mem2_id = mem2_body["id"].as_str().unwrap().to_string();
+
+    // Consolidate them
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/consolidate",
+        &serde_json::json!({
+            "ids": [mem1_id, mem2_id],
+            "title": "consolidated-memory",
+            "summary": "Result of consolidating two test memories",
+            "namespace": "consolidate-test"
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201", "consolidate status code: {body}");
+    assert!(body.get("id").is_some(), "consolidate.id: {body}");
+    assert_eq!(body["consolidated"], 2, "consolidated count: {body}");
+}
+
+#[test]
+fn http_phase4_archive_list() {
+    let d = DaemonGuard::spawn();
+
+    // Test GET /api/v1/archive (list archived)
+    let (code, body) = curl_get(d.port, "/api/v1/archive");
+    assert_eq!(code, "200", "archive list status code: {body}");
+    assert!(body.get("archived").is_some(), "archive.archived: {body}");
+    assert!(body.get("count").is_some(), "archive.count: {body}");
+    assert!(body["archived"].is_array(), "archived is array: {body}");
+}
+
+#[test]
+fn http_phase4_archive_by_ids() {
+    let d = DaemonGuard::spawn();
+
+    // Create a memory to archive
+    let (code, mem_body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "archive-test",
+            "content": "memory to be archived",
+            "namespace": "archive-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+    let mem_id = mem_body["id"].as_str().unwrap().to_string();
+
+    // Archive by IDs (POST /api/v1/archive)
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/archive",
+        &serde_json::json!({
+            "ids": [mem_id.clone()],
+            "reason": "test archive"
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "archive status code: {body}");
+    assert!(body.get("archived").is_some(), "archive.archived: {body}");
+    assert!(body.get("missing").is_some(), "archive.missing: {body}");
+    assert!(body.get("count").is_some(), "archive.count: {body}");
+    assert_eq!(body["count"], 1, "should archive 1 memory: {body}");
+
+    // Verify it's in the archive list
+    let (code, list_body) = curl_get(d.port, "/api/v1/archive");
+    assert_eq!(code, "200");
     assert!(
-        curl_post(
-            d.port,
-            "/api/v1/import",
-            &serde_json::json!({"memories": []}),
-            None
-        )
-        .0 != "500"
-    );
-    assert_eq!(
-        curl_post(
-            d.port,
-            "/api/v1/sync/push",
-            &serde_json::json!({"sender_agent_id": "ai:test", "memories": []}),
-            None
-        )
-        .0,
-        "200"
-    );
-    assert_eq!(
-        curl_get(d.port, "/api/v1/sync/since?since=2020-01-01T00:00:00Z").0,
-        "200"
+        list_body["archived"].as_array().unwrap().len() > 0,
+        "should have archived items"
     );
 }
+
+#[test]
+fn http_phase4_restore_archive() {
+    let d = DaemonGuard::spawn();
+
+    // Create and archive a memory
+    let (code, mem_body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "restore-test",
+            "content": "memory to be archived and restored",
+            "namespace": "restore-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+    let mem_id = mem_body["id"].as_str().unwrap().to_string();
+
+    // Archive it
+    let (code, _arch_body) = curl_post(
+        d.port,
+        "/api/v1/archive",
+        &serde_json::json!({
+            "ids": [mem_id.clone()]
+        }),
+        None,
+    );
+    assert_eq!(code, "200");
+
+    // Restore from archive
+    let (code, body) = curl_post(
+        d.port,
+        &format!("/api/v1/archive/{}/restore", mem_id),
+        &serde_json::json!({}),
+        None,
+    );
+    assert_eq!(code, "200", "restore status code: {body}");
+    assert!(body.get("restored").is_some(), "restore.restored: {body}");
+    assert!(body.get("id").is_some(), "restore.id: {body}");
+    assert_eq!(body["restored"], true, "restored should be true: {body}");
+}
+
+#[test]
+fn http_phase4_import_memories() {
+    let d = DaemonGuard::spawn();
+
+    // Import multiple memories
+    let memories_to_import = vec![
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "title": "imported-1",
+            "content": "imported memory 1",
+            "namespace": "import-test",
+            "tier": "mid",
+            "tags": ["imported"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "import",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "access_count": 0,
+            "metadata": {}
+        }),
+        serde_json::json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "title": "imported-2",
+            "content": "imported memory 2",
+            "namespace": "import-test",
+            "tier": "mid",
+            "tags": ["imported"],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "import",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "access_count": 0,
+            "metadata": {}
+        }),
+    ];
+
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/import",
+        &serde_json::json!({
+            "memories": memories_to_import,
+            "links": []
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "import status code: {body}");
+    assert!(body.get("imported").is_some(), "import.imported: {body}");
+    assert!(body.get("errors").is_some(), "import.errors: {body}");
+    assert_eq!(body["imported"], 2, "should import 2 memories: {body}");
+}
+
+#[test]
+fn http_phase4_sync_push() {
+    let d = DaemonGuard::spawn();
+
+    // Create some memories locally first to understand the structure
+    let (code, mem_body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "sync-test",
+            "content": "memory for sync test",
+            "namespace": "sync-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+
+    // Push memories via sync (simulate peer sync)
+    let (code, body) = curl_post(
+        d.port,
+        "/api/v1/sync/push",
+        &serde_json::json!({
+            "sender_agent_id": "ai:peer-sync-agent",
+            "memories": [],
+            "deletions": [],
+            "archives": [],
+            "restores": [],
+            "pendings": [],
+            "pending_decisions": [],
+            "namespace_meta": [],
+            "namespace_meta_clears": []
+        }),
+        None,
+    );
+    assert_eq!(code, "200", "sync_push status code: {body}");
+    assert!(body.get("applied").is_some(), "sync_push.applied: {body}");
+    assert!(body.get("noop").is_some(), "sync_push.noop: {body}");
+}
+
+#[test]
+fn http_phase4_sync_since() {
+    let d = DaemonGuard::spawn();
+
+    // Create a memory to ensure there's something in the DB
+    let (code, _body) = curl_post(
+        d.port,
+        "/api/v1/memories",
+        &serde_json::json!({
+            "title": "sync-since-test",
+            "content": "memory for sync_since test",
+            "namespace": "sync-test",
+            "tier": "mid",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "metadata": {}
+        }),
+        Some("ai:phase4-agent"),
+    );
+    assert_eq!(code, "201");
+
+    // Query memories updated since a timestamp
+    let (code, body) = curl_get(d.port, "/api/v1/sync/since?since=2020-01-01T00:00:00Z");
+    assert_eq!(code, "200", "sync_since status code: {body}");
+    assert!(body.get("count").is_some(), "sync_since.count: {body}");
+    assert!(
+        body.get("memories").is_some(),
+        "sync_since.memories: {body}"
+    );
+    assert!(
+        body.get("updated_since").is_some(),
+        "sync_since.updated_since: {body}"
+    );
+    assert!(body["memories"].is_array(), "memories is array: {body}");
+}
+
+/// CLI smoke test matrix (Tier 1+2): all 32 subcommands
 
 /// CLI smoke test matrix (Tier 1+2): all 32 subcommands
 ///
