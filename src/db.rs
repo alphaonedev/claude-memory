@@ -525,6 +525,15 @@ fn migrate(conn: &Connection) -> Result<()> {
             // (charter line 428): set to the source memory's
             // `created_at` to avoid null-handling complexity in v0.6.3
             // KG query code.
+            //
+            // Type note: charter said `TIMESTAMP` for `valid_from` and
+            // `valid_until`. SQLite has no native TIMESTAMP type — it
+            // stores timestamps as TEXT (ISO-8601), REAL (Julian), or
+            // INTEGER (unix). The codebase uses TEXT throughout (matches
+            // every other timestamp column in this schema and matches
+            // chrono's `to_rfc3339()` output). The Postgres adapter at
+            // `src/store/postgres_schema.sql` uses `TIMESTAMPTZ` —
+            // semantically equivalent across both backends.
             let has_valid_from = conn
                 .prepare("SELECT valid_from FROM memory_links LIMIT 0")
                 .is_ok();
@@ -2292,6 +2301,20 @@ pub const KG_TIMELINE_MAX_LIMIT: usize = 1000;
 /// entity asserted by agents in different namespaces. Callers can
 /// post-filter by `target_namespace` if they need a namespace-scoped
 /// view.
+///
+/// v0.7 AGE acceleration onramp (charter §"Stream C" bullet 4). When
+/// the v0.7 SAL ships with Apache AGE, the equivalent property-graph
+/// query is:
+///
+///   MATCH (s {id: $source_id})-[r {valid_from IS NOT NULL,
+///          valid_from >= $since, valid_from <= $until}]->(t)
+///   WHERE t.id <> s.id  -- exclude self-loops
+///   RETURN t.id, r.relation, r.valid_from, r.valid_until, r.observed_by
+///   ORDER BY r.valid_from ASC, r.created_at ASC
+///   LIMIT $limit
+///
+/// Stub left here per charter intent so the v0.7 migration has a 1:1
+/// reference query.
 pub fn kg_timeline(
     conn: &Connection,
     source_id: &str,
@@ -2518,6 +2541,22 @@ pub fn kg_query(
     let max_depth_ph = binds.len();
     binds.push(Box::new(i64::try_from(cap).unwrap_or(i64::MAX)));
     let limit_ph = binds.len();
+
+    // v0.7 AGE acceleration onramp (charter §"Stream C — KG Query Layer"
+    // bullet 4). The recursive CTE below is the v0.6.3 SQLite/Postgres
+    // implementation. When the v0.7 SAL ships with Apache AGE wired in,
+    // the equivalent property-graph query will look like:
+    //
+    //   MATCH (s {id: $source_id})-[r*1..$max_depth {valid_from <= $t,
+    //          observed_by IN $allowed_agents}]->(t)
+    //   WHERE NONE(n IN nodes(path) WHERE n.id = t.id)  -- cycle prune
+    //   RETURN t.id, last(r).relation, t.title, length(r) AS depth,
+    //          [n IN nodes(path) | n.id] AS path
+    //   ORDER BY depth, last(r).valid_from
+    //   LIMIT $limit
+    //
+    // Stub left here per charter intent so the v0.7 migration to AGE
+    // has a 1:1 reference query alongside the SQL implementation.
 
     let sql = format!(
         "WITH RECURSIVE traversal(\

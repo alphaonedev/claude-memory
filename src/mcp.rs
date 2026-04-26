@@ -77,7 +77,7 @@ fn err_response(id: Value, code: i64, message: String) -> RpcResponse {
 /// an existing tool's shape changes in a breaking way (renamed params,
 /// tightened schemas, removed options). Adding a new tool is additive
 /// and does NOT require a bump. Ultrareview #351.
-const TOOLS_VERSION: &str = "2026-04-22";
+const TOOLS_VERSION: &str = "2026-04-26";
 
 #[allow(clippy::too_many_lines)]
 fn tool_definitions() -> Value {
