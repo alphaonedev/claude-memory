@@ -7756,6 +7756,131 @@ fn test_cli_bench_emits_json_with_seven_results_and_passes_budget() {
     }
 }
 
+fn verify_jsonl_entry(entry: &serde_json::Value, expected_iterations: i64, expected_warmup: i64) {
+    assert!(
+        entry.get("captured_at").is_some(),
+        "entry must have 'captured_at' field"
+    );
+    let captured_at_str = entry["captured_at"]
+        .as_str()
+        .expect("captured_at must be a string");
+    chrono::DateTime::parse_from_rfc3339(captured_at_str)
+        .expect("captured_at must be valid RFC3339");
+
+    assert_eq!(
+        entry["iterations"],
+        serde_json::json!(expected_iterations),
+        "entry must have iterations = {expected_iterations}"
+    );
+    assert_eq!(
+        entry["warmup"],
+        serde_json::json!(expected_warmup),
+        "entry must have warmup = {expected_warmup}"
+    );
+
+    let results = entry["results"]
+        .as_array()
+        .expect("entry must have 'results' array");
+    assert_eq!(
+        results.len(),
+        7,
+        "entry must have exactly 7 results, got {}",
+        results.len()
+    );
+}
+
+#[test]
+fn test_cli_bench_with_history_appends_jsonl_line() {
+    // Coverage for `bench::append_history()` — Stream E audit gap.
+    // The --history flag cherry-picked from PR #408 shipped without
+    // exercising the JSONL append codepath. This test runs bench twice
+    // with the same --history path and verifies: two JSONL records
+    // appended (no overwrite), each with captured_at RFC3339, iterations,
+    // warmup, and 7 results.
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    let history_path = std::env::temp_dir().join(format!(
+        "ai-memory-bench-history-{}.jsonl",
+        uuid::Uuid::new_v4()
+    ));
+
+    // First run: create file with one JSONL record.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--history",
+            history_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench (first run)");
+
+    assert!(
+        out.status.success(),
+        "bench (first run) exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Verify history file exists and has exactly one line.
+    let history_content = std::fs::read_to_string(&history_path)
+        .expect("failed to read history file after first run");
+    let lines: Vec<&str> = history_content.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "history file should contain exactly 1 line after first run, got {}",
+        lines.len()
+    );
+
+    // Parse and verify first entry.
+    let entry1: serde_json::Value =
+        serde_json::from_str(lines[0]).expect("first history entry must be valid JSON");
+    verify_jsonl_entry(&entry1, 5, 0);
+
+    // Second run: append a second entry to the same file.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--history",
+            history_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench (second run)");
+
+    assert!(
+        out.status.success(),
+        "bench (second run) exited non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Verify history file now has exactly two lines (append, not overwrite).
+    let history_content = std::fs::read_to_string(&history_path)
+        .expect("failed to read history file after second run");
+    let lines: Vec<&str> = history_content.lines().collect();
+    assert_eq!(
+        lines.len(),
+        2,
+        "history file should contain exactly 2 lines after second run (append behavior), got {}",
+        lines.len()
+    );
+
+    // Verify second entry is also valid JSONL with same structure.
+    let entry2: serde_json::Value =
+        serde_json::from_str(lines[1]).expect("second history entry must be valid JSON");
+    verify_jsonl_entry(&entry2, 5, 0);
+
+    // Cleanup: remove the history file.
+    std::fs::remove_file(&history_path).expect("failed to clean up history file");
+}
+
 #[test]
 fn test_cli_sync_dry_run_writes_nothing() {
     // v0.6.0 GA Phase 3 foundation: --dry-run must classify new/update/noop
@@ -8479,6 +8604,152 @@ fn test_serve_rejects_half_tls_config() {
         "half-configured TLS must be rejected"
     );
     let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_cli_taxonomy_returns_hierarchical_tree() {
+    // Coverage for memory_get_taxonomy HTTP handler
+    // (Stream A audit gap — 0% coverage on MCP/HTTP path)
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-taxonomy-test-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+
+    // Seed ~6 memories across hierarchical + flat namespaces
+    for (ns, count) in &[
+        ("alphaone", 1),
+        ("alphaone/engineering", 1),
+        ("alphaone/engineering/platform", 1),
+        ("alphaone/engineering/platform/api", 3),
+        ("alphaone/sales", 1),
+        ("other", 1),
+    ] {
+        for i in 0..*count {
+            let title = format!("{}_memory_{}", ns.replace('/', "_"), i);
+            let output = cmd_output_or_panic(
+                binary,
+                &[
+                    "--db",
+                    db_path.to_str().unwrap(),
+                    "--json",
+                    "store",
+                    "-n",
+                    ns,
+                    "-T",
+                    &title,
+                    "--content",
+                    "test memory content",
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "store failed in {}: {}",
+                ns,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    // Spawn serve daemon on a free port
+    let port = free_port();
+    let child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _serve = ChildGuard::new(child).with_cleanup([db_path.clone()]);
+    assert!(wait_for_health(port), "serve never came up");
+
+    // GET /api/v1/taxonomy with no prefix — should get full tree
+    let (code, body) = curl_get(port, "/api/v1/taxonomy");
+    assert_eq!(code, "200", "taxonomy request failed: {body}");
+
+    // Parse JSON response
+    assert!(
+        body.get("tree").is_some(),
+        "missing tree in response: {body}"
+    );
+    assert!(
+        body.get("total_count").is_some(),
+        "missing total_count: {body}"
+    );
+    assert!(body.get("truncated").is_some(), "missing truncated: {body}");
+
+    let total = body["total_count"].as_u64().unwrap();
+    assert_eq!(total, 8, "expected 8 total memories, got {total}");
+
+    let truncated = body["truncated"].as_bool().unwrap();
+    assert!(!truncated, "should not be truncated for this small tree");
+
+    let tree = &body["tree"];
+    assert_eq!(
+        tree["namespace"].as_str().unwrap(),
+        "",
+        "root should have empty namespace"
+    );
+
+    // Find alphaone node in root's children
+    let children = tree["children"].as_array().unwrap();
+    let alphaone = children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("alphaone"))
+        .expect("alphaone node not found in root's children");
+
+    assert!(
+        alphaone["subtree_count"].as_u64().unwrap() > 0,
+        "alphaone subtree_count should be > 0"
+    );
+
+    // Check alphaone's children — should have engineering and sales
+    let alpha_children = alphaone["children"].as_array().unwrap();
+    assert!(
+        alpha_children.len() >= 2,
+        "alphaone should have at least 2 children (engineering, sales), got {}",
+        alpha_children.len()
+    );
+
+    let engineering = alpha_children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("engineering"))
+        .expect("engineering not found under alphaone");
+
+    let platform = engineering["children"]
+        .as_array()
+        .and_then(|ch| ch.iter().find(|c| c["name"].as_str() == Some("platform")))
+        .expect("platform not found under engineering");
+
+    let api = platform["children"]
+        .as_array()
+        .and_then(|ch| ch.iter().find(|c| c["name"].as_str() == Some("api")))
+        .expect("api not found under platform");
+
+    assert_eq!(
+        api["count"].as_u64().unwrap(),
+        3,
+        "api node should have count == 3"
+    );
+
+    // Check that "other" appears as a sibling at the root level
+    let other = children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("other"))
+        .expect("other namespace not found as root-level sibling");
+    assert_eq!(
+        other["count"].as_u64().unwrap(),
+        1,
+        "other should have count == 1"
+    );
+
+    // Cleanup handled by ChildGuard
 }
 
 // ---------------------------------------------------------------------------
@@ -10035,4 +10306,219 @@ fn http_namespace_standard_meta_fans_out() {
         found,
         "peer never saw the parent namespace from the meta fanout"
     );
+}
+
+#[test]
+fn test_cli_bench_with_baseline_detects_regression() {
+    // Integration test for `ai-memory bench --baseline` regression detection.
+    // Verifies the full codepath:
+    //   1. Baseline file is loaded and parsed correctly.
+    //   2. A tight baseline (0.001 ms) triggers regression on real measurements.
+    //   3. Exit code is non-zero.
+    //   4. stderr contains "regressed".
+    //   5. JSON output includes regressions field with regressed: true entries.
+    let dir = std::env::temp_dir();
+    let baseline_path = dir.join(format!("ai-memory-baseline-{}.json", uuid::Uuid::new_v4()));
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Create a tight baseline with all operations at 0.001 ms.
+    // Any real benchmark run will regress against this.
+    let baseline_json = serde_json::json!({
+        "iterations": 200,
+        "warmup": 20,
+        "results": [
+            {
+                "operation": "store_no_embedding",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "search_fts",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "recall_hot",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth1",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth3",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth5",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_timeline",
+                "measured_p95_ms": 0.001
+            }
+        ]
+    });
+
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline_json).unwrap(),
+    )
+    .expect("failed to write baseline file");
+
+    // Run bench with the tight baseline and default 10% threshold.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--baseline",
+            baseline_path.to_str().unwrap(),
+            "--regression-threshold",
+            "1.0",
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench");
+
+    // Should exit non-zero due to regression detection.
+    assert!(
+        !out.status.success(),
+        "bench should exit non-zero with regression detected, but exited successfully"
+    );
+
+    // Stderr should mention "regressed".
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("regressed"),
+        "stderr should contain 'regressed', got: {stderr}"
+    );
+
+    // Parse and validate JSON output.
+    let stdout = String::from_utf8(out.stdout).expect("bench --json must emit UTF-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bench --json must be valid JSON");
+
+    // regressions field must exist and be non-null.
+    let regressions = parsed["regressions"]
+        .as_array()
+        .expect("regressions must be a JSON array");
+    assert!(
+        !regressions.is_empty(),
+        "regressions array should not be empty when regression is detected"
+    );
+
+    // At least one regression entry should have regressed: true.
+    let has_regressed = regressions.iter().any(|r| {
+        r.get("regressed")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    });
+    assert!(
+        has_regressed,
+        "at least one regression entry should have regressed: true"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&baseline_path);
+}
+
+#[test]
+fn test_cli_bench_with_baseline_passes_when_loose_threshold() {
+    // Integration test verifying that a loose regression threshold
+    // allows a tight baseline to pass without triggering.
+    // This confirms the threshold logic works in both directions.
+    let dir = std::env::temp_dir();
+    let baseline_path = dir.join(format!("ai-memory-baseline-{}.json", uuid::Uuid::new_v4()));
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Use realistic baseline values (~100-1000x the tight baseline above).
+    // These are near the target budgets documented in PERFORMANCE.md,
+    // allowing 100%+ growth before hitting the regression threshold.
+    let baseline_json = serde_json::json!({
+        "iterations": 200,
+        "warmup": 20,
+        "results": [
+            {
+                "operation": "store_no_embedding",
+                "measured_p95_ms": 10.0
+            },
+            {
+                "operation": "search_fts",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "recall_hot",
+                "measured_p95_ms": 25.0
+            },
+            {
+                "operation": "kg_query_depth1",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "kg_query_depth3",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "kg_query_depth5",
+                "measured_p95_ms": 125.0
+            },
+            {
+                "operation": "kg_timeline",
+                "measured_p95_ms": 50.0
+            }
+        ]
+    });
+
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline_json).unwrap(),
+    )
+    .expect("failed to write baseline file");
+
+    // Run with a loose threshold (500%) — allows generous growth.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--baseline",
+            baseline_path.to_str().unwrap(),
+            "--regression-threshold",
+            "500.0",
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench");
+
+    // Should exit 0 (no regression with loose threshold).
+    assert!(
+        out.status.success(),
+        "bench should exit 0 with loose threshold, but got non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Parse and validate JSON output.
+    let stdout = String::from_utf8(out.stdout).expect("bench --json must emit UTF-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bench --json must be valid JSON");
+
+    // regressions field should exist but have no regressed entries.
+    if let Some(regressions) = parsed["regressions"].as_array() {
+        for r in regressions {
+            let regressed = r
+                .get("regressed")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            assert!(
+                !regressed,
+                "no entry should have regressed: true with loose threshold"
+            );
+        }
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&baseline_path);
 }
