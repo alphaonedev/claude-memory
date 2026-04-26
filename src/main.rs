@@ -203,6 +203,27 @@ struct BenchArgs {
     /// Emit results as JSON instead of the human-readable table.
     #[arg(long)]
     json: bool,
+    /// Path to a previous `bench --json` payload. When supplied, the
+    /// fresh run is compared per-operation against this baseline and
+    /// the process exits non-zero if any measured p95 exceeds the
+    /// baseline by more than `--regression-threshold` percent.
+    /// Independent of the absolute-budget guard.
+    #[arg(long, value_name = "PATH")]
+    baseline: Option<String>,
+    /// Allowed p95 growth (percent) over the `--baseline` reading
+    /// before a row is flagged as a regression. Clamped to
+    /// `[0.0, 1000.0]`. Has no effect without `--baseline`.
+    #[arg(long, default_value_t = bench::DEFAULT_REGRESSION_THRESHOLD_PCT)]
+    regression_threshold: f64,
+    /// Append this run to a JSONL history file (one self-describing
+    /// JSON object per line). Creates the file and any missing parent
+    /// directories on first call. Each entry carries `captured_at`
+    /// (RFC3339), `iterations`, `warmup`, and the same `results` array
+    /// `--json` emits — long-running campaigns can build a regression
+    /// dataset to feed downstream tooling. The CLI table / JSON output
+    /// still prints; this flag only adds the append side effect.
+    #[arg(long, value_name = "PATH")]
+    history: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -4400,6 +4421,7 @@ fn cmd_curator_rollback(db_path: &Path, args: &CuratorArgs) -> Result<()> {
 fn cmd_bench(args: &BenchArgs) -> Result<()> {
     let iterations = args.iterations.clamp(1, 100_000);
     let warmup = args.warmup.min(10_000);
+    let regression_threshold = args.regression_threshold.clamp(0.0, 1000.0);
     // Bench always seeds a disposable in-memory DB so the operator's
     // main DB (and disk) are untouched. SQLite's `:memory:` URL and
     // WAL-less mode keep the workload bounded by RAM and CPU.
@@ -4410,6 +4432,18 @@ fn cmd_bench(args: &BenchArgs) -> Result<()> {
         namespace: bench::BENCH_NAMESPACE.to_string(),
     };
     let results = bench::run(&conn, &config)?;
+
+    let regressions = if let Some(path) = &args.baseline {
+        let baseline = bench::load_baseline(Path::new(path))?;
+        Some(bench::compare_against_baseline(
+            &results,
+            &baseline,
+            regression_threshold,
+        ))
+    } else {
+        None
+    };
+
     if args.json {
         println!(
             "{}",
@@ -4417,16 +4451,45 @@ fn cmd_bench(args: &BenchArgs) -> Result<()> {
                 "iterations": iterations,
                 "warmup": warmup,
                 "results": results,
+                "regressions": regressions,
             }))?
         );
     } else {
         print!("{}", bench::render_table(&results));
+        if let Some(rows) = &regressions {
+            println!();
+            print!("{}", bench::render_regression_table(rows));
+        }
     }
-    if results
+
+    if let Some(history_path) = &args.history {
+        let captured_at = chrono::Utc::now().to_rfc3339();
+        bench::append_history(history_path, &captured_at, iterations, warmup, &results)?;
+        eprintln!(
+            "bench: appended run to history file {}",
+            history_path.display()
+        );
+    }
+
+    let budget_failed = results
         .iter()
-        .any(|r| matches!(r.status, bench::Status::Fail))
-    {
+        .any(|r| matches!(r.status, bench::Status::Fail));
+    let regression_failed = regressions
+        .as_ref()
+        .is_some_and(|rows| rows.iter().any(|r| r.regressed));
+
+    if budget_failed && regression_failed {
+        anyhow::bail!(
+            "bench: at least one operation exceeded its p95 budget by >10% AND regressed >{regression_threshold:.1}% vs baseline"
+        );
+    }
+    if budget_failed {
         anyhow::bail!("bench: at least one operation exceeded its p95 budget by >10%");
+    }
+    if regression_failed {
+        anyhow::bail!(
+            "bench: at least one operation regressed >{regression_threshold:.1}% vs baseline"
+        );
     }
     Ok(())
 }
