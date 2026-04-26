@@ -359,7 +359,7 @@ mod tests {
     clippy::unnecessary_wraps,
     clippy::needless_pass_by_value,
     clippy::wildcard_imports,
-    clippy::doc_markdown,
+    clippy::doc_markdown
 )]
 pub mod test_support {
     use super::*;

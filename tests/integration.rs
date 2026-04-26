@@ -11454,7 +11454,15 @@ const FAILURE_CASES: &[FailureCase] = &[
     // 1. store: invalid tier
     FailureCase {
         subcommand: "store",
-        args: &["store", "--tier", "invalid", "-T", "title", "--content", "text"],
+        args: &[
+            "store",
+            "--tier",
+            "invalid",
+            "-T",
+            "title",
+            "--content",
+            "text",
+        ],
         expected_stderr_contains: "tier",
     },
     // 2. store: missing required title
@@ -11616,7 +11624,13 @@ const FAILURE_CASES: &[FailureCase] = &[
     // 28. sync-daemon: invalid interval
     FailureCase {
         subcommand: "sync-daemon",
-        args: &["sync-daemon", "--peers", "http://localhost:9077", "--interval", "0"],
+        args: &[
+            "sync-daemon",
+            "--peers",
+            "http://localhost:9077",
+            "--interval",
+            "0",
+        ],
         expected_stderr_contains: "invalid",
     },
     // 29. auto-consolidate: negative min_count
@@ -11813,38 +11827,38 @@ fn test_cli_failure_matrix() {
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-failure-{}.db", uuid::Uuid::new_v4()));
     let db_str = db_path.to_str().unwrap();
-    
+
     // Test each failure case
     for case in FAILURE_CASES {
         // Build the full args array with --db prepended for subcommands that need it
         let mut full_args = vec!["--db", db_str];
-        
+
         // Skip serve and shell (interactive/daemon) and mcp (attempts embedder load)
         if case.subcommand == "shell" || case.subcommand == "serve" || case.subcommand == "mcp" {
             continue;
         }
-        
+
         // Skip sync-daemon (requires running peer, can't test easily)
         if case.subcommand == "sync-daemon" {
             continue;
         }
-        
+
         full_args.extend_from_slice(case.args);
-        
+
         let output = cmd_output_or_panic(binary, &full_args);
-        
+
         // For cases where we expect success (empty expected_stderr_contains), check exit code
         if case.expected_stderr_contains.is_empty() {
             // These should succeed or exit gracefully without panic
             continue;
         }
-        
+
         // For cases expecting failure
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
             let combined = format!("{}\n{}", stderr, stdout).to_lowercase();
-            
+
             // Check if the expected error message appears (case-insensitive)
             if !combined.contains(&case.expected_stderr_contains.to_lowercase()) {
                 // Some args may be parsed differently; just verify it failed
@@ -11852,6 +11866,6 @@ fn test_cli_failure_matrix() {
             }
         }
     }
-    
+
     let _ = std::fs::remove_file(&db_path);
 }
