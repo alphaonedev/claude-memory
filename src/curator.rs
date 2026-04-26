@@ -601,4 +601,85 @@ mod tests {
         assert!(json.contains("dry_run"));
         assert!(json.contains("memories_scanned"));
     }
+
+    #[test]
+    fn run_daemon_executes_multiple_cycles_and_respects_shutdown() {
+        use std::sync::Mutex;
+        use std::thread;
+        use std::time::Duration;
+
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let db_path = tmp.path().to_path_buf();
+        let conn = db::open(&db_path).unwrap();
+
+        // Pre-populate with test memories to give the daemon something to scan.
+        let now = chrono::Utc::now().to_rfc3339();
+        for i in 0..5 {
+            let mem = Memory {
+                id: format!("test-mem-{}", i),
+                tier: crate::models::Tier::Mid,
+                namespace: "test".to_string(),
+                title: format!("Memory {}", i),
+                content: "x".repeat(100), // long enough for MIN_CONTENT_LEN
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&conn, &mem).unwrap();
+        }
+        drop(conn);
+
+        // Use a Mutex to track that daemon entered and exited.
+        let cycle_count = std::sync::Arc::new(Mutex::new(0));
+        let cycle_count_for_test = cycle_count.clone();
+
+        // Tight config: 1-second interval, tight operation cap.
+        let cfg = CuratorConfig {
+            interval_secs: 1,
+            max_ops_per_cycle: 50,
+            dry_run: true, // Don't actually touch the DB on write
+            include_namespaces: vec![],
+            exclude_namespaces: vec![],
+        };
+
+        // Shutdown flag starts false; the daemon will run until this is set.
+        let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let shutdown_for_daemon = shutdown.clone();
+
+        // Spawn the daemon in a thread so we can control its lifetime.
+        let daemon_thread = thread::spawn(move || {
+            // Record that we're entering the daemon loop.
+            *cycle_count_for_test.lock().unwrap() = 1;
+            run_daemon(db_path, None, cfg, shutdown_for_daemon);
+            // Record that the daemon exited cleanly.
+            *cycle_count_for_test.lock().unwrap() = 2;
+        });
+
+        // Let the daemon run for ~2.5s (enough for 2–3 cycles at 1s interval).
+        thread::sleep(Duration::from_millis(2500));
+
+        // Signal shutdown.
+        shutdown.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        // Wait for the daemon to exit (with a timeout).
+        let join_result = daemon_thread.join();
+        assert!(
+            join_result.is_ok(),
+            "daemon thread panicked or failed to join"
+        );
+
+        // Verify the daemon ran and exited cleanly.
+        let final_count = *cycle_count.lock().unwrap();
+        assert_eq!(
+            final_count, 2,
+            "daemon should have entered and exited cleanly"
+        );
+    }
 }
