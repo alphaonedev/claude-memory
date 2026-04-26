@@ -9,6 +9,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Curator-cycle bench operation (Pillar 3 / Stream E)** — new
+  `Operation::CuratorCycle` variant in `src/bench.rs`, gated against the
+  `curator cycle (1k memories) < 60 s p95` row in `PERFORMANCE.md`.
+  Opt-in via `ai-memory bench --with-curator`: seeds the canonical
+  1000-memory workload (`benchmarks/v063/canonical_workload.json`) into
+  the bench's disposable in-memory `SQLite`, runs one
+  `curator::run_once` sweep against it (with the per-cycle op cap
+  raised from the production-safe default of 100 to 1000 to cover the
+  full sweep), and reports the single-sample latency in the same
+  `OperationResult` shape every other op uses. Bench requires a
+  reachable Ollama endpoint with the curator's configured model
+  (`FeatureTier::Smart` → `gemma4:e2b`); when Ollama is unreachable
+  the flag is treated as a no-op and a clear message is emitted on
+  stderr — same opt-in/no-op pattern as `--with-embedding` from
+  earlier in this Patch. The fixture is loaded at runtime via
+  `env!("CARGO_MANIFEST_DIR")` and validated against three pinned
+  invariants (`schema_version == 1`, `seed == 20_260_426`, and
+  `count == memories.len()`) before the upsert path runs, so a
+  drifted fixture surfaces as a hard error instead of silently
+  rebasing the bench numbers. Default `cargo test` and the
+  `bench.yml` CI guard never trigger the curator op (no `--with-curator`,
+  no Ollama in CI), so the hot path stays fast and deterministic.
+  Charter §"Stream E — Performance Instrumentation"; closes the
+  curator-cycle row from the published budget table. Builds on the
+  canonical workload fixture from the prior iteration in this Patch.
+
 - **Canonical workload fixture (Pillar 3 / Stream E scaffold)** — new
   `benchmarks/v063/canonical_workload.json` is the 1000-memory
   deterministic seed required by the `curator cycle (1k memories) <

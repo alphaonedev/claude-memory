@@ -5,7 +5,6 @@
 
 mod autonomy;
 mod bench;
-mod canonical_workload;
 mod color;
 mod config;
 mod curator;
@@ -204,6 +203,15 @@ struct BenchArgs {
     /// Emit results as JSON instead of the human-readable table.
     #[arg(long)]
     json: bool,
+    /// Opt in to the curator-cycle operation: seed the canonical
+    /// 1000-memory workload (`benchmarks/v063/canonical_workload.json`)
+    /// and time one [`curator::run_once`] sweep against the 60 s p95
+    /// budget. Requires a reachable Ollama endpoint with the curator's
+    /// model. If Ollama is unreachable or the fixture is missing, the
+    /// flag is treated as a no-op and a clear message is emitted on
+    /// stderr — same opt-in/no-op shape as `--with-embedding`.
+    #[arg(long)]
+    with_curator: bool,
 }
 
 #[derive(Args)]
@@ -4410,13 +4418,40 @@ fn cmd_bench(args: &BenchArgs) -> Result<()> {
         warmup,
         namespace: bench::BENCH_NAMESPACE.to_string(),
     };
-    let results = bench::run(&conn, &config)?;
+    let mut results = bench::run(&conn, &config)?;
+    // Opt-in curator-cycle bench. Built off the same in-memory DB so
+    // the canonical 1000-memory workload doesn't churn the operator's
+    // disk. If `--with-curator` is set but Ollama is unreachable or
+    // the fixture is missing, we log on stderr and continue without
+    // the row — same opt-in/no-op shape as `--with-embedding`.
+    if args.with_curator {
+        match build_curator_llm(config::FeatureTier::Smart) {
+            Some(llm) => match bench::run_curator_cycle(&conn, &llm) {
+                Ok(r) => {
+                    eprintln!("ai-memory bench: curator-cycle op enabled");
+                    results.push(r);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "ai-memory bench: --with-curator requested but the cycle failed: {e}; skipping curator-cycle op"
+                    );
+                }
+            },
+            None => {
+                eprintln!(
+                    "ai-memory bench: --with-curator requested but no Ollama endpoint reachable for the configured curator model; skipping curator-cycle op"
+                );
+            }
+        }
+    }
     if args.json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "iterations": iterations,
                 "warmup": warmup,
+                "with_curator": args.with_curator
+                    && results.iter().any(|r| matches!(r.operation, bench::Operation::CuratorCycle)),
                 "results": results,
             }))?
         );
