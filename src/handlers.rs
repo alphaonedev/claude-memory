@@ -8150,4 +8150,1371 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    // -------------------------------------------------------------------
+    // Wave 3 (Closer T) — targeted unit tests for code paths NOT yet
+    // covered by Wave 2's smoke + lifecycle + format tests. Each block
+    // below targets a specific uncovered run located via the pre-coverage
+    // JSON snapshot. These exercise production code paths in-process
+    // (federation = None, embedder = None) so the federation-quorum
+    // branches stay short-circuited and only the local logic under test
+    // executes.
+    // -------------------------------------------------------------------
+
+    // ---- check_duplicate (handlers.rs ~L1930-2026) ----
+
+    #[tokio::test]
+    async fn http_check_duplicate_rejects_invalid_title() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/check_duplicate", axum_post(check_duplicate))
+            .with_state(test_app_state(state));
+        // Empty title fails validation.
+        let body = serde_json::json!({"title": "", "content": "non-empty"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/check_duplicate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_check_duplicate_rejects_invalid_content() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/check_duplicate", axum_post(check_duplicate))
+            .with_state(test_app_state(state));
+        // Empty content fails validation.
+        let body = serde_json::json!({"title": "ok", "content": ""});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/check_duplicate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_check_duplicate_rejects_invalid_namespace() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/check_duplicate", axum_post(check_duplicate))
+            .with_state(test_app_state(state));
+        // Namespace with disallowed characters fails validation.
+        let body = serde_json::json!({
+            "title": "ok",
+            "content": "ok content",
+            "namespace": "BAD NAMESPACE WITH SPACES",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/check_duplicate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_check_duplicate_503_when_no_embedder() {
+        // Without an embedder, check_duplicate cannot run (returns 503).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/check_duplicate", axum_post(check_duplicate))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({"title": "anchor", "content": "some long enough content"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/check_duplicate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ---- entity_register / entity_get_by_alias (handlers.rs ~L2058-2205) ----
+
+    #[tokio::test]
+    async fn http_entity_register_creates_then_idempotent_returns_200() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/entities", axum_post(entity_register))
+            .with_state(state.clone());
+        // First call: 201 CREATED.
+        let body = serde_json::json!({
+            "canonical_name": "Acme Corp",
+            "namespace": "kg-test",
+            "aliases": ["acme", "Acme"],
+            "metadata": {"region": "us"},
+        });
+        let resp = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "alice")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // Second call with same canonical_name+namespace: 200 OK + created=false.
+        let resp2 = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp2.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_entity_register_rejects_invalid_canonical_name() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/entities", axum_post(entity_register))
+            .with_state(state);
+        let body = serde_json::json!({
+            "canonical_name": "",
+            "namespace": "kg-test",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_entity_register_rejects_invalid_namespace() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/entities", axum_post(entity_register))
+            .with_state(state);
+        let body = serde_json::json!({
+            "canonical_name": "Acme",
+            "namespace": "BAD NS!",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_entity_register_rejects_invalid_agent_id_header() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/entities", axum_post(entity_register))
+            .with_state(state);
+        let body = serde_json::json!({
+            "canonical_name": "Acme",
+            "namespace": "kg-test",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "BAD AGENT!")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_entity_register_collision_with_non_entity_returns_409() {
+        // Pre-seed a non-entity memory at (namespace, title), then attempt
+        // entity_register with the same canonical_name+namespace.
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+        {
+            let lock = state.lock().await;
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "collide-ns".into(),
+                title: "Acme Squat".into(),
+                content: "this is a regular memory".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/entities", axum_post(entity_register))
+            .with_state(state);
+        let body = serde_json::json!({
+            "canonical_name": "Acme Squat",
+            "namespace": "collide-ns",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn http_entity_get_by_alias_blank_alias_rejected() {
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/entities/by_alias",
+                axum::routing::get(entity_get_by_alias),
+            )
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities/by_alias?alias=%20%20")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_entity_get_by_alias_invalid_namespace_rejected() {
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/entities/by_alias",
+                axum::routing::get(entity_get_by_alias),
+            )
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities/by_alias?alias=acme&namespace=BAD%20NS!")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_entity_get_by_alias_returns_found_false_when_unknown() {
+        let state = test_state();
+        let app = Router::new()
+            .route(
+                "/api/v1/entities/by_alias",
+                axum::routing::get(entity_get_by_alias),
+            )
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities/by_alias?alias=nonexistent")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["found"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn http_entity_get_by_alias_returns_found_true_after_register() {
+        // Pre-register an entity, then look it up by alias.
+        let state = test_state();
+        {
+            let lock = state.lock().await;
+            db::entity_register(
+                &lock.0,
+                "Acme Corp",
+                "kg-lookup",
+                &["acme".to_string(), "ACME".to_string()],
+                &serde_json::json!({}),
+                Some("alice"),
+            )
+            .unwrap();
+        }
+        let app = Router::new()
+            .route(
+                "/api/v1/entities/by_alias",
+                axum::routing::get(entity_get_by_alias),
+            )
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/entities/by_alias?alias=acme&namespace=kg-lookup")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["found"], serde_json::json!(true));
+        assert_eq!(v["canonical_name"], serde_json::json!("Acme Corp"));
+    }
+
+    // ---- kg_timeline (handlers.rs ~L2219-2284) ----
+
+    #[tokio::test]
+    async fn http_kg_timeline_rejects_invalid_source_id() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
+            .with_state(state);
+        // Empty source_id is rejected by validate_id.
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/timeline?source_id=")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_timeline_rejects_invalid_since() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
+            .with_state(state);
+        let id = Uuid::new_v4().to_string();
+        let uri = format!("/api/v1/kg/timeline?source_id={id}&since=NOT-A-TIMESTAMP");
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_timeline_rejects_invalid_until() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
+            .with_state(state);
+        let id = Uuid::new_v4().to_string();
+        let uri = format!("/api/v1/kg/timeline?source_id={id}&until=garbage");
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_timeline_returns_empty_for_unlinked_source() {
+        // Valid source_id with no outbound links → 200 + count=0.
+        let state = test_state();
+        let id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "kg-tl".into(),
+                title: "anchor".into(),
+                content: "anchor body".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+        let app = Router::new()
+            .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
+            .with_state(state);
+        let uri = format!("/api/v1/kg/timeline?source_id={id}");
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], serde_json::json!(0));
+        assert!(v["events"].is_array());
+    }
+
+    // ---- kg_invalidate (handlers.rs ~L2300-2365) ----
+
+    #[tokio::test]
+    async fn http_kg_invalidate_rejects_invalid_link() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
+            .with_state(state);
+        // Self-link: source_id == target_id → validate_link rejects.
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "target_id": "11111111-1111-4111-8111-111111111111",
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/invalidate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_invalidate_rejects_invalid_valid_until() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "target_id": "22222222-2222-4222-8222-222222222222",
+            "relation": "related_to",
+            "valid_until": "garbage",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/invalidate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // Bad valid_until is the second validation gate; the (UUID, UUID,
+        // related_to) link itself is well-formed.
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_invalidate_404_when_link_missing() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "target_id": "22222222-2222-4222-8222-222222222222",
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/invalidate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn http_kg_invalidate_marks_link_as_invalidated() {
+        // Pre-seed two memories + an outbound link, then invalidate.
+        let state = test_state();
+        let (a_id, b_id) = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mk = |title: &str| Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "kg-inv".into(),
+                title: title.into(),
+                content: format!("{title} body"),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            let a = db::insert(&lock.0, &mk("source-a")).unwrap();
+            let b = db::insert(&lock.0, &mk("target-b")).unwrap();
+            db::create_link(&lock.0, &a, &b, "related_to").unwrap();
+            (a, b)
+        };
+        let app = Router::new()
+            .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": a_id,
+            "target_id": b_id,
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/invalidate")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["found"], serde_json::json!(true));
+    }
+
+    // ---- kg_query (handlers.rs ~L2387-2484) ----
+
+    #[tokio::test]
+    async fn http_kg_query_rejects_invalid_source_id() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        // Empty source_id is rejected by validate_id.
+        let body = serde_json::json!({"source_id": ""});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_rejects_invalid_valid_at() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "valid_at": "not-a-timestamp",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_rejects_invalid_allowed_agent() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "allowed_agents": ["BAD AGENT!"],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_returns_422_for_oversized_max_depth() {
+        // The DB layer rejects max_depth > supported with an error whose
+        // message contains "max_depth"; the handler must return 422.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "max_depth": 999_usize,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_returns_422_for_zero_max_depth() {
+        // The DB layer rejects max_depth=0 with "max_depth must be >= 1";
+        // handler routes that to 422.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "max_depth": 0_usize,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_returns_empty_for_unlinked_source() {
+        // Real source memory but no links → 200 with count=0.
+        let state = test_state();
+        let id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "kg-q".into(),
+                title: "anchor".into(),
+                content: "anchor body".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": id,
+            "max_depth": 1_usize,
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], serde_json::json!(0));
+        assert_eq!(v["max_depth"], serde_json::json!(1));
+    }
+
+    #[tokio::test]
+    async fn http_kg_query_short_circuits_empty_allowed_agents() {
+        // Empty allowed_agents → DB layer short-circuits with empty result.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/kg/query", axum_post(kg_query))
+            .with_state(state);
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "allowed_agents": [],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/kg/query")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], serde_json::json!(0));
+    }
+
+    // ---- delete_link / get_links / forget_memories / list_namespaces ----
+
+    #[tokio::test]
+    async fn http_delete_link_rejects_self_link() {
+        // delete_link reuses validate_link → self-link rejected with 400.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/links", axum::routing::delete(delete_link))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "target_id": "11111111-1111-4111-8111-111111111111",
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/links")
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_delete_link_returns_deleted_false_when_missing() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/links", axum::routing::delete(delete_link))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "source_id": "11111111-1111-4111-8111-111111111111",
+            "target_id": "22222222-2222-4222-8222-222222222222",
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/links")
+                    .method("DELETE")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["deleted"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
+    async fn http_get_links_for_unknown_id_returns_empty_array() {
+        // Unknown ID (well-formed but no row) → 200 OK + empty links.
+        // validate_id only rejects empty/oversized/control-char strings,
+        // so an unrecognised but well-formed id still reaches the DB layer.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/memories/{id}/links", axum::routing::get(get_links))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/memories/nonexistent-id/links")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["links"].is_array());
+        assert_eq!(v["links"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_get_links_returns_empty_array_for_unlinked_id() {
+        let state = test_state();
+        let id = {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "links-test".into(),
+                title: "anchor".into(),
+                content: "no links yet".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+            };
+            db::insert(&lock.0, &mem).unwrap()
+        };
+        let app = Router::new()
+            .route("/api/v1/memories/{id}/links", axum::routing::get(get_links))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/memories/{id}/links"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["links"].is_array());
+        assert_eq!(v["links"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_list_namespaces_returns_empty_for_fresh_db() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/namespaces", axum::routing::get(list_namespaces))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/namespaces")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["namespaces"].is_array());
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_with_namespace_filter_returns_count() {
+        // Pre-seed two rows in a target namespace, then POST forget.
+        let state = test_state();
+        {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            for i in 0..3 {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Long,
+                    namespace: "forget-target".into(),
+                    title: format!("row-{i}"),
+                    content: format!("content {i}"),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let body = serde_json::json!({"namespace": "forget-target"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // count of deleted rows is reported under "deleted"
+        assert!(v["deleted"].as_u64().is_some());
+    }
+
+    // ---- archive_stats / archive_by_ids zero-id batch ----
+
+    #[tokio::test]
+    async fn http_archive_stats_empty_db_returns_zero() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_purge_archive_returns_zero_for_empty_archive() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive/purge", axum_post(purge_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive/purge")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["purged"], serde_json::json!(0));
+    }
+
+    // ---- run_gc / export_memories / import_memories ----
+
+    #[tokio::test]
+    async fn http_run_gc_returns_zero_for_clean_db() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/gc", axum_post(run_gc))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/gc")
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_export_memories_empty_returns_zero_count() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/export", axum::routing::get(export_memories))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/export")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    async fn http_import_memories_oversized_batch_rejected() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/import", axum_post(import_memories))
+            .with_state(state);
+        // MAX_BULK_SIZE+1 stub rows. We use minimal Memory payloads so
+        // serialisation is cheap.
+        let many: Vec<serde_json::Value> = (0..=MAX_BULK_SIZE)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("11111111-1111-4111-8111-{:012}", i),
+                    "tier": "long",
+                    "namespace": "imp",
+                    "title": format!("t-{i}"),
+                    "content": "x",
+                    "tags": [],
+                    "priority": 5,
+                    "confidence": 1.0,
+                    "source": "import",
+                    "access_count": 0,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "last_accessed_at": null,
+                    "expires_at": null,
+                    "metadata": {},
+                })
+            })
+            .collect();
+        let body = serde_json::json!({"memories": many});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/import")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_import_memories_skips_invalid_rows() {
+        // One valid + one invalid (missing required fields) → 200 with errors.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/import", axum_post(import_memories))
+            .with_state(state);
+        let valid = serde_json::json!({
+            "id": Uuid::new_v4().to_string(),
+            "tier": "long",
+            "namespace": "imp",
+            "title": "ok-row",
+            "content": "valid content",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "import",
+            "access_count": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_accessed_at": null,
+            "expires_at": null,
+            "metadata": {},
+        });
+        // Empty title is rejected by validate_memory.
+        let invalid = serde_json::json!({
+            "id": Uuid::new_v4().to_string(),
+            "tier": "long",
+            "namespace": "imp",
+            "title": "",
+            "content": "x",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "import",
+            "access_count": 0,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "last_accessed_at": null,
+            "expires_at": null,
+            "metadata": {},
+        });
+        let body = serde_json::json!({"memories": [valid, invalid]});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/import")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // Valid row imported = 1; errors array contains the invalid row.
+        assert_eq!(v["imported"], serde_json::json!(1));
+        assert!(v["errors"].as_array().unwrap().len() >= 1);
+    }
+
+    // ---- get_stats / get_taxonomy / sync_push pending+meta paths ----
+
+    #[tokio::test]
+    async fn http_get_stats_empty_db() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/stats", axum::routing::get(get_stats))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_namespace_meta_clears_garbage_skipped() {
+        // namespace_meta_clears with a malformed namespace must be skipped
+        // (not crash, not cleared).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-x",
+            "memories": [],
+            "namespace_meta_clears": ["BAD NAMESPACE!"],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_pending_decision_invalid_id_skipped() {
+        // pending_decisions with an invalid id must be skipped (not crash).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-x",
+            "memories": [],
+            "pending_decisions": [
+                {"id": "BAD ID!", "approved": true, "decider": "alice"}
+            ],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_namespace_meta_invalid_skipped() {
+        // namespace_meta with an invalid namespace OR invalid standard_id
+        // should be skipped (incremented under skipped, not applied).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-x",
+            "memories": [],
+            "namespace_meta": [
+                {"namespace": "BAD NS!", "standard_id": "11111111-1111-4111-8111-111111111111", "parent_namespace": null}
+            ],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn http_sync_push_dry_run_namespace_meta_no_apply() {
+        // dry_run: namespace_meta entries are counted as noop, not applied.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-x",
+            "memories": [],
+            "dry_run": true,
+            "namespace_meta_clears": ["preview-ns"],
+            "pending_decisions": [
+                {"id": "11111111-1111-4111-8111-111111111111", "approved": true, "decider": "alice"}
+            ],
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }
