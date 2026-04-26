@@ -442,3 +442,30 @@ jobs:
       - name: Upload to COPR
         run: |
           copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install tarpaulin
+        run: cargo install cargo-tarpaulin --locked
+
+      - name: Generate coverage with branch flag
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: cargo tarpaulin --out Html --output-dir coverage --timeout 300 --exclude-files tests/* --exclude-files benches/*
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-report
+          path: coverage/tarpaulin-report.html
