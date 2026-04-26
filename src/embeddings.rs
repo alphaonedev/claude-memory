@@ -377,3 +377,174 @@ mod tests {
         assert!(sim_ctx > 0.3); // ~0.394 analytically
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    clippy::wildcard_imports
+)]
+pub mod test_support {
+    use super::*;
+
+    /// Mock embedder for testing model-loading paths without HuggingFace Hub
+    /// or candle dependencies. Returns deterministic fake embeddings.
+    pub enum MockEmbedder {
+        /// Mock local embedder — always returns 384-dim vectors (MiniLM).
+        Local,
+        /// Mock Ollama embedder — always returns 768-dim vectors (nomic).
+        Ollama,
+    }
+
+    impl MockEmbedder {
+        /// Create a mock local embedder (MiniLM path).
+        pub fn new_local() -> Result<Self> {
+            Ok(Self::Local)
+        }
+
+        /// Create a mock Ollama embedder (nomic path).
+        pub fn new_ollama() -> Self {
+            Self::Ollama
+        }
+
+        /// Generate a deterministic mock embedding based on text hash.
+        pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            let dim = match self {
+                Self::Local => MINILM_DIM,
+                Self::Ollama => NOMIC_DIM,
+            };
+            let hash = text.bytes().fold(0u32, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(u32::from(b))
+            });
+            let base = ((hash % 1000) as f32) / 1000.0;
+            let embedding: Vec<f32> = (0..dim)
+                .map(|i| base + ((i as f32) * 0.0001).sin().abs())
+                .collect();
+            Ok(embedding)
+        }
+
+        /// Batch embed with mock embeddings.
+        pub fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            texts.iter().map(|t| self.embed(t)).collect()
+        }
+
+        /// Return the dimensionality.
+        pub fn dim(&self) -> usize {
+            match self {
+                Self::Local => MINILM_DIM,
+                Self::Ollama => NOMIC_DIM,
+            }
+        }
+
+        /// Return a model description.
+        pub fn model_description(&self) -> &str {
+            match self {
+                Self::Local => "mock-all-MiniLM-L6-v2 (384-dim, local)",
+                Self::Ollama => "mock-nomic-embed-text-v1.5 (768-dim, Ollama)",
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::test_support::*;
+    use super::*;
+
+    #[test]
+    fn mock_local_new() {
+        let embedder = MockEmbedder::new_local();
+        assert!(embedder.is_ok());
+    }
+
+    #[test]
+    fn mock_ollama_new() {
+        let embedder = MockEmbedder::new_ollama();
+        match embedder {
+            MockEmbedder::Ollama => {}
+            _ => panic!("expected Ollama variant"),
+        }
+    }
+
+    #[test]
+    fn mock_local_dim() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        assert_eq!(embedder.dim(), MINILM_DIM);
+    }
+
+    #[test]
+    fn mock_ollama_dim() {
+        let embedder = MockEmbedder::new_ollama();
+        assert_eq!(embedder.dim(), NOMIC_DIM);
+    }
+
+    #[test]
+    fn mock_embed_local_deterministic() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        let e1 = embedder.embed("test").unwrap();
+        let e2 = embedder.embed("test").unwrap();
+        assert_eq!(e1, e2);
+    }
+
+    #[test]
+    fn mock_embed_local_dimension() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        let embedding = embedder.embed("hello world").unwrap();
+        assert_eq!(embedding.len(), MINILM_DIM);
+    }
+
+    #[test]
+    fn mock_embed_ollama_dimension() {
+        let embedder = MockEmbedder::new_ollama();
+        let embedding = embedder.embed("hello world").unwrap();
+        assert_eq!(embedding.len(), NOMIC_DIM);
+    }
+
+    #[test]
+    fn mock_embed_batch_local() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        let texts = vec!["text1", "text2", "text3"];
+        let embeddings = embedder.embed_batch(&texts).unwrap();
+        assert_eq!(embeddings.len(), 3);
+        for emb in embeddings {
+            assert_eq!(emb.len(), MINILM_DIM);
+        }
+    }
+
+    #[test]
+    fn mock_embed_batch_ollama() {
+        let embedder = MockEmbedder::new_ollama();
+        let texts = vec!["text1", "text2"];
+        let embeddings = embedder.embed_batch(&texts).unwrap();
+        assert_eq!(embeddings.len(), 2);
+        for emb in embeddings {
+            assert_eq!(emb.len(), NOMIC_DIM);
+        }
+    }
+
+    #[test]
+    fn mock_local_model_description() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        let desc = embedder.model_description();
+        assert!(desc.contains("MiniLM"));
+        assert!(desc.contains("384"));
+    }
+
+    #[test]
+    fn mock_ollama_model_description() {
+        let embedder = MockEmbedder::new_ollama();
+        let desc = embedder.model_description();
+        assert!(desc.contains("nomic"));
+        assert!(desc.contains("768"));
+    }
+
+    #[test]
+    fn mock_embed_different_texts_different_vectors() {
+        let embedder = MockEmbedder::new_local().unwrap();
+        let e1 = embedder.embed("text one").unwrap();
+        let e2 = embedder.embed("text two").unwrap();
+        // Different inputs should generally produce different embeddings
+        assert_ne!(e1[0], e2[0]);
+    }
+}
