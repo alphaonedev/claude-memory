@@ -17,6 +17,7 @@ pub mod bench;
 pub mod color;
 pub mod config;
 pub mod curator;
+pub mod daemon_runtime;
 pub mod db;
 pub mod embeddings;
 pub mod errors;

@@ -12026,203 +12026,274 @@ fn test_cli_failure_matrix() {
 }
 
 // ============================================================================
-// Daemon-body coverage tests — covers long-running loops, signal handling,
-// graceful shutdown. Main.rs daemon subcommands: cmd_serve, cmd_sync_daemon,
-// cmd_curator --daemon
+// Daemon-body coverage tests — covers long-running loops, graceful
+// shutdown. The daemon subcommands (serve, sync-daemon, curator --daemon)
+// are exercised IN-PROCESS via `ai_memory::daemon_runtime`, not by spawning
+// the binary as a subprocess. Subprocess tests can't be attributed by
+// `cargo-llvm-cov` without extra `LLVM_PROFILE_FILE` plumbing the harness
+// doesn't provide, so the prior subprocess+SIGTERM tests passed but
+// contributed zero coverage to the loop bodies. The lib-side
+// `daemon_runtime::*` helpers mirror the production main.rs paths
+// (`build_router` + `axum::serve` + graceful shutdown for serve,
+// `sync_cycle_once` + JoinSet loop for sync-daemon, `curator::run_daemon`
+// blocking task for curator) so attribution lands on the same lib code
+// the production binary exercises.
 // ============================================================================
 
-#[test]
-#[cfg(unix)]
-fn test_daemon_cmd_serve_responds_to_health_then_terminates() {
-    // Coverage: cmd_serve body — HTTP daemon startup, listener bind, graceful
-    // shutdown. Tests main.rs lines 1322-1338 (TLS path) and 1333-1337 (HTTP path).
-    // The serve function spawns GC + checkpoint tasks, handles embedder init,
-    // and installs a ctrl_c signal watcher for graceful shutdown.
-    let bin = env!("CARGO_BIN_EXE_ai-memory");
+/// Helper: build a fresh in-memory `AppState` + `ApiKeyState` for the serve
+/// test. Mirrors `OneshotDaemon::new()` but uses an on-disk DB so the
+/// per-handler `db::open` calls (e.g. inside the sync handlers) can refer
+/// to the same path the daemon was built against.
+fn build_serve_state(
+    db_path: &std::path::Path,
+) -> (
+    ai_memory::handlers::ApiKeyState,
+    ai_memory::handlers::AppState,
+) {
+    let conn = ai_memory::db::open(db_path).unwrap();
+    let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((
+        conn,
+        db_path.to_path_buf(),
+        ai_memory::config::ResolvedTtl::default(),
+        true,
+    )));
+    let app_state = ai_memory::handlers::AppState {
+        db,
+        embedder: std::sync::Arc::new(None),
+        vector_index: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        federation: std::sync::Arc::new(None),
+        tier_config: std::sync::Arc::new(ai_memory::config::FeatureTier::Keyword.config()),
+        scoring: std::sync::Arc::new(ai_memory::config::ResolvedScoring::default()),
+    };
+    let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+    (api_key_state, app_state)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_cmd_serve_responds_to_health_then_terminates() {
+    // Coverage: serve_http_with_shutdown — Router build via build_router,
+    // TcpListener bind, axum::serve with graceful shutdown notify. Mirrors
+    // the production HTTP path of main.rs::serve (lines 1326-1338 of
+    // v0.6.3). The shared `build_router` keeps the route table identical
+    // to the production daemon.
     let dir = std::env::temp_dir();
     let db = dir.join(format!("ai-memory-serve-test-{}.db", uuid::Uuid::new_v4()));
     let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
 
-    // Spawn serve daemon
-    let mut child = cmd(bin)
-        .args([
-            "--db",
-            db.to_str().unwrap(),
-            "serve",
-            "--port",
-            &port.to_string(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let (api_key_state, app_state) = build_serve_state(&db);
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_daemon = shutdown.clone();
+    let addr_for_daemon = addr.clone();
 
-    // Create guard to ensure cleanup even on panic
-    let _guard = ChildGuard::new(
-        std::process::Command::new("sleep")
-            .arg("1")
-            .spawn()
-            .unwrap(),
-    )
-    .with_cleanup([db.clone()]);
+    // Spawn the daemon in-process. The handle is aborted in cleanup; a
+    // graceful shutdown via `shutdown.notify_one()` lets axum drain
+    // cleanly first.
+    let handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::serve_http_with_shutdown(
+            &addr_for_daemon,
+            api_key_state,
+            app_state,
+            shutdown_for_daemon,
+        )
+        .await
+    });
 
-    // Wait for HTTP listener to be ready
+    // Wait for the listener to come up. ~5s budget with 100ms backoff —
+    // identical wait_for_health semantics as the prior subprocess test,
+    // but talking to the in-process daemon over the loopback socket.
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(resp) = reqwest::get(&format!("http://127.0.0.1:{port}/api/v1/health")).await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            ready = true;
+            break;
+        }
+    }
     assert!(
-        wait_for_health(port),
-        "serve health probe never returned 200 — HTTP daemon failed to bind"
+        ready,
+        "serve health probe never returned 200 — in-process HTTP daemon failed to bind"
     );
 
-    // Verify the health endpoint works (exercises HTTP handler path)
-    let health_resp = std::process::Command::new("curl")
-        .args([
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            &format!("http://127.0.0.1:{port}/api/v1/health"),
-        ])
-        .output()
-        .unwrap();
+    // Hit /api/v1/health a second time to exercise the handler path (same
+    // assertion the prior subprocess test made, but against the in-process
+    // daemon — coverage attribution lands on `handlers::health`).
+    let resp = reqwest::get(&format!("http://127.0.0.1:{port}/api/v1/health"))
+        .await
+        .expect("health request must succeed");
     assert_eq!(
-        String::from_utf8_lossy(&health_resp.stdout),
-        "200",
+        resp.status(),
+        reqwest::StatusCode::OK,
         "health endpoint must return 200"
     );
 
-    // Kill the daemon
-    let _ = child.kill();
+    // Trigger graceful shutdown. axum::serve resolves; the spawned task
+    // returns Ok(()).
+    shutdown.notify_one();
 
-    // Wait for exit — the daemon's signal handler or kill will terminate it
-    let exit = child.wait().unwrap();
-    // We accept any exit code (success or signal-terminated) — the key is that
-    // the daemon responds to the signal and terminates. child.kill() sends SIGKILL
-    // which results in exit codes like 137 (128+9) or similar on different OS.
-    assert!(
-        !exit.success() || exit.success(), // Always true; accepts any exit
-        "serve daemon must terminate"
-    );
+    // Bound the wait so a stuck shutdown doesn't hang the test runner.
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => panic!("serve_http_with_shutdown errored: {e}"),
+        Ok(Err(e)) => panic!("daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
 
     let _ = std::fs::remove_file(&db);
 }
 
-#[test]
-#[cfg(unix)]
-fn test_daemon_cmd_sync_daemon_pulls_then_terminates() {
-    // Coverage: cmd_sync_daemon body — sync loop startup, peer reconciliation,
-    // JoinSet parallel fanout, graceful shutdown. Tests main.rs lines 3329-3374
-    // (the main loop, signal handling, and peer batching). The sync-daemon spawns
-    // a JoinSet of peer-sync tasks and loops on a configurable interval, polling
-    // shutdown signal via tokio::select!.
-    let bin = env!("CARGO_BIN_EXE_ai-memory");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_cmd_sync_daemon_pulls_then_terminates() {
+    // Coverage: run_sync_daemon_with_shutdown + sync_cycle_once — the loop
+    // body, JoinSet fanout across peers, sleep-vs-shutdown select.
+    // Mirrors main.rs::cmd_sync_daemon's loop (lines 3336-3374 of v0.6.3).
+    // Drives a real peer (an in-process serve_http_with_shutdown) so the
+    // pull/push round-trips exercise the production handlers + db sync
+    // state code paths.
     let dir = std::env::temp_dir();
     let db_peer = dir.join(format!("ai-memory-sync-peer-{}.db", uuid::Uuid::new_v4()));
     let db_local = dir.join(format!("ai-memory-sync-local-{}.db", uuid::Uuid::new_v4()));
 
-    // Start a serve daemon on the peer to sync against
+    // Initialise the local DB so the sync_cycle's `db::open` calls find a
+    // valid file. The schema is created on first open.
+    {
+        let _ = ai_memory::db::open(&db_local).unwrap();
+    }
+
+    // 1. Stand up an in-process peer via serve_http_with_shutdown.
     let peer_port = free_port();
-    let serve_child = cmd(bin)
-        .args([
-            "--db",
-            db_peer.to_str().unwrap(),
-            "serve",
-            "--port",
-            &peer_port.to_string(),
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let _serve = ChildGuard::new(serve_child).with_cleanup([db_peer.clone()]);
+    let peer_addr = format!("127.0.0.1:{peer_port}");
+    let (peer_api_key, peer_state) = build_serve_state(&db_peer);
+    let peer_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let peer_shutdown_for_daemon = peer_shutdown.clone();
+    let peer_addr_for_daemon = peer_addr.clone();
+    let peer_handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::serve_http_with_shutdown(
+            &peer_addr_for_daemon,
+            peer_api_key,
+            peer_state,
+            peer_shutdown_for_daemon,
+        )
+        .await
+    });
 
-    // Wait for peer to be ready
-    assert!(wait_for_health(peer_port), "peer serve never became ready");
+    // Wait for peer readiness.
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(resp) = reqwest::get(&format!("http://127.0.0.1:{peer_port}/api/v1/health")).await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "peer serve never became ready");
 
-    // Spawn the sync-daemon with a 1-second interval, pointed at the peer
-    let mut daemon_child = cmd(bin)
-        .args([
-            "--db",
-            db_local.to_str().unwrap(),
-            "sync-daemon",
-            "--peers",
-            &format!("http://127.0.0.1:{peer_port}"),
-            "--interval",
-            "1",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    // 2. Run the sync-daemon loop in-process with interval=1 so at least
+    //    one full cycle (pull + push) executes before we trigger shutdown.
+    let sync_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let sync_shutdown_for_daemon = sync_shutdown.clone();
+    let db_local_for_daemon = db_local.clone();
+    let peers = vec![format!("http://127.0.0.1:{peer_port}")];
+    let sync_handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::run_sync_daemon_with_shutdown(
+            db_local_for_daemon,
+            "test-agent".to_string(),
+            peers,
+            None,
+            1, // interval_secs
+            500,
+            sync_shutdown_for_daemon,
+        )
+        .await
+    });
 
-    // Let it run for a cycle or two
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    // Let the daemon run a cycle or two (the JoinSet fanout completes,
+    // then the loop hits the sleep+shutdown select).
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
-    // Kill the daemon and verify it terminates
-    let _ = daemon_child.kill();
+    // 3. Trigger sync-daemon shutdown — the `select!` wakes on the notify
+    //    and returns Ok(()).
+    sync_shutdown.notify_one();
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), sync_handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => panic!("run_sync_daemon_with_shutdown errored: {e}"),
+        Ok(Err(e)) => panic!("sync-daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("sync-daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
 
-    let exit = daemon_child.wait().unwrap();
-    // Accept any exit (success or signal-terminated)
-    assert!(
-        !exit.success() || exit.success(), // Always true; accepts any exit
-        "sync-daemon must terminate"
-    );
+    // 4. Tear down the peer.
+    peer_shutdown.notify_one();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), peer_handle).await;
 
     let _ = std::fs::remove_file(&db_local);
+    let _ = std::fs::remove_file(&db_peer);
 }
 
-#[test]
-#[cfg(unix)]
-fn test_daemon_cmd_curator_daemon_cycles_then_terminates() {
-    // Coverage: cmd_curator --daemon body — curator daemon loop setup, cycle
-    // execution, signal handling via atomic bool. Tests main.rs lines 4317-4334
-    // (daemon mode: tokio::spawn of signal watcher, spawn_blocking of
-    // curator::run_daemon, and the shutdown flag propagation). The curator daemon
-    // runs on a blocking task, polls shutdown_flag between cycles (set by a ctrl_c
-    // watcher task), and exits cleanly when signaled.
-    let bin = env!("CARGO_BIN_EXE_ai-memory");
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_cmd_curator_daemon_cycles_then_terminates() {
+    // Coverage: run_curator_daemon_with_shutdown — wraps curator::run_daemon
+    // (lib code) on a spawn_blocking, with a Notify-driven shutdown flag.
+    // Mirrors main.rs::cmd_curator's daemon arm (lines 4317-4334 of v0.6.3).
+    // run_daemon's interval is clamped to 60s minimum, but its shutdown
+    // poll fires every 500ms, so we observe clean termination within
+    // ~500ms regardless.
     let dir = std::env::temp_dir();
     let db = dir.join(format!(
         "ai-memory-curator-test-{}.db",
         uuid::Uuid::new_v4()
     ));
+    {
+        let _ = ai_memory::db::open(&db).unwrap();
+    }
 
-    // Spawn curator in daemon mode with a short interval (5s) so we can observe it
-    let mut child = cmd(bin)
-        .args([
-            "--db",
-            db.to_str().unwrap(),
-            "curator",
-            "--daemon",
-            "--interval-secs",
-            "5",
-        ])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
+    let cfg = ai_memory::curator::CuratorConfig {
+        interval_secs: 60,
+        max_ops_per_cycle: 1,
+        dry_run: true,
+        include_namespaces: Vec::new(),
+        exclude_namespaces: Vec::new(),
+    };
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_daemon = shutdown.clone();
+    let db_for_daemon = db.clone();
+    let handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::run_curator_daemon_with_shutdown(
+            db_for_daemon,
+            cfg,
+            shutdown_for_daemon,
+        )
+        .await
+    });
 
-    // Create guard for cleanup on panic
-    let _guard = ChildGuard::new(
-        std::process::Command::new("sleep")
-            .arg("1")
-            .spawn()
-            .unwrap(),
-    )
-    .with_cleanup([db.clone()]);
+    // Let the daemon start (the spawn_blocking thread spins up; the inner
+    // loop's first cycle runs against the empty DB and emits a tracing
+    // info line; then it falls into the 60s sleep that polls shutdown
+    // every 500ms).
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    // Let the daemon start (signal handling setup may take a few ms)
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Kill the daemon
-    let _ = child.kill();
-
-    // Wait for exit
-    let exit = child.wait().unwrap();
-    // Accept any exit
-    assert!(
-        !exit.success() || exit.success(), // Always true; accepts any exit
-        "curator daemon must terminate"
-    );
+    // Trigger shutdown — within ~500ms the `run_daemon` polling loop
+    // observes the AtomicBool and returns; the `spawn_blocking` join
+    // resolves; `run_curator_daemon_with_shutdown` returns Ok(()).
+    shutdown.notify_one();
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => panic!("run_curator_daemon_with_shutdown errored: {e}"),
+        Ok(Err(e)) => panic!("curator daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("curator daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
 
     let _ = std::fs::remove_file(&db);
 }
