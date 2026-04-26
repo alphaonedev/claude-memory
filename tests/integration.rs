@@ -10036,3 +10036,268 @@ fn http_namespace_standard_meta_fans_out() {
         "peer never saw the parent namespace from the meta fanout"
     );
 }
+
+/// CLI smoke test matrix (Tier 1+2): all 32 subcommands
+///
+/// Tier 1: --help exit 0 + non-empty stdout (arg validation coverage)
+/// Tier 2: canonical happy-path invocation against temp DB (main dispatch + JSON output)
+///
+/// Subcommands covered (32):
+/// 1. serve, 2. mcp, 3. store, 4. update, 5. recall, 6. search, 7. get,
+/// 8. list, 9. delete, 10. promote, 11. forget, 12. link, 13. consolidate,
+/// 14. gc, 15. stats, 16. namespaces, 17. export, 18. import, 19. resolve,
+/// 20. shell, 21. sync, 22. sync-daemon, 23. auto-consolidate, 24. completions,
+/// 25. man, 26. mine, 27. archive, 28. agents, 29. pending, 30. backup,
+/// 31. restore, 32. curator, 33. bench, [34. migrate (SAL feature, optional)]
+#[test]
+fn test_cli_smoke_subcommand_help() {
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // All 32 subcommands should respond to --help with exit 0 + non-empty stdout
+    let subcommands = vec![
+        "serve",
+        "mcp",
+        "store",
+        "update",
+        "recall",
+        "search",
+        "get",
+        "list",
+        "delete",
+        "promote",
+        "forget",
+        "link",
+        "consolidate",
+        "gc",
+        "stats",
+        "namespaces",
+        "export",
+        "import",
+        "resolve",
+        "shell",
+        "sync",
+        "sync-daemon",
+        "auto-consolidate",
+        "completions",
+        "man",
+        "mine",
+        "archive",
+        "agents",
+        "pending",
+        "backup",
+        "restore",
+        "curator",
+        "bench",
+    ];
+
+    for subcmd in subcommands {
+        let output = cmd_output_or_panic(binary, &[subcmd, "--help"]);
+        assert!(
+            output.status.success(),
+            "{} --help should exit 0, got: {}",
+            subcmd,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            !output.stdout.is_empty(),
+            "{} --help should have non-empty stdout",
+            subcmd
+        );
+        let stdout_str = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout_str.contains("Usage:") || stdout_str.contains("usage:"),
+            "{} --help should contain usage info",
+            subcmd
+        );
+    }
+}
+
+#[test]
+fn test_cli_smoke_canonical_paths() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-cli-smoke-{}.db", uuid::Uuid::new_v4()));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Tier 2: canonical happy-path invocations
+    let db_str = db_path.to_str().unwrap();
+
+    // 1. store: create test memories
+    let store_output = cmd_output_or_panic(
+        binary,
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "store",
+            "-T",
+            "Smoke test memory",
+            "--content",
+            "Test content for smoke tests",
+            "-t",
+            "mid",
+        ],
+    );
+    assert!(store_output.status.success(), "store failed");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&store_output.stdout).expect("store --json must be valid JSON");
+    let test_id = stored["id"].as_str().expect("store must return id");
+
+    // 2. get: retrieve by ID
+    let get_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "get", test_id]);
+    assert!(get_output.status.success(), "get failed");
+    let gotten: serde_json::Value =
+        serde_json::from_slice(&get_output.stdout).expect("get --json must be valid JSON");
+    assert_eq!(gotten["memory"]["id"].as_str(), Some(test_id));
+
+    // 3. list: list all
+    let list_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "list"]);
+    assert!(list_output.status.success(), "list failed");
+    let listed: serde_json::Value =
+        serde_json::from_slice(&list_output.stdout).expect("list --json must be valid JSON");
+    assert!(listed["count"].as_u64().unwrap_or(0) >= 1);
+
+    // 4. search: find by keyword
+    let search_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "search", "Smoke"]);
+    assert!(search_output.status.success(), "search failed");
+    let searched: serde_json::Value =
+        serde_json::from_slice(&search_output.stdout).expect("search --json must be valid JSON");
+    assert!(searched["count"].as_u64().unwrap_or(0) >= 1);
+
+    // 5. recall: semantic recall
+    let recall_output =
+        cmd_output_or_panic(binary, &["--db", db_str, "--json", "recall", "test memory"]);
+    assert!(recall_output.status.success(), "recall failed");
+    let recalled: serde_json::Value =
+        serde_json::from_slice(&recall_output.stdout).expect("recall --json must be valid JSON");
+    assert!(recalled["count"].as_u64().unwrap_or(0) >= 1);
+
+    // 6. update: modify the memory
+    let update_output = cmd_output_or_panic(
+        binary,
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "update",
+            test_id,
+            "-T",
+            "Updated smoke test memory",
+        ],
+    );
+    assert!(update_output.status.success(), "update failed");
+
+    // 7. promote: move to long-term
+    let promote_output =
+        cmd_output_or_panic(binary, &["--db", db_str, "--json", "promote", test_id]);
+    assert!(promote_output.status.success(), "promote failed");
+
+    // 8. stats: check stats
+    let stats_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "stats"]);
+    assert!(stats_output.status.success(), "stats failed");
+    let stats: serde_json::Value =
+        serde_json::from_slice(&stats_output.stdout).expect("stats --json must be valid JSON");
+    assert!(stats["total"].as_u64().unwrap_or(0) >= 1);
+
+    // 9. namespaces: list all namespaces
+    let ns_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "namespaces"]);
+    assert!(ns_output.status.success(), "namespaces failed");
+    let ns: serde_json::Value =
+        serde_json::from_slice(&ns_output.stdout).expect("namespaces --json must be valid JSON");
+    assert!(ns["namespaces"].is_array());
+
+    // 10. export: export to JSON
+    let export_output = cmd_output_or_panic(binary, &["--db", db_str, "export"]);
+    assert!(export_output.status.success(), "export failed");
+    let exported: serde_json::Value =
+        serde_json::from_slice(&export_output.stdout).expect("export must be valid JSON");
+    assert!(exported["count"].as_u64().unwrap_or(0) >= 1);
+
+    // 11. gc: run garbage collection
+    let gc_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "gc"]);
+    assert!(gc_output.status.success(), "gc failed");
+
+    // 12. link: link two memories
+    let store2_output = cmd_output_or_panic(
+        binary,
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "store",
+            "-T",
+            "Second smoke memory",
+            "--content",
+            "Another test",
+        ],
+    );
+    let stored2: serde_json::Value = serde_json::from_slice(&store2_output.stdout).unwrap();
+    let test_id_2 = stored2["id"].as_str().unwrap();
+
+    let link_output = cmd_output_or_panic(
+        binary,
+        &["--db", db_str, "--json", "link", test_id, test_id_2],
+    );
+    assert!(link_output.status.success(), "link failed");
+
+    // 13. forget: dry-run delete by pattern
+    let forget_output = cmd_output_or_panic(
+        binary,
+        &["--db", db_str, "--json", "forget", "--pattern", "nomatch"],
+    );
+    assert!(forget_output.status.success(), "forget failed");
+
+    // 14. delete: delete a memory
+    let delete_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "delete", test_id]);
+    assert!(delete_output.status.success(), "delete failed");
+
+    // 15. archive: list archived memories
+    let archive_output = cmd_output_or_panic(binary, &["--db", db_str, "archive", "list"]);
+    assert!(archive_output.status.success(), "archive list failed");
+
+    // 16. agents: list agents
+    let agents_output = cmd_output_or_panic(binary, &["--db", db_str, "--json", "agents"]);
+    assert!(agents_output.status.success(), "agents failed");
+
+    // 17. pending: list pending actions
+    let pending_output =
+        cmd_output_or_panic(binary, &["--db", db_str, "--json", "pending", "list"]);
+    assert!(pending_output.status.success(), "pending list failed");
+
+    // 18. backup: backup the database
+    let backup_dir = dir.join(format!("ai-memory-backup-{}", uuid::Uuid::new_v4()));
+    let backup_output = cmd_output_or_panic(
+        binary,
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "backup",
+            "--to",
+            backup_dir.to_str().unwrap(),
+        ],
+    );
+    assert!(backup_output.status.success(), "backup failed");
+
+    // 19. bench: run microbench (with minimal iterations to stay fast)
+    let bench_output = cmd_output_or_panic(
+        binary,
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "bench",
+            "--iterations",
+            "2",
+            "--warmup",
+            "0",
+        ],
+    );
+    assert!(bench_output.status.success(), "bench failed");
+    let bench_result: serde_json::Value =
+        serde_json::from_slice(&bench_output.stdout).expect("bench --json must be valid JSON");
+    assert!(bench_result["results"].is_array());
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    let _ = std::fs::remove_file(&db_path);
+}
