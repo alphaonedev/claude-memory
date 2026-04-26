@@ -295,7 +295,7 @@ mod tests {
         let r1 = registry();
         let r2 = registry();
         // Same instance — no double-registration.
-        assert!(std::ptr::eq(r1 as *const _, r2 as *const _));
+        assert!(std::ptr::eq(std::ptr::from_ref(r1), std::ptr::from_ref(r2)));
     }
 
     #[test]
