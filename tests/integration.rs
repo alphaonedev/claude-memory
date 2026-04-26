@@ -8561,6 +8561,133 @@ fn curl_delete(port: u16, path: &str, agent_id: Option<&str>) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
+// ---------------------------------------------------------------------------
+// In-process Router::oneshot harness
+// ---------------------------------------------------------------------------
+//
+// Replaces `DaemonGuard::spawn() + curl_*()` with an axum Router built via
+// `ai_memory::build_router`. Each call constructs a fresh in-memory DB +
+// keyword-tier AppState (no embedder, no federation), wires it into the
+// real production route table, and dispatches a single request via
+// `tower::ServiceExt::oneshot`. Benefits:
+//
+//   1. ~200-500ms per test (no daemon spawn / health-poll / TCP round-trip)
+//   2. Coverage attribution — `cargo llvm-cov` instruments the test process
+//      directly, so handler line coverage shows up without subprocess
+//      `LLVM_PROFILE_FILE` plumbing.
+//   3. Deterministic — no port collisions, no half-killed daemons, no
+//      curl-vs-axum status-code translation surprises.
+//
+// `OneshotDaemon` mimics the surface area of `DaemonGuard` so tests read
+// almost identically to their subprocess equivalents. Retain
+// `DaemonGuard::spawn()` for tests that need real socket / mTLS behavior
+// (handshake tests, multi-process sync mesh).
+#[allow(dead_code)]
+struct OneshotDaemon {
+    router: axum::Router,
+}
+
+impl OneshotDaemon {
+    fn new() -> Self {
+        let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
+        let path = std::path::PathBuf::from(":memory:");
+        let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((
+            conn,
+            path,
+            ai_memory::config::ResolvedTtl::default(),
+            true,
+        )));
+        let app_state = ai_memory::handlers::AppState {
+            db,
+            embedder: std::sync::Arc::new(None),
+            vector_index: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            federation: std::sync::Arc::new(None),
+            tier_config: std::sync::Arc::new(ai_memory::config::FeatureTier::Keyword.config()),
+            scoring: std::sync::Arc::new(ai_memory::config::ResolvedScoring::default()),
+        };
+        let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+        let router = ai_memory::build_router(api_key_state, app_state);
+        Self { router }
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+        agent_id: Option<&str>,
+    ) -> (axum::http::StatusCode, serde_json::Value) {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt as _;
+
+        let mut req = Request::builder().method(method).uri(path);
+        if let Some(id) = agent_id {
+            req = req.header("x-agent-id", id);
+        }
+        let req = match body {
+            Some(b) => req
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(b).unwrap()))
+                .unwrap(),
+            None => req.body(Body::empty()).unwrap(),
+        };
+        let resp = self.router.clone().oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 4 * 1024 * 1024)
+            .await
+            .unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json)
+    }
+}
+
+/// Tuple-style helper mirroring `curl_get`: returns (status_code_str, body_json).
+#[allow(dead_code)]
+async fn route_get(d: &OneshotDaemon, path: &str) -> (String, serde_json::Value) {
+    let (status, body) = d.request("GET", path, None, None).await;
+    (status.as_u16().to_string(), body)
+}
+
+#[allow(dead_code)]
+async fn route_get_with_agent(
+    d: &OneshotDaemon,
+    path: &str,
+    agent_id: &str,
+) -> (String, serde_json::Value) {
+    let (status, body) = d.request("GET", path, None, Some(agent_id)).await;
+    (status.as_u16().to_string(), body)
+}
+
+#[allow(dead_code)]
+async fn route_post(
+    d: &OneshotDaemon,
+    path: &str,
+    body: &serde_json::Value,
+    agent_id: Option<&str>,
+) -> (String, serde_json::Value) {
+    let (status, body) = d.request("POST", path, Some(body), agent_id).await;
+    (status.as_u16().to_string(), body)
+}
+
+#[allow(dead_code)]
+async fn route_put(
+    d: &OneshotDaemon,
+    path: &str,
+    body: &serde_json::Value,
+    agent_id: Option<&str>,
+) -> (String, serde_json::Value) {
+    let (status, body) = d.request("PUT", path, Some(body), agent_id).await;
+    (status.as_u16().to_string(), body)
+}
+
+#[allow(dead_code)]
+async fn route_delete(d: &OneshotDaemon, path: &str, agent_id: Option<&str>) -> String {
+    let (status, _) = d.request("DELETE", path, None, agent_id).await;
+    status.as_u16().to_string()
+}
+
 /// RAII guard for any spawned child process used by the integration
 /// tests. On `Drop` it kills the child, reaps it, then unlinks any
 /// associated temp files.
@@ -8661,30 +8788,32 @@ fn http_capabilities_returns_json_with_version() {
     assert!(body.get("features").is_some(), "missing features: {body}");
 }
 
-#[test]
-fn http_notify_and_inbox_round_trip() {
+#[tokio::test]
+async fn http_notify_and_inbox_round_trip() {
     // S32 — alice notifies ai:bob; bob fetches his inbox by ?agent_id=
     // and sees the message, plus charlie's inbox stays empty.
-    let d = DaemonGuard::spawn();
+    let d = OneshotDaemon::new();
     // Register senders/receivers so subscribe doesn't reject ai:alice.
     // (notify doesn't require registration — but we exercise both sides
     // from a consistent identity posture.)
-    let _ = curl_post(
-        d.port,
+    let _ = route_post(
+        &d,
         "/api/v1/agents",
         &serde_json::json!({"agent_id": "ai:alice", "agent_type": "ai:generic"}),
         None,
-    );
-    let _ = curl_post(
-        d.port,
+    )
+    .await;
+    let _ = route_post(
+        &d,
         "/api/v1/agents",
         &serde_json::json!({"agent_id": "ai:bob", "agent_type": "ai:generic"}),
         None,
-    );
+    )
+    .await;
 
     let marker = format!("marker-{}", uuid::Uuid::new_v4());
-    let (code, _body) = curl_post(
-        d.port,
+    let (code, _body) = route_post(
+        &d,
         "/api/v1/notify",
         &serde_json::json!({
             "target_agent_id": "ai:bob",
@@ -8692,10 +8821,11 @@ fn http_notify_and_inbox_round_trip() {
             "content": format!("hello bob, token={marker}"),
         }),
         Some("ai:alice"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
 
-    let (code, body) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:bob&limit=50");
+    let (code, body) = route_get(&d, "/api/v1/inbox?agent_id=ai:bob&limit=50").await;
     assert_eq!(code, "200");
     let messages = body["messages"].as_array().expect("messages array");
     assert!(
@@ -8706,7 +8836,7 @@ fn http_notify_and_inbox_round_trip() {
     );
 
     // charlie must NOT see bob's notification.
-    let (_code, body2) = curl_get(d.port, "/api/v1/inbox?agent_id=ai:charlie&limit=50");
+    let (_code, body2) = route_get(&d, "/api/v1/inbox?agent_id=ai:charlie&limit=50").await;
     let messages2 = body2["messages"].as_array().cloned().unwrap_or_default();
     assert!(
         !messages2
@@ -8771,31 +8901,33 @@ fn http_inbox_cross_source_agent_id_body_vs_query_vs_header() {
     assert_eq!(v["agent_id"], "ai:bob", "header owner mismatch: {v}");
 }
 
-#[test]
-fn http_subscriptions_s33_shape_round_trip() {
+#[tokio::test]
+async fn http_subscriptions_s33_shape_round_trip() {
     // S33 — POST {agent_id, namespace}; GET ?agent_id=; DELETE
     // ?agent_id=&namespace= removes the row.
-    let d = DaemonGuard::spawn();
+    let d = OneshotDaemon::new();
     // Pre-register the subscriber so handle_subscribe doesn't reject.
-    let _ = curl_post(
-        d.port,
+    let _ = route_post(
+        &d,
         "/api/v1/agents",
         &serde_json::json!({"agent_id": "ai:bob", "agent_type": "ai:generic"}),
         None,
-    );
+    )
+    .await;
     let ns = format!(
         "scenario33-pubsub-{}",
         &uuid::Uuid::new_v4().to_string()[..6]
     );
-    let (code, _body) = curl_post(
-        d.port,
+    let (code, _body) = route_post(
+        &d,
         "/api/v1/subscriptions",
         &serde_json::json!({"agent_id": "ai:bob", "namespace": ns}),
         Some("ai:bob"),
-    );
+    )
+    .await;
     assert!(code == "201" || code == "200", "subscribe code={code}");
 
-    let (code_g, body_g) = curl_get(d.port, "/api/v1/subscriptions?agent_id=ai:bob");
+    let (code_g, body_g) = route_get(&d, "/api/v1/subscriptions?agent_id=ai:bob").await;
     assert_eq!(code_g, "200");
     let rows = body_g["subscriptions"]
         .as_array()
@@ -8805,17 +8937,18 @@ fn http_subscriptions_s33_shape_round_trip() {
         "subscribed namespace {ns} missing — {body_g}"
     );
 
-    let del_code = curl_delete(
-        d.port,
+    let del_code = route_delete(
+        &d,
         &format!("/api/v1/subscriptions?agent_id=ai:bob&namespace={ns}"),
         Some("ai:bob"),
-    );
+    )
+    .await;
     assert!(
         del_code == "200" || del_code == "204",
         "delete code={del_code}"
     );
 
-    let (_code_g2, body_g2) = curl_get(d.port, "/api/v1/subscriptions?agent_id=ai:bob");
+    let (_code_g2, body_g2) = route_get(&d, "/api/v1/subscriptions?agent_id=ai:bob").await;
     let rows_after = body_g2["subscriptions"]
         .as_array()
         .cloned()
@@ -10327,6 +10460,7 @@ fn spawn_leader_with_timeout(
     DaemonGuard { child, port, db }
 }
 
+#[allow(dead_code)]
 fn curl_put(
     port: u16,
     path: &str,
@@ -10378,9 +10512,9 @@ fn curl_put(
 ///
 /// Phase 3 (6 governance/webhook): `approve_pending`, `reject_pending`, `register_agent`,
 /// notify, subscribe, unsubscribe.
-#[test]
-fn http_smoke_matrix_phases_1_3() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_smoke_matrix_phases_1_3() {
+    let d = OneshotDaemon::new();
 
     // ============================================================================
     // PHASE 1: Simple list/get/stats endpoints (16 endpoints)
@@ -10388,24 +10522,24 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/health — GET, must return 200 with status="ok"
     {
-        let (code, body) = curl_get(d.port, "/api/v1/health");
+        let (code, body) = route_get(&d, "/api/v1/health").await;
         assert_eq!(code, "200", "health: {body}");
         assert_eq!(body["status"].as_str(), Some("ok"), "health status: {body}");
     }
 
     // /metrics and /api/v1/metrics — GET, must return 200
     {
-        let (code, _body) = curl_get(d.port, "/metrics");
+        let (code, _body) = route_get(&d, "/metrics").await;
         assert_eq!(code, "200", "metrics endpoint");
     }
     {
-        let (code, _body) = curl_get(d.port, "/api/v1/metrics");
+        let (code, _body) = route_get(&d, "/api/v1/metrics").await;
         assert_eq!(code, "200", "api/v1/metrics endpoint");
     }
 
     // /api/v1/stats — GET, must return 200 with stats object
     {
-        let (code, body) = curl_get(d.port, "/api/v1/stats");
+        let (code, body) = route_get(&d, "/api/v1/stats").await;
         assert_eq!(code, "200", "stats: {body}");
         assert!(body.get("total").is_some(), "stats.total: {body}");
         assert!(
@@ -10416,7 +10550,7 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/gc — POST, must return 200 with gc result
     {
-        let (code, body) = curl_post(d.port, "/api/v1/gc", &serde_json::json!({}), None);
+        let (code, body) = route_post(&d, "/api/v1/gc", &serde_json::json!({}), None).await;
         assert_eq!(code, "200", "gc: {body}");
         assert!(
             body.get("expired_deleted").is_some(),
@@ -10426,7 +10560,7 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/archive/stats — GET, must return 200 with archive stats
     {
-        let (code, body) = curl_get(d.port, "/api/v1/archive/stats");
+        let (code, body) = route_get(&d, "/api/v1/archive/stats").await;
         assert_eq!(code, "200", "archive_stats: {body}");
         assert!(
             body.get("archived_total").is_some(),
@@ -10436,28 +10570,28 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/agents — GET, must return 200 with agents list
     {
-        let (code, body) = curl_get(d.port, "/api/v1/agents");
+        let (code, body) = route_get(&d, "/api/v1/agents").await;
         assert_eq!(code, "200", "agents: {body}");
         assert!(body.get("agents").is_some(), "agents.agents: {body}");
     }
 
     // /api/v1/pending — GET, must return 200 with pending list
     {
-        let (code, body) = curl_get(d.port, "/api/v1/pending");
+        let (code, body) = route_get(&d, "/api/v1/pending").await;
         assert_eq!(code, "200", "pending: {body}");
         assert!(body.get("pending").is_some(), "pending.pending: {body}");
     }
 
     // /api/v1/inbox — GET, must return 200 with inbox list
     {
-        let (code, body) = curl_get(d.port, "/api/v1/inbox");
+        let (code, body) = route_get(&d, "/api/v1/inbox").await;
         assert_eq!(code, "200", "inbox: {body}");
         assert!(body.get("messages").is_some(), "inbox.messages: {body}");
     }
 
     // /api/v1/capabilities — GET, must return 200 with capabilities object
     {
-        let (code, body) = curl_get(d.port, "/api/v1/capabilities");
+        let (code, body) = route_get(&d, "/api/v1/capabilities").await;
         assert_eq!(code, "200", "capabilities: {body}");
         assert!(body.get("tier").is_some(), "capabilities.tier: {body}");
         assert!(
@@ -10468,7 +10602,7 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/subscriptions — GET, must return 200 with subscriptions list
     {
-        let (code, body) = curl_get(d.port, "/api/v1/subscriptions");
+        let (code, body) = route_get(&d, "/api/v1/subscriptions").await;
         assert_eq!(code, "200", "subscriptions: {body}");
         assert!(
             body.get("subscriptions").is_some(),
@@ -10478,30 +10612,26 @@ fn http_smoke_matrix_phases_1_3() {
 
     // /api/v1/session/start — POST, must return 200
     {
-        let (code, body) = curl_post(
-            d.port,
-            "/api/v1/session/start",
-            &serde_json::json!({}),
-            None,
-        );
+        let (code, body) =
+            route_post(&d, "/api/v1/session/start", &serde_json::json!({}), None).await;
         assert_eq!(code, "200", "session_start: {body}");
     }
 
     // /api/v1/namespaces — GET (query-string form)
     {
-        let (code, _body) = curl_get(d.port, "/api/v1/namespaces?namespace=test");
+        let (code, _body) = route_get(&d, "/api/v1/namespaces?namespace=test").await;
         assert!(code == "200" || code == "404", "namespaces GET");
     }
 
     // /api/v1/namespaces/{ns}/standard — GET (path form)
     {
-        let (code, _body) = curl_get(d.port, "/api/v1/namespaces/test-smoke/standard");
+        let (code, _body) = route_get(&d, "/api/v1/namespaces/test-smoke/standard").await;
         assert!(code == "200" || code == "404", "namespaces path form GET");
     }
 
     // /api/v1/taxonomy — GET
     {
-        let (code, body) = curl_get(d.port, "/api/v1/taxonomy");
+        let (code, body) = route_get(&d, "/api/v1/taxonomy").await;
         assert_eq!(code, "200", "taxonomy: {body}");
     }
 
@@ -10511,8 +10641,8 @@ fn http_smoke_matrix_phases_1_3() {
 
     // POST /api/v1/memories — create_memory, must return 201 with id
     let memory_id = {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/memories",
             &serde_json::json!({
                 "title": "smoke-phase2-mem",
@@ -10526,7 +10656,8 @@ fn http_smoke_matrix_phases_1_3() {
                 "metadata": {}
             }),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "201", "create_memory: {body}");
         assert!(body.get("id").is_some(), "create_memory.id: {body}");
         body["id"].as_str().unwrap().to_string()
@@ -10534,21 +10665,22 @@ fn http_smoke_matrix_phases_1_3() {
 
     // PUT /api/v1/memories/{id} — update_memory, must return 200
     {
-        let (code, body) = curl_put(
-            d.port,
+        let (code, body) = route_put(
+            &d,
             &format!("/api/v1/memories/{memory_id}"),
             &serde_json::json!({
                 "title": "updated-smoke-mem",
                 "content": "updated content"
             }),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "200", "update_memory: {body}");
     }
 
     // GET /api/v1/memories/{id} — get_memory, must return 200
     {
-        let (code, body) = curl_get(d.port, &format!("/api/v1/memories/{memory_id}"));
+        let (code, body) = route_get(&d, &format!("/api/v1/memories/{memory_id}")).await;
         assert_eq!(code, "200", "get_memory: {body}");
         assert_eq!(
             body["memory"]["id"].as_str(),
@@ -10559,19 +10691,20 @@ fn http_smoke_matrix_phases_1_3() {
 
     // POST /api/v1/memories/{id}/promote — promote_memory, must return 200
     {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             &format!("/api/v1/memories/{memory_id}/promote"),
             &serde_json::json!({}),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "200", "promote_memory: {body}");
     }
 
     // POST /api/v1/links — create_link
     let link_test_id = {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/memories",
             &serde_json::json!({
                 "title": "smoke-phase2-mem-2",
@@ -10585,14 +10718,15 @@ fn http_smoke_matrix_phases_1_3() {
                 "metadata": {}
             }),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "201");
         body["id"].as_str().unwrap().to_string()
     };
 
     {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/links",
             &serde_json::json!({
                 "source_id": &memory_id,
@@ -10600,23 +10734,25 @@ fn http_smoke_matrix_phases_1_3() {
                 "relation": "related_to"
             }),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "201", "create_link: {body}");
     }
 
     // GET /api/v1/links/{id} — get_links
     {
-        let (code, body) = curl_get(d.port, &format!("/api/v1/links/{memory_id}"));
+        let (code, body) = route_get(&d, &format!("/api/v1/links/{memory_id}")).await;
         assert_eq!(code, "200", "get_links: {body}");
     }
 
     // DELETE /api/v1/memories/{id} — delete_memory, must return 204
     {
-        let code = curl_delete(
-            d.port,
+        let code = route_delete(
+            &d,
             &format!("/api/v1/memories/{link_test_id}"),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert!(code == "204" || code == "200", "delete_memory code: {code}");
     }
 
@@ -10626,8 +10762,8 @@ fn http_smoke_matrix_phases_1_3() {
 
     // POST /api/v1/agents — register_agent
     {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/agents",
             &serde_json::json!({
                 "agent_id": "ai:smoke-agent-2",
@@ -10635,14 +10771,15 @@ fn http_smoke_matrix_phases_1_3() {
                 "capabilities": ["test"]
             }),
             None,
-        );
+        )
+        .await;
         assert_eq!(code, "201", "register_agent: {body}");
     }
 
     // POST /api/v1/notify — notify
     {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/notify",
             &serde_json::json!({
                 "target_agent_id": "ai:smoke-recipient",
@@ -10651,39 +10788,42 @@ fn http_smoke_matrix_phases_1_3() {
                 "tier": "mid"
             }),
             Some("ai:smoke-agent"),
-        );
+        )
+        .await;
         assert_eq!(code, "201", "notify: {body}");
     }
 
     // POST /api/v1/subscriptions — subscribe
     {
-        let (code, body) = curl_post(
-            d.port,
+        let (code, body) = route_post(
+            &d,
             "/api/v1/subscriptions",
             &serde_json::json!({
                 "url": "https://example.com/webhook",
                 "events": "*"
             }),
             None,
-        );
+        )
+        .await;
         assert_eq!(code, "201", "subscribe: {body}");
         let sub_id = body.get("id").map(|v| v.as_str().unwrap().to_string());
 
         // DELETE /api/v1/subscriptions — unsubscribe
         if let Some(id) = sub_id {
-            let code = curl_delete(d.port, &format!("/api/v1/subscriptions?id={id}"), None);
+            let code = route_delete(&d, &format!("/api/v1/subscriptions?id={id}"), None).await;
             assert!(code == "204" || code == "200", "unsubscribe code: {code}");
         }
     }
 
     // POST /api/v1/pending/{id}/approve — test with nonexistent id (expect 404)
     {
-        let (code, _body) = curl_post(
-            d.port,
+        let (code, _body) = route_post(
+            &d,
             "/api/v1/pending/nonexistent-id/approve",
             &serde_json::json!({}),
             None,
-        );
+        )
+        .await;
         assert!(
             code == "403" || code == "404",
             "approve_pending on nonexistent"
@@ -10692,12 +10832,13 @@ fn http_smoke_matrix_phases_1_3() {
 
     // POST /api/v1/pending/{id}/reject — test with nonexistent id (expect 404)
     {
-        let (code, _body) = curl_post(
-            d.port,
+        let (code, _body) = route_post(
+            &d,
             "/api/v1/pending/nonexistent-id/reject",
             &serde_json::json!({}),
             None,
-        );
+        )
+        .await;
         assert!(
             code == "403" || code == "404",
             "reject_pending on nonexistent"
@@ -10714,13 +10855,13 @@ fn http_smoke_matrix_phases_1_3() {
 ///
 /// Tier-gated endpoints (/search and /recall with semantic mode) are gated on the
 /// binary being built with --features semantic. Keyword-tier fallback is tested by default.
-#[test]
-fn http_phase4_search_memories() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_search_memories() {
+    let d = OneshotDaemon::new();
 
     // Seed a test memory to search against
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "phase4-search-test",
@@ -10734,32 +10875,30 @@ fn http_phase4_search_memories() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201", "create memory for search: {body}");
 
     // Test search with query
-    let (code, body) = curl_get(d.port, "/api/v1/search?q=phase4");
+    let (code, body) = route_get(&d, "/api/v1/search?q=phase4").await;
     assert_eq!(code, "200", "search status code: {body}");
     assert!(body.get("results").is_some(), "search.results: {body}");
     assert!(body.get("count").is_some(), "search.count: {body}");
     assert!(body.get("query").is_some(), "search.query: {body}");
 
     // Test search with multiple parameters
-    let (code, body) = curl_get(
-        d.port,
-        "/api/v1/search?q=test&limit=10&namespace=phase4-test",
-    );
+    let (code, body) = route_get(&d, "/api/v1/search?q=test&limit=10&namespace=phase4-test").await;
     assert_eq!(code, "200", "search with params: {body}");
     assert!(body["results"].is_array(), "results is array: {body}");
 }
 
-#[test]
-fn http_phase4_recall_memories_post() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_recall_memories_post() {
+    let d = OneshotDaemon::new();
 
     // Seed a test memory
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "phase4-recall-test",
@@ -10773,19 +10912,21 @@ fn http_phase4_recall_memories_post() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
-    assert_eq!(code, "201");
+    )
+    .await;
+    assert_eq!(code, "201", "create: {body}");
 
     // Test recall via POST
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/recall",
         &serde_json::json!({
             "context": "test memory recall",
             "limit": 10
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "200", "recall status code: {body}");
     assert!(body.get("memories").is_some(), "recall.memories: {body}");
     assert!(body.get("count").is_some(), "recall.count: {body}");
@@ -10797,13 +10938,13 @@ fn http_phase4_recall_memories_post() {
     assert!(body["memories"].is_array(), "memories is array: {body}");
 }
 
-#[test]
-fn http_phase4_recall_memories_get() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_recall_memories_get() {
+    let d = OneshotDaemon::new();
 
     // Seed a test memory
-    let (code, _body) = curl_post(
-        d.port,
+    let (code, _body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "phase4-recall-get-test",
@@ -10817,19 +10958,20 @@ fn http_phase4_recall_memories_get() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
 
     // Test recall via GET
-    let (code, body) = curl_get(d.port, "/api/v1/recall?context=test&limit=10");
+    let (code, body) = route_get(&d, "/api/v1/recall?context=test&limit=10").await;
     assert_eq!(code, "200", "recall GET status code: {body}");
     assert!(body.get("memories").is_some(), "recall.memories: {body}");
     assert!(body.get("count").is_some(), "recall.count: {body}");
 }
 
-#[test]
-fn http_phase4_bulk_create() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_bulk_create() {
+    let d = OneshotDaemon::new();
 
     // Create multiple memories in one request
     let memories = vec![
@@ -10857,25 +10999,26 @@ fn http_phase4_bulk_create() {
         }),
     ];
 
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/memories/bulk",
         &serde_json::Value::Array(memories),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "200", "bulk_create status code: {body}");
     assert!(body.get("created").is_some(), "bulk_create.created: {body}");
     assert!(body.get("errors").is_some(), "bulk_create.errors: {body}");
     assert_eq!(body["created"], 2, "should create 2 memories: {body}");
 }
 
-#[test]
-fn http_phase4_consolidate_memories() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_consolidate_memories() {
+    let d = OneshotDaemon::new();
 
     // Create two memories to consolidate
-    let (code, mem1_body) = curl_post(
-        d.port,
+    let (code, mem1_body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "consolidate-1",
@@ -10889,12 +11032,13 @@ fn http_phase4_consolidate_memories() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
     let mem1_id = mem1_body["id"].as_str().unwrap().to_string();
 
-    let (code, mem2_body) = curl_post(
-        d.port,
+    let (code, mem2_body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "consolidate-2",
@@ -10908,13 +11052,14 @@ fn http_phase4_consolidate_memories() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
     let mem2_id = mem2_body["id"].as_str().unwrap().to_string();
 
     // Consolidate them
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/consolidate",
         &serde_json::json!({
             "ids": [mem1_id, mem2_id],
@@ -10923,31 +11068,32 @@ fn http_phase4_consolidate_memories() {
             "namespace": "consolidate-test"
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201", "consolidate status code: {body}");
     assert!(body.get("id").is_some(), "consolidate.id: {body}");
     assert_eq!(body["consolidated"], 2, "consolidated count: {body}");
 }
 
-#[test]
-fn http_phase4_archive_list() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_archive_list() {
+    let d = OneshotDaemon::new();
 
     // Test GET /api/v1/archive (list archived)
-    let (code, body) = curl_get(d.port, "/api/v1/archive");
+    let (code, body) = route_get(&d, "/api/v1/archive").await;
     assert_eq!(code, "200", "archive list status code: {body}");
     assert!(body.get("archived").is_some(), "archive.archived: {body}");
     assert!(body.get("count").is_some(), "archive.count: {body}");
     assert!(body["archived"].is_array(), "archived is array: {body}");
 }
 
-#[test]
-fn http_phase4_archive_by_ids() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_archive_by_ids() {
+    let d = OneshotDaemon::new();
 
     // Create a memory to archive
-    let (code, mem_body) = curl_post(
-        d.port,
+    let (code, mem_body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "archive-test",
@@ -10961,20 +11107,22 @@ fn http_phase4_archive_by_ids() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
     let mem_id = mem_body["id"].as_str().unwrap().to_string();
 
     // Archive by IDs (POST /api/v1/archive)
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/archive",
         &serde_json::json!({
             "ids": [mem_id.clone()],
             "reason": "test archive"
         }),
         None,
-    );
+    )
+    .await;
     assert_eq!(code, "200", "archive status code: {body}");
     assert!(body.get("archived").is_some(), "archive.archived: {body}");
     assert!(body.get("missing").is_some(), "archive.missing: {body}");
@@ -10982,21 +11130,21 @@ fn http_phase4_archive_by_ids() {
     assert_eq!(body["count"], 1, "should archive 1 memory: {body}");
 
     // Verify it's in the archive list
-    let (code, list_body) = curl_get(d.port, "/api/v1/archive");
+    let (code, list_body) = route_get(&d, "/api/v1/archive").await;
     assert_eq!(code, "200");
     assert!(
-        list_body["archived"].as_array().unwrap().len() > 0,
+        !list_body["archived"].as_array().unwrap().is_empty(),
         "should have archived items"
     );
 }
 
-#[test]
-fn http_phase4_restore_archive() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_restore_archive() {
+    let d = OneshotDaemon::new();
 
     // Create and archive a memory
-    let (code, mem_body) = curl_post(
-        d.port,
+    let (code, mem_body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "restore-test",
@@ -11010,37 +11158,40 @@ fn http_phase4_restore_archive() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
     let mem_id = mem_body["id"].as_str().unwrap().to_string();
 
     // Archive it
-    let (code, _arch_body) = curl_post(
-        d.port,
+    let (code, _arch_body) = route_post(
+        &d,
         "/api/v1/archive",
         &serde_json::json!({
             "ids": [mem_id.clone()]
         }),
         None,
-    );
+    )
+    .await;
     assert_eq!(code, "200");
 
     // Restore from archive
-    let (code, body) = curl_post(
-        d.port,
-        &format!("/api/v1/archive/{}/restore", mem_id),
+    let (code, body) = route_post(
+        &d,
+        &format!("/api/v1/archive/{mem_id}/restore"),
         &serde_json::json!({}),
         None,
-    );
+    )
+    .await;
     assert_eq!(code, "200", "restore status code: {body}");
     assert!(body.get("restored").is_some(), "restore.restored: {body}");
     assert!(body.get("id").is_some(), "restore.id: {body}");
     assert_eq!(body["restored"], true, "restored should be true: {body}");
 }
 
-#[test]
-fn http_phase4_import_memories() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_import_memories() {
+    let d = OneshotDaemon::new();
 
     // Import multiple memories
     let memories_to_import = vec![
@@ -11076,28 +11227,29 @@ fn http_phase4_import_memories() {
         }),
     ];
 
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/import",
         &serde_json::json!({
             "memories": memories_to_import,
             "links": []
         }),
         None,
-    );
+    )
+    .await;
     assert_eq!(code, "200", "import status code: {body}");
     assert!(body.get("imported").is_some(), "import.imported: {body}");
     assert!(body.get("errors").is_some(), "import.errors: {body}");
     assert_eq!(body["imported"], 2, "should import 2 memories: {body}");
 }
 
-#[test]
-fn http_phase4_sync_push() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_sync_push() {
+    let d = OneshotDaemon::new();
 
     // Create some memories locally first to understand the structure
-    let (code, mem_body) = curl_post(
-        d.port,
+    let (code, _mem_body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "sync-test",
@@ -11111,12 +11263,13 @@ fn http_phase4_sync_push() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
 
     // Push memories via sync (simulate peer sync)
-    let (code, body) = curl_post(
-        d.port,
+    let (code, body) = route_post(
+        &d,
         "/api/v1/sync/push",
         &serde_json::json!({
             "sender_agent_id": "ai:peer-sync-agent",
@@ -11130,19 +11283,20 @@ fn http_phase4_sync_push() {
             "namespace_meta_clears": []
         }),
         None,
-    );
+    )
+    .await;
     assert_eq!(code, "200", "sync_push status code: {body}");
     assert!(body.get("applied").is_some(), "sync_push.applied: {body}");
     assert!(body.get("noop").is_some(), "sync_push.noop: {body}");
 }
 
-#[test]
-fn http_phase4_sync_since() {
-    let d = DaemonGuard::spawn();
+#[tokio::test]
+async fn http_phase4_sync_since() {
+    let d = OneshotDaemon::new();
 
     // Create a memory to ensure there's something in the DB
-    let (code, _body) = curl_post(
-        d.port,
+    let (code, _body) = route_post(
+        &d,
         "/api/v1/memories",
         &serde_json::json!({
             "title": "sync-since-test",
@@ -11156,11 +11310,12 @@ fn http_phase4_sync_since() {
             "metadata": {}
         }),
         Some("ai:phase4-agent"),
-    );
+    )
+    .await;
     assert_eq!(code, "201");
 
     // Query memories updated since a timestamp
-    let (code, body) = curl_get(d.port, "/api/v1/sync/since?since=2020-01-01T00:00:00Z");
+    let (code, body) = route_get(&d, "/api/v1/sync/since?since=2020-01-01T00:00:00Z").await;
     assert_eq!(code, "200", "sync_since status code: {body}");
     assert!(body.get("count").is_some(), "sync_since.count: {body}");
     assert!(
