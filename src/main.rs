@@ -13,7 +13,7 @@
 // the integration suite's coverage onto the production paths.
 use ai_memory::{
     autonomy, bench, color, config, curator, db, embeddings, federation, handlers, hnsw, identity,
-    llm, mcp, mine, models, reranker, validate,
+    llm, mcp, mine, models, reranker, tls, validate,
 };
 
 #[cfg(feature = "sal")]
@@ -1148,7 +1148,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
                 "mTLS enabled — client certs required. Allowlist: {}",
                 allowlist_path.display()
             );
-            load_mtls_rustls_config(cert, key, allowlist_path).await?
+            tls::load_mtls_rustls_config(cert, key, allowlist_path).await?
         } else {
             tracing::warn!(
                 "TLS enabled but mTLS NOT configured — sync endpoints \
@@ -1156,7 +1156,7 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
                  Set --mtls-allowlist for production peer-mesh deployments \
                  (red-team #231)."
             );
-            load_rustls_config(cert, key).await?
+            tls::load_rustls_config(cert, key).await?
         };
         tracing::info!("ai-memory listening on https://{addr}");
         let socket_addr: std::net::SocketAddr = addr.parse()?;
@@ -1199,334 +1199,6 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         .await?;
     }
     Ok(())
-}
-
-/// Load a PEM cert + PEM key (PKCS#8 or RSA) into an `axum-server`
-/// rustls config. Returns an error with a specific message for the
-/// operator rather than letting rustls' wrapped IO error bubble up —
-/// TLS misconfigurations are the #1 new-deploy footgun.
-async fn load_rustls_config(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    let cert = tokio::fs::read(cert_path)
-        .await
-        .with_context(|| format!("failed to read TLS cert from {}", cert_path.display()))?;
-    let key = tokio::fs::read(key_path)
-        .await
-        .with_context(|| format!("failed to read TLS key from {}", key_path.display()))?;
-    let config = axum_server::tls_rustls::RustlsConfig::from_pem(cert, key)
-        .await
-        .context(
-            "failed to parse TLS cert/key — ensure PEM-encoded (cert may be fullchain; \
-                 key must be PKCS#8 or RSA)",
-        )?;
-    Ok(config)
-}
-
-// ---------------------------------------------------------------------------
-// Layer 2 — mTLS with SHA-256 fingerprint allowlist.
-//
-// Builds a rustls ServerConfig that:
-//   1. Presents the local cert/key (same as Layer 1).
-//   2. Demands a client certificate on every connection.
-//   3. Accepts the client cert only if its SHA-256 fingerprint is on the
-//      operator-configured allowlist. Any other cert — including ones
-//      signed by trusted CAs — is rejected.
-//
-// This is the fastest path to "only authorised peers can even connect"
-// without depending on a PKI/CA ecosystem. Fingerprint pinning is a
-// well-understood primitive (HTTP Public Key Pinning, SSH host keys).
-// Task 2b (post-v0.6.0) adds fingerprint → agent_id mapping so the
-// handler can refuse requests whose `sender_agent_id` doesn't match
-// the cert's expected identity.
-// ---------------------------------------------------------------------------
-
-/// Load a rustls server config with client-cert-fingerprint verification.
-async fn load_mtls_rustls_config(
-    cert_path: &Path,
-    key_path: &Path,
-    allowlist_path: &Path,
-) -> Result<axum_server::tls_rustls::RustlsConfig> {
-    let allowlist = load_fingerprint_allowlist(allowlist_path).await?;
-    if allowlist.is_empty() {
-        anyhow::bail!(
-            "mTLS allowlist at {} is empty — refuse to start rather than silently accept all peers",
-            allowlist_path.display()
-        );
-    }
-
-    let cert_pem = tokio::fs::read(cert_path)
-        .await
-        .with_context(|| format!("failed to read TLS cert from {}", cert_path.display()))?;
-    let key_pem = tokio::fs::read(key_path)
-        .await
-        .with_context(|| format!("failed to read TLS key from {}", key_path.display()))?;
-
-    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
-        rustls_pki_pem_iter_certs(&cert_pem)?;
-    let key = rustls_pki_pem_parse_private_key(&key_pem)?;
-
-    let verifier = Arc::new(FingerprintAllowlistVerifier { allowlist });
-    let server_config = rustls::ServerConfig::builder()
-        .with_client_cert_verifier(verifier)
-        .with_single_cert(certs, key)
-        .context("failed to build rustls ServerConfig for mTLS")?;
-
-    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
-        Arc::new(server_config),
-    ))
-}
-
-/// Parse the allowlist file: one SHA-256 fingerprint per line, case-insensitive
-/// hex with optional `:` separators. Empty lines and `#` comments are skipped.
-async fn load_fingerprint_allowlist(path: &Path) -> Result<std::collections::HashSet<[u8; 32]>> {
-    let text = tokio::fs::read_to_string(path)
-        .await
-        .with_context(|| format!("failed to read mTLS allowlist from {}", path.display()))?;
-    let mut set = std::collections::HashSet::new();
-    for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        // Issue #358: tolerate inline trailing comments — anything after `#`
-        // on a non-comment line is dropped before the strict hex/colon
-        // validation below. Safe because `#` is not a valid hex/colon char,
-        // so it cannot appear in a legitimate SHA-256 fingerprint.
-        let line = line.split('#').next().unwrap_or("").trim();
-        if line.is_empty() {
-            continue;
-        }
-        // Accept a leading `sha256:` marker for forward-compat with richer formats.
-        let hex_part = line.strip_prefix("sha256:").unwrap_or(line);
-        // Ultrareview #338: reject any non-hex, non-colon character —
-        // including embedded whitespace/tabs. Previously the parser
-        // stripped only `:` and relied on the length check to catch
-        // whitespace, but silent acceptance of copy-paste artefacts
-        // (e.g. soft-wraps producing internal spaces) would produce
-        // misleading parse errors further down rather than a clear
-        // "whitespace not allowed" signal. Keep it strict.
-        if let Some(bad) = hex_part
-            .chars()
-            .find(|c| !c.is_ascii_hexdigit() && *c != ':')
-        {
-            anyhow::bail!(
-                "mTLS allowlist line {}: unexpected character {:?} — \
-                 entries must be 64 hex chars with optional `:` separators",
-                lineno + 1,
-                bad
-            );
-        }
-        let hex_clean: String = hex_part.chars().filter(|c| *c != ':').collect();
-        if hex_clean.len() != 64 {
-            anyhow::bail!(
-                "mTLS allowlist line {}: expected 64 hex chars (optionally with `:` separators), got {}",
-                lineno + 1,
-                hex_clean.len()
-            );
-        }
-        let mut bytes = [0u8; 32];
-        for i in 0..32 {
-            bytes[i] = u8::from_str_radix(&hex_clean[i * 2..i * 2 + 2], 16)
-                .with_context(|| format!("mTLS allowlist line {}: invalid hex", lineno + 1))?;
-        }
-        set.insert(bytes);
-    }
-    Ok(set)
-}
-
-fn rustls_pki_pem_iter_certs(
-    pem: &[u8],
-) -> Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
-    use rustls::pki_types::pem::PemObject as _;
-    let mut cursor = std::io::Cursor::new(pem);
-    let certs: Vec<_> = rustls::pki_types::CertificateDer::pem_reader_iter(&mut cursor)
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .context("failed to parse TLS cert PEM")?;
-    if certs.is_empty() {
-        anyhow::bail!("TLS cert PEM contained no certificates");
-    }
-    Ok(certs)
-}
-
-fn rustls_pki_pem_parse_private_key(
-    pem: &[u8],
-) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
-    use rustls::pki_types::pem::PemObject as _;
-    let mut cursor = std::io::Cursor::new(pem);
-    let key = rustls::pki_types::PrivateKeyDer::from_pem_reader(&mut cursor)
-        .context("failed to parse TLS key PEM — expected PKCS#8, RSA, or SEC1")?;
-    Ok(key)
-}
-
-/// Custom `ClientCertVerifier` that accepts only client certs whose SHA-256
-/// DER fingerprint is on the allowlist. Ignores CA chain — fingerprint
-/// pinning is the trust anchor here, same model as SSH `known_hosts`.
-#[derive(Debug)]
-struct FingerprintAllowlistVerifier {
-    allowlist: std::collections::HashSet<[u8; 32]>,
-}
-
-impl rustls::server::danger::ClientCertVerifier for FingerprintAllowlistVerifier {
-    fn offer_client_auth(&self) -> bool {
-        true
-    }
-
-    fn client_auth_mandatory(&self) -> bool {
-        true
-    }
-
-    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
-        &[]
-    }
-
-    fn verify_client_cert(
-        &self,
-        end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
-        use sha2::{Digest, Sha256};
-        let fp: [u8; 32] = Sha256::digest(end_entity.as_ref()).into();
-        if self.allowlist.contains(&fp) {
-            Ok(rustls::server::danger::ClientCertVerified::assertion())
-        } else {
-            Err(rustls::Error::General(format!(
-                "client cert fingerprint {} not in mTLS allowlist",
-                hex_short(&fp)
-            )))
-        }
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
-}
-
-fn hex_short(fp: &[u8; 32]) -> String {
-    use std::fmt::Write as _;
-    let mut s = String::with_capacity(12);
-    for b in &fp[..6] {
-        let _ = write!(s, "{b:02x}");
-    }
-    s.push('…');
-    s
-}
-
-/// Build a rustls `ClientConfig` with client-cert auth and a
-/// "dangerously-accept-any-server-cert" verifier. Used by the
-/// sync-daemon to present its client cert on every outbound request
-/// while connecting to peers with self-signed server certs. Peer
-/// authenticity is established on the other direction (they verify
-/// us via `--mtls-allowlist`).
-async fn build_rustls_client_config(
-    cert_path: &Path,
-    key_path: &Path,
-) -> Result<rustls::ClientConfig> {
-    let cert_pem = tokio::fs::read(cert_path)
-        .await
-        .with_context(|| format!("failed to read client cert from {}", cert_path.display()))?;
-    let key_pem = tokio::fs::read(key_path)
-        .await
-        .with_context(|| format!("failed to read client key from {}", key_path.display()))?;
-
-    let certs = rustls_pki_pem_iter_certs(&cert_pem)?;
-    let key = rustls_pki_pem_parse_private_key(&key_pem)?;
-
-    // SAFETY: we accept any server cert because the server authenticates
-    // US via our client cert fingerprint (Layer 2's trust anchor), not
-    // via server-cert validation. Server-cert pinning is a Layer 2b
-    // refinement tracked in #224.
-    let config = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(DangerousAnyServerVerifier))
-        .with_client_auth_cert(certs, key)
-        .context("failed to build rustls ClientConfig with client cert")?;
-    Ok(config)
-}
-
-/// `ServerCertVerifier` that accepts any peer certificate. Safe ONLY when
-/// paired with a strong reverse authentication channel — in our case the
-/// peer's `--mtls-allowlist` fingerprint-pins our client cert.
-#[derive(Debug)]
-struct DangerousAnyServerVerifier;
-
-impl rustls::client::danger::ServerCertVerifier for DangerousAnyServerVerifier {
-    fn verify_server_cert(
-        &self,
-        _end_entity: &rustls::pki_types::CertificateDer<'_>,
-        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
-        _server_name: &rustls::pki_types::ServerName<'_>,
-        _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
-    ) -> std::result::Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        message: &[u8],
-        cert: &rustls::pki_types::CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
-    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(
-            message,
-            cert,
-            dss,
-            &rustls::crypto::ring::default_provider().signature_verification_algorithms,
-        )
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider()
-            .signature_verification_algorithms
-            .supported_schemes()
-    }
 }
 
 // --- CLI ---
@@ -3160,7 +2832,7 @@ async fn cmd_sync_daemon(
         // mTLS path — daemon presents client cert; the peer's
         // FingerprintAllowlistVerifier authenticates us. Server-cert
         // pinning on this side is Layer 2b (post-v0.6.0).
-        let rustls_config = build_rustls_client_config(cert_path, key_path).await?;
+        let rustls_config = tls::build_rustls_client_config(cert_path, key_path).await?;
         let mut builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .use_preconfigured_tls(rustls_config);
@@ -4380,7 +4052,7 @@ mod tests {
         );
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), body).unwrap();
-        let set = load_fingerprint_allowlist(tmp.path()).await.unwrap();
+        let set = tls::load_fingerprint_allowlist(tmp.path()).await.unwrap();
         assert_eq!(set.len(), 3, "expected 3 fingerprints, got {}", set.len());
         assert!(set.contains(&[0xaa; 32]));
         assert!(set.contains(&[0xbb; 32]));
@@ -4395,7 +4067,9 @@ mod tests {
         let body = format!("{} {}\n", "a".repeat(32), "a".repeat(32));
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), body).unwrap();
-        let err = load_fingerprint_allowlist(tmp.path()).await.unwrap_err();
+        let err = tls::load_fingerprint_allowlist(tmp.path())
+            .await
+            .unwrap_err();
         assert!(
             err.to_string().contains("unexpected character"),
             "expected strict char-set error, got: {err}"

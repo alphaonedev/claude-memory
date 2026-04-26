@@ -102,6 +102,10 @@ uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# Wave 4 (v0.6.3) — TLS test fixture generator. Pinned to an exact version
+# so cert / key / fingerprint bytes stay stable across machines (rcgen's
+# RNG is seeded but its DER encoding can shift between minor releases).
+rcgen = { version = "=0.14.7", default-features = false, features = ["pem", "ring"] }
 
 [[bench]]
 name = "recall"

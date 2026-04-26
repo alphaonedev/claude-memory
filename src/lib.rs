@@ -33,6 +33,7 @@ pub mod models;
 pub mod replication;
 pub mod reranker;
 pub mod subscriptions;
+pub mod tls;
 pub mod toon;
 pub mod validate;
 
