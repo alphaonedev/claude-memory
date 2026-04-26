@@ -5981,7 +5981,7 @@ fn fresh_enforce_db() -> std::path::PathBuf {
 }
 
 /// Set a governance policy on a namespace. Seeds the standard memory under
-/// `owner_agent_id`, then calls memory_namespace_set_standard with the policy.
+/// `owner_agent_id`, then calls `memory_namespace_set_standard` with the policy.
 fn set_governance(
     binary: &str,
     db_path: &std::path::Path,
