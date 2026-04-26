@@ -1,0 +1,75 @@
+{
+  "totals": {
+    "branches": {
+      "count": 0,
+      "covered": 0,
+      "notcovered": 0,
+      "percent": 0
+    },
+    "functions": {
+      "count": 3234,
+      "covered": 2808,
+      "percent": 86.82745825602969
+    },
+    "instantiations": {
+      "count": 4639,
+      "covered": 3349,
+      "percent": 72.19228281957318
+    },
+    "lines": {
+      "count": 39448,
+      "covered": 34961,
+      "percent": 88.62553234638006
+    },
+    "mcdc": {
+      "count": 0,
+      "covered": 0,
+      "notcovered": 0,
+      "percent": 0
+    },
+    "regions": {
+      "count": 66671,
+      "covered": 59218,
+      "notcovered": 7453,
+      "percent": 88.82122662026968
+    }
+  },
+  "mine_rs": {
+    "filename": "/Users/fate/ai-memory-mcp.w12-D/src/mine.rs",
+    "summary": {
+      "branches": {
+        "count": 0,
+        "covered": 0,
+        "notcovered": 0,
+        "percent": 0.0
+      },
+      "mcdc": {
+        "count": 0,
+        "covered": 0,
+        "notcovered": 0,
+        "percent": 0.0
+      },
+      "functions": {
+        "count": 98,
+        "covered": 97,
+        "percent": 98.9795918367347
+      },
+      "instantiations": {
+        "count": 142,
+        "covered": 106,
+        "percent": 74.64788732394366
+      },
+      "lines": {
+        "count": 849,
+        "covered": 843,
+        "percent": 99.29328621908127
+      },
+      "regions": {
+        "count": 1468,
+        "covered": 1455,
+        "notcovered": 13,
+        "percent": 99.11444141689373
+      }
+    }
+  }
+}
