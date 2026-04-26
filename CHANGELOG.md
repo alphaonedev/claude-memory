@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **README "Performance Budgets" section + Bench badge (Pillar 3 / Stream F
+  perception fix)** — `README.md` gains a `Bench` badge in the badges row
+  (pinned to `release/v0.6.3` so it tracks the current dev branch instead
+  of always-red `main`) and a new `## Performance Budgets` section
+  immediately after the existing `## Benchmark` (LongMemEval) section.
+  The new section names the >10% p95 fail-build threshold, links to the
+  authoritative `PERFORMANCE.md` budget table, and shows the same
+  `ai-memory bench` operator-self-verification snippet that
+  `PERFORMANCE.md` already publishes — keeping operators on the README
+  one click away from a number rather than asking "is this thing fast?"
+  Closes the README-side of charter §"The Marketing Line" line 532
+  ("Operators evaluating ai-memory should be able to see budgets in
+  `PERFORMANCE.md`, see CI badges showing the build passes them, and
+  run `ai-memory bench` locally").
+
 - **Hierarchical namespace taxonomy (Pillar 1 / Stream A)** — new
   `memory_get_taxonomy` MCP tool plus REST mirror at
   `GET /api/v1/taxonomy`. Walks live (non-expired) memories grouped by
