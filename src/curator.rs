@@ -241,6 +241,7 @@ pub fn run_once(
 /// Arguments are taken by value because this function is designed to be
 /// handed to `tokio::task::spawn_blocking`, which requires owned data.
 #[allow(clippy::needless_pass_by_value)]
+#[allow(dead_code)] // called via lib crate (daemon_runtime); bin sees it as unused
 pub fn run_daemon(
     db_path: PathBuf,
     llm: Option<Arc<OllamaClient>>,

@@ -281,6 +281,55 @@ pub async fn run_curator_daemon_with_shutdown(
     Ok(())
 }
 
+/// Curator-daemon loop body, primitive-arg flavour for the binary.
+///
+/// The production `cmd_curator()` builds its config + (optional) local
+/// LLM via `mod curator` / `mod llm` declared inside `main.rs`. Those
+/// duplicate-compile to *different* nominal types from `ai_memory::*`,
+/// so threading the bin's `CuratorConfig` straight into the lib helper
+/// fails at the type level. This variant accepts the four config
+/// primitives plus an `Ollama_url`/`Ollama_model` pair (so the helper
+/// can construct the lib-side LLM inside the lib crate). Behaviour is
+/// 1:1 with `cmd_curator()`'s prior inline body.
+///
+/// `ollama_model` of `None` disables the LLM (matching the pre-tiered
+/// keyword-only path in `build_curator_llm`).
+#[allow(clippy::too_many_arguments)]
+pub async fn run_curator_daemon_with_primitives(
+    db_path: PathBuf,
+    interval_secs: u64,
+    max_ops_per_cycle: usize,
+    dry_run: bool,
+    include_namespaces: Vec<String>,
+    exclude_namespaces: Vec<String>,
+    ollama_model: Option<String>,
+    shutdown: Arc<Notify>,
+) -> Result<()> {
+    let cfg = crate::curator::CuratorConfig {
+        interval_secs,
+        max_ops_per_cycle,
+        dry_run,
+        include_namespaces,
+        exclude_namespaces,
+    };
+    let llm: Option<Arc<crate::llm::OllamaClient>> =
+        ollama_model.and_then(|m| crate::llm::OllamaClient::new(&m).ok().map(Arc::new));
+
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_flag_for_signal = shutdown_flag.clone();
+    tokio::spawn(async move {
+        shutdown.notified().await;
+        shutdown_flag_for_signal.store(true, Ordering::Relaxed);
+    });
+
+    tokio::task::spawn_blocking(move || {
+        crate::curator::run_daemon(db_path, llm, cfg, shutdown_flag);
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
+    Ok(())
+}
+
 // -----------------------------------------------------------------------
 // helpers
 // -----------------------------------------------------------------------

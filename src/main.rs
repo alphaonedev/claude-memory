@@ -4177,24 +4177,39 @@ async fn cmd_curator(
         return Ok(());
     }
 
-    // Daemon mode. Install a tokio ctrl_c watcher that flips the shutdown
-    // flag; the daemon loop polls it between cycles so SIGINT / SIGTERM
-    // land cleanly on the next wake-up.
-    let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // Daemon mode. Drive shutdown through a tokio::sync::Notify the same
+    // way `daemon_runtime::run_curator_daemon_with_shutdown` exposes for
+    // the integration tests — production wires the OS signal into the
+    // notify, the helper owns the spawn_blocking + AtomicBool plumbing
+    // + the inner `curator::run_daemon` call, so daemon_runtime stays
+    // the single source of truth for the loop body. The CLI passes
+    // primitives (not its bin-side `CuratorConfig`/`OllamaClient`) so
+    // the lib-side helper can rebuild the lib-side types — the bin and
+    // lib otherwise duplicate-compile `mod curator`/`mod llm` to
+    // distinct nominal types and the call wouldn't type-check.
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
     let shutdown_for_signal = shutdown.clone();
     tokio::spawn(async move {
         let _ = tokio::signal::ctrl_c().await;
-        shutdown_for_signal.store(true, std::sync::atomic::Ordering::Relaxed);
+        shutdown_for_signal.notify_one();
     });
 
-    let db_owned = db_path.to_path_buf();
-    let llm_arc = llm.map(std::sync::Arc::new);
-    tokio::task::spawn_blocking(move || {
-        curator::run_daemon(db_owned, llm_arc, cfg, shutdown);
-    })
+    let ollama_model = feature_tier
+        .config()
+        .llm_model
+        .map(|m| m.ollama_model_id().to_string());
+
+    ai_memory::daemon_runtime::run_curator_daemon_with_primitives(
+        db_path.to_path_buf(),
+        args.interval_secs,
+        args.max_ops,
+        args.dry_run,
+        args.include_namespaces.clone(),
+        args.exclude_namespaces.clone(),
+        ollama_model,
+        shutdown,
+    )
     .await
-    .map_err(|e| anyhow::anyhow!("curator daemon join: {e}"))?;
-    Ok(())
 }
 
 fn cmd_curator_rollback(db_path: &Path, args: &CuratorArgs) -> Result<()> {
