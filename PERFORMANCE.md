@@ -79,6 +79,21 @@ The status table is updated as each Stream lands within the v0.6.3
 cycle. When measurements begin, this file will gain a "Latest measured"
 column alongside each target.
 
+## Latest Measured (p95)
+
+The block between the markers below is machine-managed. Run
+`ai-memory bench --update-performance-md` from this repo to refresh it
+in place — the command splices a fresh table into the section without
+touching anything else. Until the first refresh ships, the table reads
+"not yet measured" so operators reading this file can tell apart
+"baseline pending" from "regressed."
+
+<!-- BENCH_MEASURED_BEGIN -->
+| Operation | Target (p95) | Measured (p95) | p50 | p99 | Status |
+|---|---|---|---|---|---|
+| (not yet measured — run `ai-memory bench --update-performance-md`) | — | — | — | — | — |
+<!-- BENCH_MEASURED_END -->
+
 ## Operator Self-Verification
 
 The `ai-memory bench` subcommand seeds an in-memory disposable

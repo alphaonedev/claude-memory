@@ -28,9 +28,10 @@
 //! and are tracked as follow-up Stream E work — they don't belong on
 //! the hot path of a `cargo test` invocation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::db;
@@ -494,6 +495,105 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
+/// Markdown begin/end markers delimiting the machine-managed
+/// "Latest Measured" section in `PERFORMANCE.md`. Kept in lockstep with
+/// the markers in that file — changing one without the other breaks
+/// `--update-performance-md`.
+pub const PERFORMANCE_MD_BEGIN: &str = "<!-- BENCH_MEASURED_BEGIN -->";
+pub const PERFORMANCE_MD_END: &str = "<!-- BENCH_MEASURED_END -->";
+
+/// Render the markdown table that the `--update-performance-md` flag
+/// splices into `PERFORMANCE.md`. Uses the same columns as
+/// [`render_table`] but in GitHub-flavored markdown so the result reads
+/// naturally next to the budget table at the top of the file.
+#[must_use]
+pub fn render_markdown_table(results: &[OperationResult]) -> String {
+    let mut out = String::new();
+    out.push_str("| Operation | Target (p95) | Measured (p95) | p50 | p99 | Status |\n");
+    out.push_str("|---|---|---|---|---|---|\n");
+    for r in results {
+        let status_str = match r.status {
+            Status::Pass => "✅ PASS",
+            Status::Fail => "❌ FAIL",
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let target_ms = r.target_p95_ms.round() as i64;
+        let line = format!(
+            "| `{}` | < {} ms | {:.1} ms | {:.1} ms | {:.1} ms | {} |\n",
+            r.label, target_ms, r.measured_p95_ms, r.measured_p50_ms, r.measured_p99_ms, status_str,
+        );
+        out.push_str(&line);
+    }
+    out
+}
+
+/// Splice a fresh measurements table into `existing`, replacing
+/// whatever sits between [`PERFORMANCE_MD_BEGIN`] and
+/// [`PERFORMANCE_MD_END`]. Returns the rewritten document.
+///
+/// # Errors
+///
+/// Returns an error if either marker is missing or if the end marker
+/// appears before the begin marker — both indicate the file has drifted
+/// from the format `--update-performance-md` knows how to manage.
+pub fn splice_performance_md(existing: &str, results: &[OperationResult]) -> Result<String> {
+    let begin = existing.find(PERFORMANCE_MD_BEGIN).with_context(|| {
+        format!(
+            "PERFORMANCE.md missing begin marker '{PERFORMANCE_MD_BEGIN}' — \
+             refusing to rewrite"
+        )
+    })?;
+    let end = existing.find(PERFORMANCE_MD_END).with_context(|| {
+        format!(
+            "PERFORMANCE.md missing end marker '{PERFORMANCE_MD_END}' — \
+             refusing to rewrite"
+        )
+    })?;
+    if end < begin {
+        anyhow::bail!(
+            "PERFORMANCE.md markers out of order: end '{PERFORMANCE_MD_END}' appears before \
+             begin '{PERFORMANCE_MD_BEGIN}'"
+        );
+    }
+    let after_begin = begin + PERFORMANCE_MD_BEGIN.len();
+    let table = render_markdown_table(results);
+    let mut out = String::with_capacity(existing.len() + table.len());
+    out.push_str(&existing[..after_begin]);
+    out.push('\n');
+    out.push_str(&table);
+    out.push_str(&existing[end..]);
+    Ok(out)
+}
+
+/// Update the "Latest Measured" section of `PERFORMANCE.md` in place.
+/// Reads `path`, splices in a fresh table, and atomically rewrites the
+/// file via `write-temp + rename` so a crash mid-write cannot leave the
+/// repo with a half-rewritten doc.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be read, the markers are
+/// missing, or the temp file cannot be renamed into place.
+pub fn update_performance_md(path: &Path, results: &[OperationResult]) -> Result<()> {
+    let existing = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    let updated = splice_performance_md(&existing, results)?;
+    if updated == existing {
+        return Ok(());
+    }
+    let tmp = path.with_extension("md.bench.tmp");
+    std::fs::write(&tmp, &updated)
+        .with_context(|| format!("failed to write temp file {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "failed to atomically replace {} with {}",
+            path.display(),
+            tmp.display()
+        )
+    })?;
+    Ok(())
+}
+
 /// Render a results table to a string in the same shape used in the
 /// `PERFORMANCE.md` "Operator Self-Verification" example.
 #[must_use]
@@ -658,6 +758,157 @@ mod tests {
                 "depth=3 on a {KG_CHAIN_FIXTURE_HOPS}-hop chain must reach exactly 3 follow-on nodes"
             );
         }
+    }
+
+    fn synth_results_two_ops() -> Vec<OperationResult> {
+        vec![
+            OperationResult {
+                operation: Operation::StoreNoEmbedding,
+                label: Operation::StoreNoEmbedding.label(),
+                target_p95_ms: 20.0,
+                measured_p50_ms: 0.3,
+                measured_p95_ms: 0.4,
+                measured_p99_ms: 0.5,
+                samples: 100,
+                status: Status::Pass,
+            },
+            OperationResult {
+                operation: Operation::KgQueryDepth5,
+                label: Operation::KgQueryDepth5.label(),
+                target_p95_ms: 250.0,
+                measured_p50_ms: 0.6,
+                measured_p95_ms: 0.7,
+                measured_p99_ms: 1.0,
+                samples: 100,
+                status: Status::Pass,
+            },
+        ]
+    }
+
+    const FIXTURE_DOC: &str = "# Performance Budgets\n\
+        \n\
+        ## Latest Measured (p95)\n\
+        \n\
+        <!-- BENCH_MEASURED_BEGIN -->\n\
+        | Operation | Target (p95) | Measured (p95) | p50 | p99 | Status |\n\
+        |---|---|---|---|---|---|\n\
+        | (not yet measured) | — | — | — | — | — |\n\
+        <!-- BENCH_MEASURED_END -->\n\
+        \n\
+        ## Operator Self-Verification\n";
+
+    #[test]
+    fn render_markdown_table_emits_one_row_per_result() {
+        let table = render_markdown_table(&synth_results_two_ops());
+        // Header + alignment line + 2 data rows = 4 lines (plus trailing).
+        assert_eq!(table.lines().count(), 4);
+        assert!(table.contains("| `memory_store (no embedding)` | < 20 ms |"));
+        assert!(table.contains("| `memory_kg_query (depth=5)` | < 250 ms |"));
+        assert!(table.contains("✅ PASS"));
+        // Header reads "Status" so the column is greppable.
+        assert!(table.contains("| Status |"));
+    }
+
+    #[test]
+    fn render_markdown_table_marks_failures() {
+        let mut results = synth_results_two_ops();
+        results[0].status = Status::Fail;
+        let table = render_markdown_table(&results);
+        assert!(table.contains("❌ FAIL"));
+    }
+
+    #[test]
+    fn splice_performance_md_replaces_only_managed_block() {
+        let updated = splice_performance_md(FIXTURE_DOC, &synth_results_two_ops()).unwrap();
+        // Surrounding doc preserved verbatim.
+        assert!(updated.starts_with("# Performance Budgets\n"));
+        assert!(updated.contains("## Operator Self-Verification"));
+        // Stale placeholder is gone, fresh measurement is present.
+        assert!(!updated.contains("(not yet measured)"));
+        assert!(updated.contains("`memory_store (no embedding)`"));
+        assert!(updated.contains("`memory_kg_query (depth=5)`"));
+        // Begin/end markers still present so subsequent runs can splice.
+        assert!(updated.contains(PERFORMANCE_MD_BEGIN));
+        assert!(updated.contains(PERFORMANCE_MD_END));
+    }
+
+    #[test]
+    fn splice_performance_md_is_idempotent() {
+        let once = splice_performance_md(FIXTURE_DOC, &synth_results_two_ops()).unwrap();
+        let twice = splice_performance_md(&once, &synth_results_two_ops()).unwrap();
+        assert_eq!(once, twice);
+    }
+
+    #[test]
+    fn splice_performance_md_errors_when_begin_marker_missing() {
+        let bad = "no markers in this doc";
+        let err = splice_performance_md(bad, &synth_results_two_ops()).unwrap_err();
+        assert!(
+            err.to_string().contains("missing begin marker"),
+            "expected begin-marker error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn splice_performance_md_errors_when_end_marker_missing() {
+        let bad = "<!-- BENCH_MEASURED_BEGIN -->\nbut no end\n";
+        let err = splice_performance_md(bad, &synth_results_two_ops()).unwrap_err();
+        assert!(
+            err.to_string().contains("missing end marker"),
+            "expected end-marker error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn splice_performance_md_errors_when_markers_out_of_order() {
+        let bad = "<!-- BENCH_MEASURED_END -->\nstuff\n<!-- BENCH_MEASURED_BEGIN -->\nmore\n";
+        let err = splice_performance_md(bad, &synth_results_two_ops()).unwrap_err();
+        assert!(
+            err.to_string().contains("out of order"),
+            "expected out-of-order error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn update_performance_md_round_trips_through_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("PERFORMANCE.md");
+        std::fs::write(&path, FIXTURE_DOC).unwrap();
+        update_performance_md(&path, &synth_results_two_ops()).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("`memory_store (no embedding)`"));
+        assert!(!on_disk.contains("(not yet measured)"));
+        // Temp file from atomic rename must be cleaned up.
+        let leftover = path.with_extension("md.bench.tmp");
+        assert!(!leftover.exists(), "atomic rename left a temp file behind");
+    }
+
+    #[test]
+    fn update_performance_md_propagates_marker_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("BROKEN.md");
+        std::fs::write(&path, "no markers here").unwrap();
+        let err = update_performance_md(&path, &synth_results_two_ops()).unwrap_err();
+        assert!(err.to_string().contains("missing begin marker"));
+    }
+
+    #[test]
+    fn repo_performance_md_carries_managed_markers() {
+        // Pin the section to its declared markers — if a future PR
+        // moves them, --update-performance-md silently breaks until
+        // someone re-runs the tests, so keep the pin tight.
+        let perf_md = include_str!("../PERFORMANCE.md");
+        assert!(
+            perf_md.contains(PERFORMANCE_MD_BEGIN),
+            "PERFORMANCE.md is missing the BENCH_MEASURED_BEGIN marker"
+        );
+        assert!(
+            perf_md.contains(PERFORMANCE_MD_END),
+            "PERFORMANCE.md is missing the BENCH_MEASURED_END marker"
+        );
+        let begin = perf_md.find(PERFORMANCE_MD_BEGIN).unwrap();
+        let end = perf_md.find(PERFORMANCE_MD_END).unwrap();
+        assert!(begin < end, "PERFORMANCE.md markers are out of order");
     }
 
     #[test]

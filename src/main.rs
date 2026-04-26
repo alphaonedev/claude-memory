@@ -203,6 +203,15 @@ struct BenchArgs {
     /// Emit results as JSON instead of the human-readable table.
     #[arg(long)]
     json: bool,
+    /// Splice a fresh measurements table into `PERFORMANCE.md`. Reads
+    /// the path provided (or `PERFORMANCE.md` in the current working
+    /// directory when no value is supplied), rewrites the
+    /// `BENCH_MEASURED_BEGIN`/`BENCH_MEASURED_END` block in place, and
+    /// atomically renames the temp file over the original. The CLI
+    /// table / JSON output still prints; this flag only adds the
+    /// docs-rewrite side effect on top.
+    #[arg(long, value_name = "PATH", num_args = 0..=1, default_missing_value = "PERFORMANCE.md")]
+    update_performance_md: Option<PathBuf>,
 }
 
 #[derive(Args)]
@@ -4421,6 +4430,13 @@ fn cmd_bench(args: &BenchArgs) -> Result<()> {
         );
     } else {
         print!("{}", bench::render_table(&results));
+    }
+    if let Some(perf_md_path) = &args.update_performance_md {
+        bench::update_performance_md(perf_md_path, &results)?;
+        eprintln!(
+            "bench: refreshed measurements table in {}",
+            perf_md_path.display()
+        );
     }
     if results
         .iter()
