@@ -222,9 +222,9 @@ fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[allow(clippy::too_many_lines)]
 const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_hierarchy_kg.sql");
 
+#[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row(
@@ -2293,12 +2293,14 @@ pub const KG_TIMELINE_MAX_LIMIT: usize = 1000;
 /// the v0.7 SAL ships with Apache AGE, the equivalent property-graph
 /// query is:
 ///
-///   MATCH (s {id: $source_id})-[r {valid_from IS NOT NULL,
-///          valid_from >= $since, valid_from <= $until}]->(t)
-///   WHERE t.id <> s.id  -- exclude self-loops
-///   RETURN t.id, r.relation, r.valid_from, r.valid_until, r.observed_by
-///   ORDER BY r.valid_from ASC, r.created_at ASC
-///   LIMIT $limit
+/// ```cypher
+/// MATCH (s {id: $source_id})-[r {valid_from IS NOT NULL,
+///        valid_from >= $since, valid_from <= $until}]->(t)
+/// WHERE t.id <> s.id  // exclude self-loops
+/// RETURN t.id, r.relation, r.valid_from, r.valid_until, r.observed_by
+/// ORDER BY r.valid_from ASC, r.created_at ASC
+/// LIMIT $limit
+/// ```
 ///
 /// Stub left here per charter intent so the v0.7 migration has a 1:1
 /// reference query.

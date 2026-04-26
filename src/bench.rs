@@ -677,6 +677,7 @@ pub fn append_history(
     Ok(())
 }
 
+#[allow(clippy::wildcard_imports)]
 mod tests {
     use super::*;
     use crate::db;
