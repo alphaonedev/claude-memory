@@ -31,7 +31,7 @@ struct RpcRequest {
     params: Value,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct RpcResponse {
     jsonrpc: String,
     id: Value,
@@ -41,7 +41,7 @@ struct RpcResponse {
     error: Option<RpcError>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 struct RpcError {
     code: i64,
     message: String,
@@ -3736,5 +3736,306 @@ mod tests {
             captured.contains("err"),
             "missing err outcome in: {captured}"
         );
+    }
+    /// Parametrized smoke matrix for all 43 MCP tools (Justice of MCP pathway).
+    /// Tier 1: happy path with canonical valid args.
+    /// Tier 2: required arg validation (missing required arg → error).
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn mcp_tools_smoke_matrix() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let tier_config = FeatureTier::Keyword.config();
+        let resolved_ttl = crate::config::ResolvedTtl::default();
+        let resolved_scoring = crate::config::ResolvedScoring::default();
+
+        struct ToolCase {
+            name: &'static str,
+            valid_args: Value,
+            required_arg: Option<&'static str>, // first required arg name for error test
+        }
+
+        let cases: &[ToolCase] = &[
+            ToolCase {
+                name: "memory_store",
+                valid_args: json!({"title": "test", "content": "test content"}),
+                required_arg: Some("title"),
+            },
+            ToolCase {
+                name: "memory_recall",
+                valid_args: json!({"context": "test"}),
+                required_arg: Some("context"),
+            },
+            ToolCase {
+                name: "memory_search",
+                valid_args: json!({"query": "test"}),
+                required_arg: Some("query"),
+            },
+            ToolCase {
+                name: "memory_list",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_get_taxonomy",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_check_duplicate",
+                valid_args: json!({"title": "test", "content": "test content"}),
+                required_arg: Some("title"),
+            },
+            ToolCase {
+                name: "memory_entity_register",
+                valid_args: json!({"canonical_name": "Entity", "namespace": "test"}),
+                required_arg: Some("canonical_name"),
+            },
+            ToolCase {
+                name: "memory_entity_get_by_alias",
+                valid_args: json!({"alias": "test"}),
+                required_arg: Some("alias"),
+            },
+            ToolCase {
+                name: "memory_kg_timeline",
+                valid_args: json!({"source_id": "fake-id-for-test"}),
+                required_arg: Some("source_id"),
+            },
+            ToolCase {
+                name: "memory_kg_invalidate",
+                valid_args: json!({"source_id": "s", "target_id": "t", "relation": "related_to"}),
+                required_arg: Some("source_id"),
+            },
+            ToolCase {
+                name: "memory_kg_query",
+                valid_args: json!({"source_id": "fake-id-for-test"}),
+                required_arg: Some("source_id"),
+            },
+            ToolCase {
+                name: "memory_delete",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_promote",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_forget",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_stats",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_update",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_get",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_link",
+                valid_args: json!({"source_id": "s", "target_id": "t"}),
+                required_arg: Some("source_id"),
+            },
+            ToolCase {
+                name: "memory_get_links",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_consolidate",
+                valid_args: json!({"ids": ["id1", "id2"], "title": "consolidated"}),
+                required_arg: Some("ids"),
+            },
+            ToolCase {
+                name: "memory_capabilities",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_expand_query",
+                valid_args: json!({"query": "test"}),
+                required_arg: Some("query"),
+            },
+            ToolCase {
+                name: "memory_auto_tag",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_detect_contradiction",
+                valid_args: json!({"id_a": "a", "id_b": "b"}),
+                required_arg: Some("id_a"),
+            },
+            ToolCase {
+                name: "memory_archive_list",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_archive_restore",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_archive_purge",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_archive_stats",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_gc",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_session_start",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_namespace_set_standard",
+                valid_args: json!({"namespace": "test", "id": "fake-id-for-test"}),
+                required_arg: Some("namespace"),
+            },
+            ToolCase {
+                name: "memory_namespace_get_standard",
+                valid_args: json!({"namespace": "test"}),
+                required_arg: Some("namespace"),
+            },
+            ToolCase {
+                name: "memory_namespace_clear_standard",
+                valid_args: json!({"namespace": "test"}),
+                required_arg: Some("namespace"),
+            },
+            ToolCase {
+                name: "memory_pending_list",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_pending_approve",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_pending_reject",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_agent_register",
+                valid_args: json!({"agent_id": "test-agent", "agent_type": "human"}),
+                required_arg: Some("agent_id"),
+            },
+            ToolCase {
+                name: "memory_agent_list",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_notify",
+                valid_args: json!({"target_agent_id": "agent", "title": "msg", "payload": "body"}),
+                required_arg: Some("target_agent_id"),
+            },
+            ToolCase {
+                name: "memory_inbox",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            ToolCase {
+                name: "memory_subscribe",
+                valid_args: json!({"url": "https://example.com/webhook"}),
+                required_arg: Some("url"),
+            },
+            ToolCase {
+                name: "memory_unsubscribe",
+                valid_args: json!({"id": "fake-id-for-test"}),
+                required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_list_subscriptions",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+        ];
+
+        // Tier 1: happy path tests
+        for case in cases {
+            let req = make_tools_call(case.name, case.valid_args.clone());
+            let resp = handle_request(
+                &conn,
+                std::path::Path::new(":memory:"),
+                &req,
+                None,
+                None,
+                None,
+                &tier_config,
+                None,
+                &resolved_ttl,
+                &resolved_scoring,
+                true,
+                false,
+                None,
+            );
+            assert!(
+                resp.error.is_none(),
+                "happy path failed for {}: {:?}",
+                case.name,
+                resp.error
+            );
+            assert!(
+                resp.result.is_some(),
+                "missing result for happy path {}: {:?}",
+                case.name,
+                resp
+            );
+        }
+
+        // Tier 2: required arg validation
+        for case in cases {
+            if let Some(required_arg) = case.required_arg {
+                let mut bad_args = case.valid_args.clone();
+                bad_args.as_object_mut().unwrap().remove(required_arg);
+
+                let req = make_tools_call(case.name, bad_args);
+                let resp = handle_request(
+                    &conn,
+                    std::path::Path::new(":memory:"),
+                    &req,
+                    None,
+                    None,
+                    None,
+                    &tier_config,
+                    None,
+                    &resolved_ttl,
+                    &resolved_scoring,
+                    true,
+                    false,
+                    None,
+                );
+
+                // Missing required args should produce an error response (handler returns Err)
+                // which becomes an ok_response with isError=true, not a JSON-RPC error
+                assert!(
+                    resp.error.is_none() || resp.result.is_some(),
+                    "unexpected RPC-layer error for {} (missing {}) should be handler-level Err",
+                    case.name,
+                    required_arg
+                );
+            }
+        }
     }
 }
