@@ -46,6 +46,114 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `link()` is wired up there). Pure additive — no existing query
   breaks. Charter §"Critical Schema Reference", lines 686–723.
 
+- **Entity registry (Pillar 2 / Stream B)** — `memory_entity_register`
+  + `memory_entity_get_by_alias` MCP tools (count 38 → 40) plus the
+  matching HTTP surface (`POST /api/v1/entities`,
+  `GET /api/v1/entities/by_alias`, with 201 / 200 / 409 status
+  discipline and `X-Agent-Id` honoured). Entities are long-tier
+  memories tagged `entity` with `metadata.kind = "entity"`; aliases
+  live in the v15 `entity_aliases` side table. Registration is
+  idempotent on `(canonical_name, namespace)` — re-registering reuses
+  the entity_id and merges new aliases via `INSERT OR IGNORE`. A
+  non-entity memory occupying the same `(title, namespace)` returns a
+  hard error rather than letting the upsert path silently overwrite
+  unrelated content. Resolver returns the most-recently-created
+  entity when no namespace filter is supplied; ignores stray
+  `entity_aliases` rows that point at non-entity memories. Builds on
+  the v15 schema (#384). Charter §"Stream B — KG Schema + Entity
+  Model", lines 369–375.
+
+- **`memory_kg_timeline` (Pillar 2 / Stream C)** — entity-anchored
+  chronological view powering the `ai-memory kg-timeline` headline
+  demo. `db::kg_timeline()` queries `memory_links` ordered by
+  `valid_from ASC` (tie-break `created_at`) with optional inclusive
+  `since` / `until` filters; limit clamps to `[1, 1000]`, default
+  200. `db::create_link()` now stamps `valid_from = created_at` on
+  every insert so newly created links are visible to the timeline
+  without a later sweep, closing the forward gap left by the v15
+  backfill of legacy rows. `memory_kg_timeline` MCP tool (count
+  40 → 41) plus `GET /api/v1/kg/timeline?source_id=…&since=…
+  &until=…&limit=…`. Returns `KgTimelineEvent` carrying `target_id`,
+  `relation`, validity window, `observed_by`, and the target's
+  `title` / `namespace`. Charter §"Stream C — KG Query Layer",
+  lines 377–383.
+
+- **`memory_kg_invalidate` (Pillar 2 / Stream C)** — second tool of
+  the KG-traversal triplet. Marks a KG link as superseded by setting
+  its `valid_until` column so a contradicting fact can invalidate
+  the prior assertion without deleting the row, preserving the
+  timeline. The link is identified by its composite key
+  `(source_id, target_id, relation)` since `memory_links` has no
+  separate id; `valid_until` defaults to wall-clock now when
+  omitted. `db::invalidate_link()` returns
+  `Option<InvalidateResult>` — `None` when the triple does not
+  match, `Some` with the value now stored and `previous_valid_until`
+  so callers can distinguish a fresh supersession from an idempotent
+  retry. `memory_kg_invalidate` MCP tool (count 41 → 42) plus HTTP.
+  Schema does not yet carry an audit column for the supersession
+  `reason`; that arrives with v0.7 attestation. Charter §"Stream C —
+  KG Query Layer", lines 377–383.
+
+- **`memory_kg_query` depth=1 (Pillar 2 / Stream C)** — outbound
+  "expand neighbors" first slice. `memory_kg_query` MCP tool (count
+  42 → 43) plus HTTP. `db::kg_query()` ships with constants
+  `KG_QUERY_DEFAULT_LIMIT = 200`, `KG_QUERY_MAX_LIMIT = 1000`, and
+  `KG_QUERY_MAX_SUPPORTED_DEPTH = 1`; callers passing `max_depth=2`
+  get a clean error rather than a silent truncation, so the API
+  contract is stable from day one — the recursive-CTE multi-hop
+  follow-up just lifts the ceiling without changing the surface.
+  Filters per the charter spec: `valid_at` (RFC3339, only links
+  valid at that instant); `allowed_agents` (only links observed by
+  an agent in the set; **empty list returns zero rows by design** —
+  callers signaling "no agents trusted" must get an empty traversal,
+  not the unfiltered fallback); `limit` clamped to `[1, 1000]`.
+  Charter §"Stream C — KG Query Layer", lines 377–383.
+
+- **`memory_kg_query` depth 2..=5 (Pillar 2 / Stream C)** — lifts
+  `KG_QUERY_MAX_SUPPORTED_DEPTH` from 1 to 5, matching the published
+  `memory_kg_query (depth ≤ 5)` 250 ms p95 / 500 ms p99 budget in
+  `PERFORMANCE.md`. Replaces the depth=1 JOIN with a recursive CTE
+  that re-applies the temporal / agent filter on every hop and
+  prunes cycles via the accumulated `path`; each row's `depth` +
+  `path` now reflect the actual chain (e.g. depth=2 →
+  `src->mid->target`). API contract is unchanged — depth=1 collapses
+  to the original time-ordered single-hop result, and the
+  over-ceiling MCP/HTTP error path (422 with `max_depth=N exceeds
+  supported depth=5`) is preserved. Closes the Stream C
+  `memory_kg_query` slice; traversals at depth 2..=5 are now correct
+  under temporal-validity and observed-by filtering. Charter
+  §"Stream C — KG Query Layer", lines 377–383.
+
+- **`memory_check_duplicate` (Pillar 2 / Stream D)** — pre-write
+  near-duplicate check across DB / MCP / HTTP. `db::check_duplicate`
+  performs a cosine scan over live embedded memories with the
+  threshold clamped at `DUPLICATE_THRESHOLD_MIN = 0.5` (so permissive
+  callers can't dress unrelated content as a merge candidate) and
+  default `DUPLICATE_THRESHOLD_DEFAULT = 0.85` (tuned for the
+  MiniLM-L6-v2 embedder — near-paraphrases land ≥ 0.88, loosely
+  related content sits well below). `memory_check_duplicate` MCP
+  tool (count 37 → 38) returns the nearest-neighbor cosine, the
+  above-threshold boolean, and an optional `suggested_merge` target.
+  HTTP `POST /api/v1/check_duplicate` mirrors the MCP surface and
+  embeds *before* taking the DB lock (issue #219 pattern). Charter
+  §"Stream D — Duplicate Check", lines 384–386.
+
+- **`ai-memory bench` scaffold (Pillar 3 / Stream E)** — first slice
+  of perf instrumentation. New CLI subcommand + `src/bench.rs`
+  runner so operators (and the `bench.yml` CI guard / Stream F) can
+  verify the published `PERFORMANCE.md` budgets. Covers the three
+  embedding-free hot-path operations: `memory_store` (no embedding)
+  / 20 ms p95, `memory_search` (FTS5) / 100 ms p95, and
+  `memory_recall` (hot, depth=1) / 50 ms p95. Each invocation seeds
+  a disposable `:memory:` SQLite DB so the operator's main DB is
+  untouched. Reports p50 / p95 / p99 in either a human table or
+  `--json`. Exit code is non-zero when any p95 exceeds its target
+  by more than the documented 10% tolerance — so the same binary
+  slots into the CI guard once Stream F lands. `PERFORMANCE.md`
+  status table now distinguishes "scaffold landed" from "Stream E
+  follow-up" so partial coverage isn't silent. Charter §"Stream E —
+  Performance Instrumentation", lines 388–393.
+
 - **Performance budgets published** — new `PERFORMANCE.md` at the repo
   root carries the authoritative p95/p99 latency contract for every
   hot-path operation (verbatim from the v0.6.3 grand-slam charter):
@@ -131,6 +239,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tolerance. Encountered in the a2a-gate mTLS matrix; the gate-side
   generator fix in `ai-memory-ai2ai-gate#35` already worked around it for
   v0.6.2 — this is the parser-side resolution.
+
+### Tests
+
+- **[#401]** RAII `ChildGuard` fixes mTLS test daemon-leak on assert
+  panic.
+  `tests/integration.rs::test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer`
+  was leaking `target/debug/ai-memory … serve` child processes
+  whenever any of its 4 asserts panicked between spawn and the
+  manual `kill()` at the bottom — `std::process::Child` has no
+  kill-on-drop on Unix. Adds a generic `ChildGuard { child:
+  Option<Child>, cleanup_paths: Vec<PathBuf> }` alongside the
+  existing `DaemonGuard`, with an unwind-safe `Drop` that kills,
+  reaps, and unlinks; refactors the mTLS test to wrap both spawned
+  children. End-user impact is zero (production `serve` deployments
+  via systemd / launchd / Docker reap children correctly), but the
+  campaign runner had been accumulating ~28 GB of orphaned daemons
+  across 7 reparented PIDs during the v0.6.3 dev sprint.
 
 ## [v0.6.2] — 2026-04-24 — A2A-CERTIFIED
 
