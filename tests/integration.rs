@@ -10036,3 +10036,219 @@ fn http_namespace_standard_meta_fans_out() {
         "peer never saw the parent namespace from the meta fanout"
     );
 }
+
+#[test]
+fn test_cli_bench_with_baseline_detects_regression() {
+    // Integration test for `ai-memory bench --baseline` regression detection.
+    // Verifies the full codepath:
+    //   1. Baseline file is loaded and parsed correctly.
+    //   2. A tight baseline (0.001 ms) triggers regression on real measurements.
+    //   3. Exit code is non-zero.
+    //   4. stderr contains "regressed".
+    //   5. JSON output includes regressions field with regressed: true entries.
+    let dir = std::env::temp_dir();
+    let baseline_path = dir.join(format!("ai-memory-baseline-{}.json", uuid::Uuid::new_v4()));
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Create a tight baseline with all operations at 0.001 ms.
+    // Any real benchmark run will regress against this.
+    let baseline_json = serde_json::json!({
+        "iterations": 200,
+        "warmup": 20,
+        "results": [
+            {
+                "operation": "store_no_embedding",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "search_fts",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "recall_hot",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth1",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth3",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_query_depth5",
+                "measured_p95_ms": 0.001
+            },
+            {
+                "operation": "kg_timeline",
+                "measured_p95_ms": 0.001
+            }
+        ]
+    });
+
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline_json).unwrap(),
+    )
+    .expect("failed to write baseline file");
+
+    // Run bench with the tight baseline and default 10% threshold.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--baseline",
+            baseline_path.to_str().unwrap(),
+            "--regression-threshold",
+            "1.0",
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench");
+
+    // Should exit non-zero due to regression detection.
+    assert!(
+        !out.status.success(),
+        "bench should exit non-zero with regression detected, but exited successfully"
+    );
+
+    // Stderr should mention "regressed".
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("regressed"),
+        "stderr should contain 'regressed', got: {}",
+        stderr
+    );
+
+    // Parse and validate JSON output.
+    let stdout = String::from_utf8(out.stdout).expect("bench --json must emit UTF-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bench --json must be valid JSON");
+
+    // regressions field must exist and be non-null.
+    let regressions = parsed["regressions"]
+        .as_array()
+        .expect("regressions must be a JSON array");
+    assert!(
+        !regressions.is_empty(),
+        "regressions array should not be empty when regression is detected"
+    );
+
+    // At least one regression entry should have regressed: true.
+    let has_regressed = regressions.iter().any(|r| {
+        r.get("regressed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+    });
+    assert!(
+        has_regressed,
+        "at least one regression entry should have regressed: true"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&baseline_path);
+}
+
+#[test]
+fn test_cli_bench_with_baseline_passes_when_loose_threshold() {
+    // Integration test verifying that a loose regression threshold
+    // allows a tight baseline to pass without triggering.
+    // This confirms the threshold logic works in both directions.
+    let dir = std::env::temp_dir();
+    let baseline_path = dir.join(format!("ai-memory-baseline-{}.json", uuid::Uuid::new_v4()));
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Use realistic baseline values (~100-1000x the tight baseline above).
+    // These are near the target budgets documented in PERFORMANCE.md,
+    // allowing 100%+ growth before hitting the regression threshold.
+    let baseline_json = serde_json::json!({
+        "iterations": 200,
+        "warmup": 20,
+        "results": [
+            {
+                "operation": "store_no_embedding",
+                "measured_p95_ms": 10.0
+            },
+            {
+                "operation": "search_fts",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "recall_hot",
+                "measured_p95_ms": 25.0
+            },
+            {
+                "operation": "kg_query_depth1",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "kg_query_depth3",
+                "measured_p95_ms": 50.0
+            },
+            {
+                "operation": "kg_query_depth5",
+                "measured_p95_ms": 125.0
+            },
+            {
+                "operation": "kg_timeline",
+                "measured_p95_ms": 50.0
+            }
+        ]
+    });
+
+    std::fs::write(
+        &baseline_path,
+        serde_json::to_string_pretty(&baseline_json).unwrap(),
+    )
+    .expect("failed to write baseline file");
+
+    // Run with a loose threshold (500%) — allows generous growth.
+    let out = cmd(bin)
+        .args([
+            "bench",
+            "--json",
+            "--iterations",
+            "5",
+            "--warmup",
+            "0",
+            "--baseline",
+            baseline_path.to_str().unwrap(),
+            "--regression-threshold",
+            "500.0",
+        ])
+        .output()
+        .expect("failed to spawn ai-memory bench");
+
+    // Should exit 0 (no regression with loose threshold).
+    assert!(
+        out.status.success(),
+        "bench should exit 0 with loose threshold, but got non-zero: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Parse and validate JSON output.
+    let stdout = String::from_utf8(out.stdout).expect("bench --json must emit UTF-8");
+    let parsed: serde_json::Value =
+        serde_json::from_str(&stdout).expect("bench --json must be valid JSON");
+
+    // regressions field should exist but have no regressed entries.
+    if let Some(regressions) = parsed["regressions"].as_array() {
+        for r in regressions {
+            let regressed = r
+                .get("regressed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            assert!(
+                !regressed,
+                "no entry should have regressed: true with loose threshold"
+            );
+        }
+    }
+
+    // Cleanup.
+    let _ = std::fs::remove_file(&baseline_path);
+}
