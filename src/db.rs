@@ -4160,7 +4160,7 @@ mod tests {
         open(std::path::Path::new(":memory:")).unwrap()
     }
 
-    fn make_memory(title: &str, ns: &str, tier: Tier, priority: i32) -> Memory {
+    fn make_memory(title: &str, ns: &str, tier: &Tier, priority: i32) -> Memory {
         let now = chrono::Utc::now().to_rfc3339();
         Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -4195,7 +4195,7 @@ mod tests {
     #[test]
     fn insert_and_get() {
         let conn = test_db();
-        let mem = make_memory("Test insert", "test", Tier::Long, 5);
+        let mem = make_memory("Test insert", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id).unwrap().unwrap();
         assert_eq!(got.title, "Test insert");
@@ -4213,7 +4213,7 @@ mod tests {
     #[test]
     fn update_partial_fields() {
         let conn = test_db();
-        let mem = make_memory("Original", "test", Tier::Mid, 5);
+        let mem = make_memory("Original", "test", &Tier::Mid, 5);
         let id = insert(&conn, &mem).unwrap();
 
         let (found, content_changed) = update(
@@ -4242,7 +4242,7 @@ mod tests {
     #[test]
     fn update_content_changed_flag() {
         let conn = test_db();
-        let mem = make_memory("Stable", "test", Tier::Mid, 5);
+        let mem = make_memory("Stable", "test", &Tier::Mid, 5);
         let id = insert(&conn, &mem).unwrap();
 
         // Updating only priority — content_changed should be false
@@ -4306,7 +4306,7 @@ mod tests {
     fn update_tier_downgrade_protection() {
         let conn = test_db();
         // Long-tier memory should never be downgraded
-        let mem = make_memory("Permanent", "test", Tier::Long, 9);
+        let mem = make_memory("Permanent", "test", &Tier::Long, 9);
         let id = insert(&conn, &mem).unwrap();
 
         let (found, _) = update(
@@ -4328,7 +4328,7 @@ mod tests {
         assert_eq!(got.tier, Tier::Long); // still long
 
         // Mid-tier should not downgrade to short
-        let mem2 = make_memory("Working", "test", Tier::Mid, 5);
+        let mem2 = make_memory("Working", "test", &Tier::Mid, 5);
         let id2 = insert(&conn, &mem2).unwrap();
 
         let (found, _) = update(
@@ -4372,8 +4372,8 @@ mod tests {
     #[test]
     fn update_title_collision_returns_error() {
         let conn = test_db();
-        let mem_a = make_memory("Alpha", "test", Tier::Mid, 5);
-        let mem_b = make_memory("Beta", "test", Tier::Mid, 5);
+        let mem_a = make_memory("Alpha", "test", &Tier::Mid, 5);
+        let mem_b = make_memory("Beta", "test", &Tier::Mid, 5);
         let id_a = insert(&conn, &mem_a).unwrap();
         let _id_b = insert(&conn, &mem_b).unwrap();
 
@@ -4399,7 +4399,7 @@ mod tests {
     #[test]
     fn delete_existing() {
         let conn = test_db();
-        let mem = make_memory("To delete", "test", Tier::Short, 3);
+        let mem = make_memory("To delete", "test", &Tier::Short, 3);
         let id = insert(&conn, &mem).unwrap();
         assert!(delete(&conn, &id).unwrap());
         assert!(get(&conn, &id).unwrap().is_none());
@@ -4414,9 +4414,9 @@ mod tests {
     #[test]
     fn list_with_namespace_filter() {
         let conn = test_db();
-        insert(&conn, &make_memory("A", "ns1", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("B", "ns2", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("C", "ns1", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("A", "ns1", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "ns2", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("C", "ns1", &Tier::Long, 5)).unwrap();
 
         let results = list(
             &conn,
@@ -4437,8 +4437,8 @@ mod tests {
     #[test]
     fn list_with_tier_filter() {
         let conn = test_db();
-        insert(&conn, &make_memory("Long", "test", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("Mid", "test", Tier::Mid, 5)).unwrap();
+        insert(&conn, &make_memory("Long", "test", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("Mid", "test", &Tier::Mid, 5)).unwrap();
 
         let results = list(
             &conn,
@@ -4463,7 +4463,7 @@ mod tests {
         for i in 0..5 {
             insert(
                 &conn,
-                &make_memory(&format!("Mem {i}"), "test", Tier::Long, 5),
+                &make_memory(&format!("Mem {i}"), "test", &Tier::Long, 5),
             )
             .unwrap();
         }
@@ -4476,10 +4476,10 @@ mod tests {
         let conn = test_db();
         insert(
             &conn,
-            &make_memory("PostgreSQL config", "test", Tier::Long, 5),
+            &make_memory("PostgreSQL config", "test", &Tier::Long, 5),
         )
         .unwrap();
-        insert(&conn, &make_memory("Redis cache", "test", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("Redis cache", "test", &Tier::Long, 5)).unwrap();
 
         let results = search(
             &conn,
@@ -4502,7 +4502,7 @@ mod tests {
     #[test]
     fn search_no_match() {
         let conn = test_db();
-        insert(&conn, &make_memory("PostgreSQL", "test", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("PostgreSQL", "test", &Tier::Long, 5)).unwrap();
         let results = search(
             &conn,
             "nonexistent_term_xyz",
@@ -4525,12 +4525,12 @@ mod tests {
         let conn = test_db();
         insert(
             &conn,
-            &make_memory("Rust programming language", "test", Tier::Long, 8),
+            &make_memory("Rust programming language", "test", &Tier::Long, 8),
         )
         .unwrap();
         insert(
             &conn,
-            &make_memory("Python scripting", "test", Tier::Long, 5),
+            &make_memory("Python scripting", "test", &Tier::Long, 5),
         )
         .unwrap();
 
@@ -4558,7 +4558,7 @@ mod tests {
     #[test]
     fn recall_empty_context() {
         let conn = test_db();
-        insert(&conn, &make_memory("Test", "test", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("Test", "test", &Tier::Long, 5)).unwrap();
         // Empty context should not crash
         let results = recall(
             &conn,
@@ -4580,7 +4580,7 @@ mod tests {
     #[test]
     fn touch_increments_access_count() {
         let conn = test_db();
-        let mem = make_memory("Touchable", "test", Tier::Mid, 5);
+        let mem = make_memory("Touchable", "test", &Tier::Mid, 5);
         let id = insert(&conn, &mem).unwrap();
         assert_eq!(get(&conn, &id).unwrap().unwrap().access_count, 0);
 
@@ -4596,12 +4596,12 @@ mod tests {
         let conn = test_db();
         insert(
             &conn,
-            &make_memory("Database is PostgreSQL", "infra", Tier::Long, 8),
+            &make_memory("Database is PostgreSQL", "infra", &Tier::Long, 8),
         )
         .unwrap();
         insert(
             &conn,
-            &make_memory("Database is MySQL", "infra", Tier::Long, 5),
+            &make_memory("Database is MySQL", "infra", &Tier::Long, 5),
         )
         .unwrap();
 
@@ -4612,8 +4612,8 @@ mod tests {
     #[test]
     fn create_and_get_links() {
         let conn = test_db();
-        let id1 = insert(&conn, &make_memory("Memory A", "test", Tier::Long, 5)).unwrap();
-        let id2 = insert(&conn, &make_memory("Memory B", "test", Tier::Long, 5)).unwrap();
+        let id1 = insert(&conn, &make_memory("Memory A", "test", &Tier::Long, 5)).unwrap();
+        let id2 = insert(&conn, &make_memory("Memory B", "test", &Tier::Long, 5)).unwrap();
 
         create_link(&conn, &id1, &id2, "related_to").unwrap();
         let links = get_links(&conn, &id1).unwrap();
@@ -4624,8 +4624,8 @@ mod tests {
     #[test]
     fn consolidate_merges_memories() {
         let conn = test_db();
-        let id1 = insert(&conn, &make_memory("Part 1", "test", Tier::Mid, 5)).unwrap();
-        let id2 = insert(&conn, &make_memory("Part 2", "test", Tier::Mid, 5)).unwrap();
+        let id1 = insert(&conn, &make_memory("Part 1", "test", &Tier::Mid, 5)).unwrap();
+        let id2 = insert(&conn, &make_memory("Part 2", "test", &Tier::Mid, 5)).unwrap();
 
         let new_id = consolidate(
             &conn,
@@ -4651,9 +4651,9 @@ mod tests {
     fn stats_counts() {
         let conn = test_db();
         let path = std::path::Path::new(":memory:");
-        insert(&conn, &make_memory("A", "ns1", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("B", "ns1", Tier::Mid, 5)).unwrap();
-        insert(&conn, &make_memory("C", "ns2", Tier::Short, 5)).unwrap();
+        insert(&conn, &make_memory("A", "ns1", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "ns1", &Tier::Mid, 5)).unwrap();
+        insert(&conn, &make_memory("C", "ns2", &Tier::Short, 5)).unwrap();
 
         let s = stats(&conn, path).unwrap();
         assert_eq!(s.total, 3);
@@ -4662,7 +4662,7 @@ mod tests {
     #[test]
     fn gc_removes_expired() {
         let conn = test_db();
-        let mut mem = make_memory("Expired", "test", Tier::Short, 5);
+        let mut mem = make_memory("Expired", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string()); // past
         insert(&conn, &mem).unwrap();
 
@@ -4673,7 +4673,7 @@ mod tests {
     #[test]
     fn gc_preserves_long_term() {
         let conn = test_db();
-        insert(&conn, &make_memory("Permanent", "test", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("Permanent", "test", &Tier::Long, 5)).unwrap();
         let removed = gc(&conn, false).unwrap();
         assert_eq!(removed, 0);
     }
@@ -4681,7 +4681,7 @@ mod tests {
     #[test]
     fn gc_archives_before_delete() {
         let conn = test_db();
-        let mut mem = make_memory("Archivable", "test", Tier::Short, 5);
+        let mut mem = make_memory("Archivable", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         insert(&conn, &mem).unwrap();
 
@@ -4698,7 +4698,7 @@ mod tests {
     #[test]
     fn restore_archived_memory() {
         let conn = test_db();
-        let mut mem = make_memory("Restorable", "test", Tier::Short, 5);
+        let mut mem = make_memory("Restorable", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         let id = insert(&conn, &mem).unwrap();
 
@@ -4716,7 +4716,7 @@ mod tests {
     #[test]
     fn purge_archive_removes_all() {
         let conn = test_db();
-        let mut mem = make_memory("Purgeable", "test", Tier::Short, 5);
+        let mut mem = make_memory("Purgeable", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         insert(&conn, &mem).unwrap();
         gc(&conn, true).unwrap();
@@ -4737,7 +4737,7 @@ mod tests {
     #[test]
     fn restore_rejects_active_id_collision() {
         let conn = test_db();
-        let mut mem = make_memory("Collision Test", "test", Tier::Short, 5);
+        let mut mem = make_memory("Collision Test", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         let id = insert(&conn, &mem).unwrap();
 
@@ -4766,9 +4766,9 @@ mod tests {
     #[test]
     fn archive_stats_counts() {
         let conn = test_db();
-        let mut m1 = make_memory("Stats A", "ns1", Tier::Short, 5);
+        let mut m1 = make_memory("Stats A", "ns1", &Tier::Short, 5);
         m1.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
-        let mut m2 = make_memory("Stats B", "ns1", Tier::Short, 5);
+        let mut m2 = make_memory("Stats B", "ns1", &Tier::Short, 5);
         m2.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         insert(&conn, &m1).unwrap();
         insert(&conn, &m2).unwrap();
@@ -4785,7 +4785,7 @@ mod tests {
         // reason. Unlike gc(archive=true), this is NOT gated on
         // `expires_at` — the caller is asking for it right now.
         let conn = test_db();
-        let mem = make_memory("Archive me", "s29", Tier::Long, 5);
+        let mem = make_memory("Archive me", "s29", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
 
         let moved = archive_memory(&conn, &id, Some("explicit")).unwrap();
@@ -4820,7 +4820,7 @@ mod tests {
     #[test]
     fn archive_memory_default_reason_is_archive() {
         let conn = test_db();
-        let mem = make_memory("Default reason", "s29", Tier::Long, 5);
+        let mem = make_memory("Default reason", "s29", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         assert!(archive_memory(&conn, &id, None).unwrap());
         let archived = list_archived(&conn, None, 10, 0).unwrap();
@@ -4830,8 +4830,8 @@ mod tests {
     #[test]
     fn export_all_and_links() {
         let conn = test_db();
-        let id1 = insert(&conn, &make_memory("Export A", "test", Tier::Long, 5)).unwrap();
-        let id2 = insert(&conn, &make_memory("Export B", "test", Tier::Long, 5)).unwrap();
+        let id1 = insert(&conn, &make_memory("Export A", "test", &Tier::Long, 5)).unwrap();
+        let id2 = insert(&conn, &make_memory("Export B", "test", &Tier::Long, 5)).unwrap();
         create_link(&conn, &id1, &id2, "supersedes").unwrap();
 
         let mems = export_all(&conn).unwrap();
@@ -4843,9 +4843,9 @@ mod tests {
     #[test]
     fn list_namespaces_counts() {
         let conn = test_db();
-        insert(&conn, &make_memory("A", "alpha", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("B", "alpha", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("C", "beta", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("A", "alpha", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "alpha", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("C", "beta", &Tier::Long, 5)).unwrap();
 
         let ns = list_namespaces(&conn).unwrap();
         assert_eq!(ns.len(), 2);
@@ -4855,9 +4855,9 @@ mod tests {
     fn taxonomy_flat_namespaces_only() {
         // No `/` anywhere — every namespace is a direct child of the root.
         let conn = test_db();
-        insert(&conn, &make_memory("A", "alpha", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("B", "alpha", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("C", "beta", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("A", "alpha", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "alpha", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("C", "beta", &Tier::Long, 5)).unwrap();
 
         let tax = get_taxonomy(&conn, None, 8, 1000).unwrap();
         assert_eq!(tax.total_count, 3);
@@ -4883,19 +4883,19 @@ mod tests {
     fn taxonomy_hierarchical_tree() {
         // Mixed depths: tree must aggregate counts up the spine.
         let conn = test_db();
-        insert(&conn, &make_memory("a", "alphaone", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("b", "alphaone/eng", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("a", "alphaone", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("b", "alphaone/eng", &Tier::Long, 5)).unwrap();
         insert(
             &conn,
-            &make_memory("c", "alphaone/eng/platform", Tier::Long, 5),
+            &make_memory("c", "alphaone/eng/platform", &Tier::Long, 5),
         )
         .unwrap();
         insert(
             &conn,
-            &make_memory("d", "alphaone/eng/platform", Tier::Long, 5),
+            &make_memory("d", "alphaone/eng/platform", &Tier::Long, 5),
         )
         .unwrap();
-        insert(&conn, &make_memory("e", "alphaone/sales", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("e", "alphaone/sales", &Tier::Long, 5)).unwrap();
 
         let tax = get_taxonomy(&conn, None, 8, 1000).unwrap();
         assert_eq!(tax.total_count, 5);
@@ -4924,16 +4924,16 @@ mod tests {
     #[test]
     fn taxonomy_prefix_scopes_subtree() {
         let conn = test_db();
-        insert(&conn, &make_memory("a", "alphaone/eng", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("a", "alphaone/eng", &Tier::Long, 5)).unwrap();
         insert(
             &conn,
-            &make_memory("b", "alphaone/eng/platform", Tier::Long, 5),
+            &make_memory("b", "alphaone/eng/platform", &Tier::Long, 5),
         )
         .unwrap();
-        insert(&conn, &make_memory("c", "alphaone/sales", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("c", "alphaone/sales", &Tier::Long, 5)).unwrap();
         // Sibling that happens to share a string prefix — must NOT bleed in.
-        insert(&conn, &make_memory("d", "alphaone-sibling", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("e", "other", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("d", "alphaone-sibling", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("e", "other", &Tier::Long, 5)).unwrap();
 
         let tax = get_taxonomy(&conn, Some("alphaone/eng"), 8, 1000).unwrap();
         assert_eq!(tax.total_count, 2);
@@ -4951,12 +4951,12 @@ mod tests {
         let conn = test_db();
         insert(
             &conn,
-            &make_memory("a", "alphaone/eng/platform/db", Tier::Long, 5),
+            &make_memory("a", "alphaone/eng/platform/db", &Tier::Long, 5),
         )
         .unwrap();
         insert(
             &conn,
-            &make_memory("b", "alphaone/eng/platform/api", Tier::Long, 5),
+            &make_memory("b", "alphaone/eng/platform/api", &Tier::Long, 5),
         )
         .unwrap();
 
@@ -4977,8 +4977,8 @@ mod tests {
         // Mirror of `list_namespaces` semantics — expired rows must not
         // count toward either the tree or `total_count`.
         let conn = test_db();
-        let mut alive = make_memory("alive", "alpha", Tier::Long, 5);
-        let mut dead = make_memory("dead", "alpha", Tier::Short, 5);
+        let mut alive = make_memory("alive", "alpha", &Tier::Long, 5);
+        let mut dead = make_memory("dead", "alpha", &Tier::Short, 5);
         // Force the short-tier memory's expiry into the past.
         dead.expires_at = Some("2000-01-01T00:00:00Z".to_string());
         alive.expires_at = None;
@@ -4995,7 +4995,7 @@ mod tests {
     fn taxonomy_truncates_at_limit_but_total_stays_honest() {
         let conn = test_db();
         for ns in ["aa", "bb", "cc", "dd", "ee"] {
-            insert(&conn, &make_memory("m", ns, Tier::Long, 5)).unwrap();
+            insert(&conn, &make_memory("m", ns, &Tier::Long, 5)).unwrap();
         }
         let tax = get_taxonomy(&conn, None, 8, 2).unwrap();
         // Limit drops 3 namespaces from the walk; total_count must
@@ -5008,9 +5008,9 @@ mod tests {
     #[test]
     fn forget_by_namespace() {
         let conn = test_db();
-        insert(&conn, &make_memory("A", "delete-me", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("B", "delete-me", Tier::Long, 5)).unwrap();
-        insert(&conn, &make_memory("C", "keep", Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("A", "delete-me", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("B", "delete-me", &Tier::Long, 5)).unwrap();
+        insert(&conn, &make_memory("C", "keep", &Tier::Long, 5)).unwrap();
 
         let deleted = forget(&conn, Some("delete-me"), None, None, false).unwrap();
         assert_eq!(deleted, 2);
@@ -5021,7 +5021,7 @@ mod tests {
     #[test]
     fn set_and_get_embedding() {
         let conn = test_db();
-        let mem = make_memory("Embed test", "test", Tier::Long, 5);
+        let mem = make_memory("Embed test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
 
         let emb = vec![0.1f32, 0.2, 0.3, 0.4];
@@ -5040,7 +5040,7 @@ mod tests {
         ns: &str,
         embedding: &[f32],
     ) -> String {
-        let mem = make_memory(title, ns, Tier::Long, 5);
+        let mem = make_memory(title, ns, &Tier::Long, 5);
         let id = insert(conn, &mem).unwrap();
         set_embedding(conn, &id, embedding).unwrap();
         id
@@ -5122,7 +5122,7 @@ mod tests {
         let conn = test_db();
         // Short-tier memory with a backdated `expires_at` is past the
         // live-row gate and must not be a candidate.
-        let mut mem = make_memory("expired", "ns", Tier::Short, 5);
+        let mut mem = make_memory("expired", "ns", &Tier::Short, 5);
         mem.expires_at = Some((chrono::Utc::now() - chrono::Duration::seconds(60)).to_rfc3339());
         let id = insert(&conn, &mem).unwrap();
         set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -5139,7 +5139,7 @@ mod tests {
         // One memory with an embedding, one without — only the embedded
         // row should appear in `candidates_scanned`.
         let id_embedded = insert_with_embedding(&conn, "with-emb", "ns", &[1.0, 0.0, 0.0]);
-        let mem = make_memory("no-emb", "ns", Tier::Long, 5);
+        let mem = make_memory("no-emb", "ns", &Tier::Long, 5);
         let _ = insert(&conn, &mem).unwrap();
 
         let q = vec![1.0_f32, 0.0, 0.0];
@@ -5151,7 +5151,7 @@ mod tests {
     #[test]
     fn get_unembedded_returns_memoryless() {
         let conn = test_db();
-        let mem = make_memory("No embed", "test", Tier::Long, 5);
+        let mem = make_memory("No embed", "test", &Tier::Long, 5);
         insert(&conn, &mem).unwrap();
 
         let unembedded = get_unembedded_ids(&conn).unwrap();
@@ -5196,7 +5196,7 @@ mod tests {
     #[test]
     fn get_by_prefix_8char() {
         let conn = test_db();
-        let mem = make_memory("Prefix test", "test", Tier::Long, 5);
+        let mem = make_memory("Prefix test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         let prefix = &id[..8];
         let got = get_by_prefix(&conn, prefix).unwrap().unwrap();
@@ -5207,7 +5207,7 @@ mod tests {
     #[test]
     fn get_by_prefix_full_uuid() {
         let conn = test_db();
-        let mem = make_memory("Full UUID prefix", "test", Tier::Long, 5);
+        let mem = make_memory("Full UUID prefix", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         // Full UUID used as prefix still works (LIKE 'full-uuid%' matches exact)
         let got = get_by_prefix(&conn, &id).unwrap().unwrap();
@@ -5225,10 +5225,10 @@ mod tests {
     fn get_by_prefix_ambiguous() {
         let conn = test_db();
         // Insert two memories with IDs sharing a common prefix
-        let mut mem1 = make_memory("Ambig A", "test", Tier::Long, 5);
+        let mut mem1 = make_memory("Ambig A", "test", &Tier::Long, 5);
         mem1.id = "aaaa1111-0000-0000-0000-000000000001".to_string();
         insert(&conn, &mem1).unwrap();
-        let mut mem2 = make_memory("Ambig B", "test2", Tier::Long, 5);
+        let mut mem2 = make_memory("Ambig B", "test2", &Tier::Long, 5);
         mem2.id = "aaaa2222-0000-0000-0000-000000000002".to_string();
         insert(&conn, &mem2).unwrap();
         let result = get_by_prefix(&conn, "aaaa");
@@ -5247,7 +5247,7 @@ mod tests {
     #[test]
     fn resolve_id_exact_then_prefix() {
         let conn = test_db();
-        let mem = make_memory("Resolve test", "test", Tier::Long, 5);
+        let mem = make_memory("Resolve test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         // Exact match
         let got = resolve_id(&conn, &id).unwrap().unwrap();
@@ -5263,7 +5263,7 @@ mod tests {
     #[test]
     fn insert_if_newer_updates() {
         let conn = test_db();
-        let mut mem = make_memory("Sync test", "test", Tier::Long, 5);
+        let mut mem = make_memory("Sync test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
 
         mem.id = id.clone();
@@ -5281,7 +5281,7 @@ mod tests {
     #[test]
     fn metadata_default_empty_object() {
         let conn = test_db();
-        let mem = make_memory("Default metadata", "test", Tier::Long, 5);
+        let mem = make_memory("Default metadata", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id).unwrap().unwrap();
         assert_eq!(got.metadata, serde_json::json!({}));
@@ -5290,7 +5290,7 @@ mod tests {
     #[test]
     fn metadata_store_and_retrieve() {
         let conn = test_db();
-        let mut mem = make_memory("With metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("With metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"agent_id": "claude-1", "session": 42});
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id).unwrap().unwrap();
@@ -5301,7 +5301,7 @@ mod tests {
     #[test]
     fn metadata_roundtrip_nested_json() {
         let conn = test_db();
-        let mut mem = make_memory("Nested metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("Nested metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({
             "agent": {"type": "ai:claude", "version": "4.6"},
             "tags_extra": ["experimental"],
@@ -5317,7 +5317,7 @@ mod tests {
     #[test]
     fn metadata_preserved_on_update() {
         let conn = test_db();
-        let mut mem = make_memory("Update metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("Update metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"key": "original"});
         let id = insert(&conn, &mem).unwrap();
 
@@ -5366,12 +5366,12 @@ mod tests {
     #[test]
     fn metadata_preserved_on_upsert() {
         let conn = test_db();
-        let mut mem = make_memory("Upsert meta", "test", Tier::Long, 5);
+        let mut mem = make_memory("Upsert meta", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"version": 1});
         insert(&conn, &mem).unwrap();
 
         // Insert again with same title+namespace — upsert should update metadata
-        let mut mem2 = make_memory("Upsert meta", "test", Tier::Long, 5);
+        let mut mem2 = make_memory("Upsert meta", "test", &Tier::Long, 5);
         mem2.metadata = serde_json::json!({"version": 2});
         let id = insert(&conn, &mem2).unwrap();
         let got = get(&conn, &id).unwrap().unwrap();
@@ -5381,7 +5381,7 @@ mod tests {
     #[test]
     fn metadata_in_list_and_search() {
         let conn = test_db();
-        let mut mem = make_memory("Searchable metadata", "test", Tier::Long, 8);
+        let mut mem = make_memory("Searchable metadata", "test", &Tier::Long, 8);
         mem.metadata = serde_json::json!({"source_model": "opus"});
         insert(&conn, &mem).unwrap();
 
@@ -5422,7 +5422,7 @@ mod tests {
     #[test]
     fn metadata_in_recall() {
         let conn = test_db();
-        let mut mem = make_memory("Recallable metadata", "test", Tier::Long, 8);
+        let mut mem = make_memory("Recallable metadata", "test", &Tier::Long, 8);
         mem.metadata = serde_json::json!({"context": "test-recall"});
         insert(&conn, &mem).unwrap();
 
@@ -5447,7 +5447,7 @@ mod tests {
     #[test]
     fn metadata_in_export_import() {
         let conn = test_db();
-        let mut mem = make_memory("Export metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("Export metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"exported": true});
         insert(&conn, &mem).unwrap();
 
@@ -5467,7 +5467,7 @@ mod tests {
         // Simulate a pre-v7 database (no metadata column) by creating one
         // and checking that migration adds the column with correct default
         let conn = test_db();
-        let mem = make_memory("Migration test", "test", Tier::Long, 5);
+        let mem = make_memory("Migration test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
 
         // Verify the column exists and has the default value
@@ -5484,7 +5484,7 @@ mod tests {
     #[test]
     fn metadata_survives_archive_restore_cycle() {
         let conn = test_db();
-        let mut mem = make_memory("Archivable", "test", Tier::Short, 5);
+        let mut mem = make_memory("Archivable", "test", &Tier::Short, 5);
         mem.metadata = serde_json::json!({"origin": "archive-test"});
         // Set expiry in the past so GC will archive it
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
@@ -5509,7 +5509,7 @@ mod tests {
     #[test]
     fn metadata_in_insert_if_newer() {
         let conn = test_db();
-        let mut mem = make_memory("Sync metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("Sync metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"version": 1});
         let id = insert(&conn, &mem).unwrap();
 
@@ -5536,11 +5536,11 @@ mod tests {
     #[test]
     fn metadata_merged_in_consolidate() {
         let conn = test_db();
-        let mut mem_a = make_memory("Consolidate A", "test", Tier::Long, 5);
+        let mut mem_a = make_memory("Consolidate A", "test", &Tier::Long, 5);
         mem_a.metadata = serde_json::json!({"agent": "claude", "shared": "from_a"});
         let id_a = insert(&conn, &mem_a).unwrap();
 
-        let mut mem_b = make_memory("Consolidate B", "test", Tier::Long, 7);
+        let mut mem_b = make_memory("Consolidate B", "test", &Tier::Long, 7);
         mem_b.metadata = serde_json::json!({"model": "opus", "shared": "from_b"});
         let id_b = insert(&conn, &mem_b).unwrap();
 
@@ -5567,7 +5567,7 @@ mod tests {
     fn metadata_consolidate_rejects_oversized_merge() {
         let conn = test_db();
         // Create two memories with large unique-key metadata that together exceed 64KB
-        let mut mem_a = make_memory("Big meta A", "test", Tier::Long, 5);
+        let mut mem_a = make_memory("Big meta A", "test", &Tier::Long, 5);
         let big_val_a: serde_json::Map<String, serde_json::Value> = (0..500)
             .map(|i| {
                 (
@@ -5579,7 +5579,7 @@ mod tests {
         mem_a.metadata = serde_json::Value::Object(big_val_a);
         let id_a = insert(&conn, &mem_a).unwrap();
 
-        let mut mem_b = make_memory("Big meta B", "test", Tier::Long, 5);
+        let mut mem_b = make_memory("Big meta B", "test", &Tier::Long, 5);
         let big_val_b: serde_json::Map<String, serde_json::Value> = (0..500)
             .map(|i| {
                 (
@@ -5613,7 +5613,7 @@ mod tests {
     #[test]
     fn metadata_special_characters_roundtrip() {
         let conn = test_db();
-        let mut mem = make_memory("Special chars metadata", "test", Tier::Long, 5);
+        let mut mem = make_memory("Special chars metadata", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({
             "pipe": "a|b|c",
             "newline": "line1\nline2",
@@ -5636,7 +5636,7 @@ mod tests {
     #[test]
     fn metadata_corrupt_column_falls_back_to_empty() {
         let conn = test_db();
-        let mem = make_memory("Corrupt test", "test", Tier::Long, 5);
+        let mem = make_memory("Corrupt test", "test", &Tier::Long, 5);
         let id = insert(&conn, &mem).unwrap();
 
         // Manually corrupt the metadata column
@@ -5654,7 +5654,7 @@ mod tests {
     #[test]
     fn metadata_restore_resets_corrupt_archived_metadata() {
         let conn = test_db();
-        let mut mem = make_memory("Corrupt archive", "test", Tier::Short, 5);
+        let mut mem = make_memory("Corrupt archive", "test", &Tier::Short, 5);
         mem.metadata = serde_json::json!({"valid": true});
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         let id = insert(&conn, &mem).unwrap();
@@ -5713,7 +5713,7 @@ mod tests {
         // Seed enough rows + ANALYZE so planner cost model is honest.
         for i in 0..200 {
             let scope = if i % 3 == 0 { "collective" } else { "private" };
-            let mut mem = make_memory(&format!("row-{i}"), "test", Tier::Long, 5);
+            let mut mem = make_memory(&format!("row-{i}"), "test", &Tier::Long, 5);
             mem.metadata = serde_json::json!({"scope": scope});
             insert(&conn, &mem).unwrap();
         }
@@ -5737,7 +5737,7 @@ mod tests {
         // v0.6.0 GA — the VIRTUAL generated column must track metadata.scope
         // across insert and update without manual maintenance.
         let conn = test_db();
-        let mut mem = make_memory("scope-tracking", "test", Tier::Long, 5);
+        let mut mem = make_memory("scope-tracking", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({"scope": "team"});
         let id = insert(&conn, &mem).unwrap();
         let scope: String = conn
@@ -5775,7 +5775,7 @@ mod tests {
         assert_eq!(scope2, "unit");
 
         // Memory with no scope key — virtual column returns the default.
-        let mut bare = make_memory("no-scope-key", "test", Tier::Long, 5);
+        let mut bare = make_memory("no-scope-key", "test", &Tier::Long, 5);
         bare.metadata = serde_json::json!({});
         let id2 = insert(&conn, &bare).unwrap();
         let scope3: String = conn
@@ -5791,7 +5791,7 @@ mod tests {
     #[test]
     fn auto_purge_archive_respects_max_days() {
         let conn = test_db();
-        let mut mem = make_memory("Purge test", "test", Tier::Short, 5);
+        let mut mem = make_memory("Purge test", "test", &Tier::Short, 5);
         mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
         insert(&conn, &mem).unwrap();
         gc(&conn, true).unwrap();
@@ -5954,7 +5954,7 @@ mod tests {
     #[test]
     fn entity_register_errors_on_collision_with_non_entity_memory() {
         let conn = test_db();
-        let mem = make_memory("Conflict", "projects/alpha", Tier::Long, 5);
+        let mem = make_memory("Conflict", "projects/alpha", &Tier::Long, 5);
         insert(&conn, &mem).unwrap();
         let err = entity_register(
             &conn,
@@ -6095,7 +6095,7 @@ mod tests {
         // Insert a regular (non-entity) memory and a stray
         // entity_aliases row pointing at it. The resolver must skip
         // it because `kind != 'entity'`.
-        let mut mem = make_memory("Decoy", "test", Tier::Long, 5);
+        let mut mem = make_memory("Decoy", "test", &Tier::Long, 5);
         mem.metadata = serde_json::json!({});
         let mid = insert(&conn, &mem).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -6149,8 +6149,8 @@ mod tests {
     #[test]
     fn create_link_populates_valid_from_for_new_rows() {
         let conn = test_db();
-        let src = make_memory("kg-src", "test", Tier::Long, 5);
-        let tgt = make_memory("kg-tgt", "test", Tier::Long, 5);
+        let src = make_memory("kg-src", "test", &Tier::Long, 5);
+        let tgt = make_memory("kg-tgt", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6170,10 +6170,10 @@ mod tests {
     #[test]
     fn kg_timeline_returns_events_ordered_by_valid_from_ascending() {
         let conn = test_db();
-        let src = make_memory("alpha", "kg/projects/alpha", Tier::Long, 5);
-        let s1 = make_memory("kickoff", "kg/projects/alpha", Tier::Long, 5);
-        let s2 = make_memory("design phase", "kg/projects/alpha", Tier::Long, 5);
-        let s3 = make_memory("implementation", "kg/projects/alpha", Tier::Long, 5);
+        let src = make_memory("alpha", "kg/projects/alpha", &Tier::Long, 5);
+        let s1 = make_memory("kickoff", "kg/projects/alpha", &Tier::Long, 5);
+        let s2 = make_memory("design phase", "kg/projects/alpha", &Tier::Long, 5);
+        let s3 = make_memory("implementation", "kg/projects/alpha", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &s1).unwrap();
         insert(&conn, &s2).unwrap();
@@ -6216,9 +6216,9 @@ mod tests {
     #[test]
     fn kg_timeline_filters_by_since_inclusive() {
         let conn = test_db();
-        let src = make_memory("e", "ns", Tier::Long, 5);
-        let t1 = make_memory("e1", "ns", Tier::Long, 5);
-        let t2 = make_memory("e2", "ns", Tier::Long, 5);
+        let src = make_memory("e", "ns", &Tier::Long, 5);
+        let t1 = make_memory("e1", "ns", &Tier::Long, 5);
+        let t2 = make_memory("e2", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
@@ -6251,9 +6251,9 @@ mod tests {
     #[test]
     fn kg_timeline_filters_by_until_inclusive() {
         let conn = test_db();
-        let src = make_memory("e", "ns", Tier::Long, 5);
-        let t1 = make_memory("e1", "ns", Tier::Long, 5);
-        let t2 = make_memory("e2", "ns", Tier::Long, 5);
+        let src = make_memory("e", "ns", &Tier::Long, 5);
+        let t1 = make_memory("e1", "ns", &Tier::Long, 5);
+        let t2 = make_memory("e2", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
@@ -6275,9 +6275,9 @@ mod tests {
     #[test]
     fn kg_timeline_skips_links_with_null_valid_from() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let t1 = make_memory("t1", "ns", Tier::Long, 5);
-        let t2 = make_memory("t2", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let t1 = make_memory("t1", "ns", &Tier::Long, 5);
+        let t2 = make_memory("t2", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
@@ -6304,8 +6304,8 @@ mod tests {
         // timeline. This guards against accidentally widening the
         // contract to a bidirectional view.
         let conn = test_db();
-        let entity = make_memory("entity", "ns", Tier::Long, 5);
-        let other = make_memory("other", "ns", Tier::Long, 5);
+        let entity = make_memory("entity", "ns", &Tier::Long, 5);
+        let other = make_memory("other", "ns", &Tier::Long, 5);
         insert(&conn, &entity).unwrap();
         insert(&conn, &other).unwrap();
         insert_link_at(
@@ -6322,10 +6322,10 @@ mod tests {
     #[test]
     fn kg_timeline_limit_clamped_to_max() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         for i in 0..5 {
-            let t = make_memory(&format!("t{i}"), "ns", Tier::Long, 5);
+            let t = make_memory(&format!("t{i}"), "ns", &Tier::Long, 5);
             insert(&conn, &t).unwrap();
             insert_link_at(
                 &conn,
@@ -6349,8 +6349,8 @@ mod tests {
     #[test]
     fn kg_timeline_carries_observed_by_and_valid_until() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let t = make_memory("t", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let t = make_memory("t", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -6381,8 +6381,8 @@ mod tests {
     #[test]
     fn invalidate_link_sets_valid_until_to_provided_timestamp() {
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6406,8 +6406,8 @@ mod tests {
     #[test]
     fn invalidate_link_defaults_to_now_when_no_timestamp_provided() {
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6440,8 +6440,8 @@ mod tests {
     fn invalidate_link_returns_none_when_relation_does_not_match() {
         // Link exists for ("related_to") but caller asks for ("supersedes").
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6452,8 +6452,8 @@ mod tests {
     #[test]
     fn invalidate_link_overwrites_existing_valid_until_and_reports_prior() {
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6475,8 +6475,8 @@ mod tests {
         // Two links between the same pair, different relations. Invalidating
         // one must not affect the other.
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         create_link(&conn, &src.id, &tgt.id, "related_to").unwrap();
@@ -6513,8 +6513,8 @@ mod tests {
         // valid_from, observed_by, created_at, signature must not be
         // touched by the invalidate UPDATE.
         let conn = test_db();
-        let src = make_memory("inv-s", "test", Tier::Long, 5);
-        let tgt = make_memory("inv-t", "test", Tier::Long, 5);
+        let src = make_memory("inv-s", "test", &Tier::Long, 5);
+        let tgt = make_memory("inv-t", "test", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &tgt).unwrap();
         let now = chrono::Utc::now().to_rfc3339();
@@ -6582,9 +6582,9 @@ mod tests {
     #[test]
     fn kg_query_returns_outbound_neighbors_at_depth_1() {
         let conn = test_db();
-        let src = make_memory("alpha", "kg/projects/alpha", Tier::Long, 5);
-        let n1 = make_memory("kickoff", "kg/projects/alpha", Tier::Long, 5);
-        let n2 = make_memory("design", "kg/projects/alpha", Tier::Long, 5);
+        let src = make_memory("alpha", "kg/projects/alpha", &Tier::Long, 5);
+        let n1 = make_memory("kickoff", "kg/projects/alpha", &Tier::Long, 5);
+        let n2 = make_memory("design", "kg/projects/alpha", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &n1).unwrap();
         insert(&conn, &n2).unwrap();
@@ -6623,9 +6623,9 @@ mod tests {
     #[test]
     fn kg_query_filters_by_valid_at_window() {
         let conn = test_db();
-        let src = make_memory("e", "ns", Tier::Long, 5);
-        let t1 = make_memory("e1", "ns", Tier::Long, 5);
-        let t2 = make_memory("e2", "ns", Tier::Long, 5);
+        let src = make_memory("e", "ns", &Tier::Long, 5);
+        let t1 = make_memory("e1", "ns", &Tier::Long, 5);
+        let t2 = make_memory("e2", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
@@ -6692,8 +6692,8 @@ mod tests {
     #[test]
     fn kg_query_skips_null_valid_from_when_valid_at_filter_active() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let t = make_memory("t", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let t = make_memory("t", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t).unwrap();
         // Link with NULL valid_from — must be invisible to a temporally
@@ -6720,10 +6720,10 @@ mod tests {
     #[test]
     fn kg_query_filters_by_allowed_agents() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let t1 = make_memory("t1", "ns", Tier::Long, 5);
-        let t2 = make_memory("t2", "ns", Tier::Long, 5);
-        let t3 = make_memory("t3", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let t1 = make_memory("t1", "ns", &Tier::Long, 5);
+        let t2 = make_memory("t2", "ns", &Tier::Long, 5);
+        let t3 = make_memory("t3", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
@@ -6771,8 +6771,8 @@ mod tests {
     #[test]
     fn kg_query_empty_allowed_agents_returns_zero_rows() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let t = make_memory("t", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let t = make_memory("t", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &t).unwrap();
         insert_link_full(
@@ -6799,7 +6799,7 @@ mod tests {
     #[test]
     fn kg_query_rejects_max_depth_zero() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         let err = kg_query(&conn, &src.id, 0, None, None, None).unwrap_err();
         assert!(err.to_string().contains("max_depth"));
@@ -6811,7 +6811,7 @@ mod tests {
         // produce an explicit error so callers learn they hit the
         // ceiling rather than receiving a partial graph.
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         let err = kg_query(
             &conn,
@@ -6832,9 +6832,9 @@ mod tests {
         // src -> mid -> leaf. depth=2 must return both hops, with
         // depth/path reflecting the chain.
         let conn = test_db();
-        let src = make_memory("src", "ns", Tier::Long, 5);
-        let mid = make_memory("mid", "ns", Tier::Long, 5);
-        let leaf = make_memory("leaf", "ns", Tier::Long, 5);
+        let src = make_memory("src", "ns", &Tier::Long, 5);
+        let mid = make_memory("mid", "ns", &Tier::Long, 5);
+        let leaf = make_memory("leaf", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &mid).unwrap();
         insert(&conn, &leaf).unwrap();
@@ -6882,9 +6882,9 @@ mod tests {
         // only mid is returned; at valid_at=2026-04-15 the first hop is
         // closed, so both are filtered out.
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let mid = make_memory("m", "ns", Tier::Long, 5);
-        let leaf = make_memory("l", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let mid = make_memory("m", "ns", &Tier::Long, 5);
+        let leaf = make_memory("l", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &mid).unwrap();
         insert(&conn, &leaf).unwrap();
@@ -6937,9 +6937,9 @@ mod tests {
         // traversal must stop revisiting nodes that are already on the
         // path; the result lists each reachable node at most once.
         let conn = test_db();
-        let a = make_memory("a", "ns", Tier::Long, 5);
-        let b = make_memory("b", "ns", Tier::Long, 5);
-        let c = make_memory("c", "ns", Tier::Long, 5);
+        let a = make_memory("a", "ns", &Tier::Long, 5);
+        let b = make_memory("b", "ns", &Tier::Long, 5);
+        let c = make_memory("c", "ns", &Tier::Long, 5);
         insert(&conn, &a).unwrap();
         insert(&conn, &b).unwrap();
         insert(&conn, &c).unwrap();
@@ -6989,9 +6989,9 @@ mod tests {
         // src -> mid (agent-a), mid -> leaf (agent-b). With allow=[a]
         // only the first hop survives; with allow=[a,b] both surface.
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
-        let mid = make_memory("m", "ns", Tier::Long, 5);
-        let leaf = make_memory("l", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
+        let mid = make_memory("m", "ns", &Tier::Long, 5);
+        let leaf = make_memory("l", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         insert(&conn, &mid).unwrap();
         insert(&conn, &leaf).unwrap();
@@ -7029,10 +7029,10 @@ mod tests {
     #[test]
     fn kg_query_limit_clamped_to_max() {
         let conn = test_db();
-        let src = make_memory("s", "ns", Tier::Long, 5);
+        let src = make_memory("s", "ns", &Tier::Long, 5);
         insert(&conn, &src).unwrap();
         for i in 0..3 {
-            let t = make_memory(&format!("t{i}"), "ns", Tier::Long, 5);
+            let t = make_memory(&format!("t{i}"), "ns", &Tier::Long, 5);
             insert(&conn, &t).unwrap();
             insert_link_full(
                 &conn,
@@ -7076,8 +7076,8 @@ mod tests {
         ));
         {
             let conn = open(&path).unwrap();
-            let src = make_memory("src", "test", Tier::Long, 5);
-            let tgt = make_memory("tgt", "test", Tier::Long, 5);
+            let src = make_memory("src", "test", &Tier::Long, 5);
+            let tgt = make_memory("tgt", "test", &Tier::Long, 5);
             insert(&conn, &src).unwrap();
             insert(&conn, &tgt).unwrap();
             // Insert a link directly with NULL valid_from to mimic
