@@ -482,3 +482,197 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    clippy::wildcard_imports
+)]
+pub mod test_support {
+    use super::*;
+
+    /// Mock neural cross-encoder for testing. Returns deterministic scores
+    /// based on (query, title, content) without loading BERT.
+    pub struct MockCrossEncoder {
+        pub use_neural: bool,
+    }
+
+    impl MockCrossEncoder {
+        /// Create a mock lexical encoder (like CrossEncoder::new()).
+        pub fn new() -> Self {
+            Self { use_neural: false }
+        }
+
+        /// Create a mock neural encoder (like CrossEncoder::new_neural()).
+        pub fn new_neural() -> Self {
+            Self { use_neural: true }
+        }
+
+        /// Mock score: deterministic hash-based score in [0, 1].
+        /// Neural path uses a different formula than lexical for testing.
+        pub fn score(&self, query: &str, title: &str, content: &str) -> f32 {
+            if self.use_neural {
+                // Neural mock: combine query+title hash
+                let combined = format!("{}{}", query, title);
+                let hash = combined.bytes().fold(0u32, |acc, b| {
+                    acc.wrapping_mul(31).wrapping_add(u32::from(b))
+                });
+                let base = ((hash % 1000) as f32) / 1000.0;
+                // Boost for exact title matches
+                if title.contains(query) {
+                    (base * 0.5 + 0.5).min(1.0)
+                } else {
+                    base
+                }
+            } else {
+                // Lexical path uses the real lexical_score
+                lexical_score(query, title, content)
+            }
+        }
+
+        /// Whether this is a neural mock.
+        pub fn is_neural(&self) -> bool {
+            self.use_neural
+        }
+
+        /// Rerank candidates (same blending formula as real CrossEncoder).
+        pub fn rerank(
+            &self,
+            query: &str,
+            mut candidates: Vec<(Memory, f64)>,
+        ) -> Vec<(Memory, f64)> {
+            let mut scored: Vec<(Memory, f64)> = candidates
+                .drain(..)
+                .map(|(mem, original_score)| {
+                    let ce_score = f64::from(self.score(query, &mem.title, &mem.content));
+                    let final_score =
+                        ORIGINAL_WEIGHT * original_score + CROSS_ENCODER_WEIGHT * ce_score;
+                    (mem, final_score)
+                })
+                .collect();
+
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+        }
+    }
+
+    impl Default for MockCrossEncoder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::test_support::*;
+    use crate::models::{Memory, Tier};
+
+    fn make_memory(title: &str, content: &str) -> Memory {
+        Memory {
+            id: "test-id".to_string(),
+            tier: Tier::Mid,
+            namespace: "test".to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn mock_lexical_new() {
+        let ce = MockCrossEncoder::new();
+        assert!(!ce.is_neural());
+    }
+
+    #[test]
+    fn mock_neural_new() {
+        let ce = MockCrossEncoder::new_neural();
+        assert!(ce.is_neural());
+    }
+
+    #[test]
+    fn mock_neural_score_deterministic() {
+        let ce = MockCrossEncoder::new_neural();
+        let s1 = ce.score("query", "title", "content");
+        let s2 = ce.score("query", "title", "content");
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn mock_neural_score_title_match_boost() {
+        let ce = MockCrossEncoder::new_neural();
+        let s_title_contains = ce.score("apple", "apple pie recipe", "delicious dessert");
+        let s_no_match = ce.score("apple", "unrelated", "delicious dessert");
+        assert!(
+            s_title_contains > s_no_match,
+            "title match ({s_title_contains}) should beat no match ({s_no_match})"
+        );
+    }
+
+    #[test]
+    fn mock_neural_score_bounded() {
+        let ce = MockCrossEncoder::new_neural();
+        for query in &["test", "neural", "reranker", "machine learning"] {
+            for title in &["a", "b", "the quick brown"] {
+                let s = ce.score(query, title, "content");
+                assert!((0.0..=1.0).contains(&s), "score {s} out of bounds");
+            }
+        }
+    }
+
+    #[test]
+    fn mock_neural_rerank_reorders() {
+        let ce = MockCrossEncoder::new_neural();
+        let a = make_memory("neural network", "deep learning with transformers");
+        let b = make_memory("grocery list", "milk eggs bread butter");
+        let candidates = vec![(b.clone(), 0.3), (a.clone(), 0.2)];
+        let reranked = ce.rerank("neural network", candidates);
+        // Neural encoder should boost the neural-network-titled memory
+        assert_eq!(reranked[0].0.title, "neural network");
+    }
+
+    #[test]
+    fn mock_neural_rerank_preserves_count() {
+        let ce = MockCrossEncoder::new_neural();
+        let candidates = vec![
+            (make_memory("A", "content a"), 0.5),
+            (make_memory("B", "content b"), 0.4),
+            (make_memory("C", "content c"), 0.6),
+        ];
+        let reranked = ce.rerank("test", candidates);
+        assert_eq!(reranked.len(), 3);
+    }
+
+    #[test]
+    fn mock_lexical_path_via_mock() {
+        let ce = MockCrossEncoder::new();
+        let s = ce.score(
+            "network adapter",
+            "Network Configuration",
+            "the network adapter is connected",
+        );
+        assert!((0.0..=1.0).contains(&s));
+    }
+
+    #[test]
+    fn mock_neural_different_from_lexical() {
+        let lexical = MockCrossEncoder::new();
+        let neural = MockCrossEncoder::new_neural();
+        let s_lex = lexical.score("machine learning", "ML title", "neural networks");
+        let s_neu = neural.score("machine learning", "ML title", "neural networks");
+        // They should use different scoring formulas
+        assert_ne!(s_lex, s_neu);
+    }
+}
