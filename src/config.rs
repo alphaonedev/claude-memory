@@ -982,12 +982,12 @@ mod tests {
 
     #[test]
     fn scoring_roundtrip_through_toml() {
-        let toml_src = r#"
+        let toml_src = r"
 [scoring]
 half_life_days_short = 5.0
 half_life_days_mid = 25.0
 legacy_scoring = false
-"#;
+";
         let cfg: AppConfig = toml::from_str(toml_src).expect("parses");
         let s = cfg.effective_scoring();
         assert!((s.half_life_days_short - 5.0).abs() < f64::EPSILON);
