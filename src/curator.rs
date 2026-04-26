@@ -603,6 +603,210 @@ mod tests {
         assert!(json.contains("memories_scanned"));
     }
 
+    // ---- Wave 3 (Closer T) — targeted unit tests for code paths NOT
+    // currently exercised by the smoke + needs_curation suite.
+
+    fn make_test_memory(ns: &str, title: &str, content: &str) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn persist_auto_tags_writes_metadata() {
+        // After persist_auto_tags, the row's metadata.auto_tags reflects the
+        // input list and metadata.curated_at is a non-empty string.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_test_memory("curate-test", "anchor", &"a".repeat(120));
+        db::insert(&conn, &mem).unwrap();
+
+        persist_auto_tags(&conn, &mem, &["alpha".to_string(), "beta".to_string()]).unwrap();
+
+        let updated = db::get(&conn, &mem.id).unwrap().unwrap();
+        let tags = updated
+            .metadata
+            .get("auto_tags")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].as_str().unwrap(), "alpha");
+        assert!(
+            updated
+                .metadata
+                .get("curated_at")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+        );
+    }
+
+    #[test]
+    fn persist_auto_tags_with_empty_tag_list_still_writes_marker() {
+        // Even an empty tag list must persist `auto_tags: []` and
+        // `curated_at` so the curator skips the row on the next cycle.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_test_memory("curate-test", "anchor", &"a".repeat(120));
+        db::insert(&conn, &mem).unwrap();
+
+        persist_auto_tags(&conn, &mem, &[]).unwrap();
+
+        let updated = db::get(&conn, &mem.id).unwrap().unwrap();
+        let tags = updated
+            .metadata
+            .get("auto_tags")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert!(tags.is_empty());
+    }
+
+    #[test]
+    fn persist_contradiction_appends_unique_ids() {
+        // Two persist_contradiction calls with different ids → both ids
+        // present in the array. A duplicate id is a no-op.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_test_memory("curate-test", "anchor", &"a".repeat(120));
+        db::insert(&conn, &mem).unwrap();
+
+        persist_contradiction(&conn, &mem, "id-1").unwrap();
+        // Re-read to pick up the now-populated metadata for the second call.
+        let mid = db::get(&conn, &mem.id).unwrap().unwrap();
+        persist_contradiction(&conn, &mid, "id-2").unwrap();
+        // Duplicate id-1 → no-op (still 2 entries).
+        let mid2 = db::get(&conn, &mem.id).unwrap().unwrap();
+        persist_contradiction(&conn, &mid2, "id-1").unwrap();
+
+        let updated = db::get(&conn, &mem.id).unwrap().unwrap();
+        let ids = updated
+            .metadata
+            .get("confirmed_contradictions")
+            .unwrap()
+            .as_array()
+            .unwrap();
+        assert_eq!(ids.len(), 2);
+        let strs: Vec<String> = ids
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        assert!(strs.contains(&"id-1".to_string()));
+        assert!(strs.contains(&"id-2".to_string()));
+    }
+
+    #[test]
+    fn adjacent_memory_returns_none_when_only_self_exists() {
+        // Solo namespace → no sibling → Ok(None).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_test_memory("solo-ns", "only", &"a".repeat(120));
+        db::insert(&conn, &mem).unwrap();
+
+        let got = adjacent_memory(&conn, &mem).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn adjacent_memory_returns_some_when_sibling_present() {
+        // Two memories in the same namespace → adjacent_memory returns the
+        // other one (whichever the underlying `db::list` orders first).
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let m1 = make_test_memory("dual-ns", "first", &"a".repeat(120));
+        let m2 = make_test_memory("dual-ns", "second", &"b".repeat(120));
+        db::insert(&conn, &m1).unwrap();
+        db::insert(&conn, &m2).unwrap();
+
+        let got = adjacent_memory(&conn, &m1).unwrap().unwrap();
+        assert_ne!(got.id, m1.id);
+        assert!(got.content.len() >= MIN_CONTENT_LEN);
+    }
+
+    #[test]
+    fn adjacent_memory_skips_short_sibling() {
+        // Sibling exists but content too short → adjacent_memory returns None.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let m1 = make_test_memory("ns-short", "anchor", &"a".repeat(120));
+        let mut m2 = make_test_memory("ns-short", "tiny-sibling", "x");
+        m2.content = "short".to_string(); // Below MIN_CONTENT_LEN.
+        db::insert(&conn, &m1).unwrap();
+        db::insert(&conn, &m2).unwrap();
+
+        let got = adjacent_memory(&conn, &m1).unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn record_truncation_appends_when_truncated() {
+        let mut report = CuratorReport::new(false);
+        let cfg = CuratorConfig::default();
+        record_truncation(&mut report, true, &cfg);
+        assert_eq!(report.errors.len(), 1);
+        assert!(report.errors[0].contains("collect_candidates truncated"));
+    }
+
+    #[test]
+    fn record_truncation_noop_when_not_truncated() {
+        let mut report = CuratorReport::new(false);
+        let cfg = CuratorConfig::default();
+        record_truncation(&mut report, false, &cfg);
+        assert!(report.errors.is_empty());
+    }
+
+    #[test]
+    fn collect_candidates_returns_eligible_memories() {
+        // Long-tier rows with sufficient content are picked up; short-tier
+        // rows are excluded by collect_candidates' per-tier sweep.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        for i in 0..3 {
+            let mem = make_test_memory("cand-ns", &format!("row-{i}"), &"a".repeat(120));
+            db::insert(&conn, &mem).unwrap();
+        }
+        let cfg = CuratorConfig::default();
+        let batch = collect_candidates(&conn, &cfg).unwrap();
+        assert!(!batch.memories.is_empty());
+        // No truncation expected for a tiny seed.
+        assert!(!batch.truncated);
+    }
+
+    #[test]
+    fn run_once_with_dry_run_does_not_persist() {
+        // dry_run=true with no LLM still runs to completion; the report
+        // captures duration and the "no LLM" error path.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = db::open(tmp.path()).unwrap();
+        let mem = make_test_memory("dry-ns", "anchor", &"a".repeat(120));
+        db::insert(&conn, &mem).unwrap();
+
+        let cfg = CuratorConfig {
+            dry_run: true,
+            ..CuratorConfig::default()
+        };
+        let report = run_once(&conn, None, &cfg).unwrap();
+        assert!(report.dry_run);
+        // No mutations happened — the original metadata is untouched.
+        let after = db::get(&conn, &mem.id).unwrap().unwrap();
+        assert!(after.metadata.get("auto_tags").is_none());
+    }
+
     #[test]
     fn run_daemon_executes_multiple_cycles_and_respects_shutdown() {
         use std::sync::Mutex;
