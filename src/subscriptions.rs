@@ -564,7 +564,14 @@ mod tests {
 // format!("{:x}", _) pattern over GenericArray outputs.
 #[cfg(test)]
 mod hex {
+    use std::fmt::Write as _;
+
     pub fn encode_fallback(bytes: &[u8]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
+        bytes
+            .iter()
+            .fold(String::with_capacity(bytes.len() * 2), |mut output, b| {
+                let _ = write!(output, "{b:02x}");
+                output
+            })
     }
 }
