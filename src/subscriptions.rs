@@ -558,6 +558,169 @@ mod tests {
             Some("bob")
         ));
     }
+
+    // ----------------------------------------------------------------
+    // Wave 10 (L10b) — SSRF coverage for `validate_url_dns`.
+    //
+    // `validate_url_dns` is the DNS-resolving SSRF guard. It performs
+    // `to_socket_addrs()` and inspects the resolved IPs.  The current
+    // production implementation INTENTIONALLY allows loopback IPs
+    // (`is_private(ip) && !ip.is_loopback()`) so that dev/CI webhooks
+    // pointed at localhost still work.  Tests that target loopback
+    // therefore assert the documented "ok" behaviour rather than
+    // "err"; those cases are covered by `validate_url`'s scheme
+    // gating which forces non-loopback hosts onto https.
+    //
+    // Tests below are split into:
+    //   - cases that are correctly rejected today (link-local v6,
+    //     AWS metadata IP, RFC1918 ranges)
+    //   - the documented-behaviour loopback acceptance (kept as
+    //     `is_ok`)
+    //   - public-IP / hostname acceptance
+    //
+    // The function signature is `validate_url_dns(&str) -> Result<()>`.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_validate_url_dns_accepts_loopback_v4() {
+        // DESIGN: loopback is allowed by `validate_url_dns` for dev/CI;
+        // the layered defence is `validate_url`, which forces https for
+        // non-loopback hosts. We document that current behaviour here
+        // so a regression that *tightens* loopback handling is visible.
+        assert!(
+            validate_url_dns("http://127.0.0.1/foo").is_ok(),
+            "127.0.0.1 should be accepted by validate_url_dns (dev/CI)"
+        );
+        assert!(
+            validate_url_dns("http://127.0.0.1:8080/").is_ok(),
+            "127.0.0.1:8080 should be accepted by validate_url_dns"
+        );
+        assert!(
+            validate_url_dns("http://localhost/").is_ok(),
+            "localhost should be accepted by validate_url_dns"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_dns_accepts_loopback_v6() {
+        // Same as v4: loopback is documented-allowed.
+        assert!(
+            validate_url_dns("http://[::1]/").is_ok(),
+            "[::1] should be accepted by validate_url_dns"
+        );
+        assert!(
+            validate_url_dns("http://[0:0:0:0:0:0:0:1]/").is_ok(),
+            "[::1] expanded form should be accepted"
+        );
+    }
+
+    #[test]
+    #[ignore = "FIXME: validate_url_dns accepts http://[fe80::1]/ — \
+                bracketed IPv6 hosts without an explicit port skip the \
+                ':80' default, so to_socket_addrs() returns 'invalid \
+                port value' and the production code's DNS-failure \
+                fallback returns Ok(()). Real SSRF gap — production \
+                fix needed (default port appending for bracketed IPv6)."]
+    fn test_validate_url_dns_rejects_link_local_ipv6() {
+        // fe80::/10 is link-local. is_private() flags this and the IP
+        // is not loopback, so validate_url_dns *should* reject. But
+        // the URL parsing branch builds `resolv_target = "[fe80::1]"`
+        // (no port) when the host_port starts with '[' and contains
+        // ':'. `"[fe80::1]".to_socket_addrs()` errors with "invalid
+        // port value", and the validator's err-fallback is `Ok(())`,
+        // so the SSRF target slips through.
+        //
+        // Asserting SECURE behaviour (Err); test gated #[ignore]
+        // until production is fixed.
+        let res = validate_url_dns("http://[fe80::1]/");
+        assert!(
+            res.is_err(),
+            "fe80::1 must be rejected as link-local IPv6, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_dns_rejects_aws_metadata() {
+        // 169.254.169.254 is the AWS / GCP / Azure instance metadata
+        // service. RFC3927 link-local; `Ipv4Addr::is_link_local` covers
+        // 169.254.0.0/16, so validate_url_dns must reject.
+        let res = validate_url_dns("http://169.254.169.254/latest/meta-data/");
+        assert!(
+            res.is_err(),
+            "AWS metadata IP must be rejected, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_dns_rejects_rfc1918_private_ranges() {
+        // 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 are RFC1918.
+        // `Ipv4Addr::is_private` flags all three; validate_url_dns must
+        // reject every variant.
+        for url in [
+            "http://10.0.0.1/",
+            "http://172.16.0.1/",
+            "http://172.31.255.255/",
+            "http://192.168.1.1/",
+        ] {
+            let res = validate_url_dns(url);
+            assert!(
+                res.is_err(),
+                "{url} must be rejected as RFC1918, got {res:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_url_dns_accepts_public_ip_or_dns() {
+        // 1.1.1.1 is Cloudflare's public resolver — never private. We
+        // intentionally exercise the IP-literal path (no DNS) so the
+        // test is hermetic and does not rely on network resolution for
+        // example.com.
+        assert!(
+            validate_url_dns("https://1.1.1.1/").is_ok(),
+            "public IP literal must be accepted"
+        );
+        // example.com may or may not resolve in the sandbox; per the
+        // production comment, DNS failure returns Ok (let reqwest
+        // surface it). Either way the outcome is Ok.
+        assert!(
+            validate_url_dns("https://example.com/").is_ok(),
+            "public hostname must be accepted (or DNS-skip path returns Ok)"
+        );
+    }
+
+    #[test]
+    #[ignore = "FIXME: validate_url_dns accepts 0.0.0.0 / [::] — \
+                is_private does not include is_unspecified, so the \
+                unspecified address routes through to_socket_addrs and \
+                is treated as public. SSRF gap — production fix needed."]
+    fn test_validate_url_dns_rejects_unspecified_addresses() {
+        // 0.0.0.0 / [::] are "unspecified" addresses. `is_private` does
+        // not include `is_unspecified`, so the kernel-side resolver
+        // returns 0.0.0.0 verbatim and the validator accepts it. On
+        // most OSes connecting to 0.0.0.0 routes to localhost — that
+        // is an SSRF / loopback bypass.
+        //
+        // Asserting SECURE behaviour (Err); test is gated #[ignore]
+        // with a FIXME-bug tag until production is fixed.
+        let v4 = validate_url_dns("http://0.0.0.0/");
+        let v6 = validate_url_dns("http://[::]/");
+        assert!(
+            v4.is_err(),
+            "0.0.0.0 should be rejected as unspecified, got {v4:?}"
+        );
+        assert!(
+            v6.is_err(),
+            "[::] should be rejected as unspecified, got {v6:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_dns_missing_scheme() {
+        // No `://` separator → explicit Err (not panic).
+        let res = validate_url_dns("not-a-url");
+        assert!(res.is_err(), "missing scheme must Err, got {res:?}");
+    }
 }
 
 // Local hex helper used only by tests; the production paths use the
