@@ -314,4 +314,177 @@ mod tests {
         assert!(toon.contains("memories["));
         assert!(toon.contains("Found"));
     }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — token-savings size invariant + round-trip-ish check
+    // -----------------------------------------------------------------
+
+    /// Build a fixed 5-memory fixture so the size invariant is reproducible.
+    fn five_memory_fixture() -> Value {
+        json!({
+            "memories": [
+                {
+                    "id": "01",
+                    "title": "PostgreSQL config",
+                    "tier": "long",
+                    "namespace": "infra",
+                    "priority": 9,
+                    "confidence": 1.0,
+                    "score": 0.91,
+                    "access_count": 4,
+                    "tags": ["postgres", "database"],
+                    "source": "claude",
+                    "created_at": "2026-04-03T15:00:00+00:00",
+                    "updated_at": "2026-04-03T15:00:00+00:00",
+                    "metadata": {"agent_id": "alice"}
+                },
+                {
+                    "id": "02",
+                    "title": "Redis cache strategy",
+                    "tier": "long",
+                    "namespace": "infra",
+                    "priority": 8,
+                    "confidence": 0.95,
+                    "score": 0.84,
+                    "access_count": 2,
+                    "tags": ["redis", "cache"],
+                    "source": "claude",
+                    "created_at": "2026-04-03T15:01:00+00:00",
+                    "updated_at": "2026-04-03T15:01:00+00:00",
+                    "metadata": {"agent_id": "alice"}
+                },
+                {
+                    "id": "03",
+                    "title": "BIND9 custom build",
+                    "tier": "mid",
+                    "namespace": "infra/dns",
+                    "priority": 7,
+                    "confidence": 0.9,
+                    "score": 0.71,
+                    "access_count": 1,
+                    "tags": ["bind", "dns"],
+                    "source": "user",
+                    "created_at": "2026-04-03T15:02:00+00:00",
+                    "updated_at": "2026-04-03T15:02:00+00:00",
+                    "metadata": {"agent_id": "bob"}
+                },
+                {
+                    "id": "04",
+                    "title": "Kubernetes pod recovery",
+                    "tier": "mid",
+                    "namespace": "platform/k8s",
+                    "priority": 6,
+                    "confidence": 0.85,
+                    "score": 0.62,
+                    "access_count": 0,
+                    "tags": ["k8s", "ops"],
+                    "source": "hook",
+                    "created_at": "2026-04-03T15:03:00+00:00",
+                    "updated_at": "2026-04-03T15:03:00+00:00",
+                    "metadata": {"agent_id": "carol"}
+                },
+                {
+                    "id": "05",
+                    "title": "Vault secrets rotation",
+                    "tier": "short",
+                    "namespace": "security",
+                    "priority": 5,
+                    "confidence": 0.8,
+                    "score": 0.55,
+                    "access_count": 3,
+                    "tags": ["vault", "secrets"],
+                    "source": "api",
+                    "created_at": "2026-04-03T15:04:00+00:00",
+                    "updated_at": "2026-04-03T15:04:00+00:00",
+                    "metadata": {"agent_id": "dave"}
+                }
+            ],
+            "count": 5,
+            "mode": "hybrid"
+        })
+    }
+
+    #[test]
+    fn test_toon_size_invariant_5_memories_under_threshold() {
+        // Published claim: TOON shaves ~40-79% off JSON for memory rows.
+        // We pin a lenient 65% upper bound (≤ 0.65 * JSON_BYTES) for the
+        // compact format on a fixed 5-memory fixture. Catches regressions
+        // without being so tight that minor format tweaks break CI.
+        let fixture = five_memory_fixture();
+        let json_bytes = serde_json::to_string(&fixture).unwrap().len();
+        let toon_bytes = memories_to_toon(&fixture, true).len();
+
+        let ratio = (toon_bytes as f64) / (json_bytes as f64);
+        assert!(
+            ratio < 0.65,
+            "TOON size invariant violated: toon={toon_bytes} json={json_bytes} \
+             ratio={ratio:.3} (must be < 0.65 for 5-memory compact fixture)"
+        );
+
+        // Lower-bound sanity: TOON output must be non-empty and contain
+        // at least all 5 ids.
+        let toon = memories_to_toon(&fixture, true);
+        for id in ["01", "02", "03", "04", "05"] {
+            assert!(toon.contains(id), "TOON output missing id `{id}`");
+        }
+    }
+
+    #[test]
+    fn test_toon_round_trip_preserves_visible_fields() {
+        // No bidirectional parser exists in-tree (TOON is one-way for
+        // LLM output). Instead we assert "round-trip-ish": every input
+        // field that maps to a TOON column appears verbatim in the output
+        // for the non-compact format on a single memory.
+        let resp = json!({
+            "memories": [{
+                "id": "abc-xyz",
+                "title": "Round-trip test",
+                "tier": "long",
+                "namespace": "test",
+                "priority": 9,
+                "confidence": 1.0,
+                "score": 0.5,
+                "access_count": 7,
+                "tags": ["alpha", "beta"],
+                "source": "claude",
+                "created_at": "2026-04-03T15:00:00+00:00",
+                "updated_at": "2026-04-03T15:00:30+00:00",
+                "metadata": {"agent_id": "alice"}
+            }],
+            "count": 1
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Header lists every non-compact column.
+        for col in [
+            "id",
+            "title",
+            "tier",
+            "namespace",
+            "priority",
+            "confidence",
+            "score",
+            "access_count",
+            "tags",
+            "source",
+            "created_at",
+            "updated_at",
+            "metadata",
+        ] {
+            assert!(
+                toon.contains(col),
+                "TOON header must list column `{col}`; got:\n{toon}"
+            );
+        }
+        // Data row preserves visible string values.
+        assert!(toon.contains("abc-xyz"));
+        assert!(toon.contains("Round-trip test"));
+        assert!(toon.contains("alpha,beta")); // tag array joined w/ comma
+        // Timestamps contain `:` which TOON escapes as `\:`. Both forms ship
+        // the same logical value; check the escaped variant emitted by
+        // `escape_toon` when ':' triggers the escape branch.
+        assert!(
+            toon.contains(r"2026-04-03T15\:00\:00+00\:00"),
+            "TOON should contain timestamp (with escaped ':'): {toon}"
+        );
+    }
 }

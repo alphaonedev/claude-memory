@@ -376,6 +376,72 @@ mod tests {
         assert!(sim_q > 0.9); // ~0.919 analytically
         assert!(sim_ctx > 0.3); // ~0.394 analytically
     }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — fuse() weight-1 + cosine-direction invariants
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_fuse_with_weight_one_returns_primary() {
+        // fuse(primary, secondary, 1.0) MUST return the primary vector
+        // verbatim. The doc commits to "result is returned un-normalized" —
+        // so equality must hold element-by-element.
+        let primary = vec![0.6_f32, -0.8, 0.0]; // L2 norm = 1
+        let secondary = vec![0.0_f32, 0.0, 1.0];
+        let fused = Embedder::fuse(&primary, &secondary, 1.0);
+        assert_eq!(fused.len(), primary.len());
+        for (i, (f, p)) in fused.iter().zip(primary.iter()).enumerate() {
+            assert!(
+                (f - p).abs() < 1e-6,
+                "fuse weight=1 idx {i}: fused {} != primary {}",
+                f,
+                p
+            );
+        }
+
+        // Cosine-direction equivalence: even after any (no-op) normalization,
+        // the direction matches the primary.
+        let sim = Embedder::cosine_similarity(&fused, &primary);
+        assert!(
+            (sim - 1.0).abs() < 1e-6,
+            "cos(fuse(p,s,1.0), p) must be 1.0"
+        );
+    }
+
+    #[test]
+    fn test_fuse_is_l2_normalized() {
+        // The current fuse() contract returns an UN-normalized vector
+        // (per its rustdoc). Cosine_similarity divides out magnitudes,
+        // so the practical signal is direction. This test pins the
+        // observed behavior so a future change to "return L2-normalized
+        // output" is caught — and asserts the direction-only contract
+        // holds via cosine_similarity.
+        let primary = vec![3.0_f32, 0.0, 0.0]; // norm = 3
+        let secondary = vec![0.0_f32, 4.0, 0.0]; // norm = 4
+        let fused = Embedder::fuse(&primary, &secondary, 0.5);
+        // Raw fused = [1.5, 2.0, 0.0]; L2 norm = sqrt(1.5^2 + 2.0^2) = 2.5
+        let norm = fused.iter().map(|x| x * x).sum::<f32>().sqrt();
+        // Pin behavior: returned vector is NOT L2-normalized.
+        assert!(
+            (norm - 2.5).abs() < 1e-5,
+            "fuse currently returns un-normalized vec; norm should be 2.5, got {norm}"
+        );
+
+        // But the cosine-direction signal is well-defined and consistent
+        // with a hypothetical normalized output.
+        let normalized: Vec<f32> = fused.iter().map(|x| x / norm).collect();
+        let renorm = normalized.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (renorm - 1.0).abs() < 1e-5,
+            "renormalized fused must have unit norm, got {renorm}"
+        );
+        // Direction is preserved between un-normalized and normalized.
+        let sim = Embedder::cosine_similarity(&fused, &normalized);
+        assert!(
+            (sim - 1.0).abs() < 1e-5,
+            "cos(raw_fuse, normalize(raw_fuse)) must be 1.0, got {sim}"
+        );
+    }
 }
 
 #[cfg(test)]

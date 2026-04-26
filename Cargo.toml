@@ -94,6 +94,10 @@ sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 # adapter. `sal-postgres` layers on the Postgres/pgvector backend.
 sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
 sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
+# W11/S11b — opt-in feature for tests that pull large model weights at runtime
+# (BERT cross-encoder, MiniLM, etc.). Off by default so CI doesn't download
+# 80MB+ on every run.
+test-with-models = []
 
 [dev-dependencies]
 proptest = "1"

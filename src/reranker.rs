@@ -481,6 +481,69 @@ mod tests {
             "phrase match ({s_phrase}) should beat scattered ({s_scattered})"
         );
     }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — input-count invariants for the rerank() API
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_rerank_preserves_input_count_heuristic() {
+        let ce = CrossEncoder::new();
+        // Build 5 distinct candidates with varied original scores.
+        let candidates: Vec<(Memory, f64)> = (0..5)
+            .map(|i| {
+                (
+                    make_memory(
+                        &format!("title {i}"),
+                        &format!("content body number {i} with some words"),
+                    ),
+                    f64::from(i) * 0.1,
+                )
+            })
+            .collect();
+        let query = "title content body";
+        let reranked = ce.rerank(query, candidates);
+        assert_eq!(
+            reranked.len(),
+            5,
+            "heuristic rerank must preserve candidate count, got {} = {:?}",
+            reranked.len(),
+            reranked
+                .iter()
+                .map(|(m, s)| (&m.title, *s))
+                .collect::<Vec<_>>()
+        );
+        // Sorted descending by final score (rerank contract).
+        for w in reranked.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "rerank output must be descending by score: {} < {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn test_rerank_zero_candidates_returns_empty_heuristic() {
+        let ce = CrossEncoder::new();
+        let reranked = ce.rerank("query", Vec::new());
+        assert!(reranked.is_empty());
+    }
+
+    // Neural variant: gated to avoid pulling 80MB BERT weights at test time.
+    // Run with `--features test-with-models` once the cross-encoder feature
+    // exists upstream.
+    #[cfg(feature = "test-with-models")]
+    #[test]
+    fn test_rerank_preserves_input_count_neural_if_available() {
+        let ce = CrossEncoder::new_neural();
+        let candidates: Vec<(Memory, f64)> = (0..5)
+            .map(|i| (make_memory(&format!("t{i}"), &format!("body {i}")), 0.5))
+            .collect();
+        let reranked = ce.rerank("body", candidates);
+        assert_eq!(reranked.len(), 5);
+    }
 }
 
 #[cfg(test)]

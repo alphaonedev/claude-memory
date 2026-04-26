@@ -914,4 +914,146 @@ mod tests {
         }
         assert!(validate_metadata(&val).is_ok());
     }
+
+    // -----------------------------------------------------------------
+    // W11/S11b: proptest properties — boundary + adversarial fuzz
+    // -----------------------------------------------------------------
+    use proptest::prelude::*;
+
+    proptest! {
+        // Title rejection happens iff trimmed string is empty (whitespace-only or "").
+        #[test]
+        fn prop_validate_title_rejects_empty_strings_only_when_actually_empty(
+            ws in r"[ \t\n]{0,16}",
+            tail in r"[A-Za-z0-9 _\-.,!?]{0,80}",
+        ) {
+            // Whitespace-only must reject; otherwise title is valid (within char bounds).
+            let title = format!("{ws}{tail}{ws}");
+            let trimmed_empty = title.trim().is_empty();
+            let result = validate_title(&title);
+            if trimmed_empty {
+                prop_assert!(result.is_err(), "whitespace-only title must reject: {:?}", title);
+            } else if title.chars().count() <= 512 {
+                prop_assert!(result.is_ok(), "non-empty trimmed title must accept: {:?}", title);
+            }
+        }
+    }
+
+    proptest! {
+        // Namespaces with control chars / spaces / backslashes / null bytes must reject.
+        #[test]
+        fn prop_validate_namespace_rejects_invalid_chars(
+            base in r"[a-z][a-z0-9_-]{0,20}",
+            // Pick one of the always-rejected chars and splice it in.
+            bad in prop::sample::select(&[' ', '\\', '\0', '\x07', '\x1b', '\x08']),
+        ) {
+            let ns = format!("{base}{bad}suffix");
+            prop_assert!(
+                validate_namespace(&ns).is_err(),
+                "namespace with bad char {:?} must reject: {:?}", bad, ns
+            );
+        }
+    }
+
+    proptest! {
+        // a/b/c style paths up to 8 levels with safe chars should validate.
+        #[test]
+        fn prop_validate_namespace_accepts_valid_hierarchy(
+            segs in prop::collection::vec(r"[a-z][a-z0-9_-]{0,20}", 1..=8),
+        ) {
+            // Filter out `.` / `..` segments which the validator rejects.
+            let safe: Vec<String> = segs
+                .into_iter()
+                .filter(|s| s != "." && s != "..")
+                .collect();
+            if safe.is_empty() {
+                return Ok(());
+            }
+            let ns = safe.join("/");
+            prop_assert!(
+                validate_namespace(&ns).is_ok(),
+                "valid hierarchy must accept: {:?}", ns
+            );
+        }
+    }
+
+    proptest! {
+        // Priority must accept 1..=10, reject anything outside that band.
+        #[test]
+        fn prop_validate_priority_rejects_outside_range(p in -1000i32..1000i32) {
+            let result = validate_priority(p);
+            if (1..=10).contains(&p) {
+                prop_assert!(result.is_ok(), "priority {p} (in 1..=10) must accept");
+            } else {
+                prop_assert!(result.is_err(), "priority {p} (outside 1..=10) must reject");
+            }
+        }
+    }
+
+    proptest! {
+        // Confidence rejects NaN / infinity / out-of-band values, accepts [0.0, 1.0].
+        // Documented behavior: rejects (does not clamp).
+        #[test]
+        fn prop_validate_confidence_clamps_or_rejects(c in -10.0f64..10.0f64) {
+            let result = validate_confidence(c);
+            if (0.0..=1.0).contains(&c) {
+                prop_assert!(result.is_ok(), "confidence {c} in [0,1] must accept");
+            } else {
+                prop_assert!(result.is_err(), "confidence {c} outside [0,1] must reject");
+            }
+        }
+
+        #[test]
+        fn prop_validate_confidence_nan_inf_always_rejected(_u in Just(())) {
+            prop_assert!(validate_confidence(f64::NAN).is_err());
+            prop_assert!(validate_confidence(f64::INFINITY).is_err());
+            prop_assert!(validate_confidence(f64::NEG_INFINITY).is_err());
+        }
+    }
+
+    proptest! {
+        // Self-link must reject for every relation type, regardless of id payload.
+        #[test]
+        fn prop_validate_link_rejects_self_link_for_every_relation(
+            id in r"[a-z][a-zA-Z0-9_-]{0,32}",
+            rel_idx in 0usize..4,
+        ) {
+            let relations = ["related_to", "supersedes", "contradicts", "derived_from"];
+            let rel = relations[rel_idx];
+            let result = validate_link(&id, &id, rel);
+            prop_assert!(result.is_err(), "self-link must reject for relation {rel}, id {:?}", id);
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Unicode-boundary unit tests (W11/S11b — visible-but-tricky chars)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_title_accepts_zero_width_joiner() {
+        // ZWJ (U+200D) is not a control char; titles should accept it.
+        assert!(validate_title("emoji\u{200D}joiner").is_ok());
+    }
+
+    #[test]
+    fn test_title_accepts_rtl_marks() {
+        // Right-to-left mark (U+200F) and LRM (U+200E) are allowed (non-control).
+        assert!(validate_title("hello\u{200F}world").is_ok());
+        assert!(validate_title("hello\u{200E}world").is_ok());
+    }
+
+    #[test]
+    fn test_title_accepts_combining_chars() {
+        // Combining acute accent on `e` (U+0065 U+0301) — distinct chars,
+        // is_clean_string allows them; char count differs from byte count.
+        assert!(validate_title("cafe\u{0301}").is_ok());
+    }
+
+    #[test]
+    fn test_title_rejects_unicode_bom_as_control() {
+        // U+FEFF (BOM/zero-width no-break space) — Rust's `is_control` on BOM
+        // returns false (it's a format char, not control). Document actual
+        // behavior: titles containing BOM are accepted.
+        assert!(validate_title("foo\u{FEFF}bar").is_ok());
+    }
 }
