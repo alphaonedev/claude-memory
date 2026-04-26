@@ -858,7 +858,7 @@ mod tests {
             short_extend_secs = 7200
         "#;
         let cfg: AppConfig = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.ttl.as_ref().unwrap().mid_ttl_secs, Some(7776000));
+        assert_eq!(cfg.ttl.as_ref().unwrap().mid_ttl_secs, Some(7_776_000));
         assert_eq!(cfg.ttl.as_ref().unwrap().short_extend_secs, Some(7200));
         assert!(!cfg.effective_archive_on_gc());
     }
