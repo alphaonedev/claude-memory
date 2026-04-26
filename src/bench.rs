@@ -643,7 +643,6 @@ pub fn render_regression_table(rows: &[Regression]) -> String {
     out
 }
 
-#[cfg(test)]
 /// Append a benchmark result to a JSONL history file.
 /// Creates the file and parent directories if missing.
 /// Each line is a self-describing JSON object with `captured_at`, `iterations`,
@@ -659,10 +658,10 @@ pub fn append_history(
     use std::io::Write;
 
     // Create parent directories if needed
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
 
     let entry = serde_json::json!({
@@ -672,10 +671,7 @@ pub fn append_history(
         "results": results,
     });
 
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
 
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
     Ok(())
@@ -685,10 +681,12 @@ mod tests {
     use super::*;
     use crate::db;
 
+    #[allow(dead_code)]
     fn fresh_conn() -> Connection {
         db::open(Path::new(":memory:")).unwrap()
     }
 
+    #[allow(dead_code)]
     fn small_config() -> BenchConfig {
         BenchConfig {
             iterations: 30,
@@ -838,6 +836,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn synthetic_result(op: Operation, p95: f64) -> OperationResult {
         OperationResult {
             operation: op,
@@ -851,6 +850,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn synthetic_baseline(op: Operation, p95: f64) -> BaselineRecord {
         BaselineRecord {
             operation: op,
