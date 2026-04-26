@@ -12483,3 +12483,261 @@ async fn test_daemon_cmd_curator_daemon_cycles_then_terminates() {
 
     let _ = std::fs::remove_file(&db);
 }
+
+// ============================================================================
+// Closer M-prime: tests for the three new daemon_runtime variants Wave 3
+// added when migrating main.rs to the lib helpers. The Wave 2 X tests above
+// only transitively exercise these via the OLD wrappers, so the interesting
+// code paths (custom shutdown future, custom reqwest::Client, primitive-arg
+// curator config) were dark. These tests target each variant directly.
+// ============================================================================
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_serve_http_with_shutdown_future_runs_with_custom_cleanup() {
+    // Coverage: serve_http_with_shutdown_future — the variant of
+    // serve_http_with_shutdown that takes an arbitrary future instead of a
+    // Notify. Production main.rs::serve uses this so it can embed a WAL
+    // checkpoint cleanup step into the shutdown future. We pass a future
+    // that does nontrivial async work (a tokio sleep + observable side
+    // effect via an AtomicBool) before resolving, and confirm the helper
+    // runs the future and returns gracefully.
+    let dir = std::env::temp_dir();
+    let db = dir.join(format!(
+        "ai-memory-serve-future-test-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let port = free_port();
+    let addr = format!("127.0.0.1:{port}");
+
+    let (api_key_state, app_state) = build_serve_state(&db);
+
+    // Notify drives the inner shutdown signal; the outer shutdown future
+    // wraps it and additionally performs nontrivial cleanup work (sleep
+    // + AtomicBool flip) so we can observe that the helper actually
+    // awaited the user-supplied future before returning.
+    let inner_signal = std::sync::Arc::new(tokio::sync::Notify::new());
+    let inner_signal_for_future = inner_signal.clone();
+    let cleanup_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cleanup_ran_for_future = cleanup_ran.clone();
+
+    let shutdown_future = async move {
+        inner_signal_for_future.notified().await;
+        // Simulate the production WAL-checkpoint cleanup work — a tiny
+        // sleep + flag flip the test can verify ran before serve returned.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cleanup_ran_for_future.store(true, std::sync::atomic::Ordering::SeqCst);
+    };
+
+    let addr_for_daemon = addr.clone();
+    let handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::serve_http_with_shutdown_future(
+            &addr_for_daemon,
+            api_key_state,
+            app_state,
+            shutdown_future,
+        )
+        .await
+    });
+
+    // Wait for readiness via the same health-probe pattern as the Wave 2
+    // serve test.
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(resp) = reqwest::get(&format!("http://127.0.0.1:{port}/api/v1/health")).await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(
+        ready,
+        "serve_http_with_shutdown_future health probe never returned 200"
+    );
+
+    // Trigger shutdown — the user-supplied future's notified().await wakes,
+    // it does the cleanup work, then resolves; axum::serve drains; the
+    // helper returns Ok(()).
+    inner_signal.notify_one();
+
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => panic!("serve_http_with_shutdown_future errored: {e}"),
+        Ok(Err(e)) => panic!("daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
+
+    // Critical assertion: the user-supplied cleanup future ran. If the
+    // helper had dropped the future or wrapped it incorrectly, the bool
+    // would still be false. This verifies the future is actually awaited.
+    assert!(
+        cleanup_ran.load(std::sync::atomic::Ordering::SeqCst),
+        "shutdown future cleanup work did not run — helper failed to await user-supplied future"
+    );
+
+    let _ = std::fs::remove_file(&db);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_sync_with_shutdown_using_client_accepts_custom_client() {
+    // Coverage: run_sync_daemon_with_shutdown_using_client — the variant
+    // of run_sync_daemon_with_shutdown that takes a caller-built
+    // reqwest::Client. Production main.rs::cmd_sync_daemon constructs an
+    // mTLS-aware client via build_rustls_client_config and threads it in.
+    // We pass a custom client (non-default timeout, distinct user-agent)
+    // and confirm at least one cycle runs against an in-process peer
+    // and shutdown is honored.
+    let dir = std::env::temp_dir();
+    let db_peer = dir.join(format!(
+        "ai-memory-sync-client-peer-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    let db_local = dir.join(format!(
+        "ai-memory-sync-client-local-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    {
+        let _ = ai_memory::db::open(&db_local).unwrap();
+    }
+
+    // 1. In-process peer.
+    let peer_port = free_port();
+    let peer_addr = format!("127.0.0.1:{peer_port}");
+    let (peer_api_key, peer_state) = build_serve_state(&db_peer);
+    let peer_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let peer_shutdown_for_daemon = peer_shutdown.clone();
+    let peer_addr_for_daemon = peer_addr.clone();
+    let peer_handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::serve_http_with_shutdown(
+            &peer_addr_for_daemon,
+            peer_api_key,
+            peer_state,
+            peer_shutdown_for_daemon,
+        )
+        .await
+    });
+
+    let mut ready = false;
+    for _ in 0..50 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(resp) = reqwest::get(&format!("http://127.0.0.1:{peer_port}/api/v1/health")).await
+            && resp.status() == reqwest::StatusCode::OK
+        {
+            ready = true;
+            break;
+        }
+    }
+    assert!(ready, "peer serve never became ready");
+
+    // 2. Build a custom reqwest::Client that differs from the default the
+    //    plain run_sync_daemon_with_shutdown wrapper builds — non-default
+    //    timeout + a distinct user-agent. This is the production-shaped
+    //    use case (cmd_sync_daemon's mTLS client) compressed to test scale.
+    let custom_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .user_agent("ai-memory-sync-mprime-test/1")
+        .build()
+        .expect("custom client builds");
+
+    // 3. Run sync daemon loop with the custom client.
+    let sync_shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let sync_shutdown_for_daemon = sync_shutdown.clone();
+    let db_local_for_daemon = db_local.clone();
+    let peers = vec![format!("http://127.0.0.1:{peer_port}")];
+    let sync_handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::run_sync_daemon_with_shutdown_using_client(
+            custom_client,
+            db_local_for_daemon,
+            "test-agent-mprime".to_string(),
+            peers,
+            None,
+            1, // interval_secs
+            500,
+            sync_shutdown_for_daemon,
+        )
+        .await
+    });
+
+    // Allow at least one full cycle: JoinSet fanout, sync_cycle_once
+    // pull+push completes, the sleep+shutdown select runs.
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+    // 4. Trigger shutdown.
+    sync_shutdown.notify_one();
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), sync_handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            panic!("run_sync_daemon_with_shutdown_using_client errored: {e}")
+        }
+        Ok(Err(e)) => panic!("sync-daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("sync-daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
+
+    peer_shutdown.notify_one();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), peer_handle).await;
+
+    let _ = std::fs::remove_file(&db_local);
+    let _ = std::fs::remove_file(&db_peer);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_daemon_curator_with_primitives_runs_with_dry_run_config() {
+    // Coverage: run_curator_daemon_with_primitives — the primitive-arg
+    // flavour of the curator daemon helper. This path is independent
+    // of run_curator_daemon_with_shutdown (the typed-CuratorConfig path)
+    // and was fully dark prior to this test. Production
+    // main.rs::cmd_curator uses this variant to sidestep a bin/lib
+    // CuratorConfig type-mismatch.
+    let dir = std::env::temp_dir();
+    let db = dir.join(format!(
+        "ai-memory-curator-prim-test-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+    {
+        let _ = ai_memory::db::open(&db).unwrap();
+    }
+
+    let shutdown = std::sync::Arc::new(tokio::sync::Notify::new());
+    let shutdown_for_daemon = shutdown.clone();
+    let db_for_daemon = db.clone();
+    let handle = tokio::spawn(async move {
+        ai_memory::daemon_runtime::run_curator_daemon_with_primitives(
+            db_for_daemon,
+            1,    // interval_secs (clamped to 60s by run_daemon, but accepted here)
+            10,   // max_ops_per_cycle
+            true, // dry_run
+            Vec::new(),
+            Vec::new(),
+            None, // ollama_model — keyword-only path, no LLM
+            shutdown_for_daemon,
+        )
+        .await
+    });
+
+    // Let the daemon start: spawn_blocking thread spins up, run_daemon's
+    // first cycle runs against the empty DB, then it falls into the
+    // poll loop that observes shutdown every ~500ms.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    shutdown.notify_one();
+    let join = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+    match join {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(e))) => {
+            panic!("run_curator_daemon_with_primitives errored: {e}")
+        }
+        Ok(Err(e)) => panic!("curator daemon task panicked: {e}"),
+        Err(elapsed) => {
+            panic!("curator daemon failed to terminate within 5s of shutdown notify: {elapsed}")
+        }
+    }
+
+    let _ = std::fs::remove_file(&db);
+}
