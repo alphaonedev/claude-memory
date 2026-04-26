@@ -223,6 +223,8 @@ fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
+const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_hierarchy_kg.sql");
+
 fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
         .query_row(
@@ -514,17 +516,9 @@ fn migrate(conn: &Connection) -> Result<()> {
 
         if version < 15 {
             // v0.6.3 Stream B — Temporal-Validity KG schema additions.
-            // Charter §"Critical Schema Reference" (lines 686–723):
-            // four temporal columns on `memory_links`, three temporal
-            // indexes for KG traversal queries, and an `entity_aliases`
-            // side table for the upcoming entity registry. Pure additive
-            // — no existing column or index is dropped or renamed, so
-            // existing `link()` / `links_for()` paths keep working with
-            // the new columns NULL on legacy rows. The `valid_from`
-            // backfill matches the charter pre-flight default
-            // (charter line 428): set to the source memory's
-            // `created_at` to avoid null-handling complexity in v0.6.3
-            // KG query code.
+            // Migration extracted to migrations/sqlite/0010_v063_hierarchy_kg.sql.
+            // Preserve column-existence checks here since SQLite cannot do
+            // ALTER TABLE ADD COLUMN IF NOT EXISTS.
             let has_valid_from = conn
                 .prepare("SELECT valid_from FROM memory_links LIMIT 0")
                 .is_ok();
@@ -550,39 +544,8 @@ fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE memory_links ADD COLUMN signature BLOB", [])?;
             }
 
-            conn.execute(
-                "UPDATE memory_links \
-                 SET valid_from = (SELECT created_at FROM memories WHERE id = memory_links.source_id) \
-                 WHERE valid_from IS NULL",
-                [],
-            )?;
-
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_temporal_src \
-                 ON memory_links (source_id, valid_from, valid_until)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_temporal_tgt \
-                 ON memory_links (target_id, valid_from, valid_until)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_relation \
-                 ON memory_links (relation, valid_from)",
-                [],
-            )?;
-
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS entity_aliases (
-                    entity_id  TEXT NOT NULL,
-                    alias      TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (entity_id, alias)
-                );
-                CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias
-                  ON entity_aliases (alias);",
-            )?;
+            // All INDEX and TABLE statements are idempotent; batch-run the migration
+            conn.execute_batch(MIGRATION_V15_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
