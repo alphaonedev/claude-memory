@@ -3,50 +3,34 @@
 
 #![recursion_limit = "256"]
 
-mod autonomy;
-mod bench;
-mod color;
-mod config;
-mod curator;
-mod db;
-mod embeddings;
-mod errors;
-mod federation;
-mod handlers;
-mod hnsw;
-mod identity;
-mod llm;
-mod mcp;
-mod metrics;
+// Wave 3 (v0.6.3) — main.rs imports the production modules from the
+// `ai_memory` lib crate instead of `mod ...;`-recompiling them inside the
+// bin. The dual compilation produced two distinct nominal type sets for
+// the same source files, which kept the bin's `serve()` from delegating
+// to `daemon_runtime::serve_http_with_shutdown_*` and stranded the
+// route-table code at zero in-process coverage. Using lib types directly
+// lets the bin route through the test-shared helpers, which propagates
+// the integration suite's coverage onto the production paths.
+use ai_memory::{
+    autonomy, bench, color, config, curator, db, embeddings, federation, handlers, hnsw, identity,
+    llm, mcp, mine, models, reranker, validate,
+};
+
 #[cfg(feature = "sal")]
-mod migrate;
-mod mine;
-mod models;
-mod replication;
-mod reranker;
+use ai_memory::migrate;
 #[cfg(feature = "sal")]
-mod store;
-mod subscriptions;
-mod toon;
-mod validate;
+use ai_memory::store;
 
 use anyhow::{Context, Result};
-use axum::{
-    Router,
-    extract::DefaultBodyLimit,
-    routing::{delete, get, post, put},
-};
 use chrono::{Duration, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::models::Tier;
+use models::Tier;
 
 const DEFAULT_DB: &str = "ai-memory.db";
 const DEFAULT_PORT: u16 = 9077;
@@ -1138,142 +1122,11 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
         tracing::info!("API key authentication enabled");
     }
 
-    let app = Router::new()
-        .route("/api/v1/health", get(handlers::health))
-        // v0.6.0.0: Prometheus scrape endpoint. Exposed at both /metrics
-        // (the community convention) and /api/v1/metrics (consistent with
-        // the rest of the REST surface).
-        .route("/metrics", get(handlers::prometheus_metrics))
-        .route("/api/v1/metrics", get(handlers::prometheus_metrics))
-        .route("/api/v1/memories", get(handlers::list_memories))
-        .route("/api/v1/memories", post(handlers::create_memory))
-        .route("/api/v1/memories/bulk", post(handlers::bulk_create))
-        .route("/api/v1/memories/{id}", get(handlers::get_memory))
-        .route("/api/v1/memories/{id}", put(handlers::update_memory))
-        .route("/api/v1/memories/{id}", delete(handlers::delete_memory))
-        .route(
-            "/api/v1/memories/{id}/promote",
-            post(handlers::promote_memory),
-        )
-        .route("/api/v1/search", get(handlers::search_memories))
-        .route("/api/v1/recall", get(handlers::recall_memories_get))
-        .route("/api/v1/recall", post(handlers::recall_memories_post))
-        .route("/api/v1/forget", post(handlers::forget_memories))
-        .route("/api/v1/consolidate", post(handlers::consolidate_memories))
-        .route(
-            "/api/v1/contradictions",
-            get(handlers::detect_contradictions),
-        )
-        .route("/api/v1/links", post(handlers::create_link))
-        .route("/api/v1/links", delete(handlers::delete_link))
-        .route("/api/v1/links/{id}", get(handlers::get_links))
-        // HTTP parity for MCP-only tools. The `/api/v1/namespaces` surface
-        // serves three verbs: GET lists namespaces OR (when ?namespace=…)
-        // fetches the namespace standard, POST sets a standard, DELETE
-        // clears one. S34/S35 use the query-string form; the path form
-        // (`/api/v1/namespaces/{ns}/standard`) is kept for MCP-tool parity.
-        .route(
-            "/api/v1/namespaces",
-            get(handlers::get_namespace_standard_qs),
-        )
-        .route(
-            "/api/v1/namespaces",
-            post(handlers::set_namespace_standard_qs),
-        )
-        .route(
-            "/api/v1/namespaces",
-            delete(handlers::clear_namespace_standard_qs),
-        )
-        .route(
-            "/api/v1/namespaces/{ns}/standard",
-            post(handlers::set_namespace_standard),
-        )
-        .route(
-            "/api/v1/namespaces/{ns}/standard",
-            get(handlers::get_namespace_standard),
-        )
-        .route(
-            "/api/v1/namespaces/{ns}/standard",
-            delete(handlers::clear_namespace_standard),
-        )
-        // Pillar 1 / Stream A — hierarchical namespace taxonomy. REST
-        // mirror of the MCP `memory_get_taxonomy` tool. Query params:
-        // `prefix`, `depth`, `limit` (all optional).
-        .route("/api/v1/taxonomy", get(handlers::get_taxonomy))
-        // Pillar 2 / Stream D — pre-write near-duplicate check. REST
-        // mirror of the MCP `memory_check_duplicate` tool. Body:
-        // `{title, content, namespace?, threshold?}`.
-        .route("/api/v1/check_duplicate", post(handlers::check_duplicate))
-        // Pillar 2 / Stream B — entity registry. REST mirror of the
-        // `memory_entity_register` and `memory_entity_get_by_alias` MCP
-        // tools. POST body: `{canonical_name, namespace, aliases?, metadata?, agent_id?}`.
-        // GET query params: `alias` (required), `namespace?`.
-        .route("/api/v1/entities", post(handlers::entity_register))
-        .route(
-            "/api/v1/entities/by_alias",
-            get(handlers::entity_get_by_alias),
-        )
-        // Pillar 2 / Stream C — KG timeline. REST mirror of the MCP
-        // `memory_kg_timeline` tool. Query params: `source_id` (required),
-        // `since?`, `until?`, `limit?`.
-        .route("/api/v1/kg/timeline", get(handlers::kg_timeline))
-        // Pillar 2 / Stream C — KG link supersession. REST mirror of the
-        // MCP `memory_kg_invalidate` tool. POST body:
-        // `{source_id, target_id, relation, valid_until?}`. 200 when the
-        // link existed (with `previous_valid_until`); 404 when no link
-        // matches the triple.
-        .route("/api/v1/kg/invalidate", post(handlers::kg_invalidate))
-        // Pillar 2 / Stream C — KG outbound traversal ('expand
-        // neighbors'). REST mirror of the MCP `memory_kg_query` tool.
-        // POST is used because `allowed_agents` is a list. This build
-        // supports `max_depth=1` only; multi-hop traversal lands in a
-        // follow-up iteration. 422 when an unsupported max_depth is
-        // requested.
-        .route("/api/v1/kg/query", post(handlers::kg_query))
-        .route("/api/v1/stats", get(handlers::get_stats))
-        .route("/api/v1/gc", post(handlers::run_gc))
-        .route("/api/v1/export", get(handlers::export_memories))
-        .route("/api/v1/import", post(handlers::import_memories))
-        .route("/api/v1/archive", get(handlers::list_archive))
-        .route("/api/v1/archive", post(handlers::archive_by_ids))
-        .route("/api/v1/archive", delete(handlers::purge_archive))
-        .route(
-            "/api/v1/archive/{id}/restore",
-            post(handlers::restore_archive),
-        )
-        .route("/api/v1/archive/stats", get(handlers::archive_stats))
-        .route("/api/v1/agents", get(handlers::list_agents))
-        .route("/api/v1/agents", post(handlers::register_agent))
-        .route("/api/v1/pending", get(handlers::list_pending))
-        .route(
-            "/api/v1/pending/{id}/approve",
-            post(handlers::approve_pending),
-        )
-        .route(
-            "/api/v1/pending/{id}/reject",
-            post(handlers::reject_pending),
-        )
-        // Phase 3 foundation (issue #224) — peer-to-peer sync endpoints.
-        // Skeletons running today's timestamp-aware merge; field-level CRDT
-        // and streaming land in v0.8.0.
-        .route("/api/v1/sync/push", post(handlers::sync_push))
-        .route("/api/v1/sync/since", get(handlers::sync_since))
-        // HTTP parity for MCP-only tools.
-        .route("/api/v1/capabilities", get(handlers::get_capabilities))
-        .route("/api/v1/notify", post(handlers::notify))
-        .route("/api/v1/inbox", get(handlers::get_inbox))
-        .route("/api/v1/subscriptions", post(handlers::subscribe))
-        .route("/api/v1/subscriptions", delete(handlers::unsubscribe))
-        .route("/api/v1/subscriptions", get(handlers::list_subscriptions))
-        .route("/api/v1/session/start", post(handlers::session_start))
-        .layer(axum::middleware::from_fn_with_state(
-            api_key_state,
-            handlers::api_key_auth,
-        ))
-        .layer(TraceLayer::new_for_http())
-        .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2MB default (bulk/import bodies capped at MAX_BULK_SIZE * per-memory limit)
-        .layer(CorsLayer::new())
-        .with_state(app_state);
+    // Wave 3 (v0.6.3): the route table now lives in
+    // `ai_memory::build_router` so the production binary and the
+    // in-process integration tests share one source of truth. The
+    // function takes the same two state values we just constructed.
+    let app = ai_memory::build_router(api_key_state.clone(), app_state.clone());
 
     let addr = format!("{}:{}", args.host, args.port);
     tracing::info!("database: {}", db_path.display());
@@ -1331,10 +1184,19 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
              peer-mesh deployments (red-team #231)."
         );
         tracing::info!("ai-memory listening on http://{addr}");
-        let listener = tokio::net::TcpListener::bind(&addr).await?;
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown)
-            .await?;
+        // Wave 3 (v0.6.3): the non-TLS path delegates to
+        // `daemon_runtime::serve_http_with_shutdown_future`, which is the
+        // same `build_router` + `TcpListener::bind` + `axum::serve` body
+        // the integration tests drive in-process. Production threads its
+        // WAL-checkpoint-on-shutdown future in directly so the cleanup
+        // semantic is preserved verbatim.
+        ai_memory::daemon_runtime::serve_http_with_shutdown_future(
+            &addr,
+            api_key_state,
+            app_state,
+            shutdown,
+        )
+        .await?;
     }
     Ok(())
 }

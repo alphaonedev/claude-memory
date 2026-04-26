@@ -50,14 +50,35 @@ pub async fn serve_http_with_shutdown(
     app_state: AppState,
     shutdown: Arc<Notify>,
 ) -> Result<()> {
+    serve_http_with_shutdown_future(addr, api_key_state, app_state, async move {
+        shutdown.notified().await;
+    })
+    .await
+}
+
+/// Variant of [`serve_http_with_shutdown`] that takes an arbitrary
+/// shutdown future. The production `serve()` in `main.rs` needs to
+/// run a WAL checkpoint after the OS signal but before tearing down
+/// the listener; that cleanup work is awkward to express through a
+/// `Notify` alone. Accepting a `Future` lets the caller embed any
+/// async cleanup into the shutdown future itself, while the helper
+/// keeps the `build_router` + `TcpListener::bind` + `axum::serve`
+/// body it already owns.
+pub async fn serve_http_with_shutdown_future<F>(
+    addr: &str,
+    api_key_state: ApiKeyState,
+    app_state: AppState,
+    shutdown: F,
+) -> Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
     let app = crate::build_router(api_key_state, app_state);
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown.notified().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .await
         .context("axum::serve")?;
     Ok(())
