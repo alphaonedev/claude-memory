@@ -5,6 +5,7 @@
 
 mod autonomy;
 mod bench;
+mod canonical_workload;
 mod color;
 mod config;
 mod curator;
