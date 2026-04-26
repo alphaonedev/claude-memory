@@ -8589,6 +8589,15 @@ struct OneshotDaemon {
 
 impl OneshotDaemon {
     fn new() -> Self {
+        Self::with_federation(None)
+    }
+
+    /// Build an in-process leader with an optional federation config.
+    /// Mirrors `new()` but lets a test wire `AppState.federation = Some(_)`
+    /// to exercise the quorum fan-out / `fanout_or_503` HTTP write path
+    /// against in-process mock peers (see `spawn_inproc_mock_peer`).
+    #[allow(dead_code)]
+    fn with_federation(federation: Option<ai_memory::federation::FederationConfig>) -> Self {
         let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
         let path = std::path::PathBuf::from(":memory:");
         let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((
@@ -8601,7 +8610,7 @@ impl OneshotDaemon {
             db,
             embedder: std::sync::Arc::new(None),
             vector_index: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-            federation: std::sync::Arc::new(None),
+            federation: std::sync::Arc::new(federation),
             tier_config: std::sync::Arc::new(ai_memory::config::FeatureTier::Keyword.config()),
             scoring: std::sync::Arc::new(ai_memory::config::ResolvedScoring::default()),
         };
@@ -10245,25 +10254,157 @@ fn test_curator_autonomy_end_to_end_cycle() {
     assert!(report["cycle_duration_ms"].is_u64());
 }
 
-#[test]
-fn test_quorum_partial_failure_with_timeout() {
-    // Justice of Federation Tier 1: quorum partial failure with timeout.
-    // 3-peer mesh, W=2/N=3. Verifies that leader can achieve quorum with
-    // 2 acks out of 3 peers via HTTP fanout (integrating real TCP, not mocks).
-    let peer1 = DaemonGuard::spawn();
-    let peer2 = DaemonGuard::spawn();
-    let peer3 = DaemonGuard::spawn();
+/// Spawn a lightweight in-process axum mock peer that responds 200 to
+/// `POST /api/v1/sync/push` and records the call count. Returns the peer
+/// URL (`http://127.0.0.1:<port>`) and a shared counter the test can
+/// inspect to assert quorum fanout reached the peer.
+///
+/// Modeled after `src/federation.rs::tests::spawn_mock_peer`. Used only
+/// by the in-process federation integration tests (where the leader is
+/// an `OneshotDaemon` and the peers are these stubs); production code
+/// paths in `federation.rs` (broadcast_store_quorum, fanout_or_503, the
+/// reqwest fan-out, deadline plumbing, ack tracking) all run inside the
+/// test process and are attributed to coverage.
+#[allow(dead_code)]
+async fn spawn_inproc_mock_peer(
+    behaviour: InprocPeerBehaviour,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    use axum::{Json as AxumJson, Router, extract::State, http::StatusCode, routing::post};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    let peer_urls = vec![
-        format!("http://127.0.0.1:{}", peer1.port),
-        format!("http://127.0.0.1:{}", peer2.port),
-        format!("http://127.0.0.1:{}", peer3.port),
-    ];
+    #[derive(Clone)]
+    struct PeerState {
+        behaviour: InprocPeerBehaviour,
+        count: Arc<AtomicUsize>,
+    }
 
-    // Leader: W=2/N=3 quorum, short timeout (2s) to keep test fast.
-    let leader = spawn_leader_with_timeout(2, &peer_urls, 2000);
+    async fn handler(
+        State(state): State<PeerState>,
+        AxumJson(_payload): AxumJson<serde_json::Value>,
+    ) -> (StatusCode, AxumJson<serde_json::Value>) {
+        state.count.fetch_add(1, Ordering::Relaxed);
+        match state.behaviour {
+            InprocPeerBehaviour::Ack => (
+                StatusCode::OK,
+                AxumJson(serde_json::json!({"applied":1,"noop":0,"skipped":0})),
+            ),
+            InprocPeerBehaviour::Fail => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                AxumJson(serde_json::json!({"error":"stub fail"})),
+            ),
+        }
+    }
 
-    // Store a memory on the leader with quorum replication.
+    let counter = Arc::new(AtomicUsize::new(0));
+    let app = Router::new()
+        .route("/api/v1/sync/push", post(handler))
+        .with_state(PeerState {
+            behaviour,
+            count: counter.clone(),
+        });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.ok();
+    });
+    (format!("http://{addr}"), counter)
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+enum InprocPeerBehaviour {
+    Ack,
+    Fail,
+}
+
+/// Build a `FederationConfig` pointing the leader at the given peer URLs
+/// with `W=quorum_writes` and a short ack timeout. Mirrors
+/// `FederationConfig::build()` minus the TLS plumbing — the test peers
+/// are plain HTTP, and there's no CA/identity work to do.
+#[allow(dead_code)]
+fn federation_cfg_for_test(
+    peer_urls: &[String],
+    quorum_writes: usize,
+    timeout_ms: u64,
+) -> ai_memory::federation::FederationConfig {
+    use std::time::Duration;
+    let timeout = Duration::from_millis(timeout_ms);
+    let client = reqwest::Client::builder()
+        .timeout(timeout)
+        .connect_timeout(Duration::from_secs(2))
+        .build()
+        .expect("build test reqwest client");
+    let n = 1 + peer_urls.len();
+    let policy = ai_memory::replication::QuorumPolicy::new(
+        n,
+        quorum_writes,
+        timeout,
+        Duration::from_secs(30),
+    )
+    .expect("valid quorum policy");
+    let peers = peer_urls
+        .iter()
+        .enumerate()
+        .map(|(i, raw)| {
+            let trimmed = raw.trim_end_matches('/');
+            ai_memory::federation::PeerEndpoint {
+                id: format!("peer-{i}"),
+                sync_push_url: format!("{trimmed}/api/v1/sync/push"),
+            }
+        })
+        .collect();
+    ai_memory::federation::FederationConfig {
+        policy,
+        peers,
+        client,
+        sender_agent_id: "ai:fed-test".to_string(),
+    }
+}
+
+/// Justice of Federation Tier 1: quorum partial failure with timeout.
+///
+/// 3-peer mesh, W=2/N=3. Verifies that the leader can achieve quorum
+/// with 2 acks out of 3 peers via HTTP fanout. Refactored from the
+/// original spawn-3-real-daemons form to leader-in-process +
+/// 3 in-process axum mock peers — production federation code paths
+/// (`broadcast_store_quorum`, `fanout_or_503`, the reqwest fan-out,
+/// `AckTracker` deadline plumbing) all run in the test process so
+/// `cargo llvm-cov` attributes their coverage to `federation.rs`.
+///
+/// Tests that genuinely need real sockets (mTLS handshake, multi-process
+/// sync mesh) correctly stay in their subprocess form below.
+#[tokio::test]
+async fn test_quorum_partial_failure_with_timeout() {
+    // 3 healthy peers; W=2 means 1 local + 1 peer ack is enough to
+    // satisfy quorum. The remaining peer(s) still receive the post-
+    // quorum detached fanout.
+    let (url1, count1) = spawn_inproc_mock_peer(InprocPeerBehaviour::Ack).await;
+    let (url2, count2) = spawn_inproc_mock_peer(InprocPeerBehaviour::Ack).await;
+    let (url3, count3) = spawn_inproc_mock_peer(InprocPeerBehaviour::Ack).await;
+    let peer_urls = vec![url1, url2, url3];
+
+    // W=2, short ack-timeout (2s) — still well above an in-process
+    // localhost round-trip even on the slowest CI runner.
+    let cfg = federation_cfg_for_test(&peer_urls, 2, 2000);
+    let leader = OneshotDaemon::with_federation(Some(cfg));
+
+    // Pre-register the writer agent. NOTE: register_agent also fans out
+    // to peers when federation is enabled (see handlers.rs:547), so each
+    // mock peer will see this POST in addition to the per-memory POSTs
+    // below — we account for that in the per-peer counter assertions.
+    let (code_reg, _) = route_post(
+        &leader,
+        "/api/v1/agents",
+        &serde_json::json!({"agent_id": "ai:fed-test", "agent_type": "ai:test"}),
+        None,
+    )
+    .await;
+    assert!(
+        code_reg == "200" || code_reg == "201",
+        "agent reg: {code_reg}"
+    );
+
     let body = serde_json::json!({
         "tier": "long",
         "namespace": "fed-partial-fail",
@@ -10276,32 +10417,43 @@ fn test_quorum_partial_failure_with_timeout() {
         "metadata": {}
     });
 
-    let (code, resp) = curl_post(leader.port, "/api/v1/memories", &body, Some("ai:fed-test"));
+    let (code, resp) = route_post(&leader, "/api/v1/memories", &body, Some("ai:fed-test")).await;
     assert_eq!(code, "201", "initial store: {resp}");
 
-    // Verify the memory reached at least 2 peers (quorum met for initial store).
-    let mem_id = resp["id"].as_str().unwrap().to_string();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    let mut acks = 0;
-    while std::time::Instant::now() < deadline && acks < 2 {
-        for peer in [&peer1, &peer2, &peer3] {
-            let (code, _body) = curl_get(peer.port, &format!("/api/v1/memories/{}", &mem_id));
-            if code == "200" {
-                acks += 1;
-            }
-        }
-        if acks >= 2 {
+    // Detached post-quorum fanout reaches every peer eventually. We
+    // expect ≥2 calls per peer (1 from register_agent, 1 from the store
+    // above). Wait for all three peers to record at least 2 calls.
+    use std::sync::atomic::Ordering;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        if count1.load(Ordering::Relaxed) >= 2
+            && count2.load(Ordering::Relaxed) >= 2
+            && count3.load(Ordering::Relaxed) >= 2
+        {
             break;
         }
-        acks = 0;
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(
-        acks >= 2,
-        "initial fanout did not reach 2 peers; acks={acks}"
+        count1.load(Ordering::Relaxed) >= 2,
+        "peer-1 must receive the fanout for both register_agent + memory POST; got {}",
+        count1.load(Ordering::Relaxed)
+    );
+    assert!(
+        count2.load(Ordering::Relaxed) >= 2,
+        "peer-2 must receive the fanout for both register_agent + memory POST; got {}",
+        count2.load(Ordering::Relaxed)
+    );
+    assert!(
+        count3.load(Ordering::Relaxed) >= 2,
+        "peer-3 must receive the fanout for both register_agent + memory POST; got {}",
+        count3.load(Ordering::Relaxed)
     );
 
-    // Test second memory to verify consistency
+    // Second write — verifies the AppState.federation arc is reusable
+    // and the leader's reqwest client/connection-pool survives a second
+    // round-trip. (Catches the v0.6.0-RC client_builder regression that
+    // wedged on the second write.)
     let body2 = serde_json::json!({
         "tier": "mid",
         "namespace": "fed-partial-fail",
@@ -10313,39 +10465,67 @@ fn test_quorum_partial_failure_with_timeout() {
         "source": "api",
         "metadata": {}
     });
-
-    let (code2, resp2) = curl_post(leader.port, "/api/v1/memories", &body2, Some("ai:fed-test"));
+    let (code2, resp2) = route_post(&leader, "/api/v1/memories", &body2, Some("ai:fed-test")).await;
     assert_eq!(code2, "201", "second store with W=2: {resp2}");
+
+    // Each peer should now have seen 3 POSTs (register + 2 memory writes).
+    let deadline2 = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while std::time::Instant::now() < deadline2 {
+        if count1.load(Ordering::Relaxed) >= 3
+            && count2.load(Ordering::Relaxed) >= 3
+            && count3.load(Ordering::Relaxed) >= 3
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        count1.load(Ordering::Relaxed) >= 3,
+        "peer-1 second-write fanout missed"
+    );
+    assert!(
+        count2.load(Ordering::Relaxed) >= 3,
+        "peer-2 second-write fanout missed"
+    );
+    assert!(
+        count3.load(Ordering::Relaxed) >= 3,
+        "peer-3 second-write fanout missed"
+    );
 }
 
-#[test]
-fn test_subscription_webhook_namespace_filter() {
-    // Justice of Federation Tier 1: subscription webhook with namespace_filter.
-    // Register a webhook subscription with a namespace filter, verify that
-    // the subscription is stored and can be retrieved. This exercises the
-    // HTTP-level subscription API with namespace filtering.
-    let d = DaemonGuard::spawn();
+/// Justice of Federation Tier 1: subscription webhook with namespace_filter.
+///
+/// Register a webhook subscription with a namespace filter, store memories
+/// in matching + non-matching namespaces, and verify the subscription
+/// survives the writes. Refactored from `DaemonGuard::spawn() + curl_*()`
+/// to `OneshotDaemon` since this test exercises only the subscription
+/// HTTP API + create_memory write path — no real-socket behavior needed.
+#[tokio::test]
+async fn test_subscription_webhook_namespace_filter() {
+    let d = OneshotDaemon::new();
 
     // Pre-register subscriber agent.
-    let _ = curl_post(
-        d.port,
+    let _ = route_post(
+        &d,
         "/api/v1/agents",
         &serde_json::json!({"agent_id": "webhook-receiver", "agent_type": "ai:generic"}),
         None,
-    );
+    )
+    .await;
 
     // Create a namespace filter subscription.
     let filter_ns = "webhook-test-foo";
 
-    let (code, resp) = curl_post(
-        d.port,
+    let (code, resp) = route_post(
+        &d,
         "/api/v1/subscriptions",
         &serde_json::json!({
             "agent_id": "webhook-receiver",
             "namespace": filter_ns
         }),
         Some("webhook-receiver"),
-    );
+    )
+    .await;
     assert!(
         code == "201" || code == "200",
         "subscribe code={code}: {resp}"
@@ -10353,7 +10533,7 @@ fn test_subscription_webhook_namespace_filter() {
 
     // Immediately verify the subscription was created.
     let (code_subs, body_subs) =
-        curl_get(d.port, "/api/v1/subscriptions?agent_id=webhook-receiver");
+        route_get(&d, "/api/v1/subscriptions?agent_id=webhook-receiver").await;
     assert_eq!(code_subs, "200");
     let subs = body_subs["subscriptions"]
         .as_array()
@@ -10377,12 +10557,13 @@ fn test_subscription_webhook_namespace_filter() {
         "metadata": {"test": "matching"}
     });
 
-    let (code_m, resp_m) = curl_post(
-        d.port,
+    let (code_m, resp_m) = route_post(
+        &d,
         "/api/v1/memories",
         &matching_body,
         Some("ai:webhook-test"),
-    );
+    )
+    .await;
     assert_eq!(code_m, "201", "store matching: {resp_m}");
 
     // Store a memory in a *non-matching* namespace.
@@ -10399,17 +10580,18 @@ fn test_subscription_webhook_namespace_filter() {
         "metadata": {"test": "non-matching"}
     });
 
-    let (code_nm, _resp_nm) = curl_post(
-        d.port,
+    let (code_nm, _resp_nm) = route_post(
+        &d,
         "/api/v1/memories",
         &non_matching_body,
         Some("ai:webhook-test"),
-    );
+    )
+    .await;
     assert_eq!(code_nm, "201", "store non-matching memory");
 
     // Verify the subscription is still active after storing memories.
     let (code_subs_final, body_subs_final) =
-        curl_get(d.port, "/api/v1/subscriptions?agent_id=webhook-receiver");
+        route_get(&d, "/api/v1/subscriptions?agent_id=webhook-receiver").await;
     assert_eq!(code_subs_final, "200");
     let subs_final = body_subs_final["subscriptions"]
         .as_array()
@@ -10422,7 +10604,11 @@ fn test_subscription_webhook_namespace_filter() {
     );
 }
 
-/// Helper to spawn a leader with custom timeout.
+/// Helper to spawn a leader with custom timeout. Retained for the
+/// real-socket mTLS handshake test (`test_serve_mtls_fingerprint_*`) and
+/// the multi-process sync mesh test, which both need a real
+/// `ai-memory serve` daemon.
+#[allow(dead_code)]
 fn spawn_leader_with_timeout(
     quorum_writes: usize,
     peer_urls: &[String],
