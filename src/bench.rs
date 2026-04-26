@@ -28,9 +28,11 @@
 //! and are tracked as follow-up Stream E work — they don't belong on
 //! the hot path of a `cargo test` invocation.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use serde::Serialize;
+use std::io::Write;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::db;
@@ -494,6 +496,67 @@ fn percentile(sorted: &[f64], q: f64) -> f64 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
+/// Append one bench run as a single JSONL line to `path`. Creates the
+/// file (and any missing parent directories) on first call so a
+/// long-running campaign can hand a fresh path on every machine and
+/// accumulate a regression dataset across runs.
+///
+/// Each line is a complete, self-describing JSON object:
+/// `{ "captured_at": <RFC3339>, "iterations": N, "warmup": M,
+///    "results": [...] }`. The `results` array is the same shape
+/// `bench --json` emits, so any reader that already parses the JSON
+/// payload (`load_baseline` in the future, ad-hoc plotting scripts,
+/// CI artifact dashboards) can reuse the schema by reading one line at
+/// a time.
+///
+/// Atomicity is best-effort: each call serializes the entry into a
+/// single buffer, opens the file with `O_CREAT | O_APPEND`, and issues
+/// one `write_all`. On Linux/macOS that buys POSIX-append's "no
+/// interleaving with other appenders" guarantee for writes ≤ `PIPE_BUF`
+/// (4 KiB) — comfortably above the ~1 KiB this entry occupies. We do
+/// not fsync, since downstream consumers re-parse on each load and the
+/// kernel page cache satisfies same-process readers.
+///
+/// # Errors
+///
+/// Returns an error if the parent directory cannot be created, the
+/// file cannot be opened for append, or the line cannot be written.
+pub fn append_history(
+    path: &Path,
+    captured_at: &str,
+    iterations: usize,
+    warmup: usize,
+    results: &[OperationResult],
+) -> Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create parent directory for history file {}",
+                parent.display()
+            )
+        })?;
+    }
+    let entry = serde_json::json!({
+        "captured_at": captured_at,
+        "iterations": iterations,
+        "warmup": warmup,
+        "results": results,
+    });
+    let mut line =
+        serde_json::to_string(&entry).context("failed to serialize bench history entry")?;
+    line.push('\n');
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("failed to open history file {}", path.display()))?;
+    file.write_all(line.as_bytes())
+        .with_context(|| format!("failed to append to history file {}", path.display()))?;
+    Ok(())
+}
+
 /// Render a results table to a string in the same shape used in the
 /// `PERFORMANCE.md` "Operator Self-Verification" example.
 #[must_use]
@@ -681,5 +744,133 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn synth_results_two_ops() -> Vec<OperationResult> {
+        vec![
+            OperationResult {
+                operation: Operation::StoreNoEmbedding,
+                label: Operation::StoreNoEmbedding.label(),
+                target_p95_ms: 20.0,
+                measured_p50_ms: 0.3,
+                measured_p95_ms: 0.4,
+                measured_p99_ms: 0.5,
+                samples: 100,
+                status: Status::Pass,
+            },
+            OperationResult {
+                operation: Operation::KgQueryDepth5,
+                label: Operation::KgQueryDepth5.label(),
+                target_p95_ms: 250.0,
+                measured_p50_ms: 0.6,
+                measured_p95_ms: 0.7,
+                measured_p99_ms: 1.0,
+                samples: 100,
+                status: Status::Pass,
+            },
+        ]
+    }
+
+    #[test]
+    fn append_history_creates_file_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        assert!(!path.exists());
+        append_history(
+            &path,
+            "2026-04-26T03:00:00Z",
+            200,
+            20,
+            &synth_results_two_ops(),
+        )
+        .unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 1, "first call must write exactly one line");
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(parsed["captured_at"], "2026-04-26T03:00:00Z");
+        assert_eq!(parsed["iterations"], 200);
+        assert_eq!(parsed["warmup"], 20);
+        assert_eq!(parsed["results"].as_array().unwrap().len(), 2);
+        assert_eq!(parsed["results"][0]["operation"], "store_no_embedding");
+    }
+
+    #[test]
+    fn append_history_appends_subsequent_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let results = synth_results_two_ops();
+        append_history(&path, "2026-04-26T03:00:00Z", 200, 20, &results).unwrap();
+        append_history(&path, "2026-04-26T04:00:00Z", 400, 40, &results).unwrap();
+        append_history(&path, "2026-04-26T05:00:00Z", 600, 60, &results).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 3, "three appends must yield three lines");
+        // Each line is independently parseable JSON — the JSONL contract.
+        for line in &lines {
+            let _: serde_json::Value =
+                serde_json::from_str(line).expect("every line must be valid JSON");
+        }
+        // Order is preserved (append-only), iterations field reflects each call.
+        let parsed_iters: Vec<i64> = lines
+            .iter()
+            .map(|l| {
+                serde_json::from_str::<serde_json::Value>(l).unwrap()["iterations"]
+                    .as_i64()
+                    .unwrap()
+            })
+            .collect();
+        assert_eq!(parsed_iters, vec![200, 400, 600]);
+    }
+
+    #[test]
+    fn append_history_creates_missing_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/sub/dir/history.jsonl");
+        assert!(!path.parent().unwrap().exists());
+        append_history(
+            &path,
+            "2026-04-26T03:00:00Z",
+            200,
+            20,
+            &synth_results_two_ops(),
+        )
+        .unwrap();
+        assert!(path.exists(), "history file must be created");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+    }
+
+    #[test]
+    fn append_history_round_trips_through_load_to_results_shape() {
+        // The history line carries the same `results` array `bench --json`
+        // emits, so a downstream reader (e.g. a future `--baseline` source)
+        // can pluck a single line and reconstruct the per-op p95 sample.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        let results = synth_results_two_ops();
+        append_history(&path, "2026-04-26T03:00:00Z", 200, 20, &results).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let line = contents.lines().next().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        let parsed_results = parsed["results"].as_array().unwrap();
+        assert_eq!(parsed_results.len(), results.len());
+        for (orig, round) in results.iter().zip(parsed_results.iter()) {
+            assert_eq!(round["measured_p95_ms"], orig.measured_p95_ms);
+            assert_eq!(round["target_p95_ms"], orig.target_p95_ms);
+        }
+    }
+
+    #[test]
+    fn append_history_handles_empty_results_array() {
+        // A degenerate run (no operations registered) must still produce a
+        // valid JSONL line — the timestamp alone is useful for tracking
+        // when a run was attempted even if it produced no measurements.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("history.jsonl");
+        append_history(&path, "2026-04-26T03:00:00Z", 0, 0, &[]).unwrap();
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
+        assert_eq!(parsed["results"].as_array().unwrap().len(), 0);
     }
 }
