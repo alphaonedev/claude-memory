@@ -8481,6 +8481,152 @@ fn test_serve_rejects_half_tls_config() {
     let _ = std::fs::remove_file(&db);
 }
 
+#[test]
+fn test_cli_taxonomy_returns_hierarchical_tree() {
+    // Coverage for memory_get_taxonomy HTTP handler
+    // (Stream A audit gap — 0% coverage on MCP/HTTP path)
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!(
+        "ai-memory-taxonomy-test-{}.db",
+        uuid::Uuid::new_v4()
+    ));
+
+    // Seed ~6 memories across hierarchical + flat namespaces
+    for (ns, count) in &[
+        ("alphaone", 1),
+        ("alphaone/engineering", 1),
+        ("alphaone/engineering/platform", 1),
+        ("alphaone/engineering/platform/api", 3),
+        ("alphaone/sales", 1),
+        ("other", 1),
+    ] {
+        for i in 0..*count {
+            let title = format!("{}_memory_{}", ns.replace('/', "_"), i);
+            let output = cmd_output_or_panic(
+                binary,
+                &[
+                    "--db",
+                    db_path.to_str().unwrap(),
+                    "--json",
+                    "store",
+                    "-n",
+                    ns,
+                    "-T",
+                    &title,
+                    "--content",
+                    "test memory content",
+                ],
+            );
+            assert!(
+                output.status.success(),
+                "store failed in {}: {}",
+                ns,
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+
+    // Spawn serve daemon on a free port
+    let port = free_port();
+    let child = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "serve",
+            "--port",
+            &port.to_string(),
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _serve = ChildGuard::new(child).with_cleanup([db_path.clone()]);
+    assert!(wait_for_health(port), "serve never came up");
+
+    // GET /api/v1/taxonomy with no prefix — should get full tree
+    let (code, body) = curl_get(port, "/api/v1/taxonomy");
+    assert_eq!(code, "200", "taxonomy request failed: {body}");
+
+    // Parse JSON response
+    assert!(
+        body.get("tree").is_some(),
+        "missing tree in response: {body}"
+    );
+    assert!(
+        body.get("total_count").is_some(),
+        "missing total_count: {body}"
+    );
+    assert!(body.get("truncated").is_some(), "missing truncated: {body}");
+
+    let total = body["total_count"].as_u64().unwrap();
+    assert_eq!(total, 8, "expected 8 total memories, got {total}");
+
+    let truncated = body["truncated"].as_bool().unwrap();
+    assert!(!truncated, "should not be truncated for this small tree");
+
+    let tree = &body["tree"];
+    assert_eq!(
+        tree["namespace"].as_str().unwrap(),
+        "",
+        "root should have empty namespace"
+    );
+
+    // Find alphaone node in root's children
+    let children = tree["children"].as_array().unwrap();
+    let alphaone = children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("alphaone"))
+        .expect("alphaone node not found in root's children");
+
+    assert!(
+        alphaone["subtree_count"].as_u64().unwrap() > 0,
+        "alphaone subtree_count should be > 0"
+    );
+
+    // Check alphaone's children — should have engineering and sales
+    let alpha_children = alphaone["children"].as_array().unwrap();
+    assert!(
+        alpha_children.len() >= 2,
+        "alphaone should have at least 2 children (engineering, sales), got {}",
+        alpha_children.len()
+    );
+
+    let engineering = alpha_children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("engineering"))
+        .expect("engineering not found under alphaone");
+
+    let platform = engineering["children"]
+        .as_array()
+        .and_then(|ch| ch.iter().find(|c| c["name"].as_str() == Some("platform")))
+        .expect("platform not found under engineering");
+
+    let api = platform["children"]
+        .as_array()
+        .and_then(|ch| ch.iter().find(|c| c["name"].as_str() == Some("api")))
+        .expect("api not found under platform");
+
+    assert_eq!(
+        api["count"].as_u64().unwrap(),
+        3,
+        "api node should have count == 3"
+    );
+
+    // Check that "other" appears as a sibling at the root level
+    let other = children
+        .iter()
+        .find(|c| c["name"].as_str() == Some("other"))
+        .expect("other namespace not found as root-level sibling");
+    assert_eq!(
+        other["count"].as_u64().unwrap(),
+        1,
+        "other should have count == 1"
+    );
+
+    // Cleanup handled by ChildGuard
+}
+
 // ---------------------------------------------------------------------------
 // HTTP parity for MCP-only tools — feat/http-parity-for-mcp-only-tools.
 //
