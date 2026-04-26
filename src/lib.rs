@@ -14,6 +14,7 @@
 
 pub mod autonomy;
 pub mod bench;
+pub mod cli;
 pub mod color;
 pub mod config;
 pub mod curator;

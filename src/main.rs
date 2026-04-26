@@ -11,9 +11,13 @@
 // route-table code at zero in-process coverage. Using lib types directly
 // lets the bin route through the test-shared helpers, which propagates
 // the integration suite's coverage onto the production paths.
+use ai_memory::cli::helpers::{auto_namespace, human_age, id_short};
+use ai_memory::cli::io::{ImportArgs, MineArgs};
+use ai_memory::cli::store::StoreArgs;
+use ai_memory::cli::update::UpdateArgs;
 use ai_memory::{
-    autonomy, bench, color, config, curator, db, embeddings, federation, handlers, hnsw, identity,
-    llm, mcp, mine, models, reranker, tls, validate,
+    autonomy, bench, cli, color, config, curator, db, embeddings, federation, handlers, hnsw,
+    identity, llm, mcp, models, reranker, tls, validate,
 };
 
 #[cfg(feature = "sal")]
@@ -22,7 +26,6 @@ use ai_memory::migrate;
 use ai_memory::store;
 
 use anyhow::{Context, Result};
-use chrono::{Duration, Utc};
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use clap_complete::{Shell, generate};
 use std::path::{Path, PathBuf};
@@ -38,16 +41,6 @@ const GC_INTERVAL_SECS: u64 = 1800;
 /// WAL auto-checkpoint cadence in the HTTP daemon. Bounds `*-wal`
 /// file growth between `SQLite`'s internal page-count checkpoints.
 const WAL_CHECKPOINT_INTERVAL_SECS: u64 = 600;
-
-fn id_short(id: &str) -> &str {
-    let end = id.len().min(8);
-    // Find a valid UTF-8 boundary
-    let mut end = end;
-    while end > 0 && !id.is_char_boundary(end) {
-        end -= 1;
-    }
-    &id[..end]
-}
 
 #[derive(Parser)]
 #[command(
@@ -374,27 +367,6 @@ enum ArchiveAction {
 }
 
 #[derive(Args)]
-struct MineArgs {
-    /// Path to the export file or directory
-    path: PathBuf,
-    /// Export format: claude, chatgpt, slack
-    #[arg(long, short)]
-    format: String,
-    /// Namespace for imported memories (auto-detected if omitted)
-    #[arg(long, short)]
-    namespace: Option<String>,
-    /// Memory tier for imported memories
-    #[arg(long, short, default_value = "mid")]
-    tier: String,
-    /// Minimum message count to import a conversation
-    #[arg(long, default_value_t = 3)]
-    min_messages: usize,
-    /// Dry run — show what would be imported without writing
-    #[arg(long, default_value_t = false)]
-    dry_run: bool,
-}
-
-#[derive(Args)]
 struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
@@ -465,62 +437,6 @@ struct ServeArgs {
     /// node convergent within one interval after resume.
     #[arg(long, default_value_t = 30)]
     catchup_interval_secs: u64,
-}
-
-#[derive(Args)]
-struct StoreArgs {
-    #[arg(long, short, default_value = "mid")]
-    tier: String,
-    #[arg(long, short)]
-    namespace: Option<String>,
-    #[arg(long, short = 'T', allow_hyphen_values = true)]
-    title: String,
-    /// Content (use - to read from stdin)
-    #[arg(long, short, allow_hyphen_values = true)]
-    content: String,
-    #[arg(long, default_value = "")]
-    tags: String,
-    #[arg(long, short, default_value_t = 5)]
-    priority: i32,
-    /// Confidence 0.0-1.0
-    #[arg(long, default_value_t = 1.0)]
-    confidence: f64,
-    /// Source: user, claude, hook, api
-    #[arg(long, short = 'S', default_value = "cli")]
-    source: String,
-    /// Explicit expiry timestamp (RFC3339). Overrides tier default.
-    #[arg(long)]
-    expires_at: Option<String>,
-    /// TTL in seconds. Overrides tier default.
-    #[arg(long)]
-    ttl_secs: Option<i64>,
-    /// Task 1.5 visibility scope: private (default) / team / unit / org / collective.
-    /// Stored as `metadata.scope`; affects which agents can recall this memory
-    /// when queries use `--as-agent`.
-    #[arg(long)]
-    scope: Option<String>,
-}
-
-#[derive(Args)]
-struct UpdateArgs {
-    id: String,
-    #[arg(long, short = 'T', allow_hyphen_values = true)]
-    title: Option<String>,
-    #[arg(long, short, allow_hyphen_values = true)]
-    content: Option<String>,
-    #[arg(long, short)]
-    tier: Option<String>,
-    #[arg(long, short)]
-    namespace: Option<String>,
-    #[arg(long)]
-    tags: Option<String>,
-    #[arg(long, short)]
-    priority: Option<i32>,
-    #[arg(long)]
-    confidence: Option<f64>,
-    /// Expiry timestamp (RFC3339), or empty string to clear
-    #[arg(long)]
-    expires_at: Option<String>,
 }
 
 #[derive(Args)]
@@ -728,14 +644,6 @@ struct SyncArgs {
 }
 
 #[derive(Args)]
-struct ImportArgs {
-    /// Trust `metadata.agent_id` in imported JSON (default: restamp with caller's id).
-    /// Only use this when importing a JSON export you fully trust (e.g., your own backup).
-    #[arg(long, default_value_t = false)]
-    trust_source: bool,
-}
-
-#[derive(Args)]
 struct AutoConsolidateArgs {
     /// Namespace to consolidate
     #[arg(long, short)]
@@ -754,51 +662,6 @@ struct AutoConsolidateArgs {
 #[derive(Args)]
 struct CompletionsArgs {
     shell: Shell,
-}
-
-fn auto_namespace() -> String {
-    // Try git remote name
-    if let Ok(out) = std::process::Command::new("git")
-        .args(["remote", "get-url", "origin"])
-        .stderr(std::process::Stdio::null())
-        .output()
-    {
-        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if !url.is_empty() {
-            // Extract repo name from URL
-            if let Some(name) = url.rsplit('/').next() {
-                let name = name.trim_end_matches(".git");
-                if !name.is_empty() {
-                    return name.to_string();
-                }
-            }
-        }
-    }
-    // Fallback to current directory name
-    std::env::current_dir()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-        .unwrap_or_else(|| "global".to_string())
-}
-
-fn human_age(iso: &str) -> String {
-    let Ok(dt) = chrono::DateTime::parse_from_rfc3339(iso) else {
-        return iso.to_string();
-    };
-    let dur = Utc::now().signed_duration_since(dt);
-    if dur.num_seconds() < 60 {
-        return "just now".to_string();
-    }
-    if dur.num_minutes() < 60 {
-        return format!("{}m ago", dur.num_minutes());
-    }
-    if dur.num_hours() < 24 {
-        return format!("{}h ago", dur.num_hours());
-    }
-    if dur.num_days() < 30 {
-        return format!("{}d ago", dur.num_days());
-    }
-    format!("{}mo ago", dur.num_days() / 30)
 }
 
 #[tokio::main]
@@ -862,8 +725,29 @@ async fn main() -> Result<()> {
             mcp::run_mcp_server(&db_path, feature_tier, &app_config)?;
             Ok(())
         }
-        Command::Store(a) => cmd_store(&db_path, a, j, &app_config, cli_agent_id.as_deref()),
-        Command::Update(a) => cmd_update(&db_path, &a, j),
+        Command::Store(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = ai_memory::cli::CliOutput::from_std(&mut so, &mut se);
+            cli::store::run(
+                &db_path,
+                a,
+                j,
+                &app_config,
+                cli_agent_id.as_deref(),
+                &mut out,
+            )
+        }
+        Command::Update(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = ai_memory::cli::CliOutput::from_std(&mut so, &mut se);
+            cli::update::run(&db_path, &a, j, &mut out)
+        }
         Command::Recall(a) => cmd_recall(&db_path, &a, j, &app_config),
         Command::Search(a) => cmd_search(&db_path, &a, j, &app_config),
         Command::Get(a) => cmd_get(&db_path, &a, j),
@@ -883,8 +767,22 @@ async fn main() -> Result<()> {
         Command::Gc => cmd_gc(&db_path, j, &app_config),
         Command::Stats => cmd_stats(&db_path, j),
         Command::Namespaces => cmd_namespaces(&db_path, j),
-        Command::Export => cmd_export(&db_path),
-        Command::Import(a) => cmd_import(&db_path, &a, j, cli_agent_id.as_deref()),
+        Command::Export => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = ai_memory::cli::CliOutput::from_std(&mut so, &mut se);
+            cli::io::export(&db_path, &mut out)
+        }
+        Command::Import(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = ai_memory::cli::CliOutput::from_std(&mut so, &mut se);
+            cli::io::import(&db_path, &a, j, cli_agent_id.as_deref(), &mut out)
+        }
         Command::Completions(a) => {
             generate(
                 a.shell,
@@ -900,7 +798,21 @@ async fn main() -> Result<()> {
             man.render(&mut std::io::stdout())?;
             Ok(())
         }
-        Command::Mine(a) => cmd_mine(&db_path, a, j, &app_config, cli_agent_id.as_deref()),
+        Command::Mine(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = ai_memory::cli::CliOutput::from_std(&mut so, &mut se);
+            cli::io::mine(
+                &db_path,
+                a,
+                j,
+                &app_config,
+                cli_agent_id.as_deref(),
+                &mut out,
+            )
+        }
         Command::Archive(a) => cmd_archive(&db_path, a, j),
         Command::Agents(a) => cmd_agents(&db_path, a, j),
         Command::Pending(a) => cmd_pending(&db_path, a, j, cli_agent_id.as_deref()),
@@ -1202,238 +1114,6 @@ async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &config::AppConfig
 }
 
 // --- CLI ---
-
-#[allow(clippy::too_many_lines)]
-fn cmd_store(
-    db_path: &Path,
-    args: StoreArgs,
-    json_out: bool,
-    app_config: &config::AppConfig,
-    cli_agent_id: Option<&str>,
-) -> Result<()> {
-    let conn = db::open(db_path)?;
-    let resolved_ttl = app_config.effective_ttl();
-    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
-    let tier = Tier::from_str(&args.tier)
-        .ok_or_else(|| anyhow::anyhow!("invalid tier: {} (use short, mid, long)", args.tier))?;
-    let namespace = args.namespace.unwrap_or_else(auto_namespace);
-    let content = if args.content == "-" {
-        use std::io::Read;
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf)?;
-        buf
-    } else {
-        args.content
-    };
-    let tags: Vec<String> = args
-        .tags
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    // Validate all fields before touching the DB
-    validate::validate_title(&args.title)?;
-    validate::validate_content(&content)?;
-    validate::validate_namespace(&namespace)?;
-    validate::validate_source(&args.source)?;
-    validate::validate_tags(&tags)?;
-    validate::validate_priority(args.priority)?;
-    validate::validate_confidence(args.confidence)?;
-    validate::validate_expires_at(args.expires_at.as_deref())?;
-    validate::validate_ttl_secs(args.ttl_secs)?;
-
-    let now = Utc::now();
-    let expires_at = args.expires_at.or_else(|| {
-        args.ttl_secs
-            .or(resolved_ttl.ttl_for_tier(&tier))
-            .map(|s| (now + Duration::seconds(s)).to_rfc3339())
-    });
-    // Resolve agent_id via the NHI-hardened precedence chain. `cli_agent_id`
-    // already reflects `--agent-id` flag or `AI_MEMORY_AGENT_ID` env (clap
-    // merges both). When neither is set we fall through to the host/anonymous
-    // defaults provided by `crate::identity`.
-    let agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
-    let mut metadata = models::default_metadata();
-    if let Some(obj) = metadata.as_object_mut() {
-        obj.insert(
-            "agent_id".to_string(),
-            serde_json::Value::String(agent_id.clone()),
-        );
-    }
-    // #151 scope: validate + merge into metadata
-    if let Some(ref s) = args.scope {
-        validate::validate_scope(s)?;
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert("scope".to_string(), serde_json::Value::String(s.clone()));
-        }
-    }
-
-    let mem = models::Memory {
-        id: uuid::Uuid::new_v4().to_string(),
-        tier,
-        namespace,
-        title: args.title,
-        content,
-        tags,
-        priority: args.priority.clamp(1, 10),
-        confidence: args.confidence.clamp(0.0, 1.0),
-        source: args.source,
-        access_count: 0,
-        created_at: now.to_rfc3339(),
-        updated_at: now.to_rfc3339(),
-        last_accessed_at: None,
-        expires_at,
-        metadata,
-    };
-
-    // Task 1.9: governance enforcement (store-side). Payload is the full
-    // Memory so Task 1.10's execute_pending_action can replay it on approval.
-    {
-        use models::{GovernanceDecision, GovernedAction};
-        let payload = serde_json::to_value(&mem).unwrap_or_default();
-        match db::enforce_governance(
-            &conn,
-            GovernedAction::Store,
-            &mem.namespace,
-            &agent_id,
-            None,
-            None,
-            &payload,
-        )? {
-            GovernanceDecision::Allow => {}
-            GovernanceDecision::Deny(reason) => {
-                eprintln!("store denied by governance: {reason}");
-                std::process::exit(1);
-            }
-            GovernanceDecision::Pending(pending_id) => {
-                if json_out {
-                    println!(
-                        "{}",
-                        serde_json::json!({
-                            "status": "pending",
-                            "pending_id": pending_id,
-                            "reason": "governance requires approval",
-                            "action": "store",
-                            "namespace": &mem.namespace,
-                        })
-                    );
-                } else {
-                    println!(
-                        "store queued for approval: pending_id={pending_id} ns={}",
-                        &mem.namespace
-                    );
-                }
-                return Ok(());
-            }
-        }
-    }
-    let contradictions =
-        db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
-    let actual_id = db::insert(&conn, &mem)?;
-    // Exclude self-ID from contradictions (upsert may reuse existing ID)
-    let filtered: Vec<&String> = contradictions
-        .iter()
-        .filter(|c| c.id != mem.id && c.id != actual_id)
-        .map(|c| &c.id)
-        .collect();
-    if json_out {
-        let mut j = serde_json::to_value(&mem)?;
-        j["id"] = serde_json::json!(actual_id);
-        // Exclude self-ID from contradictions (happens on upsert)
-        let filtered: Vec<&String> = contradictions
-            .iter()
-            .filter(|c| c.id != actual_id)
-            .map(|c| &c.id)
-            .collect();
-        if !filtered.is_empty() {
-            j["potential_contradictions"] = serde_json::json!(filtered);
-        }
-        println!("{}", serde_json::to_string(&j)?);
-    } else {
-        println!(
-            "stored: {} [{}] (ns={})",
-            actual_id, mem.tier, mem.namespace
-        );
-        if !filtered.is_empty() {
-            eprintln!(
-                "warning: {} similar memories found in same namespace (potential contradictions)",
-                filtered.len()
-            );
-        }
-    }
-    Ok(())
-}
-
-fn cmd_update(db_path: &Path, args: &UpdateArgs, json_out: bool) -> Result<()> {
-    validate::validate_id(&args.id)?;
-    let conn = db::open(db_path)?;
-    // Resolve prefix if exact ID not found
-    let resolved_id = if db::get(&conn, &args.id)?.is_some() {
-        args.id.clone()
-    } else if let Some(mem) = db::get_by_prefix(&conn, &args.id)? {
-        mem.id
-    } else {
-        eprintln!("not found: {}", args.id);
-        std::process::exit(1);
-    };
-    let tier = args.tier.as_deref().and_then(Tier::from_str);
-    let tags: Option<Vec<String>> = args.tags.as_ref().map(|t| {
-        t.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    // Validate present fields
-    if let Some(ref t) = args.title {
-        validate::validate_title(t)?;
-    }
-    if let Some(ref c) = args.content {
-        validate::validate_content(c)?;
-    }
-    if let Some(ref ns) = args.namespace {
-        validate::validate_namespace(ns)?;
-    }
-    if let Some(ref tags) = tags {
-        validate::validate_tags(tags)?;
-    }
-    if let Some(p) = args.priority {
-        validate::validate_priority(p)?;
-    }
-    if let Some(c) = args.confidence {
-        validate::validate_confidence(c)?;
-    }
-    if let Some(ref ts) = args.expires_at
-        && !ts.is_empty()
-    {
-        validate::validate_expires_at_format(ts)?;
-    }
-    let (found, _content_changed) = db::update(
-        &conn,
-        &resolved_id,
-        args.title.as_deref(),
-        args.content.as_deref(),
-        tier.as_ref(),
-        args.namespace.as_deref(),
-        tags.as_ref(),
-        args.priority,
-        args.confidence,
-        args.expires_at.as_deref(),
-        None,
-    )?;
-    if !found {
-        eprintln!("not found: {}", args.id);
-        std::process::exit(1);
-    }
-    if let Some(mem) = db::get(&conn, &resolved_id)? {
-        if json_out {
-            println!("{}", serde_json::to_string(&mem)?);
-        } else {
-            println!("updated: {} [{}]", mem.id, mem.title);
-        }
-    }
-    Ok(())
-}
 
 #[allow(clippy::too_many_lines)]
 fn cmd_recall(
@@ -2132,107 +1812,6 @@ fn cmd_namespaces(db_path: &Path, json_out: bool) -> Result<()> {
     } else {
         for n in &ns {
             println!("  {}: {} memories", n.namespace, n.count);
-        }
-    }
-    Ok(())
-}
-
-fn cmd_export(db_path: &Path) -> Result<()> {
-    let conn = db::open(db_path)?;
-    let memories = db::export_all(&conn)?;
-    let links = db::export_links(&conn)?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "memories": memories, "links": links, "count": memories.len(),
-            "exported_at": Utc::now().to_rfc3339(),
-        }))?
-    );
-    Ok(())
-}
-
-fn cmd_import(
-    db_path: &Path,
-    args: &ImportArgs,
-    json_out: bool,
-    cli_agent_id: Option<&str>,
-) -> Result<()> {
-    use std::io::Read;
-    let mut buf = String::new();
-    std::io::stdin().read_to_string(&mut buf)?;
-    let data: serde_json::Value = serde_json::from_str(&buf)?;
-    let memories: Vec<models::Memory> =
-        serde_json::from_value(data.get("memories").cloned().unwrap_or_default())?;
-    let links: Vec<models::MemoryLink> =
-        serde_json::from_value(data.get("links").cloned().unwrap_or_default()).unwrap_or_default();
-
-    // NHI: by default restamp metadata.agent_id with the caller's id so an
-    // attacker-crafted JSON file cannot forge provenance. Pass --trust-source
-    // to preserve the imported agent_id (use only for trusted backups).
-    let caller_id = identity::resolve_agent_id(cli_agent_id, None)?;
-
-    let conn = db::open(db_path)?;
-    let mut imported = 0usize;
-    let mut restamped = 0usize;
-    let mut errors = Vec::new();
-    for mut mem in memories {
-        if !args.trust_source {
-            let original = mem
-                .metadata
-                .get("agent_id")
-                .and_then(serde_json::Value::as_str)
-                .map(ToString::to_string);
-            if let Some(obj) = mem.metadata.as_object_mut() {
-                obj.insert(
-                    "agent_id".to_string(),
-                    serde_json::Value::String(caller_id.clone()),
-                );
-                if let Some(orig) = original.as_ref()
-                    && orig.as_str() != caller_id
-                {
-                    // Preserve the original claim for forensic purposes but not as authoritative id.
-                    obj.insert(
-                        "imported_from_agent_id".to_string(),
-                        serde_json::Value::String(orig.clone()),
-                    );
-                    restamped += 1;
-                }
-            }
-        }
-        if let Err(e) = validate::validate_memory(&mem) {
-            errors.push(format!("{}: {}", mem.id, e));
-            continue;
-        }
-        match db::insert(&conn, &mem) {
-            Ok(_) => imported += 1,
-            Err(e) => errors.push(format!("{}: {}", mem.id, e)),
-        }
-    }
-    for link in links {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
-            continue;
-        }
-        let _ = db::create_link(&conn, &link.source_id, &link.target_id, &link.relation);
-    }
-    if json_out {
-        println!(
-            "{}",
-            serde_json::json!({
-                "imported": imported,
-                "restamped": restamped,
-                "trusted_source": args.trust_source,
-                "errors": errors
-            })
-        );
-    } else {
-        println!("imported: {imported} (restamped agent_id on {restamped})");
-        if args.trust_source {
-            eprintln!("warning: --trust-source: agent_id from imported JSON was preserved as-is");
-        }
-        if !errors.is_empty() {
-            for e in &errors {
-                eprintln!("  {e}");
-            }
         }
     }
     Ok(())
@@ -3257,193 +2836,6 @@ fn cmd_pending(
             }
         }
     }
-    Ok(())
-}
-
-#[allow(clippy::too_many_lines)]
-fn cmd_mine(
-    db_path: &Path,
-    args: MineArgs,
-    json_out: bool,
-    app_config: &config::AppConfig,
-    cli_agent_id: Option<&str>,
-) -> Result<()> {
-    // NHI: the caller (who ran `ai-memory mine`) is the attributable party for
-    // every mined memory. Without this, mined memories would be orphaned from
-    // all agent_id filters and governance checks.
-    let miner_agent_id = identity::resolve_agent_id(cli_agent_id, None)?;
-    let format = mine::Format::from_str(&args.format).ok_or_else(|| {
-        anyhow::anyhow!(
-            "invalid format: {} (use claude, chatgpt, slack)",
-            args.format
-        )
-    })?;
-    let tier = Tier::from_str(&args.tier)
-        .ok_or_else(|| anyhow::anyhow!("invalid tier: {} (use short, mid, long)", args.tier))?;
-    let namespace = args.namespace.unwrap_or_else(|| match format {
-        mine::Format::Claude => "claude-export".to_string(),
-        mine::Format::ChatGpt => "chatgpt-export".to_string(),
-        mine::Format::Slack => "slack-export".to_string(),
-    });
-
-    let path = std::path::Path::new(&args.path);
-
-    // Parse conversations
-    let conversations = match format {
-        mine::Format::Claude => mine::parse_claude(path)?,
-        mine::Format::ChatGpt => mine::parse_chatgpt(path)?,
-        mine::Format::Slack => mine::parse_slack(path)?,
-    };
-
-    // Filter by minimum message count
-    let filtered: Vec<_> = conversations
-        .iter()
-        .filter(|c| c.messages.len() >= args.min_messages)
-        .collect();
-
-    if args.dry_run {
-        if json_out {
-            let items: Vec<serde_json::Value> = filtered
-                .iter()
-                .filter_map(|c| {
-                    mine::conversation_to_memory(c, format).map(|m| {
-                        serde_json::json!({
-                            "title": m.title,
-                            "content_length": m.content.len(),
-                            "messages": c.messages.len(),
-                            "source": m.source_format,
-                        })
-                    })
-                })
-                .collect();
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "dry_run": true,
-                    "total_conversations": conversations.len(),
-                    "filtered": filtered.len(),
-                    "would_import": items.len(),
-                    "namespace": namespace,
-                    "tier": tier.as_str(),
-                    "memories": items,
-                }))?
-            );
-        } else {
-            println!("Dry run — no memories will be stored\n");
-            println!("Total conversations found: {}", conversations.len());
-            println!(
-                "After filter (>={} messages): {}",
-                args.min_messages,
-                filtered.len()
-            );
-            println!("Namespace: {namespace}");
-            println!("Tier: {tier}\n");
-            for c in &filtered {
-                if let Some(m) = mine::conversation_to_memory(c, format) {
-                    println!(
-                        "  {} ({} msgs, {} bytes)",
-                        m.title,
-                        c.messages.len(),
-                        m.content.len()
-                    );
-                }
-            }
-        }
-        return Ok(());
-    }
-
-    // Store memories
-    let conn = db::open(db_path)?;
-    let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
-    let now = Utc::now();
-
-    let mut imported = 0usize;
-    let mut skipped = 0usize;
-    let mut errors = 0usize;
-
-    // Use a transaction for bulk performance
-    conn.execute_batch("BEGIN")?;
-
-    for conv in &filtered {
-        let Some(mined) = mine::conversation_to_memory(conv, format) else {
-            skipped += 1;
-            continue;
-        };
-
-        let expires_at = app_config
-            .effective_ttl()
-            .ttl_for_tier(&tier)
-            .map(|s| (now + Duration::seconds(s)).to_rfc3339());
-
-        let mut metadata = models::default_metadata();
-        if let Some(obj) = metadata.as_object_mut() {
-            obj.insert(
-                "agent_id".to_string(),
-                serde_json::Value::String(miner_agent_id.clone()),
-            );
-            obj.insert(
-                "mined_from".to_string(),
-                serde_json::Value::String(format.source_tag().to_string()),
-            );
-        }
-        let mem = models::Memory {
-            id: uuid::Uuid::new_v4().to_string(),
-            tier: tier.clone(),
-            namespace: namespace.clone(),
-            title: mined.title,
-            content: mined.content,
-            tags: vec![format.source_tag().to_string()],
-            priority: 5,
-            confidence: 0.8,
-            source: mined.source_format,
-            access_count: 0,
-            created_at: mined.created_at.unwrap_or_else(|| now.to_rfc3339()),
-            updated_at: now.to_rfc3339(),
-            last_accessed_at: None,
-            expires_at,
-            metadata,
-        };
-
-        match db::insert(&conn, &mem) {
-            Ok(_) => imported += 1,
-            Err(e) => {
-                errors += 1;
-                eprintln!("warning: failed to store '{}': {}", mem.title, e);
-            }
-        }
-
-        // Commit in batches of 100
-        if imported.is_multiple_of(100) && imported > 0 {
-            conn.execute_batch("COMMIT")?;
-            conn.execute_batch("BEGIN")?;
-        }
-    }
-
-    conn.execute_batch("COMMIT")?;
-
-    if json_out {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({
-                "imported": imported,
-                "skipped": skipped,
-                "errors": errors,
-                "total_conversations": conversations.len(),
-                "namespace": namespace,
-                "tier": tier.as_str(),
-            }))?
-        );
-    } else {
-        println!(
-            "Imported {} memories from {} conversations (skipped: {}, errors: {})",
-            imported,
-            conversations.len(),
-            skipped,
-            errors
-        );
-        println!("Namespace: {namespace}, Tier: {tier}");
-    }
-
     Ok(())
 }
 
