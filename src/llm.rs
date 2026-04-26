@@ -352,3 +352,289 @@ mod tests {
         assert_eq!(DEFAULT_OLLAMA_URL, "http://localhost:11434");
     }
 }
+
+#[cfg(test)]
+pub mod test_support {
+    use super::*;
+
+    /// Mock Ollama client for testing without a running Ollama daemon.
+    /// Returns deterministic, canned responses for each public method.
+    pub struct MockOllamaClient {
+        pub base_url: String,
+        pub model: String,
+    }
+
+    impl MockOllamaClient {
+        /// Create a mock client with the given URL and model name.
+        pub fn new_with_url(base_url: &str, model: &str) -> Result<Self> {
+            Ok(Self {
+                base_url: base_url.trim_end_matches('/').to_string(),
+                model: model.to_string(),
+            })
+        }
+
+        /// Mock health check — always returns true.
+        pub fn is_available(&self) -> bool {
+            true
+        }
+
+        /// Mock ensure_model — always succeeds.
+        pub fn ensure_model(&self) -> Result<()> {
+            Ok(())
+        }
+
+        /// Mock ensure_embed_model — always succeeds.
+        pub fn ensure_embed_model(&self, _model: &str) -> Result<()> {
+            Ok(())
+        }
+
+        /// Mock generate — returns deterministic responses based on prompt content.
+        pub fn generate(&self, prompt: &str, _system: Option<&str>) -> Result<String> {
+            if prompt.contains("expand") || prompt.contains("search") {
+                Ok("semantic search\nquery terms\nvector retrieval\n\
+                    information retrieval\nsimilarity matching"
+                    .to_string())
+            } else if prompt.contains("Summarize") {
+                Ok("This is a consolidated summary of multiple memories \
+                    covering key facts and decisions."
+                    .to_string())
+            } else if prompt.contains("tags") {
+                Ok("important\nkey-fact\nstatus-update\ntechnical".to_string())
+            } else if prompt.contains("contradict") {
+                if prompt.contains("yes") || prompt.contains("true") {
+                    Ok("yes".to_string())
+                } else {
+                    Ok("no".to_string())
+                }
+            } else {
+                Ok("Mock response for: ".to_string() + &prompt[..prompt.len().min(50)])
+            }
+        }
+
+        /// Mock expand_query — returns synthetic query expansion terms.
+        pub fn expand_query(&self, query: &str) -> Result<Vec<String>> {
+            let terms: Vec<String> = vec![
+                format!("{}-related", query),
+                format!("{}-expanded", query),
+                "semantic-search".to_string(),
+                "vector-expansion".to_string(),
+                "query-variants".to_string(),
+            ];
+            Ok(terms.iter().map(|s| s.to_string()).collect())
+        }
+
+        /// Mock summarize_memories — returns a canned summary.
+        pub fn summarize_memories(&self, memories: &[(String, String)]) -> Result<String> {
+            let count = memories.len();
+            Ok(format!(
+                "Summary of {} memories: consolidated facts and key decisions preserved",
+                count
+            ))
+        }
+
+        /// Mock auto_tag — returns predictable tags.
+        pub fn auto_tag(&self, title: &str, _content: &str) -> Result<Vec<String>> {
+            let tags: Vec<String> = vec![
+                "important".to_string(),
+                format!("{}-tag", title.split_whitespace().next().unwrap_or("data")),
+                "memory".to_string(),
+            ];
+            Ok(tags)
+        }
+
+        /// Mock embed_text — returns a fixed 768-dim vector (nomic standard).
+        pub fn embed_text(&self, text: &str, _embed_model: &str) -> Result<Vec<f32>> {
+            let base_val = (text.len() % 10) as f32 / 100.0;
+            let embedding: Vec<f32> = (0..768).map(|i| base_val + (i as f32) * 0.0001).collect();
+            Ok(embedding)
+        }
+
+        /// Mock detect_contradiction — simple heuristic based on keyword presence.
+        pub fn detect_contradiction(&self, mem_a: &str, mem_b: &str) -> Result<bool> {
+            let combined = format!("{} {}", mem_a, mem_b).to_lowercase();
+            let contradictory_keywords = &["not", "never", "always", "contradiction", "opposite"];
+            let count = contradictory_keywords
+                .iter()
+                .filter(|&&kw| combined.contains(kw))
+                .count();
+            Ok(count > 1)
+        }
+    }
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::test_support::MockOllamaClient;
+    use super::{AUTO_TAG_PROMPT, CONTRADICTION_PROMPT, QUERY_EXPANSION_PROMPT, SUMMARIZE_PROMPT};
+
+    #[test]
+    fn test_mock_new_with_url() {
+        let client = MockOllamaClient::new_with_url("http://localhost:11434", "test-model");
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.base_url, "http://localhost:11434");
+        assert_eq!(client.model, "test-model");
+    }
+
+    #[test]
+    fn test_mock_new_with_url_trailing_slash() {
+        let client = MockOllamaClient::new_with_url("http://localhost:11434/", "test-model");
+        assert!(client.is_ok());
+        let client = client.unwrap();
+        assert_eq!(client.base_url, "http://localhost:11434");
+    }
+
+    #[test]
+    fn test_mock_is_available() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        assert!(client.is_available());
+    }
+
+    #[test]
+    fn test_mock_ensure_model() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        assert!(client.ensure_model().is_ok());
+    }
+
+    #[test]
+    fn test_mock_ensure_embed_model() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        assert!(client.ensure_embed_model("nomic-embed-text").is_ok());
+    }
+
+    #[test]
+    fn test_mock_generate_query_expansion() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let prompt = QUERY_EXPANSION_PROMPT.replace("{query}", "search test");
+        let result = client.generate(&prompt, None);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.is_empty());
+    }
+
+    #[test]
+    fn test_mock_expand_query() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result = client.expand_query("test query");
+        assert!(result.is_ok());
+        let terms = result.unwrap();
+        assert!(!terms.is_empty());
+        assert!(terms.len() >= 3);
+    }
+
+    #[test]
+    fn test_mock_summarize_memories() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let memories = vec![
+            ("Title 1".to_string(), "Content 1".to_string()),
+            ("Title 2".to_string(), "Content 2".to_string()),
+        ];
+        let result = client.summarize_memories(&memories);
+        assert!(result.is_ok());
+        let summary = result.unwrap();
+        assert!(summary.contains("2"));
+    }
+
+    #[test]
+    fn test_mock_auto_tag() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result = client.auto_tag("Test Title", "test content");
+        assert!(result.is_ok());
+        let tags = result.unwrap();
+        assert!(!tags.is_empty());
+        assert!(tags.len() >= 2);
+    }
+
+    #[test]
+    fn test_mock_embed_text() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result = client.embed_text("test text", "nomic-embed-text");
+        assert!(result.is_ok());
+        let embedding = result.unwrap();
+        assert_eq!(embedding.len(), 768);
+        assert!(embedding.iter().all(|&x| x >= 0.0));
+    }
+
+    #[test]
+    fn test_mock_embed_text_deterministic() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result1 = client.embed_text("same text", "nomic-embed-text");
+        let result2 = client.embed_text("same text", "nomic-embed-text");
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert_eq!(result1.unwrap(), result2.unwrap());
+    }
+
+    #[test]
+    fn test_mock_detect_contradiction_true() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result = client.detect_contradiction(
+            "The system always works",
+            "The system never works correctly",
+        );
+        assert!(result.is_ok());
+        let is_contradiction = result.unwrap();
+        assert!(is_contradiction);
+    }
+
+    #[test]
+    fn test_mock_detect_contradiction_false() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let result = client.detect_contradiction(
+            "The memory is about search",
+            "Additional details about the same search",
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_mock_generate_summarize_prompt() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let prompt = SUMMARIZE_PROMPT.replace(
+            "{memories}",
+            "--- Memory 1 ---\nTitle: Test\nThis is a test",
+        );
+        let result = client.generate(&prompt, None);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(response.contains("summary") || response.contains("Summary"));
+    }
+
+    #[test]
+    fn test_mock_generate_auto_tag_prompt() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let prompt = AUTO_TAG_PROMPT
+            .replace("{title}", "Important Update")
+            .replace("{content}", "Some content");
+        let result = client.generate(&prompt, None);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.is_empty());
+    }
+
+    #[test]
+    fn test_mock_generate_contradiction_prompt() {
+        let client =
+            MockOllamaClient::new_with_url("http://localhost:11434", "test-model").unwrap();
+        let prompt = CONTRADICTION_PROMPT
+            .replace("{a}", "Statement A")
+            .replace("{b}", "Statement B");
+        let result = client.generate(&prompt, None);
+        assert!(result.is_ok());
+        let response = result.unwrap();
+        assert!(!response.is_empty());
+    }
+}
