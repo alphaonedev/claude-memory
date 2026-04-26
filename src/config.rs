@@ -995,4 +995,208 @@ legacy_scoring = false
         // Unset long defaults.
         assert!((s.half_life_days_long - 365.0).abs() < f64::EPSILON);
     }
+
+    // ---- Wave 3 (Closer T) tests for uncovered effective_* helpers
+    // and write_default_if_missing. ----
+
+    #[test]
+    fn effective_tier_cli_overrides_config() {
+        let cfg = AppConfig {
+            tier: Some("smart".to_string()),
+            ..AppConfig::default()
+        };
+        // CLI flag wins over config.
+        assert_eq!(
+            cfg.effective_tier(Some("autonomous")),
+            FeatureTier::Autonomous
+        );
+        // No CLI flag → config used.
+        assert_eq!(cfg.effective_tier(None), FeatureTier::Smart);
+    }
+
+    #[test]
+    fn effective_tier_unknown_falls_back_to_semantic() {
+        let cfg = AppConfig::default();
+        assert_eq!(
+            cfg.effective_tier(Some("invalid-tier")),
+            FeatureTier::Semantic
+        );
+        // No CLI, no config → default semantic.
+        assert_eq!(cfg.effective_tier(None), FeatureTier::Semantic);
+    }
+
+    #[test]
+    fn effective_db_cli_path_wins_when_non_default() {
+        let cfg = AppConfig {
+            db: Some("/from/config.db".to_string()),
+            ..AppConfig::default()
+        };
+        let cli_path = Path::new("/from/cli.db");
+        assert_eq!(cfg.effective_db(cli_path), PathBuf::from("/from/cli.db"));
+    }
+
+    #[test]
+    fn effective_db_falls_back_to_config_when_cli_default() {
+        let cfg = AppConfig {
+            db: Some("/from/config.db".to_string()),
+            ..AppConfig::default()
+        };
+        // The CLI default is "ai-memory.db" — config wins for that case.
+        assert_eq!(
+            cfg.effective_db(Path::new("ai-memory.db")),
+            PathBuf::from("/from/config.db")
+        );
+    }
+
+    #[test]
+    fn effective_db_falls_back_to_cli_when_no_config() {
+        let cfg = AppConfig::default();
+        let cli_path = Path::new("ai-memory.db");
+        assert_eq!(cfg.effective_db(cli_path), PathBuf::from("ai-memory.db"));
+    }
+
+    #[test]
+    fn effective_ollama_url_default_when_unset() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
+    }
+
+    #[test]
+    fn effective_ollama_url_uses_configured_value() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://my-host:9999".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(cfg.effective_ollama_url(), "http://my-host:9999");
+    }
+
+    #[test]
+    fn effective_embed_url_falls_back_to_ollama_url() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://ollama:11434".to_string()),
+            ..AppConfig::default()
+        };
+        // No embed_url → fall back to ollama_url.
+        assert_eq!(cfg.effective_embed_url(), "http://ollama:11434");
+    }
+
+    #[test]
+    fn effective_embed_url_uses_dedicated_value_when_set() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://ollama:11434".to_string()),
+            embed_url: Some("http://embed:8080".to_string()),
+            ..AppConfig::default()
+        };
+        // Dedicated embed_url wins.
+        assert_eq!(cfg.effective_embed_url(), "http://embed:8080");
+    }
+
+    #[test]
+    fn effective_embed_url_uses_default_when_neither_set() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_embed_url(), "http://localhost:11434");
+    }
+
+    #[test]
+    fn effective_archive_on_gc_default_is_true() {
+        let cfg = AppConfig::default();
+        assert!(cfg.effective_archive_on_gc());
+    }
+
+    #[test]
+    fn effective_archive_on_gc_respects_explicit_false() {
+        let cfg = AppConfig {
+            archive_on_gc: Some(false),
+            ..AppConfig::default()
+        };
+        assert!(!cfg.effective_archive_on_gc());
+    }
+
+    #[test]
+    fn effective_autonomous_hooks_default_is_false() {
+        // SAFETY: clear env so this test is deterministic; tests run with
+        // --test-threads=1 in CI for env-based tests, but we stay
+        // defensive and set+unset locally.
+        // SAFETY: env mutation is acceptable here because we set then unset.
+        unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
+        let cfg = AppConfig::default();
+        assert!(!cfg.effective_autonomous_hooks());
+    }
+
+    #[test]
+    fn effective_autonomous_hooks_config_value_used_when_env_unset() {
+        unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
+        let cfg = AppConfig {
+            autonomous_hooks: Some(true),
+            ..AppConfig::default()
+        };
+        assert!(cfg.effective_autonomous_hooks());
+    }
+
+    #[test]
+    fn effective_anonymize_default_falls_back_to_config() {
+        unsafe { std::env::remove_var("AI_MEMORY_ANONYMIZE") };
+        let cfg = AppConfig::default();
+        assert!(!cfg.effective_anonymize_default());
+    }
+
+    #[test]
+    fn write_default_if_missing_creates_file_then_noops() {
+        // Use a temp dir as $HOME so we don't clobber a real config.
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation is contained; we restore at end.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        // First call writes the file.
+        AppConfig::write_default_if_missing();
+        let expected = AppConfig::config_path().unwrap();
+        assert!(expected.exists(), "config not written at {expected:?}");
+        let original = std::fs::read_to_string(&expected).unwrap();
+        assert!(original.contains("ai-memory configuration"));
+        // Second call must NOT overwrite (idempotent).
+        std::fs::write(&expected, "# user-edited\n").unwrap();
+        AppConfig::write_default_if_missing();
+        let after = std::fs::read_to_string(&expected).unwrap();
+        assert_eq!(after, "# user-edited\n");
+    }
+
+    #[test]
+    fn config_path_returns_some_when_home_set() {
+        // SAFETY: env mutation contained to this test.
+        unsafe { std::env::set_var("HOME", "/some/home") };
+        let path = AppConfig::config_path().unwrap();
+        assert!(path.starts_with("/some/home"));
+    }
+
+    #[test]
+    fn load_from_returns_default_for_missing_file() {
+        // Non-existent path → default config.
+        let cfg = AppConfig::load_from(Path::new("/non/existent/path.toml"));
+        assert!(cfg.tier.is_none());
+        assert!(cfg.db.is_none());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_unparseable_toml() {
+        // Garbage TOML → load_from prints a warning and returns default.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "this is not [valid toml]]]").unwrap();
+        let cfg = AppConfig::load_from(tmp.path());
+        assert!(cfg.tier.is_none());
+    }
+
+    #[test]
+    fn load_from_parses_valid_toml() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"
+                tier = "smart"
+                db = "/disk.db"
+            "#,
+        )
+        .unwrap();
+        let cfg = AppConfig::load_from(tmp.path());
+        assert_eq!(cfg.tier.as_deref(), Some("smart"));
+        assert_eq!(cfg.db.as_deref(), Some("/disk.db"));
+    }
 }
