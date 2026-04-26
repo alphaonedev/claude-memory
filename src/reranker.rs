@@ -676,3 +676,34 @@ mod mock_tests {
         assert_ne!(s_lex, s_neu);
     }
 }
+
+#[test]
+fn score_handles_empty_query_string() {
+    let s = lexical_score("", "Document Title", "This is document content");
+    assert_eq!(s, 0.0, "empty query must return 0.0");
+}
+
+#[test]
+fn score_handles_unicode_normalization() {
+    // Query with accented characters, document with decomposed/composed variants
+    let s1 = lexical_score("café", "café", "the café is open");
+    let s2 = lexical_score("cafe", "cafe", "the cafe is open");
+    // Both should score positively; exact equality not required due to normalization
+    assert!(s1 > 0.0);
+    assert!(s2 > 0.0);
+}
+
+#[test]
+fn score_handles_very_long_content_truncation() {
+    // Query and document with extreme length (lexical tokenizer should handle it)
+    let long_content = "word ".repeat(10000); // 50k+ chars
+    let s = lexical_score("word", "title", &long_content);
+    assert!((0.0..=1.0).contains(&s), "score must be bounded [0, 1]");
+}
+
+#[test]
+fn bigram_score_with_single_token_query() {
+    // Query with only one token — bigrams should be empty, no crash
+    let s = lexical_score("query", "Single Token Title", "single token content");
+    assert!((0.0..=1.0).contains(&s));
+}
