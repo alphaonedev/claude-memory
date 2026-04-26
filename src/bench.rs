@@ -644,6 +644,43 @@ pub fn render_regression_table(rows: &[Regression]) -> String {
 }
 
 #[cfg(test)]
+/// Append a benchmark result to a JSONL history file.
+/// Creates the file and parent directories if missing.
+/// Each line is a self-describing JSON object with `captured_at`, `iterations`,
+/// `warmup`, and `results` array.
+pub fn append_history(
+    path: &std::path::Path,
+    captured_at: &str,
+    iterations: usize,
+    warmup: usize,
+    results: &[OperationResult],
+) -> Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    // Create parent directories if needed
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+
+    let entry = serde_json::json!({
+        "captured_at": captured_at,
+        "iterations": iterations,
+        "warmup": warmup,
+        "results": results,
+    });
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+
+    writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+    Ok(())
+}
+
 mod tests {
     use super::*;
     use crate::db;

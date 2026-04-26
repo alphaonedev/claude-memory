@@ -193,6 +193,7 @@ enum Command {
 
 #[derive(Args)]
 struct BenchArgs {
+struct BenchArgs {
     /// Measured iterations per operation. Clamped to `[1, 100_000]`.
     #[arg(long, default_value_t = bench::DEFAULT_ITERATIONS)]
     iterations: usize,
@@ -215,8 +216,27 @@ struct BenchArgs {
     /// `[0.0, 1000.0]`. Has no effect without `--baseline`.
     #[arg(long, default_value_t = bench::DEFAULT_REGRESSION_THRESHOLD_PCT)]
     regression_threshold: f64,
+struct BenchArgs {
+    /// Measured iterations per operation. Clamped to `[1, 100_000]`.
+    #[arg(long, default_value_t = bench::DEFAULT_ITERATIONS)]
+    iterations: usize,
+    /// Warmup iterations discarded from the percentile sample.
+    /// Clamped to `[0, 10_000]`.
+    #[arg(long, default_value_t = bench::DEFAULT_WARMUP)]
+    warmup: usize,
+    /// Emit results as JSON instead of the human-readable table.
+    #[arg(long)]
+    json: bool,
+    /// Append this run to a JSONL history file (one self-describing
+    /// JSON object per line). Creates the file and any missing parent
+    /// directories on first call. Each entry carries `captured_at`
+    /// (RFC3339), `iterations`, `warmup`, and the same `results` array
+    /// `--json` emits — long-running campaigns can build a regression
+    /// dataset to feed downstream tooling. The CLI table / JSON output
+    /// still prints; this flag only adds the append side effect.
+    #[arg(long, value_name = "PATH")]
+    history: Option<PathBuf>,
 }
-
 #[derive(Args)]
 #[allow(clippy::struct_excessive_bools)]
 struct CuratorArgs {
