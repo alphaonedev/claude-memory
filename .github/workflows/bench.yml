@@ -47,7 +47,7 @@ jobs:
       - name: Run bench (gate)
         run: |
           set +e
-          target/release/ai-memory bench | tee bench-table.txt
+          target/release/ai-memory bench --markdown | tee bench-table.md
           rc=${PIPESTATUS[0]}
           set -e
           {
@@ -59,9 +59,7 @@ jobs:
             echo '[`PERFORMANCE.md`](../blob/${{ github.sha }}/PERFORMANCE.md). '
             echo 'Fails the build when any p95 exceeds its target by >10%.'
             echo ''
-            echo '```'
-            cat bench-table.txt
-            echo '```'
+            cat bench-table.md
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
 
@@ -76,5 +74,5 @@ jobs:
           name: bench-results
           path: |
             bench-results.json
-            bench-table.txt
+            bench-table.md
           if-no-files-found: warn

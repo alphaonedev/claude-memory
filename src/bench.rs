@@ -27,14 +27,26 @@
 //! `memory_recall` cold/full hybrid) still require an embedder process
 //! and are tracked as follow-up Stream E work — they don't belong on
 //! the hot path of a `cargo test` invocation.
+//!
+//! The curator-cycle bench (opt-in via `ai-memory bench --with-curator`)
+//! seeds `benchmarks/v063/canonical_workload.json` (1000 deterministic
+//! memories) into a disposable `SQLite` and runs one
+//! [`crate::curator::run_once`] sweep against it, gated against the
+//! 60 s p95 row in `PERFORMANCE.md`. It requires a reachable Ollama
+//! endpoint with the configured curator model; when no LLM is
+//! available the CLI emits a clear message and skips the op rather
+//! than failing — the same opt-in/no-op pattern as `--with-embedding`.
 
 use anyhow::Result;
 use rusqlite::Connection;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use crate::curator::{self, CuratorConfig};
 use crate::db;
-use crate::models::{Memory, Tier};
+use crate::llm::OllamaClient;
+use crate::models::{CreateMemory, Memory, Tier};
 
 /// CI guard tolerance — measured p95 may exceed budget by this factor
 /// before the run is marked `Fail`. Mirrors `PERFORMANCE.md`.
@@ -74,6 +86,11 @@ pub enum Operation {
     KgQueryDepth5,
     /// `memory_kg_timeline` — ordered timeline for a single source.
     KgTimeline,
+    /// One [`crate::curator::run_once`] sweep over the canonical
+    /// 1000-memory workload (`benchmarks/v063/canonical_workload.json`).
+    /// Opt-in via `--with-curator`; budget 60 s p95 (the
+    /// "curator cycle (1k memories)" row in `PERFORMANCE.md`).
+    CuratorCycle,
 }
 
 impl Operation {
@@ -87,6 +104,7 @@ impl Operation {
             Self::KgQueryDepth3 => "memory_kg_query (depth=3)",
             Self::KgQueryDepth5 => "memory_kg_query (depth=5)",
             Self::KgTimeline => "memory_kg_timeline",
+            Self::CuratorCycle => "curator cycle (1k memories)",
         }
     }
 
@@ -97,6 +115,8 @@ impl Operation {
     /// at "depth ≤ 5" (250 ms). `SearchFts` and `KgTimeline` happen to
     /// share the same numeric budget as the depth ≤ 3 bucket despite
     /// belonging to different table rows in `PERFORMANCE.md`.
+    /// `CuratorCycle` carries the 60 s p95 budget for the
+    /// "curator cycle (1k memories)" row.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub fn target_p95_ms(self) -> f64 {
@@ -108,6 +128,7 @@ impl Operation {
             Self::KgQueryDepth3 => 100.0,
             Self::KgQueryDepth5 => 250.0,
             Self::KgTimeline => 100.0,
+            Self::CuratorCycle => 60_000.0,
         }
     }
 }
@@ -351,6 +372,172 @@ fn run_kg_timeline(
     Ok(percentile_summary(Operation::KgTimeline, &samples))
 }
 
+/// On-disk path components of the canonical 1000-memory workload
+/// fixture. Joined under `CARGO_MANIFEST_DIR` at runtime so the bench
+/// finds the file when invoked from the repo root (the only place
+/// `--with-curator` is meaningful — the file is not shipped with
+/// installed binaries).
+pub const CANONICAL_WORKLOAD_REL_PATH: &[&str] = &["benchmarks", "v063", "canonical_workload.json"];
+
+/// Per-cycle op cap for the curator-cycle bench. The default
+/// [`CuratorConfig`] caps at 100 ops/cycle to stop runaway LLM calls
+/// in production, but the published "curator cycle (1k memories)"
+/// budget assumes a full sweep — so the bench raises the cap to
+/// match the canonical workload size.
+const CURATOR_BENCH_MAX_OPS: usize = 1000;
+
+/// Wire-shape of `benchmarks/v063/canonical_workload.json`. Mirrors
+/// the schema pinned by `crate::canonical_workload` so any future
+/// rename of those fields surfaces here in compile errors instead of
+/// silently desynchronising the bench.
+#[derive(Debug, Deserialize)]
+struct CanonicalWorkload {
+    schema_version: u32,
+    seed: u64,
+    count: usize,
+    memories: Vec<CreateMemory>,
+}
+
+/// Schema version pinned by `tests/canonical_workload.rs`. Bumped here
+/// (and there) when the on-disk shape changes incompatibly.
+const CANONICAL_WORKLOAD_SCHEMA: u32 = 1;
+
+/// Deterministic RNG seed pinned by `benchmarks/v063/gen_canonical_workload.py`.
+/// Cross-checked at load time so a regenerated fixture with a drifted
+/// seed surfaces as a hard error instead of silently rebasing the bench
+/// numbers.
+const CANONICAL_WORKLOAD_SEED: u64 = 20_260_426;
+
+/// Resolved on-disk path to the canonical workload JSON. Returns the
+/// path even if the file is missing — callers handle the absent case.
+fn canonical_workload_path() -> PathBuf {
+    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for seg in CANONICAL_WORKLOAD_REL_PATH {
+        p.push(seg);
+    }
+    p
+}
+
+/// Read the canonical workload JSON into a [`CanonicalWorkload`].
+///
+/// # Errors
+///
+/// Returns an error if the file is missing, unreadable, or fails the
+/// schema-version pin.
+fn load_canonical_workload() -> Result<CanonicalWorkload> {
+    let path = canonical_workload_path();
+    let raw = std::fs::read_to_string(&path).map_err(|e| {
+        anyhow::anyhow!(
+            "canonical workload fixture not found at {}: {e} \
+             (the file is generated by benchmarks/v063/gen_canonical_workload.py and shipped on `release/v0.6.3` via PR #402)",
+            path.display()
+        )
+    })?;
+    let w: CanonicalWorkload = serde_json::from_str(&raw)
+        .map_err(|e| anyhow::anyhow!("deserialize {}: {e}", path.display()))?;
+    if w.schema_version != CANONICAL_WORKLOAD_SCHEMA {
+        anyhow::bail!(
+            "canonical workload schema_version {} != expected {} ({}). \
+             update CANONICAL_WORKLOAD_SCHEMA after auditing curator-eligibility invariants",
+            w.schema_version,
+            CANONICAL_WORKLOAD_SCHEMA,
+            path.display(),
+        );
+    }
+    if w.seed != CANONICAL_WORKLOAD_SEED {
+        anyhow::bail!(
+            "canonical workload seed {} != expected {} ({}). \
+             a drifted seed silently rebases bench numbers — regenerate the fixture or update CANONICAL_WORKLOAD_SEED",
+            w.seed,
+            CANONICAL_WORKLOAD_SEED,
+            path.display(),
+        );
+    }
+    if w.memories.len() != w.count {
+        anyhow::bail!(
+            "canonical workload count {} != memories.len() {} ({})",
+            w.count,
+            w.memories.len(),
+            path.display(),
+        );
+    }
+    Ok(w)
+}
+
+/// Convert a [`CreateMemory`] (the fixture's wire shape) into the
+/// [`Memory`] expected by [`db::insert`]. Mirrors the inline
+/// `CreateMemory` → `Memory` translation used by `handlers::create_memory`
+/// minus the HTTP-only concerns (`agent_id` resolution, scope merge).
+fn create_memory_to_memory(c: CreateMemory) -> Memory {
+    let now = chrono::Utc::now().to_rfc3339();
+    Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier: c.tier,
+        namespace: c.namespace,
+        title: c.title,
+        content: c.content,
+        tags: c.tags,
+        priority: c.priority.clamp(1, 10),
+        confidence: c.confidence.clamp(0.0, 1.0),
+        source: c.source,
+        access_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        last_accessed_at: None,
+        expires_at: c.expires_at,
+        metadata: c.metadata,
+    }
+}
+
+/// Seed the canonical 1000-memory workload from
+/// `benchmarks/v063/canonical_workload.json` into `conn`. Returns the
+/// number of memories actually inserted (== `count` on a fresh
+/// connection; lower if the namespace was already populated).
+///
+/// # Errors
+///
+/// Returns an error if the fixture is missing, malformed, or any
+/// individual insert fails.
+pub fn seed_canonical_workload(conn: &Connection) -> Result<usize> {
+    let workload = load_canonical_workload()?;
+    let mut inserted = 0usize;
+    for c in workload.memories {
+        let mem = create_memory_to_memory(c);
+        db::insert(conn, &mem)?;
+        inserted += 1;
+    }
+    Ok(inserted)
+}
+
+/// Run one [`curator::run_once`] sweep against the canonical 1000-memory
+/// workload and return the single-sample timing as a normalised
+/// [`OperationResult`]. The curator cycle is a multi-second op so we
+/// take a single sample (p50 = p95 = p99 = the measured value) rather
+/// than a percentile distribution — same shape every other op uses so
+/// downstream JSON consumers stay uniform.
+///
+/// `llm` must be reachable; the CLI handler is responsible for
+/// short-circuiting (with a clear message) when no Ollama endpoint is
+/// available — same opt-in/no-op pattern as `--with-embedding`.
+///
+/// # Errors
+///
+/// Returns the underlying [`db`] or [`curator`] error if the workload
+/// cannot be seeded or the cycle aborts before completing.
+pub fn run_curator_cycle(conn: &Connection, llm: &OllamaClient) -> Result<OperationResult> {
+    let _seeded = seed_canonical_workload(conn)?;
+    let cfg = CuratorConfig {
+        // Bench measures the full 1000-memory sweep, not the daemon's
+        // production-safe cap of 100 ops/cycle.
+        max_ops_per_cycle: CURATOR_BENCH_MAX_OPS,
+        ..CuratorConfig::default()
+    };
+    let start = Instant::now();
+    let _report = curator::run_once(conn, Some(llm), &cfg)?;
+    let elapsed = start.elapsed();
+    Ok(percentile_summary(Operation::CuratorCycle, &[elapsed]))
+}
+
 /// Seed the in-process KG fixture: `KG_FIXTURE_SOURCES` source memories,
 /// each with `KG_FIXTURE_LINKS_PER_SOURCE` outbound links to distinct
 /// targets. Every link sets `valid_from` so `kg_timeline` (which skips
@@ -525,6 +712,32 @@ pub fn render_table(results: &[OperationResult]) -> String {
     out
 }
 
+/// Render the same per-operation results as a GitHub-Flavored-Markdown
+/// table. Sortable in the GitHub UI when piped into `$GITHUB_STEP_SUMMARY`,
+/// and harvestable by future tooling that wants to populate the
+/// "Latest measured" column in `PERFORMANCE.md`. Same rounding +
+/// PASS/FAIL semantics as [`render_table`].
+#[must_use]
+pub fn render_markdown(results: &[OperationResult]) -> String {
+    let mut out = String::new();
+    out.push_str("| Operation | Target (p95) | Measured (p95) | p50 | p99 | Status |\n");
+    out.push_str("|---|---:|---:|---:|---:|:---:|\n");
+    for r in results {
+        let status_str = match r.status {
+            Status::Pass => "PASS",
+            Status::Fail => "FAIL",
+        };
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let target_ms = r.target_p95_ms.round() as i64;
+        let line = format!(
+            "| `{}` | < {} ms | {:.1} ms | {:.1} ms | {:.1} ms | {} |\n",
+            r.label, target_ms, r.measured_p95_ms, r.measured_p50_ms, r.measured_p99_ms, status_str,
+        );
+        out.push_str(&line);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -634,6 +847,164 @@ mod tests {
         assert!((Operation::KgQueryDepth3.target_p95_ms() - 100.0).abs() < 1e-9);
         assert!((Operation::KgQueryDepth5.target_p95_ms() - 250.0).abs() < 1e-9);
         assert!((Operation::KgTimeline.target_p95_ms() - 100.0).abs() < 1e-9);
+        assert!((Operation::CuratorCycle.target_p95_ms() - 60_000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn curator_cycle_label_carries_workload_size() {
+        // The label is what shows up in the bench table + JSON. Pin it
+        // here so the "(1k memories)" hint stays — operators read this
+        // row alongside the published "curator cycle (1k memories)" row
+        // in PERFORMANCE.md.
+        assert_eq!(
+            Operation::CuratorCycle.label(),
+            "curator cycle (1k memories)"
+        );
+    }
+
+    #[test]
+    fn canonical_workload_fixture_loads_into_create_memory() {
+        // Load + deserialize is the brittle step — if the fixture
+        // disappears or its schema drifts we want a deterministic test
+        // failure rather than a runtime surprise inside `cmd_bench
+        // --with-curator`. The schema-version + count assertions here
+        // mirror `crate::canonical_workload::tests` so a refresh of the
+        // fixture has to update both places.
+        let workload = load_canonical_workload().expect("canonical workload fixture must load");
+        assert_eq!(workload.schema_version, CANONICAL_WORKLOAD_SCHEMA);
+        assert_eq!(workload.count, 1000);
+        assert_eq!(workload.memories.len(), 1000);
+        assert_eq!(workload.seed, 20_260_426);
+    }
+
+    #[test]
+    fn seed_canonical_workload_populates_disposable_db() {
+        // Confirms the bench's seed path is curator-eligible end-to-end
+        // without needing an LLM: every row from the fixture lands in
+        // SQLite, and a fresh `run_once` with `llm = None` early-returns
+        // after counting them as eligible candidates. This is the
+        // observable contract `--with-curator` relies on before
+        // handing the conn to a real Ollama client.
+        let conn = fresh_conn();
+        let inserted = seed_canonical_workload(&conn).expect("seed must succeed");
+        assert_eq!(
+            inserted, 1000,
+            "every fixture row must reach the upsert path"
+        );
+        let cfg = CuratorConfig {
+            max_ops_per_cycle: CURATOR_BENCH_MAX_OPS,
+            ..CuratorConfig::default()
+        };
+        let report = curator::run_once(&conn, None, &cfg).expect("no-llm cycle must not error");
+        // run_once early-returns when llm is None, but the eligibility
+        // scan still runs — every fixture row must qualify per the
+        // invariants pinned in `crate::canonical_workload::tests`.
+        assert_eq!(report.memories_scanned, 1000);
+        assert_eq!(report.memories_eligible, 1000);
+        // No LLM means no operations attempted; the report's `errors`
+        // field carries the documented "no LLM client configured" entry.
+        assert_eq!(report.operations_attempted, 0);
+        assert!(
+            report.errors.iter().any(|e| e.contains("no LLM")),
+            "report.errors must surface the missing-LLM reason: {:?}",
+            report.errors
+        );
+    }
+
+    #[test]
+    fn render_markdown_includes_all_operations() {
+        // The Markdown table is what bench.yml pipes into
+        // `$GITHUB_STEP_SUMMARY` so GitHub renders it as a sortable
+        // table — every row in `render_table` must also appear here.
+        let conn = fresh_conn();
+        let results = run(&conn, &small_config()).unwrap();
+        let md = render_markdown(&results);
+        // Header + alignment row.
+        assert!(
+            md.starts_with("| Operation | Target (p95) | Measured (p95) | p50 | p99 | Status |\n")
+        );
+        assert!(md.contains("|---|---:|---:|---:|---:|:---:|\n"));
+        // Every operation label is present, wrapped in backticks.
+        for op in [
+            "memory_store (no embedding)",
+            "memory_search (FTS5)",
+            "memory_recall (hot, depth=1)",
+            "memory_kg_query (depth=1)",
+            "memory_kg_query (depth=3)",
+            "memory_kg_query (depth=5)",
+            "memory_kg_timeline",
+        ] {
+            let cell = format!("| `{op}` |");
+            assert!(md.contains(&cell), "missing row for {op}: {md}");
+        }
+    }
+
+    #[test]
+    fn render_markdown_carries_pass_fail_marker() {
+        // PASS/FAIL strings must survive into the Markdown output —
+        // they are how operators (and any future PERFORMANCE.md
+        // harvester) identify regressions.
+        let pass = OperationResult {
+            operation: Operation::StoreNoEmbedding,
+            label: Operation::StoreNoEmbedding.label(),
+            target_p95_ms: 20.0,
+            measured_p50_ms: 1.0,
+            measured_p95_ms: 5.0,
+            measured_p99_ms: 8.0,
+            samples: 100,
+            status: Status::Pass,
+        };
+        let fail = OperationResult {
+            status: Status::Fail,
+            measured_p95_ms: 50.0,
+            ..pass.clone()
+        };
+        let md = render_markdown(&[pass, fail]);
+        assert!(md.contains("| PASS |"));
+        assert!(md.contains("| FAIL |"));
+    }
+
+    #[test]
+    fn render_markdown_renders_curator_cycle_row() {
+        // Mirrors `render_table_renders_curator_cycle_row` for the
+        // markdown variant — operators reading the GitHub run summary
+        // see the same opt-in row they'd see in the plain-text table.
+        let results = vec![OperationResult {
+            operation: Operation::CuratorCycle,
+            label: Operation::CuratorCycle.label(),
+            target_p95_ms: Operation::CuratorCycle.target_p95_ms(),
+            measured_p50_ms: 12_000.0,
+            measured_p95_ms: 12_000.0,
+            measured_p99_ms: 12_000.0,
+            samples: 1,
+            status: Status::Pass,
+        }];
+        let md = render_markdown(&results);
+        assert!(md.contains("| `curator cycle (1k memories)` |"));
+        assert!(md.contains("| < 60000 ms |"));
+        assert!(md.contains("| PASS |"));
+    }
+
+    #[test]
+    fn render_table_renders_curator_cycle_row() {
+        // Builds a minimal results vector with a synthesized curator
+        // row so the renderer is exercised end-to-end without needing
+        // a live cycle. Confirms the row's label survives table
+        // formatting (operators see the same string in the bench
+        // table they read in PERFORMANCE.md).
+        let results = vec![OperationResult {
+            operation: Operation::CuratorCycle,
+            label: Operation::CuratorCycle.label(),
+            target_p95_ms: Operation::CuratorCycle.target_p95_ms(),
+            measured_p50_ms: 12_000.0,
+            measured_p95_ms: 12_000.0,
+            measured_p99_ms: 12_000.0,
+            samples: 1,
+            status: Status::Pass,
+        }];
+        let table = render_table(&results);
+        assert!(table.contains("curator cycle (1k memories)"));
+        assert!(table.contains("PASS"));
     }
 
     #[test]

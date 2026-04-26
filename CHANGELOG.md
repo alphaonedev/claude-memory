@@ -9,6 +9,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Curator-cycle bench operation (Pillar 3 / Stream E)** — new
+  `Operation::CuratorCycle` variant in `src/bench.rs`, gated against the
+  `curator cycle (1k memories) < 60 s p95` row in `PERFORMANCE.md`.
+  Opt-in via `ai-memory bench --with-curator`: seeds the canonical
+  1000-memory workload (`benchmarks/v063/canonical_workload.json`) into
+  the bench's disposable in-memory `SQLite`, runs one
+  `curator::run_once` sweep against it (with the per-cycle op cap
+  raised from the production-safe default of 100 to 1000 to cover the
+  full sweep), and reports the single-sample latency in the same
+  `OperationResult` shape every other op uses. Bench requires a
+  reachable Ollama endpoint with the curator's configured model
+  (`FeatureTier::Smart` → `gemma4:e2b`); when Ollama is unreachable
+  the flag is treated as a no-op and a clear message is emitted on
+  stderr — same opt-in/no-op pattern as `--with-embedding` from
+  earlier in this Patch. The fixture is loaded at runtime via
+  `env!("CARGO_MANIFEST_DIR")` and validated against three pinned
+  invariants (`schema_version == 1`, `seed == 20_260_426`, and
+  `count == memories.len()`) before the upsert path runs, so a
+  drifted fixture surfaces as a hard error instead of silently
+  rebasing the bench numbers. Default `cargo test` and the
+  `bench.yml` CI guard never trigger the curator op (no `--with-curator`,
+  no Ollama in CI), so the hot path stays fast and deterministic.
+  Charter §"Stream E — Performance Instrumentation"; closes the
+  curator-cycle row from the published budget table. Builds on the
+  canonical workload fixture from the prior iteration in this Patch.
+
+- **Canonical workload fixture (Pillar 3 / Stream E scaffold)** — new
+  `benchmarks/v063/canonical_workload.json` is the 1000-memory
+  deterministic seed required by the `curator cycle (1k memories) <
+  60 s p95` row in `PERFORMANCE.md`. The schema (top-level
+  `{schema_version, seed, count, memories[]}`, every entry shaped 1:1
+  with `crate::models::CreateMemory`) lands ahead of its bench wiring
+  so the curator-cycle benchmark in a follow-up Stream E iteration can
+  `serde_json::from_str` the array straight into the upsert path. Every
+  memory is curator-eligible by construction (no `_`-prefixed
+  namespace, content always >= curator `MIN_CONTENT_LEN`, mid/long
+  tier only, no `auto_tags` metadata) so a single sweep finds 1000
+  candidates and exercises `auto_tag` + `detect_contradiction` to the
+  default `max_ops_per_cycle` (100). The fixture is reproducible from
+  source: the committed `gen_canonical_workload.py` re-emits the same
+  byte-identical JSON given the pinned seed
+  (`SEED = 20260426`), and `src/canonical_workload.rs` carries
+  `cargo test`-gated invariants on schema version, count, seed, and
+  curator-eligibility so future edits to either side cannot silently
+  drift. No production binary impact — the fixture is read at test
+  runtime, not `include_str!`-embedded. Charter §"Stream E —
+  Performance Instrumentation"; closes the curator-cycle scaffold gap
+  flagged in `PERFORMANCE.md` §"Status".
+
 - **Hierarchical namespace taxonomy (Pillar 1 / Stream A)** — new
   `memory_get_taxonomy` MCP tool plus REST mirror at
   `GET /api/v1/taxonomy`. Walks live (non-expired) memories grouped by

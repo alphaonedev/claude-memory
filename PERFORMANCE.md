@@ -72,8 +72,9 @@ reference hardware, not absolute floors for every machine.
 | Per-tool MCP `tracing` spans | ✅ landed | `src/mcp.rs` `handle_request` — `mcp_tool_call` span carries `tool` + `rpc_id`; `elapsed_ms` emitted at exit |
 | KG operations in `bench` | ✅ landed | `src/bench.rs` — fan-out fixture (50 × 4 outbound, every link `valid_from`-stamped) drives `kg_query` depth=1 + `kg_timeline`; chain fixture (50 chains × 5 hops) drives `kg_query` depth=3 + depth=5 |
 | Embedding-bound operations in `bench` | 🚧 Stream E follow-up | needs an embedder fixture decision (opt-in flag vs cfg(test) fake vs pre-cached model) — see iter-0017 handoff |
-| `bench.yml` CI workflow | ✅ landed | `.github/workflows/bench.yml` — gates every PR and trunk push on `ubuntu-latest`; uploads `bench-results` artifact (JSON + table) |
-| Measured numbers in CI history | ✅ collecting | each workflow run's summary carries the table; the JSON artifact is retained per GitHub Actions retention policy |
+| `curator cycle (1k memories)` in `bench` | 🚧 opt-in via `--with-curator` | `src/bench.rs` `run_curator_cycle` — seeds `benchmarks/v063/canonical_workload.json` into a disposable `SQLite` and runs one `curator::run_once` sweep (per-cycle op cap raised to 1000). Requires a reachable Ollama endpoint with the curator's model; CLI emits a no-op message and skips the row otherwise. Default `cargo test` and the `bench.yml` CI guard do not trigger this row. |
+| `bench.yml` CI workflow | ✅ landed | `.github/workflows/bench.yml` — gates every PR and trunk push on `ubuntu-latest`; uploads `bench-results` artifact (JSON + Markdown table) |
+| Measured numbers in CI history | ✅ collecting | each workflow run's summary carries a sortable Markdown table emitted by `ai-memory bench --markdown`; the JSON artifact is retained per GitHub Actions retention policy |
 
 The status table is updated as each Stream lands within the v0.6.3
 cycle. When measurements begin, this file will gain a "Latest measured"
@@ -104,6 +105,11 @@ memory_kg_timeline              <  100 ms           0.1 ms         0.1      0.1 
 `--iterations` and `--warmup` (clamped to `[1, 100_000]` and
 `[0, 10_000]` respectively) tune the sample size. `--json` emits the
 same numbers as a single JSON document for downstream tooling.
+`--markdown` emits a GitHub-Flavored-Markdown table — sortable in the
+GitHub UI when the CI workflow pipes it into `$GITHUB_STEP_SUMMARY`,
+and the data source future tooling will harvest to populate the
+"Latest measured" column promised in the [Status](#status) section.
+`--json` and `--markdown` are mutually exclusive.
 
 The KG rows seed two in-process fixtures so every traversal runs
 end-to-end with no external service:
@@ -120,11 +126,15 @@ end-to-end with no external service:
   a single hop.
 
 Embedding-bound paths (`memory_store` with embedding, `memory_recall`
-cold/full hybrid), the curator daemon, and the federation ack path are
-not yet wired in — they each need fixtures or external services that
-don't belong on the hot path of a `cargo test` run. They land in a
-follow-up Stream E iteration alongside the canonical 1000-memory
-workload at `benchmarks/v063/canonical_workload.json`.
+cold/full hybrid) and the federation ack path are not yet wired in —
+they each need fixtures or external services that don't belong on the
+hot path of a `cargo test` run. The curator-cycle row is wired but
+opt-in via `ai-memory bench --with-curator`: when set, the bench loads
+`benchmarks/v063/canonical_workload.json` (1000 deterministic memories)
+into a disposable `SQLite` and runs one `curator::run_once` sweep
+against the configured Ollama endpoint, gating the result against the
+60 s p95 budget; when Ollama is unreachable the flag is a no-op and
+the row is skipped — the same opt-in/no-op shape as `--with-embedding`.
 
 ## Why Publish These at All
 
