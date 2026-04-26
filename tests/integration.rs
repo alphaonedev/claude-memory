@@ -10391,8 +10391,7 @@ fn test_cli_bench_with_baseline_detects_regression() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("regressed"),
-        "stderr should contain 'regressed', got: {}",
-        stderr
+        "stderr should contain 'regressed', got: {stderr}"
     );
 
     // Parse and validate JSON output.
@@ -10412,7 +10411,7 @@ fn test_cli_bench_with_baseline_detects_regression() {
     // At least one regression entry should have regressed: true.
     let has_regressed = regressions.iter().any(|r| {
         r.get("regressed")
-            .and_then(|v| v.as_bool())
+            .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
     });
     assert!(
@@ -10511,7 +10510,7 @@ fn test_cli_bench_with_baseline_passes_when_loose_threshold() {
         for r in regressions {
             let regressed = r
                 .get("regressed")
-                .and_then(|v| v.as_bool())
+                .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false);
             assert!(
                 !regressed,
