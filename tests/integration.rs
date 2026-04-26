@@ -3725,7 +3725,7 @@ fn test_import_trust_source_preserves_agent_id() {
 }
 
 /// GAP 2: Consolidate attribution was nondeterministic (last-write-wins from
-/// merged metadata). Fix: consolidator's agent_id becomes authoritative;
+/// merged metadata). Fix: consolidator's `agent_id` becomes authoritative;
 /// original authors preserved in `metadata.consolidated_from_agents`.
 #[test]
 fn test_consolidate_attributes_to_consolidator() {
