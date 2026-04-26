@@ -10036,3 +10036,83 @@ fn http_namespace_standard_meta_fans_out() {
         "peer never saw the parent namespace from the meta fanout"
     );
 }
+
+#[test]
+fn test_curator_autonomy_end_to_end_cycle() {
+    let dir = std::env::temp_dir();
+    let db_path = dir.join(format!("ai-memory-curator-e2e-{}.db", uuid::Uuid::new_v4()));
+    let binary = env!("CARGO_BIN_EXE_ai-memory");
+
+    // Seed the database with intentionally-tagable memories
+    // (content long enough for MIN_CONTENT_LEN = 50 bytes)
+    let memories = vec![
+        (
+            "Memory 1",
+            "This is a comprehensive test memory about artificial intelligence and machine learning concepts in modern systems",
+        ),
+        (
+            "Memory 2",
+            "Machine learning algorithms provide powerful tools for data analysis and pattern recognition tasks",
+        ),
+        (
+            "Memory 3",
+            "Artificial intelligence is reshaping technology with neural networks and deep learning methods",
+        ),
+    ];
+
+    for (title, content) in memories {
+        let output = cmd(binary)
+            .args([
+                "--db",
+                db_path.to_str().unwrap(),
+                "store",
+                "-t",
+                "mid",
+                "-n",
+                "curator-test",
+                "-T",
+                title,
+                "--content",
+                content,
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "store failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    // Run curator in dry-run mode (single cycle, no writes)
+    let output = cmd(binary)
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "--json",
+            "curator",
+            "--once",
+            "--dry-run",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "curator failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Parse the JSON report
+    let report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("curator output should be valid JSON");
+
+    // Assert that the curator cycle ran
+    assert!(report["memories_scanned"].as_u64().is_some());
+    assert!(report["memories_eligible"].as_u64().is_some());
+    assert_eq!(report["dry_run"], true, "should have been dry-run");
+
+    // Verify the report has expected structure
+    assert!(report["started_at"].is_string());
+    assert!(report["completed_at"].is_string());
+    assert!(report["cycle_duration_ms"].is_u64());
+}
