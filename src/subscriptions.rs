@@ -333,11 +333,28 @@ pub fn validate_url_dns(url: &str) -> Result<()> {
     let host_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let host_port = &rest[..host_end];
     // Supply a default port so ToSocketAddrs resolves correctly.
-    let resolv_target = if host_port.contains(':') || host_port.starts_with('[') {
-        host_port.to_string()
-    } else {
-        format!("{host_port}:80")
-    };
+    // SSRF fix (W11): bracketed IPv6 without an explicit port ("[fe80::1]"
+    // with no trailing ":N") was previously passed to ToSocketAddrs as-is,
+    // which errors with "invalid port value" — and the catch-all `Err(_) =>
+    // return Ok(())` below treated that as a DNS hiccup, silently bypassing
+    // the SSRF guard. Detect the no-trailing-port form and append `:80` so
+    // resolution succeeds and the IP is checked.
+    let resolv_target =
+        if let Some(close_idx) = host_port.strip_prefix('[').and(host_port.find(']')) {
+            let after_bracket = &host_port[close_idx + 1..];
+            if after_bracket.starts_with(':') {
+                // [ipv6]:port — already has a port
+                host_port.to_string()
+            } else {
+                // [ipv6] without port — append default
+                format!("{host_port}:80")
+            }
+        } else if host_port.contains(':') {
+            // IPv4:port or hostname:port — use as-is
+            host_port.to_string()
+        } else {
+            format!("{host_port}:80")
+        };
     let addrs: Vec<std::net::SocketAddr> = match resolv_target.to_socket_addrs() {
         Ok(iter) => iter.collect(),
         Err(_) => return Ok(()), // DNS hiccup — let reqwest surface it
@@ -419,13 +436,24 @@ pub fn validate_url(url: &str) -> Result<()> {
 fn is_private(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_private() || v4.is_link_local() || v4.is_multicast() || v4.is_broadcast()
+            // SSRF fix (W11): include `is_unspecified` (0.0.0.0). On most
+            // OSes the kernel routes 0.0.0.0 to a local listener, so an
+            // attacker-controlled hostname resolving to 0.0.0.0 hits the
+            // local box.
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
         }
         IpAddr::V6(v6) => {
             // Conservative: reject unique-local (fc00::/7), link-local
-            // (fe80::/10), and multicast.
+            // (fe80::/10), multicast, and the unspecified address `::`.
+            // SSRF fix (W11): `is_unspecified` covers `[::]`, which most
+            // kernels route to local services.
             let segs = v6.segments();
             v6.is_multicast()
+                || v6.is_unspecified()
                 || (segs[0] & 0xfe00) == 0xfc00 // ULA
                 || (segs[0] & 0xffc0) == 0xfe80 // link-local
         }
@@ -615,23 +643,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "FIXME: validate_url_dns accepts http://[fe80::1]/ — \
-                bracketed IPv6 hosts without an explicit port skip the \
-                ':80' default, so to_socket_addrs() returns 'invalid \
-                port value' and the production code's DNS-failure \
-                fallback returns Ok(()). Real SSRF gap — production \
-                fix needed (default port appending for bracketed IPv6)."]
     fn test_validate_url_dns_rejects_link_local_ipv6() {
         // fe80::/10 is link-local. is_private() flags this and the IP
-        // is not loopback, so validate_url_dns *should* reject. But
-        // the URL parsing branch builds `resolv_target = "[fe80::1]"`
-        // (no port) when the host_port starts with '[' and contains
-        // ':'. `"[fe80::1]".to_socket_addrs()` errors with "invalid
-        // port value", and the validator's err-fallback is `Ok(())`,
-        // so the SSRF target slips through.
-        //
-        // Asserting SECURE behaviour (Err); test gated #[ignore]
-        // until production is fixed.
+        // is not loopback, so validate_url_dns rejects.
+        // SSRF fix (W11): bracketed IPv6 hosts without an explicit port
+        // now get ":80" appended before to_socket_addrs(), so resolution
+        // succeeds and the IP check fires.
         let res = validate_url_dns("http://[fe80::1]/");
         assert!(
             res.is_err(),
@@ -690,19 +707,12 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "FIXME: validate_url_dns accepts 0.0.0.0 / [::] — \
-                is_private does not include is_unspecified, so the \
-                unspecified address routes through to_socket_addrs and \
-                is treated as public. SSRF gap — production fix needed."]
     fn test_validate_url_dns_rejects_unspecified_addresses() {
-        // 0.0.0.0 / [::] are "unspecified" addresses. `is_private` does
-        // not include `is_unspecified`, so the kernel-side resolver
-        // returns 0.0.0.0 verbatim and the validator accepts it. On
-        // most OSes connecting to 0.0.0.0 routes to localhost — that
-        // is an SSRF / loopback bypass.
-        //
-        // Asserting SECURE behaviour (Err); test is gated #[ignore]
-        // with a FIXME-bug tag until production is fixed.
+        // 0.0.0.0 / [::] are "unspecified" addresses. On most OSes
+        // connecting to 0.0.0.0 routes to localhost — that is an SSRF
+        // / loopback bypass.
+        // SSRF fix (W11): `is_private` now flags `is_unspecified` for
+        // both v4 and v6.
         let v4 = validate_url_dns("http://0.0.0.0/");
         let v6 = validate_url_dns("http://[::]/");
         assert!(

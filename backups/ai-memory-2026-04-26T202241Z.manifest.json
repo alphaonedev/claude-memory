@@ -1,8 +1,0 @@
-{
-  "snapshot": "ai-memory-2026-04-26T202241Z.db",
-  "sha256": "e8e2dd475abf2354c9d08f9cf98b6bb983b48ed3e9200178f7735a522ae91d56",
-  "bytes": 176128,
-  "source_db": "/var/folders/fc/6g5j3g35167chdg31mcnr5h40000gn/T/ai-memory-failure-523ed562-6386-4390-b80f-08b24b72bb06.db",
-  "version": "0.6.3-rc1",
-  "created_at": "2026-04-26T20:22:41.881349+00:00"
-}
