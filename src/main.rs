@@ -3,6 +3,7 @@
 
 #![recursion_limit = "256"]
 
+mod attestation;
 mod autonomy;
 mod color;
 mod config;

@@ -45,6 +45,13 @@ rustls = { version = "0.23", features = ["ring"] }
 # for Layer 3 E2E encryption (#228).
 sha2 = "0.10"
 
+# v0.7 Layer 2b — attested sender_agent_id from mTLS cert CN/SAN.
+# x509-parser is a pure-rust DER/PEM parser. Always on (not feature-
+# gated) because it's small (<100 kLOC of dep tree) and the
+# attestation path defaults to --attest-mode=off — no behavior
+# change unless operator opts in.
+x509-parser = "0.17"
+
 # Semantic embedding support
 candle-core = "0.10"
 candle-nn = "0.10"
