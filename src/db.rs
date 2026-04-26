@@ -170,7 +170,7 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 15;
+const CURRENT_SCHEMA_VERSION: i64 = 16;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -221,6 +221,8 @@ fn apply_sqlcipher_key(conn: &Connection) -> Result<()> {
 fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
     Ok(())
 }
+
+const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_hierarchy_kg.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -525,6 +527,22 @@ fn migrate(conn: &Connection) -> Result<()> {
             // (charter line 428): set to the source memory's
             // `created_at` to avoid null-handling complexity in v0.6.3
             // KG query code.
+            //
+            // Type note: charter said `TIMESTAMP` for `valid_from` and
+            // `valid_until`. SQLite has no native TIMESTAMP type — it
+            // stores timestamps as TEXT (ISO-8601), REAL (Julian), or
+            // INTEGER (unix). The codebase uses TEXT throughout (matches
+            // every other timestamp column in this schema and matches
+            // chrono's `to_rfc3339()` output). The Postgres adapter at
+            // `src/store/postgres_schema.sql` uses `TIMESTAMPTZ` —
+            // semantically equivalent across both backends.
+            //
+            // The DDL itself lives in migrations/sqlite/0010_v063_hierarchy_kg.sql
+            // (and migrations/postgres/0010_v063_hierarchy_kg.sql for the
+            // Postgres adapter). Loaded via include_str! at compile time
+            // and executed below via execute_batch. The column-existence
+            // checks remain inline here because SQLite cannot do
+            // ALTER TABLE ADD COLUMN IF NOT EXISTS.
             let has_valid_from = conn
                 .prepare("SELECT valid_from FROM memory_links LIMIT 0")
                 .is_ok();
@@ -550,39 +568,17 @@ fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE memory_links ADD COLUMN signature BLOB", [])?;
             }
 
-            conn.execute(
-                "UPDATE memory_links \
-                 SET valid_from = (SELECT created_at FROM memories WHERE id = memory_links.source_id) \
-                 WHERE valid_from IS NULL",
-                [],
-            )?;
+            // All INDEX and TABLE statements are idempotent; batch-run the migration
+            conn.execute_batch(MIGRATION_V15_SQLITE)?;
+        }
 
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_temporal_src \
-                 ON memory_links (source_id, valid_from, valid_until)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_temporal_tgt \
-                 ON memory_links (target_id, valid_from, valid_until)",
-                [],
-            )?;
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_links_relation \
-                 ON memory_links (relation, valid_from)",
-                [],
-            )?;
-
-            conn.execute_batch(
-                "CREATE TABLE IF NOT EXISTS entity_aliases (
-                    entity_id  TEXT NOT NULL,
-                    alias      TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (entity_id, alias)
-                );
-                CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias
-                  ON entity_aliases (alias);",
-            )?;
+        if version < 16 {
+            // v0.6.4 prep: explicitly document that the existing
+            // idx_memories_namespace already supports prefix LIKE under
+            // SQLite's default BINARY collation. Bump version so Postgres
+            // peers' text_pattern_ops index is part of the same migration
+            // generation.
+            // No DDL needed for SQLite — index already prefix-friendly.
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -2292,6 +2288,22 @@ pub const KG_TIMELINE_MAX_LIMIT: usize = 1000;
 /// entity asserted by agents in different namespaces. Callers can
 /// post-filter by `target_namespace` if they need a namespace-scoped
 /// view.
+///
+/// v0.7 AGE acceleration onramp (charter §"Stream C" bullet 4). When
+/// the v0.7 SAL ships with Apache AGE, the equivalent property-graph
+/// query is:
+///
+/// ```cypher
+/// MATCH (s {id: $source_id})-[r {valid_from IS NOT NULL,
+///        valid_from >= $since, valid_from <= $until}]->(t)
+/// WHERE t.id <> s.id  // exclude self-loops
+/// RETURN t.id, r.relation, r.valid_from, r.valid_until, r.observed_by
+/// ORDER BY r.valid_from ASC, r.created_at ASC
+/// LIMIT $limit
+/// ```
+///
+/// Stub left here per charter intent so the v0.7 migration has a 1:1
+/// reference query.
 pub fn kg_timeline(
     conn: &Connection,
     source_id: &str,
@@ -2519,6 +2531,22 @@ pub fn kg_query(
     binds.push(Box::new(i64::try_from(cap).unwrap_or(i64::MAX)));
     let limit_ph = binds.len();
 
+    // v0.7 AGE acceleration onramp (charter §"Stream C — KG Query Layer"
+    // bullet 4). The recursive CTE below is the v0.6.3 SQLite/Postgres
+    // implementation. When the v0.7 SAL ships with Apache AGE wired in,
+    // the equivalent property-graph query will look like:
+    //
+    //   MATCH (s {id: $source_id})-[r*1..$max_depth {valid_from <= $t,
+    //          observed_by IN $allowed_agents}]->(t)
+    //   WHERE NONE(n IN nodes(path) WHERE n.id = t.id)  -- cycle prune
+    //   RETURN t.id, last(r).relation, t.title, length(r) AS depth,
+    //          [n IN nodes(path) | n.id] AS path
+    //   ORDER BY depth, last(r).valid_from
+    //   LIMIT $limit
+    //
+    // Stub left here per charter intent so the v0.7 migration to AGE
+    // has a 1:1 reference query alongside the SQL implementation.
+
     let sql = format!(
         "WITH RECURSIVE traversal(\
             target_id, relation, valid_from, valid_until, observed_by, \
@@ -2526,21 +2554,22 @@ pub fn kg_query(
          ) AS (\
             SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until, \
                    ml.observed_by, ml.created_at, 1, \
-                   ml.source_id || '->' || ml.target_id \
+                   json_array(ml.source_id, ml.target_id) \
             FROM memory_links ml \
             WHERE ml.source_id = ?{source_ph}{hop_filter} \
             UNION ALL \
             SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until, \
                    ml.observed_by, ml.created_at, t.depth + 1, \
-                   t.path || '->' || ml.target_id \
+                   json_insert(t.path, '$[' || json_array_length(t.path) || ']', ml.target_id) \
             FROM memory_links ml \
             JOIN traversal t ON ml.source_id = t.target_id \
             WHERE t.depth < ?{max_depth_ph} \
-              AND t.path NOT LIKE '%' || ml.target_id || '%'\
+              AND NOT EXISTS (SELECT 1 FROM json_each(t.path) WHERE value = ml.target_id)\
               {hop_filter}\
          ) \
          SELECT t.target_id, t.relation, t.valid_from, t.valid_until, \
-                t.observed_by, m.title, m.namespace, t.depth, t.path \
+                t.observed_by, m.title, m.namespace, t.depth, \
+                (SELECT group_concat(value, '->') FROM json_each(t.path)) \
          FROM traversal t \
          JOIN memories m ON m.id = t.target_id \
          ORDER BY t.depth ASC, COALESCE(t.valid_from, t.link_created_at) ASC, \
@@ -7177,5 +7206,37 @@ mod tests {
             "expected valid_from to be backfilled, got NULL"
         );
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn namespace_prefix_query_index_available() {
+        let conn = test_db();
+        // SQLite's default BINARY collation supports prefix-matching LIKE queries
+        // with the idx_memories_namespace index. Verify the index exists and a
+        // simple prefix query can execute (EXPLAIN QUERY PLAN output varies by
+        // SQLite version and query planner heuristics, so we just check that the
+        // query completes without error).
+        let result: Option<String> = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_namespace'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            result,
+            Some("idx_memories_namespace".to_string()),
+            "idx_memories_namespace index should exist"
+        );
+
+        // Execute a prefix LIKE query to ensure it compiles and runs
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE namespace LIKE 'test/%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
 }

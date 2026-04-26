@@ -36,6 +36,21 @@ CREATE OR REPLACE FUNCTION tier_rank(t TEXT) RETURNS INTEGER
 $$;
 
 -- ─────────────────────────────────────────────────────────────────────
+-- schema_version — migration tracking (v0.7 in-place migration support).
+-- 
+-- Tracks the highest schema version applied to this Postgres instance.
+-- Mirrors the SQLite CURRENT_SCHEMA_VERSION constant and schema_version
+-- table in src/db.rs. The migration runner (PostgresStore::migrate)
+-- reads MAX(version) here to determine which steps to apply.
+-- Idempotent: if the table exists, the migration runner skips schema
+-- setup steps already applied.
+-- ─────────────────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER PRIMARY KEY,
+    applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ─────────────────────────────────────────────────────────────────────
 -- memories — the core memory table.
 -- ─────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS memories (
@@ -70,6 +85,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS memories_title_ns_uidx
     ON memories (title, namespace);
 
 CREATE INDEX IF NOT EXISTS memories_namespace_idx ON memories (namespace);
+CREATE INDEX IF NOT EXISTS idx_memories_namespace_path
+    ON memories (namespace text_pattern_ops);
 CREATE INDEX IF NOT EXISTS memories_tier_idx      ON memories (tier);
 CREATE INDEX IF NOT EXISTS memories_priority_idx  ON memories (priority DESC);
 CREATE INDEX IF NOT EXISTS memories_updated_at_idx ON memories (updated_at DESC);

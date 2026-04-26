@@ -60,6 +60,10 @@ use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
 /// Bootstrap schema run at adapter init — idempotent via IF NOT EXISTS.
 const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 
+/// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:173).
+/// Incremented on each migration step.
+const CURRENT_SCHEMA_VERSION: i32 = 15;
+
 /// Default connection pool settings. Tuned for a mid-range ai-memory
 /// daemon — adjust via `PostgresStore::with_pool_options` when wiring
 /// a larger deployment.
@@ -152,7 +156,200 @@ impl PostgresStore {
             );
         }
 
-        Ok(Self { pool })
+        // Run schema migrations after bootstrap schema is loaded.
+        let store = Self { pool };
+        store.migrate().await?;
+
+        Ok(store)
+    }
+
+    /// Run schema migrations on the connection. Called after bootstrap schema
+    /// is loaded. Reads the current schema_version, then applies all pending
+    /// migrations in a transaction per version step (matching SQLite behavior
+    /// in src/db.rs::migrate).
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::BackendUnavailable` if migration fails.
+    async fn migrate(&self) -> StoreResult<()> {
+        // Read the current version from schema_version table.
+        let current_version: Option<i32> =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| to_store_err("read schema_version", e))?;
+
+        let current_version = current_version.unwrap_or(0);
+
+        if current_version >= CURRENT_SCHEMA_VERSION {
+            return Ok(());
+        }
+
+        // Apply each migration step in its own transaction for idempotence.
+        if current_version < 15 {
+            self.migrate_v15().await?;
+        }
+
+        Ok(())
+    }
+
+    /// v0.6.3 Stream B — Temporal-Validity KG schema additions.
+    /// Idempotent: safe to run twice. Mirrors src/db.rs migrate v15 block.
+    async fn migrate_v15(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin transaction", e))?;
+
+        // Add temporal columns to memory_links if they do not exist.
+        let has_valid_from: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='memory_links' AND column_name='valid_from'
+            )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("check valid_from column", e))?;
+
+        if !has_valid_from {
+            sqlx::query("ALTER TABLE memory_links ADD COLUMN valid_from TIMESTAMPTZ")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err("add valid_from column", e))?;
+        }
+
+        let has_valid_until: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='memory_links' AND column_name='valid_until'
+            )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("check valid_until column", e))?;
+
+        if !has_valid_until {
+            sqlx::query("ALTER TABLE memory_links ADD COLUMN valid_until TIMESTAMPTZ")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err("add valid_until column", e))?;
+        }
+
+        let has_observed_by: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='memory_links' AND column_name='observed_by'
+            )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("check observed_by column", e))?;
+
+        if !has_observed_by {
+            sqlx::query("ALTER TABLE memory_links ADD COLUMN observed_by TEXT")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err("add observed_by column", e))?;
+        }
+
+        let has_signature: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='memory_links' AND column_name='signature'
+            )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("check signature column", e))?;
+
+        if !has_signature {
+            sqlx::query("ALTER TABLE memory_links ADD COLUMN signature BYTEA")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err("add signature column", e))?;
+        }
+
+        // Backfill valid_from from source memory's created_at (idempotent).
+        sqlx::query(
+            "UPDATE memory_links
+             SET valid_from = (SELECT created_at FROM memories WHERE id = memory_links.source_id)
+             WHERE valid_from IS NULL",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("backfill valid_from", e))?;
+
+        // Create temporal indexes (idempotent via IF NOT EXISTS).
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_links_temporal_src
+             ON memory_links (source_id, valid_from, valid_until)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_links_temporal_src", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_links_temporal_tgt
+             ON memory_links (target_id, valid_from, valid_until)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_links_temporal_tgt", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_links_relation
+             ON memory_links (relation, valid_from)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_links_relation", e))?;
+
+        // Create entity_aliases table (idempotent via IF NOT EXISTS).
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS entity_aliases (
+                entity_id  TEXT NOT NULL,
+                alias      TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (entity_id, alias)
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create entity_aliases table", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_entity_aliases_alias
+             ON entity_aliases (alias)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_entity_aliases_alias", e))?;
+
+        // Record the migration in schema_version.
+        sqlx::query("DELETE FROM schema_version")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("delete old schema_version", e))?;
+
+        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
+            .bind(CURRENT_SCHEMA_VERSION)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("insert schema_version", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit migration transaction", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            version = CURRENT_SCHEMA_VERSION,
+            "schema migration v15 applied"
+        );
+
+        Ok(())
     }
 
     fn row_to_memory(row: &sqlx::postgres::PgRow) -> StoreResult<Memory> {
@@ -577,6 +774,13 @@ mod tests {
         assert!(INIT_SCHEMA.contains("to_tsvector"));
     }
 
+    #[test]
+    fn init_schema_contains_schema_version_table() {
+        // Verify the schema_version table is created for migration tracking.
+        assert!(INIT_SCHEMA.contains("CREATE TABLE IF NOT EXISTS schema_version"));
+        assert!(INIT_SCHEMA.contains("version    INTEGER PRIMARY KEY"));
+    }
+
     // ------------------------------------------------------------------
     // Live-Postgres integration tests.
     //
@@ -769,6 +973,61 @@ mod tests {
             matches!(got.tier, Tier::Long),
             "tier must remain Long (got {:?})",
             got.tier
+        );
+    }
+
+    /// Verify migration is idempotent: running twice produces the same result.
+    /// Tests that ALTER TABLE/CREATE INDEX operations are guarded with
+    /// IF NOT EXISTS checks, and that schema_version is correctly recorded.
+    #[tokio::test]
+    async fn migration_v15_is_idempotent() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skipping: no AI_MEMORY_TEST_POSTGRES_URL");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+
+        // Read schema version after first connect (migration runs implicitly).
+        let first_version: Option<i32> =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+                .fetch_optional(&store.pool)
+                .await
+                .expect("read version after first connect");
+
+        // Run migration again explicitly (should be a no-op).
+        store.migrate().await.expect("migrate again");
+
+        // Verify schema version hasn't changed (idempotent).
+        let second_version: Option<i32> =
+            sqlx::query_scalar("SELECT COALESCE(MAX(version), 0) FROM schema_version")
+                .fetch_optional(&store.pool)
+                .await
+                .expect("read version after second migrate");
+
+        assert_eq!(
+            first_version, second_version,
+            "schema version must be stable across repeated migrations"
+        );
+
+        // Verify the v15 columns exist (created or already existed).
+        let has_valid_from: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name='memory_links' AND column_name='valid_from'",
+        )
+        .fetch_optional(&store.pool)
+        .await
+        .expect("check valid_from column");
+        assert!(has_valid_from.is_some(), "valid_from column must exist");
+
+        let has_entity_aliases_idx: Option<(String,)> = sqlx::query_as(
+            "SELECT indexname FROM pg_indexes WHERE indexname='idx_entity_aliases_alias'",
+        )
+        .fetch_optional(&store.pool)
+        .await
+        .expect("check entity_aliases index");
+        assert!(
+            has_entity_aliases_idx.is_some(),
+            "idx_entity_aliases_alias must exist"
         );
     }
 }

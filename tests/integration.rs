@@ -11,6 +11,19 @@ fn cmd(binary: &str) -> std::process::Command {
     c.env("AI_MEMORY_NO_CONFIG", "1");
     c
 }
+/// Spawn a command and collect its output, panicking with a descriptive
+/// error if either spawn or wait fails. Equivalent to
+/// `cmd(bin).args(...).output().unwrap()` but with consistent error
+/// formatting and an explicit assertion that the binary exists. The
+/// `output()` call blocks until the child exits and reaps it before
+/// returning, so no `ChildGuard` is needed for short-lived calls — but
+/// using this helper signals "intentional short-lived" in code review.
+fn cmd_output_or_panic(bin: &str, args: &[&str]) -> std::process::Output {
+    cmd(bin)
+        .args(args)
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn {bin} {args:?}: {e}"))
+}
 
 #[test]
 fn test_cli_store_and_recall() {
@@ -86,28 +99,28 @@ fn test_cli_store_and_recall() {
     assert!(searched["count"].as_u64().unwrap() >= 1);
 
     // List
-    let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "list"])
-        .output()
-        .unwrap();
+    let output = cmd_output_or_panic(
+        binary,
+        &["--db", db_path.to_str().unwrap(), "--json", "list"],
+    );
     assert!(output.status.success());
     let listed: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(listed["count"].as_u64().unwrap() >= 1);
 
     // Stats
-    let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "stats"])
-        .output()
-        .unwrap();
+    let output = cmd_output_or_panic(
+        binary,
+        &["--db", db_path.to_str().unwrap(), "--json", "stats"],
+    );
     assert!(output.status.success());
     let stats: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(stats["total"].as_u64().unwrap() >= 1);
 
     // Namespaces
-    let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "--json", "namespaces"])
-        .output()
-        .unwrap();
+    let output = cmd_output_or_panic(
+        binary,
+        &["--db", db_path.to_str().unwrap(), "--json", "namespaces"],
+    );
     assert!(output.status.success());
     let ns: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert!(!ns["namespaces"].as_array().unwrap().is_empty());
@@ -2454,7 +2467,7 @@ fn test_version_flag_matches_cargo_pkg_version() {
     // → 0.6.0-alpha.1 → …) without having to be re-hardcoded each time.
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let expected = env!("CARGO_PKG_VERSION");
-    let output = cmd(binary).args(["--version"]).output().unwrap();
+    let output = cmd_output_or_panic(binary, &["--version"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
@@ -8557,13 +8570,19 @@ fn curl_delete(port: u16, path: &str, agent_id: Option<&str>) -> String {
 /// tests. On `Drop` it kills the child, reaps it, then unlinks any
 /// associated temp files.
 ///
-/// `std::process::Child` does NOT kill the underlying process when
+/// RAII wrapper for daemon processes spawned with `spawn()` instead of
+/// `output()`. `std::process::Child` does NOT kill the underlying process when
 /// dropped on Unix — the docs explicitly say so. Tests that spawn a
 /// daemon and rely on a manual `kill()` at the end of the function
 /// leak the daemon to PID 1 whenever any earlier `assert!` panics:
 /// the unwinder drops the `Child` (no-op) and the test binary exits,
 /// orphaning the server. Wrap the `Child` in a guard to make cleanup
 /// unwind-safe.
+///
+/// For long-lived daemons (`serve`, `sync-daemon`, etc.) that span
+/// multiple assertions, use ChildGuard. For short-lived blocking
+/// CLI calls (`output()` immediately), use `cmd_output_or_panic` —
+/// simpler, equally safe.
 struct ChildGuard {
     child: Option<std::process::Child>,
     cleanup_paths: Vec<std::path::PathBuf>,
