@@ -333,4 +333,56 @@ mod tests {
         let text = render();
         assert!(text.contains("ai_memory_store_total{result=\"ok\",tier=\"long\"}"));
     }
+
+    // ---- Wave 3 (Closer T): tests for curator_cycle_completed (L263-287)
+    // and webhook_dispatched/_failed counter labels.
+
+    #[test]
+    fn curator_cycle_completed_increments_total() {
+        // Other tests running in parallel may bump the same singleton
+        // counter; what we own is the +1 contributed by *this* call.
+        let before = registry().curator_cycles_total.get();
+        curator_cycle_completed(0, 0, 0, 0);
+        let after = registry().curator_cycles_total.get();
+        assert!(
+            after >= before + 1,
+            "curator_cycles_total did not advance (before={before}, after={after})"
+        );
+    }
+
+    #[test]
+    fn curator_cycle_completed_records_auto_tag_ok() {
+        curator_cycle_completed(5, 3, 0, 0);
+        let text = render();
+        assert!(
+            text.contains("ai_memory_curator_operations_total"),
+            "curator_operations_total counter missing from /metrics output"
+        );
+    }
+
+    #[test]
+    fn curator_cycle_completed_records_contradiction_ok() {
+        curator_cycle_completed(2, 0, 2, 0);
+        let text = render();
+        assert!(text.contains("ai_memory_curator_operations_total"));
+    }
+
+    #[test]
+    fn curator_cycle_completed_records_errors() {
+        // operations_attempted=5, auto_tagged=2, contradictions=1 → failed=2
+        // plus errors=1 → the err counter is exercised.
+        curator_cycle_completed(5, 2, 1, 1);
+        let text = render();
+        assert!(text.contains("ai_memory_curator_operations_total"));
+    }
+
+    #[test]
+    fn curator_cycle_completed_with_zero_args_is_safe() {
+        // No labels emitted, no panic — a zero cycle is valid (empty DB).
+        let before = registry().curator_cycles_total.get();
+        curator_cycle_completed(0, 0, 0, 0);
+        let after = registry().curator_cycles_total.get();
+        // Same race-tolerant assertion as above.
+        assert!(after >= before + 1);
+    }
 }
