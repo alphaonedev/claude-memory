@@ -253,6 +253,7 @@ fn test_content_size_limit() {
 
 #[test]
 fn test_import_export_roundtrip() {
+    use std::io::Write;
     let binary = env!("CARGO_BIN_EXE_ai-memory");
     let dir = std::env::temp_dir();
     let db1 = dir.join(format!("ai-memory-export-{}.db", uuid::Uuid::new_v4()));
@@ -295,7 +296,6 @@ fn test_import_export_roundtrip() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::Write;
     child
         .stdin
         .take()
