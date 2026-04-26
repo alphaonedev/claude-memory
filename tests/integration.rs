@@ -8100,7 +8100,7 @@ fn cert_sha256_fingerprint(cert_path: &std::path::Path) -> Option<String> {
         .split('=')
         .nth(1)?
         .chars()
-        .filter(|c| c.is_ascii_hexdigit())
+        .filter(char::is_ascii_hexdigit)
         .collect();
     Some(hex.to_ascii_lowercase())
 }
