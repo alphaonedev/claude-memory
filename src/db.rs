@@ -2565,21 +2565,22 @@ pub fn kg_query(
          ) AS (\
             SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until, \
                    ml.observed_by, ml.created_at, 1, \
-                   ml.source_id || '->' || ml.target_id \
+                   json_array(ml.source_id, ml.target_id) \
             FROM memory_links ml \
             WHERE ml.source_id = ?{source_ph}{hop_filter} \
             UNION ALL \
             SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until, \
                    ml.observed_by, ml.created_at, t.depth + 1, \
-                   t.path || '->' || ml.target_id \
+                   json_insert(t.path, '$[' || json_array_length(t.path) || ']', ml.target_id) \
             FROM memory_links ml \
             JOIN traversal t ON ml.source_id = t.target_id \
             WHERE t.depth < ?{max_depth_ph} \
-              AND t.path NOT LIKE '%' || ml.target_id || '%'\
+              AND NOT EXISTS (SELECT 1 FROM json_each(t.path) WHERE value = ml.target_id)\
               {hop_filter}\
          ) \
          SELECT t.target_id, t.relation, t.valid_from, t.valid_until, \
-                t.observed_by, m.title, m.namespace, t.depth, t.path \
+                t.observed_by, m.title, m.namespace, t.depth, \
+                (SELECT group_concat(value, '->') FROM json_each(t.path)) \
          FROM traversal t \
          JOIN memories m ON m.id = t.target_id \
          ORDER BY t.depth ASC, COALESCE(t.valid_from, t.link_created_at) ASC, \
