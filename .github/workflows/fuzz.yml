@@ -1,0 +1,41 @@
+name: Fuzz Testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: 'Fuzz duration in seconds'
+        required: false
+        default: '60'
+
+jobs:
+  fuzz:
+    name: Cargo Fuzz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz validate
+        run: |
+          cd fuzz
+          cargo fuzz run fuzz_validate -- -max_len=512 -max_total_time=${{ github.event.inputs.duration }}
+
+      - name: Fuzz namespace
+        run: |
+          cd fuzz
+          cargo fuzz run fuzz_namespace -- -max_len=512 -max_total_time=${{ github.event.inputs.duration }}
+
+      - name: Upload fuzz artifacts
+        if: failure()
+        uses: actions/upload-artifact@v5
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
