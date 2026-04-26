@@ -6,6 +6,7 @@
 <p align="center"><em>universal AI memory</em></p>
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
+[![Bench](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml/badge.svg?branch=release%2Fv0.6.3)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml)
 [![Rust](https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
@@ -558,6 +559,29 @@ Evaluated on the [ICLR 2025 LongMemEval-S](benchmarks/longmemeval/) dataset (500
 | **keyword** | 97.0% | 232 q/s | None |
 | **semantic** | 97.4% | 45 q/s | Embedding model (~100MB) |
 | **smart** | 97.8% | 12 q/s | Ollama + Gemma 4 E2B |
+
+---
+
+## Performance Budgets
+
+ai-memory publishes an explicit per-operation latency contract in [`PERFORMANCE.md`](PERFORMANCE.md). Every pull request against `main`, `develop`, or `release/**` runs `ai-memory bench` on `ubuntu-latest` and **fails the build when any operation's measured p95 exceeds its target by more than 10%** — see the [Bench badge](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml) above.
+
+Operators can verify on their own hardware (the bench seeds an in-memory disposable SQLite — the operator's main DB is untouched):
+
+```bash
+$ ai-memory bench
+Operation                       Target (p95)   Measured (p95)   p50      p99      Status
+─────────────────────────────────────────────────────────────────────────────────────────
+memory_store (no embedding)     <   20 ms           0.4 ms         0.3      0.5    PASS
+memory_search (FTS5)            <  100 ms           0.5 ms         0.5      0.5    PASS
+memory_recall (hot, depth=1)    <   50 ms           4.8 ms         4.2      5.3    PASS
+memory_kg_query (depth=1)       <  100 ms           0.5 ms         0.5      0.5    PASS
+memory_kg_query (depth=3)       <  100 ms           0.6 ms         0.6      0.6    PASS
+memory_kg_query (depth=5)       <  250 ms           0.7 ms         0.6      1.0    PASS
+memory_kg_timeline              <  100 ms           0.1 ms         0.1      0.1    PASS
+```
+
+`--json` and `--markdown` emit the same numbers as a JSON document or GitHub-Flavored-Markdown table for downstream tooling. Embedding-bound and curator-cycle paths are opt-in via `--with-embedding` / `--with-curator` so the default invocation never requires an external service. The full budget table, hardware baseline, and CI guard rules live in [`PERFORMANCE.md`](PERFORMANCE.md).
 
 ---
 
