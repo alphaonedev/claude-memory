@@ -26,6 +26,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taxonomy demo CLI surface deferred to a later iteration. Charter
   §"Stream A — Hierarchy", lines 320–326.
 
+- **`ai-memory taxonomy` CLI (Pillar 1 / Stream A)** — new third
+  surface for the same `db::get_taxonomy` query that backs the MCP
+  tool and REST endpoint. Renders the response as the ASCII tree from
+  charter §"The Demo That Sells It" (lines 260–273), with
+  `├── / └──` box-drawing children, per-leaf counts, branch-level
+  `(N here, M in subtree)` annotations, and a truncation footer when
+  `limit` dropped input rows. Flags: `--namespace-prefix` (optional,
+  accepts trailing `/`), `--depth` (default 8, clamped to
+  `MAX_NAMESPACE_DEPTH`), `--limit` (default 1000, ceiling 10_000).
+  The global `--json` flag emits the same `{tree, total_count,
+  truncated}` envelope the HTTP route returns so scripts can pipe into
+  `jq`. Three unit tests pin the renderer (empty root, sibling/last
+  box-drawing recursion, truncated footer) so the demo surface stays
+  byte-stable under refactors. Closes the deferred CLI surface
+  flagged in the v15-schema entry above (line 26 in this file).
+
 - **Temporal-validity KG schema (Stream B foundation)** — SQLite schema
   bumps to v15 (`src/db.rs::migrate`). `memory_links` gains four nullable
   temporal columns — `valid_from`, `valid_until`, `observed_by` (TEXT),

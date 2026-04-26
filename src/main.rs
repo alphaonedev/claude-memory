@@ -134,6 +134,11 @@ enum Command {
     Stats,
     /// List all namespaces
     Namespaces,
+    /// v0.6.3 (Pillar 1 / Stream A): render the hierarchical namespace
+    /// taxonomy as an ASCII tree, with per-node and subtree counts.
+    /// Mirrors the `memory_get_taxonomy` MCP tool / `GET /api/v1/taxonomy`
+    /// REST surface; `--json` emits the same envelope those return.
+    Taxonomy(TaxonomyArgs),
     /// Export all memories as JSON
     Export,
     /// Import memories from JSON (stdin)
@@ -203,6 +208,23 @@ struct BenchArgs {
     /// Emit results as JSON instead of the human-readable table.
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Args)]
+struct TaxonomyArgs {
+    /// Restrict the tree to memories under this namespace prefix.
+    /// Trailing `/` is tolerated. Omit to walk the global root.
+    #[arg(long)]
+    namespace_prefix: Option<String>,
+    /// Maximum tree depth to expand below the prefix. Clamped to
+    /// `MAX_NAMESPACE_DEPTH` (8). Memories beneath the cutoff still
+    /// contribute to the boundary ancestor's `subtree_count`.
+    #[arg(long, default_value_t = crate::models::MAX_NAMESPACE_DEPTH)]
+    depth: usize,
+    /// Maximum number of `(namespace, count)` input rows to walk.
+    /// Densest namespaces win when truncated. Hard ceiling `10_000`.
+    #[arg(long, default_value_t = 1000)]
+    limit: usize,
 }
 
 #[derive(Args)]
@@ -878,6 +900,7 @@ async fn main() -> Result<()> {
         Command::Gc => cmd_gc(&db_path, j, &app_config),
         Command::Stats => cmd_stats(&db_path, j),
         Command::Namespaces => cmd_namespaces(&db_path, j),
+        Command::Taxonomy(a) => cmd_taxonomy(&db_path, &a, j),
         Command::Export => cmd_export(&db_path),
         Command::Import(a) => cmd_import(&db_path, &a, j, cli_agent_id.as_deref()),
         Command::Completions(a) => {
@@ -2580,6 +2603,86 @@ fn cmd_namespaces(db_path: &Path, json_out: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn cmd_taxonomy(db_path: &Path, args: &TaxonomyArgs, json_out: bool) -> Result<()> {
+    let conn = db::open(db_path)?;
+    let prefix_owned = args
+        .namespace_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_end_matches('/').to_string());
+    let tax = db::get_taxonomy(&conn, prefix_owned.as_deref(), args.depth, args.limit)?;
+    if json_out {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "tree": tax.tree,
+                "total_count": tax.total_count,
+                "truncated": tax.truncated,
+            }))?
+        );
+        return Ok(());
+    }
+    let mut out = String::new();
+    render_taxonomy(&tax, &mut out);
+    print!("{out}");
+    Ok(())
+}
+
+/// Render a `Taxonomy` envelope as an ASCII tree, matching the
+/// charter §"The Demo That Sells It" example. Public-shape header
+/// counts followed by box-drawing children. Centralised here (rather
+/// than inlined in `cmd_taxonomy`) so unit tests can pin the rendering
+/// without spinning up a CLI process.
+fn render_taxonomy(tax: &models::Taxonomy, out: &mut String) {
+    use std::fmt::Write;
+    let root_label = if tax.tree.namespace.is_empty() {
+        "/".to_string()
+    } else {
+        format!("{}/", tax.tree.namespace)
+    };
+    let _ = writeln!(
+        out,
+        "{root_label}  ({} memories at root, {} in subtree)",
+        tax.tree.count, tax.tree.subtree_count,
+    );
+    let n = tax.tree.children.len();
+    for (i, child) in tax.tree.children.iter().enumerate() {
+        render_taxonomy_child(child, "", i + 1 == n, out);
+    }
+    if tax.truncated {
+        let _ = writeln!(
+            out,
+            "(truncated — {} memories total across all matching namespaces)",
+            tax.total_count,
+        );
+    }
+}
+
+fn render_taxonomy_child(
+    node: &models::TaxonomyNode,
+    prefix: &str,
+    is_last: bool,
+    out: &mut String,
+) {
+    use std::fmt::Write;
+    let connector = if is_last { "└── " } else { "├── " };
+    let label = if node.children.is_empty() {
+        format!("{}  ({})", node.name, node.count)
+    } else {
+        format!(
+            "{}/  ({} here, {} in subtree)",
+            node.name, node.count, node.subtree_count,
+        )
+    };
+    let _ = writeln!(out, "{prefix}{connector}{label}");
+    let child_prefix = format!("{prefix}{}", if is_last { "    " } else { "│   " });
+    let n = node.children.len();
+    for (i, c) in node.children.iter().enumerate() {
+        render_taxonomy_child(c, &child_prefix, i + 1 == n, out);
+    }
 }
 
 fn cmd_export(db_path: &Path) -> Result<()> {
@@ -4596,6 +4699,109 @@ mod tests {
         assert!(
             err.to_string().contains("unexpected character"),
             "expected strict char-set error, got: {err}"
+        );
+    }
+
+    // v0.6.3 Pillar 1 / Stream A — `ai-memory taxonomy` ASCII tree
+    // renderer. Exercises the box-drawing prefix logic (sibling vs
+    // last-child), the leaf vs branch label split, and the truncated
+    // footer.
+    #[test]
+    fn render_taxonomy_empty_root() {
+        let tax = models::Taxonomy {
+            tree: models::TaxonomyNode {
+                namespace: String::new(),
+                name: String::new(),
+                count: 0,
+                subtree_count: 0,
+                children: vec![],
+            },
+            total_count: 0,
+            truncated: false,
+        };
+        let mut out = String::new();
+        render_taxonomy(&tax, &mut out);
+        assert_eq!(out, "/  (0 memories at root, 0 in subtree)\n");
+    }
+
+    #[test]
+    fn render_taxonomy_box_drawing_siblings_and_last_child() {
+        // Two top-level branches (alpha with two leaves; beta with one).
+        // Verifies `├──`/`└──` selection and that the recursion prefixes
+        // the right vertical bar (`│   `) under non-last siblings.
+        let tax = models::Taxonomy {
+            tree: models::TaxonomyNode {
+                namespace: String::new(),
+                name: String::new(),
+                count: 0,
+                subtree_count: 5,
+                children: vec![
+                    models::TaxonomyNode {
+                        namespace: "alpha".into(),
+                        name: "alpha".into(),
+                        count: 0,
+                        subtree_count: 4,
+                        children: vec![
+                            models::TaxonomyNode {
+                                namespace: "alpha/decisions".into(),
+                                name: "decisions".into(),
+                                count: 1,
+                                subtree_count: 1,
+                                children: vec![],
+                            },
+                            models::TaxonomyNode {
+                                namespace: "alpha/code".into(),
+                                name: "code".into(),
+                                count: 3,
+                                subtree_count: 3,
+                                children: vec![],
+                            },
+                        ],
+                    },
+                    models::TaxonomyNode {
+                        namespace: "beta".into(),
+                        name: "beta".into(),
+                        count: 1,
+                        subtree_count: 1,
+                        children: vec![],
+                    },
+                ],
+            },
+            total_count: 5,
+            truncated: false,
+        };
+        let mut out = String::new();
+        render_taxonomy(&tax, &mut out);
+        let expected = "/  (0 memories at root, 5 in subtree)\n\
+                        ├── alpha/  (0 here, 4 in subtree)\n\
+                        │   ├── decisions  (1)\n\
+                        │   └── code  (3)\n\
+                        └── beta  (1)\n";
+        assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn render_taxonomy_truncated_footer_emits_total() {
+        let tax = models::Taxonomy {
+            tree: models::TaxonomyNode {
+                namespace: "projects".into(),
+                name: "projects".into(),
+                count: 2,
+                subtree_count: 2,
+                children: vec![],
+            },
+            total_count: 999,
+            truncated: true,
+        };
+        let mut out = String::new();
+        render_taxonomy(&tax, &mut out);
+        assert!(
+            out.starts_with("projects/  (2 memories at root, 2 in subtree)\n"),
+            "header missing or wrong, got: {out}"
+        );
+        assert!(
+            out.contains("(truncated — 999 memories total"),
+            "truncated footer missing, got: {out}"
         );
     }
 }
