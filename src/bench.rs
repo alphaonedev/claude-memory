@@ -25,6 +25,9 @@
 //!     - `memory_recall` (cold, full hybrid) — `embed(query) +
 //!       recall_hybrid` against a corpus whose entries already carry
 //!       an embedding, gated against the 200 ms p95 row.
+//!     - `memory_check_duplicate` — `embed(title + content) +
+//!       check_duplicate` linear-scan against the same embedded corpus,
+//!       gated against the 50 ms p95 row.
 //!
 //! All embedding-free fixtures live in the same in-process disposable
 //! `SQLite` — no external service required. The embedding-bound ops
@@ -89,6 +92,10 @@ pub enum Operation {
     /// against an embedded corpus. Opt-in via `--with-embedding`;
     /// budget 200 ms p95.
     RecallCold,
+    /// `memory_check_duplicate` — `embed(title + content) +
+    /// check_duplicate` linear-scan over the embedded corpus. Opt-in via
+    /// `--with-embedding`; budget 50 ms p95.
+    CheckDuplicate,
 }
 
 impl Operation {
@@ -104,6 +111,7 @@ impl Operation {
             Self::KgTimeline => "memory_kg_timeline",
             Self::StoreWithEmbedding => "memory_store (with embedding)",
             Self::RecallCold => "memory_recall (cold, full hybrid)",
+            Self::CheckDuplicate => "memory_check_duplicate",
         }
     }
 
@@ -115,7 +123,8 @@ impl Operation {
     /// share the same numeric budget as the depth ≤ 3 bucket despite
     /// belonging to different table rows in `PERFORMANCE.md`.
     /// `StoreWithEmbedding` and `RecallCold` share the embedding-bound
-    /// 200 ms p95 budget rows.
+    /// 200 ms p95 budget rows. `CheckDuplicate` lives on its own 50 ms
+    /// p95 row.
     #[must_use]
     #[allow(clippy::match_same_arms)]
     pub fn target_p95_ms(self) -> f64 {
@@ -129,6 +138,7 @@ impl Operation {
             Self::KgTimeline => 100.0,
             Self::StoreWithEmbedding => 200.0,
             Self::RecallCold => 200.0,
+            Self::CheckDuplicate => 50.0,
         }
     }
 }
@@ -216,6 +226,7 @@ pub fn run(
     if let Some(emb) = embedder {
         results.push(run_store_with_embedding(conn, config, emb)?);
         results.push(run_recall_cold(conn, config, emb)?);
+        results.push(run_check_duplicate(conn, config, emb)?);
     }
     Ok(results)
 }
@@ -490,6 +501,68 @@ fn run_recall_cold(
     Ok(percentile_summary(Operation::RecallCold, &samples))
 }
 
+/// Distinct title prefix for the embedding-bound `CheckDuplicate`
+/// corpus, disjoint from the other embedded prefixes so it can coexist
+/// in the same connection without colliding on the `(title, namespace)`
+/// upsert.
+const CHECK_DUP_CORPUS_PREFIX: &str = "dup-check";
+
+fn run_check_duplicate(
+    conn: &Connection,
+    config: &BenchConfig,
+    embedder: &Embedder,
+) -> Result<OperationResult> {
+    seed_check_duplicate_corpus(conn, &config.namespace, embedder, EMBED_CORPUS_SIZE)?;
+    let total = config.warmup + config.iterations;
+    let mut samples = Vec::with_capacity(config.iterations);
+    for i in 0..total {
+        // Mirror what an MCP caller would feed in: a `title + content`
+        // string at the same shape as the corpus entries, so the linear
+        // scan finds a nearest neighbor with non-trivial cosine — the
+        // path operators actually exercise pre-write.
+        let title = format!("bench-{CHECK_DUP_CORPUS_PREFIX}-candidate-{i}");
+        let content = format!(
+            "candidate memory {i} content about topic {} category {} for dup-check workload",
+            i % 50,
+            i % 10
+        );
+        let probe = format!("{title} {content}");
+        let start = Instant::now();
+        let q_emb = embedder.embed(&probe)?;
+        let _ = db::check_duplicate(
+            conn,
+            &q_emb,
+            Some(&config.namespace),
+            db::DUPLICATE_THRESHOLD_DEFAULT,
+        )?;
+        let elapsed = start.elapsed();
+        if i >= config.warmup {
+            samples.push(elapsed);
+        }
+    }
+    Ok(percentile_summary(Operation::CheckDuplicate, &samples))
+}
+
+/// Seed an embedded corpus dedicated to the `CheckDuplicate` workload.
+/// The probes fed into `db::check_duplicate` overlap heavily with these
+/// titles + contents so each scan produces a non-trivial nearest match
+/// rather than degenerate cosines, exercising the full sort path.
+fn seed_check_duplicate_corpus(
+    conn: &Connection,
+    namespace: &str,
+    embedder: &Embedder,
+    count: usize,
+) -> Result<()> {
+    for i in 0..count {
+        let mem = synth_memory(namespace, i, CHECK_DUP_CORPUS_PREFIX);
+        let text = format!("{} {}", mem.title, mem.content);
+        let id = db::insert(conn, &mem)?;
+        let vector = embedder.embed(&text)?;
+        db::set_embedding(conn, &id, &vector)?;
+    }
+    Ok(())
+}
+
 /// Seed a corpus whose entries each carry a real embedding vector.
 /// Used by [`run_recall_cold`] so the hybrid scoring path actually
 /// has semantic candidates to consider — without embeddings the
@@ -752,7 +825,9 @@ mod tests {
             assert!(
                 !matches!(
                     r.operation,
-                    Operation::StoreWithEmbedding | Operation::RecallCold
+                    Operation::StoreWithEmbedding
+                        | Operation::RecallCold
+                        | Operation::CheckDuplicate
                 ),
                 "embedding-bound op {:?} must not appear when embedder is None",
                 r.operation,
@@ -833,10 +908,21 @@ mod tests {
                 samples: 30,
                 status: Status::Pass,
             },
+            OperationResult {
+                operation: Operation::CheckDuplicate,
+                label: Operation::CheckDuplicate.label(),
+                target_p95_ms: 50.0,
+                measured_p50_ms: 18.0,
+                measured_p95_ms: 26.0,
+                measured_p99_ms: 32.0,
+                samples: 30,
+                status: Status::Pass,
+            },
         ];
         let table = render_table(&synthetic);
         assert!(table.contains("memory_store (with embedding)"));
         assert!(table.contains("memory_recall (cold, full hybrid)"));
+        assert!(table.contains("memory_check_duplicate"));
     }
 
     #[test]
@@ -851,6 +937,7 @@ mod tests {
         assert!((Operation::KgTimeline.target_p95_ms() - 100.0).abs() < 1e-9);
         assert!((Operation::StoreWithEmbedding.target_p95_ms() - 200.0).abs() < 1e-9);
         assert!((Operation::RecallCold.target_p95_ms() - 200.0).abs() < 1e-9);
+        assert!((Operation::CheckDuplicate.target_p95_ms() - 50.0).abs() < 1e-9);
     }
 
     #[test]

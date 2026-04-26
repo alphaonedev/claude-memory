@@ -95,6 +95,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   KG-adjacent Stream E follow-up flagged in PERFORMANCE.md; the
   curator-cycle and federation-ack rows remain tracked separately.
 
+- **`ai-memory bench` `memory_check_duplicate` coverage (Pillar 3 /
+  Stream E)** — the opt-in `--with-embedding` workload now also
+  exercises `memory_check_duplicate`, gated against the 50 ms p95 row
+  in `PERFORMANCE.md`. The runner seeds its own dedicated 200-row
+  embedded corpus (prefix `dup-check`, distinct from the existing
+  `embed` recall corpus) and probes it with overlapping titles so
+  every iteration drives `embed(probe) + db::check_duplicate` —
+  embed call + linear cosine scan + sort — to a non-trivial nearest
+  neighbor rather than degenerate cosines. The op is opt-in behind
+  the same `--with-embedding` flag and is omitted from the default
+  `cargo test` and `bench.yml` CI paths. Local M4 measurement:
+  `memory_check_duplicate` p95 ~47 ms — PASS, dominated by the
+  one-shot embed call (~42 ms) plus the linear cosine scan + sort
+  over the 200-row corpus. Every embedding-bound row in the published
+  budget table is now covered end-to-end by `ai-memory bench`; the
+  curator-cycle and federation-ack rows are the only remaining
+  external-fixture follow-ups.
+
 - **`ai-memory bench` KG depth=3 + depth=5 coverage (Pillar 3 / Stream E)**
   — `memory_kg_query` is now exercised at the deepest hop of both
   documented budget buckets: depth=3 against the "depth ≤ 3" 100 ms

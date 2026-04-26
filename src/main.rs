@@ -204,11 +204,12 @@ struct BenchArgs {
     #[arg(long)]
     json: bool,
     /// Opt in to the embedding-bound operations (`memory_store` with
-    /// embedding, `memory_recall` cold/full hybrid). Loads the local
-    /// candle `MiniLM` model the first time it's invoked; if the model
-    /// cache is missing or the load fails, the flag is treated as a
-    /// no-op and a clear message is emitted on stderr. Default off so
-    /// the `bench.yml` CI guard stays fast and deterministic.
+    /// embedding, `memory_recall` cold/full hybrid, `memory_check_duplicate`).
+    /// Loads the local candle `MiniLM` model the first time it's
+    /// invoked; if the model cache is missing or the load fails, the
+    /// flag is treated as a no-op and a clear message is emitted on
+    /// stderr. Default off so the `bench.yml` CI guard stays fast and
+    /// deterministic.
     #[arg(long)]
     with_embedding: bool,
 }
