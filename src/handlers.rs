@@ -9517,4 +9517,962 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
     }
+
+    // ----------------------------------------------------------------
+    // W8 / H8a — archive lane sweep. ~30 tests covering the 6 archive
+    // handlers (list_archive, archive_by_ids, purge_archive,
+    // restore_archive, archive_stats, forget_memories) past the
+    // existing happy-path and validation suites. Reuses
+    // `test_state`, `test_app_state`, and `insert_test_memory`.
+    // ----------------------------------------------------------------
+
+    // ---- list_archive (5 new) ----
+
+    #[tokio::test]
+    async fn http_list_archive_empty_returns_empty_array() {
+        // Cold DB: response shape is `{archived: [], count: 0}` with 200.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["archived"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_list_archive_with_items_returns_them() {
+        // Two archived rows must appear in the listing.
+        let state = test_state();
+        let id_a = insert_test_memory(&state, "h8a-list-items", "row-a").await;
+        let id_b = insert_test_memory(&state, "h8a-list-items", "row-b").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id_a, Some("test")).unwrap();
+            db::archive_memory(&lock.0, &id_b, Some("test")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 2);
+    }
+
+    #[tokio::test]
+    async fn http_list_archive_pagination_offset_skips() {
+        // Insert+archive 3 rows; limit=1&offset=1 returns 1 row (the
+        // middle one by archived_at DESC ordering).
+        let state = test_state();
+        let id1 = insert_test_memory(&state, "h8a-page", "row-1").await;
+        let id2 = insert_test_memory(&state, "h8a-page", "row-2").await;
+        let id3 = insert_test_memory(&state, "h8a-page", "row-3").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id1, Some("p")).unwrap();
+            db::archive_memory(&lock.0, &id2, Some("p")).unwrap();
+            db::archive_memory(&lock.0, &id3, Some("p")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?limit=1&offset=1")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn http_list_archive_namespace_filter_excludes_others() {
+        // Archive rows in two namespaces; filtering by one returns
+        // only that namespace's rows.
+        let state = test_state();
+        let id_a = insert_test_memory(&state, "h8a-ns-a", "row-a").await;
+        let id_b = insert_test_memory(&state, "h8a-ns-b", "row-b").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id_a, Some("t")).unwrap();
+            db::archive_memory(&lock.0, &id_b, Some("t")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?namespace=h8a-ns-a&limit=10")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 1);
+        let entries = v["archived"].as_array().unwrap();
+        assert_eq!(entries[0]["namespace"], "h8a-ns-a");
+    }
+
+    #[tokio::test]
+    async fn http_list_archive_namespace_filter_unknown_returns_empty() {
+        // Filtering by a namespace with nothing archived yields count=0
+        // and an empty array (not 404).
+        let state = test_state();
+        let id_a = insert_test_memory(&state, "h8a-ns-known", "row-a").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id_a, Some("t")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?namespace=h8a-no-such-ns")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 0);
+    }
+
+    // ---- archive_by_ids (5 new) ----
+
+    #[tokio::test]
+    async fn http_archive_by_ids_single_id_success() {
+        // One id, no fanout — happy path returns 200 with archived=[id].
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-aby-single", "row").await;
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({"ids": [id], "reason": "h8a-single"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 0);
+        assert_eq!(v["reason"], "h8a-single");
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_bulk_success() {
+        // Three live ids in one request — all archived, none missing.
+        let state = test_state();
+        let id1 = insert_test_memory(&state, "h8a-bulk", "row-1").await;
+        let id2 = insert_test_memory(&state, "h8a-bulk", "row-2").await;
+        let id3 = insert_test_memory(&state, "h8a-bulk", "row-3").await;
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({"ids": [id1, id2, id3]});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 3);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_empty_array_returns_ok_zero_count() {
+        // Empty `ids` array is not an error — returns 200 with zero
+        // archived and zero missing. (No batch-size violation, no rows.)
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({"ids": []});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["archived"].as_array().unwrap().len(), 0);
+        assert_eq!(v["missing"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_missing_ids_field_returns_400() {
+        // Missing required `ids` field → 400 (axum Json extractor rejects
+        // body that doesn't deserialize).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({"reason": "no-ids-field"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn http_archive_by_ids_malformed_json_returns_400() {
+        // Garbage bytes for the body → 400.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive", axum_post(archive_by_ids))
+            .with_state(test_app_state(state));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from("not-valid-json{{"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    // ---- purge_archive (4 new) ----
+
+    #[tokio::test]
+    async fn http_purge_archive_older_than_keeps_recent() {
+        // older_than_days=365 against archived rows whose archived_at is
+        // "now" must purge zero rows (none are older than a year).
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-purge-recent", "row").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("recent")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::delete(purge_archive))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?older_than_days=365")
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["purged"], 0);
+        // Row still in archive.
+        let lock = state.lock().await;
+        let rows = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn http_purge_archive_unfiltered_purges_everything() {
+        // No `older_than_days` query → purge all archived rows.
+        let state = test_state();
+        for i in 0..3 {
+            let id = insert_test_memory(&state, "h8a-purge-all", &format!("row-{i}")).await;
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("all")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::delete(purge_archive))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["purged"], 3);
+        let lock = state.lock().await;
+        let rows = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert!(rows.is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_purge_archive_zero_days_purges_all_archived() {
+        // older_than_days=0 → cutoff is "now", so every archived row is
+        // older than the cutoff and gets purged.
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-purge-zero", "row").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("zero")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::delete(purge_archive))
+            .with_state(state.clone());
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive?older_than_days=0")
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // count of purged rows ≥ 1 (the recent archive is older than `now`).
+        assert!(v["purged"].as_u64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn http_purge_archive_response_shape_has_purged_key() {
+        // Smoke: response is a JSON object with a numeric "purged" key
+        // even when the archive is empty.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive", axum::routing::delete(purge_archive))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .method("DELETE")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v.is_object());
+        assert!(v["purged"].is_number());
+    }
+
+    // ---- restore_archive (5 new) ----
+
+    #[tokio::test]
+    async fn http_restore_archive_happy_path_and_listed_in_active() {
+        // Archive then restore: response has restored=true, the row
+        // is gone from the archive, and is present in the active table.
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-restore-ok", "row").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("h8a")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive/{id}/restore", axum_post(restore_archive))
+            .with_state(test_app_state(state.clone()));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/archive/{id}/restore"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["restored"], true);
+        assert_eq!(v["id"], id);
+        // Active row exists; archive entry is gone.
+        let lock = state.lock().await;
+        let got = db::get(&lock.0, &id).unwrap();
+        assert!(got.is_some());
+        let archived = db::list_archived(&lock.0, None, 10, 0).unwrap();
+        assert!(archived.is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_restore_archive_then_list_archive_excludes_restored() {
+        // After a restore, GET /api/v1/archive doesn't return the row
+        // (the archive table no longer holds it).
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-restore-list", "row").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("h8a")).unwrap();
+            // Sanity: archive contains 1.
+            let rows = db::list_archived(&lock.0, None, 10, 0).unwrap();
+            assert_eq!(rows.len(), 1);
+        }
+        let restore_app = Router::new()
+            .route("/api/v1/archive/{id}/restore", axum_post(restore_archive))
+            .with_state(test_app_state(state.clone()));
+        let resp = restore_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/archive/{id}/restore"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let list_app = Router::new()
+            .route("/api/v1/archive", axum::routing::get(list_archive))
+            .with_state(state);
+        let resp = list_app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn http_restore_archive_preserves_namespace_and_title() {
+        // Restored row keeps its original namespace/title (the data is
+        // copied verbatim back to `memories`).
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-rest-meta", "preserve-me").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("test")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive/{id}/restore", axum_post(restore_archive))
+            .with_state(test_app_state(state.clone()));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/archive/{id}/restore"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let lock = state.lock().await;
+        let got = db::get(&lock.0, &id).unwrap().unwrap();
+        assert_eq!(got.namespace, "h8a-rest-meta");
+        assert_eq!(got.title, "preserve-me");
+    }
+
+    #[tokio::test]
+    async fn http_restore_archive_after_purge_returns_404() {
+        // Archive → purge → restore: the row is gone from the archive
+        // table so restore returns 404.
+        let state = test_state();
+        let id = insert_test_memory(&state, "h8a-rest-purged", "row").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id, Some("test")).unwrap();
+            // Purge unconditionally.
+            db::purge_archive(&lock.0, None).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive/{id}/restore", axum_post(restore_archive))
+            .with_state(test_app_state(state));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/archive/{id}/restore"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn http_restore_archive_oversized_id_returns_400() {
+        // An id longer than MAX_ID_LEN (128) is rejected by
+        // validate::validate_id with 400, not handed off to the DB.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive/{id}/restore", axum_post(restore_archive))
+            .with_state(test_app_state(state));
+        let huge = "a".repeat(200);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri(format!("/api/v1/archive/{huge}/restore"))
+                    .method("POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ---- archive_stats (3 new) ----
+
+    #[tokio::test]
+    async fn http_archive_stats_with_data_reports_total_and_breakdown() {
+        // Two archived rows under one namespace, one under another →
+        // archived_total=3, by_namespace lists both.
+        let state = test_state();
+        let id_a1 = insert_test_memory(&state, "h8a-stats-a", "row-1").await;
+        let id_a2 = insert_test_memory(&state, "h8a-stats-a", "row-2").await;
+        let id_b1 = insert_test_memory(&state, "h8a-stats-b", "row-3").await;
+        {
+            let lock = state.lock().await;
+            db::archive_memory(&lock.0, &id_a1, Some("t")).unwrap();
+            db::archive_memory(&lock.0, &id_a2, Some("t")).unwrap();
+            db::archive_memory(&lock.0, &id_b1, Some("t")).unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["archived_total"], 3);
+        let by_ns = v["by_namespace"].as_array().unwrap();
+        assert_eq!(by_ns.len(), 2);
+        // First entry has the highest count (DESC). ns-a has 2, ns-b has 1.
+        assert_eq!(by_ns[0]["count"], 2);
+        assert_eq!(by_ns[0]["namespace"], "h8a-stats-a");
+    }
+
+    #[tokio::test]
+    async fn http_archive_stats_empty_returns_total_zero_empty_breakdown() {
+        // Cold DB: archived_total=0, by_namespace=[].
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["archived_total"], 0);
+        assert!(v["by_namespace"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn http_archive_stats_unaffected_by_active_rows() {
+        // Active (non-archived) rows must not appear in archive stats —
+        // archived_total only counts the `archived_memories` table.
+        let state = test_state();
+        // Five active rows, none archived.
+        for i in 0..5 {
+            insert_test_memory(&state, "h8a-stats-active", &format!("row-{i}")).await;
+        }
+        let app = Router::new()
+            .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/archive/stats")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["archived_total"], 0);
+    }
+
+    // ---- forget_memories (6 new) ----
+
+    #[tokio::test]
+    async fn http_forget_memories_no_filter_returns_400() {
+        // db::forget bails with "at least one of namespace, pattern, or
+        // tier is required" when all filters are absent — the handler
+        // surfaces this as 400.
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let body = serde_json::json!({});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_pattern_only_deletes_matches() {
+        // FTS pattern "delete-me" must match exactly the rows whose
+        // content contains it.
+        let state = test_state();
+        {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            for (i, content) in ["delete-me alpha", "keep-this beta", "delete-me gamma"]
+                .iter()
+                .enumerate()
+            {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Long,
+                    namespace: "h8a-forget-pat".into(),
+                    title: format!("row-{i}"),
+                    content: (*content).into(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let body = serde_json::json!({"pattern": "delete-me"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // 2 rows had the pattern "delete-me".
+        assert_eq!(v["deleted"], 2);
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_by_tier_only_targets_tier() {
+        // Mix of Short/Long rows, tier=short forgets only the Short rows.
+        let state = test_state();
+        {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            for (i, tier) in [Tier::Short, Tier::Short, Tier::Long].iter().enumerate() {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: tier.clone(),
+                    namespace: "h8a-forget-tier".into(),
+                    title: format!("row-{i}"),
+                    content: format!("content {i}"),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let body = serde_json::json!({"tier": "short"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["deleted"], 2);
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_combined_filters_intersect() {
+        // namespace + pattern should AND — only rows in `target-ns`
+        // matching `purge` are forgotten.
+        let state = test_state();
+        {
+            let lock = state.lock().await;
+            let now = Utc::now().to_rfc3339();
+            // 2 in target ns matching the pattern, 1 in target ns not
+            // matching, 1 in another ns matching.
+            for (ns, content) in [
+                ("h8a-forget-and", "purge alpha"),
+                ("h8a-forget-and", "purge beta"),
+                ("h8a-forget-and", "keep gamma"),
+                ("h8a-forget-other", "purge delta"),
+            ] {
+                let mem = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Long,
+                    namespace: ns.into(),
+                    title: format!("row-{content}"),
+                    content: content.into(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                };
+                db::insert(&lock.0, &mem).unwrap();
+            }
+        }
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let body = serde_json::json!({
+            "namespace": "h8a-forget-and",
+            "pattern": "purge"
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        // 2 rows in target ns matched the pattern.
+        assert_eq!(v["deleted"], 2);
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_malformed_json_returns_400() {
+        // Garbage body → 400 (Json extractor rejects).
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state);
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{not-json"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(resp.status().is_client_error());
+    }
+
+    #[tokio::test]
+    async fn http_forget_memories_no_match_returns_zero_deleted() {
+        // namespace filter that matches nothing → 200 with deleted=0.
+        let state = test_state();
+        // Seed a few rows in a *different* namespace so the table isn't
+        // wholly empty (forget shouldn't touch them).
+        for i in 0..3 {
+            insert_test_memory(&state, "h8a-forget-keep", &format!("k-{i}")).await;
+        }
+        let app = Router::new()
+            .route("/api/v1/forget", axum_post(forget_memories))
+            .with_state(state.clone());
+        let body = serde_json::json!({"namespace": "h8a-forget-empty"});
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/forget")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["deleted"], 0);
+        // The keep namespace still has 3 rows.
+        let lock = state.lock().await;
+        let rows = db::list(
+            &lock.0,
+            Some("h8a-forget-keep"),
+            None,
+            10,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+    }
 }
