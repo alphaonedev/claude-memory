@@ -52,6 +52,18 @@ section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
 
 footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
 footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
 </style>
 </head>
 <body>
@@ -60,9 +72,45 @@ footer a{color:var(--text-muted)}
   <div class="inner">
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Credits</span></a>
     <div class="right">
-      <a href="at-a-glance.html">Atlas</a>
-      <a href="autonomous.html">Autonomous</a>
-      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <a href="credits.html" class="current">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
     </div>
   </div>
 </nav>
