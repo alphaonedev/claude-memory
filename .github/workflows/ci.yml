@@ -362,68 +362,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  ppa:
-    name: Ubuntu PPA
-    needs: check
-    # Skip pre-release tags — Launchpad PPA users get stable releases only.
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts debhelper dput gnupg pkg-config libssl-dev build-essential
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Import GPG key
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --reload gpg-agent
-
-      - name: Update changelog version
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          SERIES=noble
-          sed -i "1s/(.*)/(${VERSION}-1) ${SERIES}; urgency=medium/" debian/changelog
-
-      - name: Create orig tarball
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          cd ..
-          tar czf "ai-memory_${VERSION}.orig.tar.gz" \
-            --exclude='.git' \
-            --exclude='target' \
-            --exclude='backup' \
-            ai-memory-mcp
-          ls -la "ai-memory_${VERSION}.orig.tar.gz"
-
-      - name: Build source package
-        env:
-          DEBUILD_DPKG_BUILDPACKAGE_OPTS: "-d"
-        run: |
-          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign -d
-
-      - name: Sign source package
-        run: |
-          cd ..
-          debsign -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 ai-memory_${{ steps.version.outputs.version }}-1_source.changes
-
-      - name: Upload to PPA
-        run: |
-          cd ..
-          dput ppa:jbridger2021/ppa ai-memory_${{ steps.version.outputs.version }}-1_source.changes
-
   copr:
     name: Fedora COPR
     needs: release

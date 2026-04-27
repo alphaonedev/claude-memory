@@ -89,7 +89,7 @@ Delivered:
 - Apache-2.0 license migration, CLA, OIN membership, USPTO trademark filing
 - Pedantic clippy (zero warnings under `-D clippy::all -D clippy::pedantic`)
 - Single-repo consolidation (ai-memory-mcp-dev archived)
-- All package repos live: Homebrew, Ubuntu PPA, Fedora COPR/EPEL
+- All package repos live: Homebrew, Fedora COPR/EPEL, crates.io, Docker GHCR
 
 ---
 
