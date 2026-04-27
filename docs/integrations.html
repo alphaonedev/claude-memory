@@ -1,0 +1,447 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  Integrations — visual matrix of every AI client + IDE + MCP host
+  ai-memory has been tested against, with one-block setup snippets.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Integrations — every AI client, every IDE</title>
+<meta name="description" content="13 AI clients tested with ai-memory: Claude Code, ChatGPT, Cursor, Windsurf, Continue, Codex, Gemini CLI, Grok CLI, OpenClaw, Hermes Agent, Llama, and any MCP-compliant host.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/integrations.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:2rem;margin-bottom:.5rem}h3{font-size:1.05rem;margin-bottom:.5rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.5rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto}
+.hero .pill-row{display:flex;justify-content:center;gap:.85rem;flex-wrap:wrap;margin-top:1.75rem}
+.hero .pill{padding:.45rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+section{padding:4.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:1rem;max-width:780px;margin-bottom:2.5rem}
+
+.client-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:1.25rem}
+.client{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;display:flex;flex-direction:column;gap:.75rem;position:relative;overflow:hidden}
+.client::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.client.tier1::before{background:var(--p1)}
+.client.tier2::before{background:var(--p2)}
+.client.tier3::before{background:var(--p3)}
+.client .client-head{display:flex;align-items:center;gap:1rem}
+.client .client-icon{width:48px;height:48px;border-radius:10px;background:rgba(255,255,255,0.04);display:flex;align-items:center;justify-content:center;font-size:1.5rem;flex-shrink:0}
+.client .client-meta{display:flex;flex-direction:column}
+.client .client-name{font-size:1.1rem;font-weight:700;color:var(--text)}
+.client .client-tier{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-dim)}
+.client .client-tier.t1{color:var(--p1)}.client .client-tier.t2{color:var(--p2)}.client .client-tier.t3{color:var(--p3)}
+.client .client-desc{font-size:.85rem;color:var(--text-muted);line-height:1.55}
+.client .client-config{background:var(--bg-code);border:1px solid var(--border);border-radius:8px;padding:.85rem 1rem;font-family:var(--font-mono);font-size:.72rem;color:var(--text-muted);overflow-x:auto;white-space:pre-wrap;line-height:1.5}
+.client .client-config .key{color:var(--p1)}
+.client .client-config .str{color:#a5d6ff}
+.client .client-config .cmt{color:var(--text-dim);font-style:italic}
+.client .client-meta-row{display:flex;gap:1.25rem;font-size:.75rem;color:var(--text-muted);margin-top:.4rem;flex-wrap:wrap}
+.client .client-meta-row span{display:flex;align-items:center;gap:.4rem}
+.client .client-meta-row .ok{color:var(--good)}
+.client .client-link{margin-top:auto;font-family:var(--font-mono);font-size:.78rem;color:var(--p1)}
+
+.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:2.5rem}
+.summary-tile{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1rem 1.25rem;text-align:center}
+.summary-tile .num{font-family:var(--font-mono);font-size:1.85rem;font-weight:700;color:var(--text)}
+.summary-tile .lab{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-top:.3rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Integrations</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html" class="current">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Every AI. Every IDE.</h1>
+  <p class="tagline">ai-memory speaks MCP — the open Model Context Protocol. Any compliant host autodiscovers all 26 tools. <strong>Plug in once, share memory across every AI you use.</strong></p>
+  <div class="pill-row">
+    <span class="pill">13 clients tested</span>
+    <span class="pill">3 tiers (first-class · supported · works-with-MCP)</span>
+    <span class="pill">All MCP-compliant hosts work</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Tested · Verified</span>
+    <h2>13 AI clients in production use.</h2>
+    <p class="lede">Each card below shows the exact setup snippet for that client. Tier 1 (cyan) means tested every release with deep integration. Tier 2 (orange) means tested release-cycle. Tier 3 (purple) means works-via-MCP-spec but not formally tested per-release.</p>
+
+    <div class="summary-grid">
+      <div class="summary-tile"><div class="num" style="color:var(--p1)">3</div><div class="lab">Tier 1 · first-class</div></div>
+      <div class="summary-tile"><div class="num" style="color:var(--p2)">7</div><div class="lab">Tier 2 · supported</div></div>
+      <div class="summary-tile"><div class="num" style="color:var(--p3)">3</div><div class="lab">Tier 3 · works-via-MCP</div></div>
+      <div class="summary-tile"><div class="num">26</div><div class="lab">Tools auto-discovered</div></div>
+    </div>
+
+    <div class="client-grid">
+
+      <!-- TIER 1 -->
+      <div class="client tier1">
+        <div class="client-head">
+          <div class="client-icon">🦾</div>
+          <div class="client-meta">
+            <span class="client-name">Claude Code</span>
+            <span class="client-tier t1">▸ TIER 1 · DEEP INTEGRATION</span>
+          </div>
+        </div>
+        <p class="client-desc">Anthropic's official CLI. ai-memory runs as a stdio MCP subprocess; the <code>memory_session_start</code> hook fires every conversation start, returning recent-context-aware memories.</p>
+        <pre class="client-config"><span class="cmt"># claude mcp add</span>
+<span class="key">claude mcp add</span> ai-memory <span class="str">--scope user</span> <span class="str">--transport stdio</span> <span class="str">-- ai-memory mcp --tier autonomous</span></pre>
+        <div class="client-meta-row">
+          <span><span class="ok">✓</span> stdio</span>
+          <span><span class="ok">✓</span> session_start hook</span>
+          <span><span class="ok">✓</span> all 26 tools</span>
+        </div>
+        <a class="client-link" href="./#claude-integration">Setup guide →</a>
+      </div>
+
+      <div class="client tier1">
+        <div class="client-head">
+          <div class="client-icon">📝</div>
+          <div class="client-meta">
+            <span class="client-name">Cursor</span>
+            <span class="client-tier t1">▸ TIER 1 · DEEP INTEGRATION</span>
+          </div>
+        </div>
+        <p class="client-desc">VS Code-fork IDE with native MCP support. ai-memory autodiscovered. Add via Settings &gt; Tools &amp; MCP, restart for green-dot status indicator.</p>
+        <pre class="client-config"><span class="cmt"># ~/.cursor/mcp.json</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"ai-memory"</span>: {
+      <span class="key">"command"</span>: <span class="str">"ai-memory"</span>,
+      <span class="key">"args"</span>: [<span class="str">"mcp"</span>, <span class="str">"--tier"</span>, <span class="str">"semantic"</span>]
+    }
+  }
+}</pre>
+        <div class="client-meta-row">
+          <span><span class="ok">✓</span> ~40 tool limit (we use 26)</span>
+          <span><span class="ok">✓</span> envFile support</span>
+        </div>
+      </div>
+
+      <div class="client tier1">
+        <div class="client-head">
+          <div class="client-icon">🦊</div>
+          <div class="client-meta">
+            <span class="client-name">Grok CLI (AlphaOne fork)</span>
+            <span class="client-tier t1">▸ TIER 1 · DEEP INTEGRATION</span>
+          </div>
+        </div>
+        <p class="client-desc">First-party fork of xAI's Grok CLI maintained by AlphaOne. Native ai-memory autoload. Memory feels native; no extra config.</p>
+        <pre class="client-config"><span class="cmt"># Built-in. Just install grok-cli; ai-memory tools appear.</span>
+<span class="key">grok</span> --memory-tier autonomous</pre>
+        <div class="client-meta-row">
+          <span><span class="ok">✓</span> auto-detected</span>
+          <span><span class="ok">✓</span> no config needed</span>
+        </div>
+      </div>
+
+      <!-- TIER 2 -->
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">🤖</div>
+          <div class="client-meta">
+            <span class="client-name">Codex (OpenAI)</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">OpenAI's developer-CLI. TOML config with underscored <code>mcp_servers</code> key. Use <code>/mcp</code> in TUI to view server status.</p>
+        <pre class="client-config"><span class="cmt"># ~/.codex/config.toml (or %APPDATA% on Windows)</span>
+[mcp_servers.ai_memory]
+command = <span class="str">"ai-memory"</span>
+args = [<span class="str">"mcp"</span>, <span class="str">"--tier"</span>, <span class="str">"semantic"</span>]
+startup_timeout_sec = 10</pre>
+        <div class="client-meta-row">
+          <span><span class="ok">✓</span> WSL: set CODEX_HOME</span>
+          <span><span class="ok">✓</span> enabled_tools allowlist</span>
+        </div>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">🌬️</div>
+          <div class="client-meta">
+            <span class="client-name">Windsurf</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">Codeium's agentic IDE. Settings &gt; Cascade &gt; MCP Servers. <code>${env:VAR}</code> interpolation supported. 100-tool limit.</p>
+        <pre class="client-config"><span class="cmt"># ~/.codeium/windsurf/mcp_config.json</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"ai-memory"</span>: {
+      <span class="key">"command"</span>: <span class="str">"ai-memory"</span>,
+      <span class="key">"args"</span>: [<span class="str">"mcp"</span>, <span class="str">"--tier"</span>, <span class="str">"smart"</span>]
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">⚙️</div>
+          <div class="client-meta">
+            <span class="client-name">Continue.dev</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">VS Code / JetBrains agent. MCP only in agent mode. Project-level <code>.continue/mcpServers/</code> directory auto-detects sibling configs.</p>
+        <pre class="client-config"><span class="cmt"># .continue/mcpServers/ai-memory.json</span>
+{
+  <span class="key">"name"</span>: <span class="str">"ai-memory"</span>,
+  <span class="key">"command"</span>: <span class="str">"ai-memory"</span>,
+  <span class="key">"args"</span>: [<span class="str">"mcp"</span>]
+}</pre>
+        <div class="client-meta-row">
+          <span><span class="ok">✓</span> auto-detects Claude/Cursor configs</span>
+        </div>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">💎</div>
+          <div class="client-meta">
+            <span class="client-name">Gemini CLI</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">Google's CLI. Use hyphens (no underscores) in server names. Tools auto-prefix as <code>mcp_memory_*</code>. Sanitizes <code>*TOKEN*</code>/<code>*SECRET*</code> env unless declared.</p>
+        <pre class="client-config"><span class="cmt"># ~/.config/gemini/settings.json</span>
+{
+  <span class="key">"mcpServers"</span>: {
+    <span class="key">"ai-memory"</span>: {
+      <span class="key">"command"</span>: <span class="str">"ai-memory"</span>,
+      <span class="key">"args"</span>: [<span class="str">"mcp"</span>, <span class="str">"--tier"</span>, <span class="str">"semantic"</span>],
+      <span class="key">"trust"</span>: <span class="str">true</span>
+    }
+  }
+}</pre>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">🐢</div>
+          <div class="client-meta">
+            <span class="client-name">OpenClaw</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">AlphaOne's 24/7 multi-machine agent runner. Stacks under ai-memory for "behaviorally autonomous" deployments. Cross-host federation native.</p>
+        <pre class="client-config"><span class="cmt"># openclaw.toml</span>
+[memory]
+backend = <span class="str">"ai-memory"</span>
+endpoint = <span class="str">"https://memory.local:9077"</span>
+mtls_cert = <span class="str">"/etc/openclaw/peer.pem"</span></pre>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">⚡</div>
+          <div class="client-meta">
+            <span class="client-name">Hermes Agent (Nous)</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">Auto-generated-skill agent framework. Uses ai-memory as its long-term store; skills can reference memories by ID across sessions.</p>
+        <pre class="client-config"><span class="cmt"># hermes.yml</span>
+memory:
+  driver: ai-memory-mcp
+  tier: autonomous</pre>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">🚀</div>
+          <div class="client-meta">
+            <span class="client-name">Grok API (xAI)</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">Direct xAI API integration via the HTTP daemon. Authorization header passes through; per-agent_id quotas enforced server-side (v0.7).</p>
+        <pre class="client-config"><span class="cmt"># Reach the HTTP daemon directly</span>
+curl https://memory.local:9077/api/v1/recall \
+  -H <span class="str">"x-api-key: $MEMORY_KEY"</span> \
+  -H <span class="str">"x-agent-id: ai:grok@host:pid-1"</span></pre>
+      </div>
+
+      <div class="client tier2">
+        <div class="client-head">
+          <div class="client-icon">🦙</div>
+          <div class="client-meta">
+            <span class="client-name">Llama / Ollama</span>
+            <span class="client-tier t2">▸ TIER 2 · TESTED</span>
+          </div>
+        </div>
+        <p class="client-desc">Local LLM hosts. ai-memory uses Ollama itself for the smart/autonomous tier; same Ollama instance can also be the agent host.</p>
+        <pre class="client-config"><span class="cmt"># Smart tier requires Ollama running with gemma3:e2b</span>
+ollama pull gemma3:e2b
+ai-memory mcp --tier smart</pre>
+      </div>
+
+      <!-- TIER 3 -->
+      <div class="client tier3">
+        <div class="client-head">
+          <div class="client-icon">🌐</div>
+          <div class="client-meta">
+            <span class="client-name">ChatGPT (web)</span>
+            <span class="client-tier t3">▸ TIER 3 · VIA HTTP API</span>
+          </div>
+        </div>
+        <p class="client-desc">No native MCP, but ai-memory's HTTP daemon is reachable. Use a custom GPT with Action pointing at <code>/api/v1</code>. Local-only; tunnel optional.</p>
+        <pre class="client-config"><span class="cmt"># Custom GPT Action OpenAPI spec points to:</span>
+servers:
+  - url: <span class="str">https://your-tunnel.example.com/api/v1</span></pre>
+      </div>
+
+      <div class="client tier3">
+        <div class="client-head">
+          <div class="client-icon">🔌</div>
+          <div class="client-meta">
+            <span class="client-name">Any MCP-compliant host</span>
+            <span class="client-tier t3">▸ TIER 3 · SPEC-CONFORMANT</span>
+          </div>
+        </div>
+        <p class="client-desc">Any host implementing the <a href="https://modelcontextprotocol.io" style="color:var(--p1)">Model Context Protocol</a> v2026-04 or later auto-discovers all 26 ai-memory tools. No special integration required.</p>
+        <pre class="client-config"><span class="cmt"># Standard MCP launcher signature</span>
+ai-memory mcp [<span class="key">--tier</span> &lt;keyword|semantic|smart|autonomous&gt;]</pre>
+      </div>
+
+      <div class="client tier3">
+        <div class="client-head">
+          <div class="client-icon">🧱</div>
+          <div class="client-meta">
+            <span class="client-name">Custom agents (Python/JS/Go)</span>
+            <span class="client-tier t3">▸ TIER 3 · DIY</span>
+          </div>
+        </div>
+        <p class="client-desc">Roll-your-own agents talk to the HTTP daemon. 39 endpoints. Or implement an MCP host shim using the official spec libraries.</p>
+        <pre class="client-config"><span class="cmt"># Python example</span>
+import requests
+r = requests.post(<span class="str">"http://localhost:9077/api/v1/recall"</span>,
+  json={<span class="str">"context"</span>: <span class="str">"...query..."</span>})</pre>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Why MCP wins</span>
+    <h2>One protocol. Every AI host. Forever.</h2>
+    <p class="lede">MCP is open, vendor-neutral, transport-agnostic. By implementing MCP once, ai-memory automatically works with every AI host that implements MCP — including future ones we haven't heard of yet. The integration cost per-AI is zero.</p>
+
+    <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem 2rem;margin:2rem 0">
+      <h3 style="color:var(--p1)">The MCP autodiscovery handshake</h3>
+      <ol style="color:var(--text-muted);padding-left:1.5rem;font-size:.9rem;line-height:1.8">
+        <li>Host launches <code>ai-memory mcp --tier semantic</code> as a stdio subprocess</li>
+        <li>Host sends JSON-RPC <code>initialize</code> with protocolVersion + clientInfo</li>
+        <li>ai-memory responds with capabilities + serverInfo</li>
+        <li>Host sends <code>tools/list</code></li>
+        <li>ai-memory responds with all 26 tool definitions (name, description, JSON Schema)</li>
+        <li>Host registers the tools with its model, presents to user as available actions</li>
+        <li>User says "remember that I prefer..." → host calls <code>tools/call memory_store ...</code></li>
+        <li>ai-memory does the work, returns the result</li>
+      </ol>
+      <p style="margin-top:1rem;color:var(--p1);font-family:var(--font-mono);font-size:.85rem">No custom integration code per-host. The protocol IS the integration.</p>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory-mcp · Apache 2.0 · v0.6.3-rc1 · <a href="./">main</a> · <a href="at-a-glance.html">At a Glance</a> · <a href="feature-matrix.html">Feature Matrix</a> · <a href="data-flow.html">Data Flow</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

@@ -1,0 +1,402 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Tracing atlas — log call taxonomy across handlers/federation/db/llm.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Tracing — every log call</title>
+<meta name="description" content="ai-memory v0.6.3 observability reference. Tracing setup (EnvFilter), module breakdown, level taxonomy (info/warn/error), and the canonical log lines AI clients can grep for in incident review.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/tracing.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--warn:#ffd700;--info:#a5d6a7;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(165,214,167,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.modgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:2rem}
+.mod{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.15rem;position:relative}
+.mod::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p1)}
+.mod.fed::before{background:var(--p2)}
+.mod.db::before{background:var(--p3)}
+.mod.llm::before{background:#a5d6a7}
+.mod .name{font-family:var(--font-mono);font-size:.95rem;font-weight:700;color:var(--text);margin-bottom:.4rem}
+.mod .count{font-family:var(--font-mono);font-size:1.6rem;color:var(--p1);font-weight:700}
+.mod.fed .count{color:var(--p2)}
+.mod.db .count{color:var(--p3)}
+.mod.llm .count{color:#a5d6a7}
+.mod .lbl{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-top:.2rem}
+.mod p{font-size:.83rem;color:var(--text-muted);margin-top:.5rem;line-height:1.45}
+
+.lev-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:2rem}
+.lev{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.15rem;position:relative}
+.lev::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.lev.info::before{background:var(--info)}
+.lev.warn::before{background:var(--warn)}
+.lev.error::before{background:var(--bad)}
+.lev h3{font-family:var(--font-mono);font-size:1rem;margin-bottom:.5rem}
+.lev .lbl{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.3rem}
+.lev p{font-size:.85rem;color:var(--text-muted);margin-bottom:.7rem}
+.lev .ex{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);background:var(--bg-code);padding:.5rem .65rem;border-radius:5px;line-height:1.5;display:block;white-space:pre-wrap}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre-wrap;overflow-x:auto;word-break:break-all}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--warn)}
+.snip .info{color:var(--info)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+
+.recipe{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.15rem 1.25rem;margin-bottom:1rem}
+.recipe .when{font-family:var(--font-mono);font-size:.78rem;color:var(--p3);margin-bottom:.4rem;letter-spacing:.04em}
+.recipe .what{font-family:var(--font-mono);font-size:.85rem;font-weight:700;color:var(--text);margin-bottom:.5rem}
+.recipe .grep{font-family:var(--font-mono);font-size:.78rem;color:var(--good);background:var(--bg-code);padding:.5rem .65rem;border-radius:5px;display:block;margin-bottom:.45rem;overflow-x:auto;white-space:pre}
+.recipe .meaning{color:var(--text-muted);font-size:.85rem;line-height:1.5}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Tracing</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html" class="current">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The trace, every line.</h1>
+  <p class="tagline">ai-memory uses the <code>tracing</code> crate with an <code>EnvFilter</code>-driven subscriber. 176 log call sites across 11 modules. Every error path is named; every fanout failure is logged with the peer id; every governance verdict is loud. AI clients can grep the canonical lines below to reconstruct what the daemon was doing.</p>
+  <div class="pills">
+    <span class="pill">tracing 0.1</span>
+    <span class="pill">EnvFilter</span>
+    <span class="pill">176 call sites</span>
+    <span class="pill">RUST_LOG-controlled</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Setup</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">How tracing initializes.</h2>
+    <p class="lede">The daemon installs a <code>tracing_subscriber::fmt</code> layer with the standard <code>EnvFilter</code> chain. Default directives keep <code>ai_memory</code> + <code>tower_http</code> at <code>info</code> while honoring any <code>RUST_LOG</code> override.</p>
+    <div class="snip">// src/main.rs::serve()
+tracing_subscriber::fmt()
+    .with_env_filter(
+        EnvFilter::<span class="key">from_default_env</span>()
+            .add_directive(<span class="val">"ai_memory=info"</span>.parse()?)
+            .add_directive(<span class="val">"tower_http=info"</span>.parse()?),
+    )
+    .init();</div>
+    <p class="lede" style="margin-top:1rem">To turn the volume up:</p>
+    <div class="snip"><span class="cm"># quiet — only errors</span>
+RUST_LOG=ai_memory=error ai-memory serve
+
+<span class="cm"># standard — what runs in prod</span>
+RUST_LOG=ai_memory=info,tower_http=info ai-memory serve
+
+<span class="cm"># debug a federation issue</span>
+RUST_LOG=ai_memory::federation=debug,ai_memory=info ai-memory serve
+
+<span class="cm"># everything (very chatty — local dev only)</span>
+RUST_LOG=ai_memory=trace,tower_http=debug ai-memory serve</div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Where the calls live</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">11 modules, 176 call sites.</h2>
+    <p class="lede">Counts pulled from <code>grep -rn 'tracing::error!|warn!|info!|debug!' src/</code>. Handlers and federation dominate — they are where user-visible behavior happens.</p>
+    <div class="modgrid">
+      <div class="mod">
+        <div class="count">67</div>
+        <div class="lbl">handlers.rs</div>
+        <p>Every HTTP/MCP write goes through one of these handlers. Errors get an <code>error!("handler error: {e}")</code> and the response code; governance verdicts get an <code>error!("governance error: {e}")</code>.</p>
+      </div>
+      <div class="mod fed">
+        <div class="count">43</div>
+        <div class="lbl">federation.rs</div>
+        <p>Quorum fanout (W of N) is the noisiest module. Every peer success is silent; every peer failure logs <code>warn!("federation: peer {peer_id} failed for {id}: {reason}")</code> so the operator can see where the network dropped traffic.</p>
+      </div>
+      <div class="mod">
+        <div class="count">25</div>
+        <div class="lbl">main.rs</div>
+        <p>Bootstrap, config, listener init, signal handling. Mostly <code>info!</code> startup banners + warn-level config fallback notices.</p>
+      </div>
+      <div class="mod">
+        <div class="count">11</div>
+        <div class="lbl">mcp.rs</div>
+        <p>MCP protocol layer. Logs malformed JSON-RPC, unknown tool names, and method-not-found responses for protocol-level debugging.</p>
+      </div>
+      <div class="mod db">
+        <div class="count">8</div>
+        <div class="lbl">db.rs</div>
+        <p>SQLite-specific issues: migration logs, FTS5 index rebuild events, vacuum completion. Most <code>db::*</code> calls are silent on success.</p>
+      </div>
+      <div class="mod">
+        <div class="count">7</div>
+        <div class="lbl">subscriptions.rs</div>
+        <p>Webhook dispatch. Logs SSRF guard rejections (W11 hardening), URL parse failures, and HTTP-client build/send errors so a misconfigured webhook doesn't disappear silently.</p>
+      </div>
+      <div class="mod">
+        <div class="count">6</div>
+        <div class="lbl">curator.rs</div>
+        <p>Cycle-driven curator (consolidation, taxonomy refresh). Logs when a cycle starts, ends, or skips because of a recent run.</p>
+      </div>
+      <div class="mod llm">
+        <div class="count">4</div>
+        <div class="lbl">llm.rs</div>
+        <p>Ollama bridge — logs <code>info!("Pulling Ollama embedding model …")</code> on first run and the success line when the pull completes.</p>
+      </div>
+      <div class="mod db">
+        <div class="count">2</div>
+        <div class="lbl">store/postgres.rs</div>
+        <p>SAL Postgres adapter (<code>--features sal</code>). Logs adapter-bound issues distinct from SQLite.</p>
+      </div>
+      <div class="mod">
+        <div class="count">2</div>
+        <div class="lbl">reranker.rs</div>
+        <p>Cross-encoder reranker. Logs lock-poisoning and tokenizer-fallback events.</p>
+      </div>
+      <div class="mod">
+        <div class="count">1</div>
+        <div class="lbl">identity.rs</div>
+        <p>Agent-id resolution chain. Logs once when the precedence chain falls through to <code>anonymous</code>.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Level taxonomy</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">info / warn / error.</h2>
+    <p class="lede">The daemon does not emit <code>debug!</code> or <code>trace!</code> at the call sites — those are reserved for ad-hoc instrumentation under <code>RUST_LOG</code>. Production output is the three levels below.</p>
+    <div class="lev-grid">
+      <div class="lev info">
+        <div class="lbl">info</div>
+        <h3>Useful, expected events.</h3>
+        <p>Bootstrap milestones, model pulls completing, catchup cycle summary. Quiet by default — doesn't drown the operator.</p>
+        <span class="ex">Pulling Ollama embedding model 'nomic-embed-text'...
+Embedding model 'nomic-embed-text' pulled successfully
+catchup: pulled 142 memories from 3 peers in 2.1s</span>
+      </div>
+      <div class="lev warn">
+        <div class="lbl">warn</div>
+        <h3>Recoverable degradation.</h3>
+        <p>Daemon kept running, request still succeeded (or fell back). Operator should look but no incident yet.</p>
+        <span class="ex">embedding generation failed: connection refused
+recall: embedder query failed, falling back to keyword-only: timeout
+SSRF guard rejected webhook URL https://10.0.0.1: private network
+federation: peer node-3 failed for abc-123: connect timeout
+register_agent fanout error (local committed): node-2 502</span>
+      </div>
+      <div class="lev error">
+        <div class="lbl">error</div>
+        <h3>Request-level failure.</h3>
+        <p>The HTTP/MCP response is also an error. Logs the same condition the client gets back so server-side reconstruction is possible from logs alone.</p>
+        <span class="ex">handler error: validation failed: title cannot be empty
+governance error: agent not registered
+execute pending error: target memory not found
+detect_contradictions list error: db locked
+export error: tar archive write failed</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The canonical phrases</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Grep recipes for incident review.</h2>
+    <p class="lede">When an AI client is reading logs to figure out what happened, these are the lines to look for. Each pattern matches an exact <code>tracing::*!</code> call site in the source.</p>
+
+    <div class="recipe">
+      <div class="when">handler error</div>
+      <div class="what">Any HTTP/MCP write that failed at the daemon</div>
+      <span class="grep">grep 'handler error:' daemon.log</span>
+      <span class="meaning">Followed by the underlying <code>anyhow</code> chain. Validators, db, governance, and federation all bubble into this single phrase. The HTTP response is 4xx/5xx; the log carries the full reason.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">governance verdict</div>
+      <div class="what">Deny or replay-failure on a governed action</div>
+      <span class="grep">grep 'governance error:' daemon.log</span>
+      <span class="meaning">A clean <code>Pending</code> verdict is silent — only Deny and replay failures log. Look for these when an AI client says "the write was rejected and I don't know why."</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">federation peer failure</div>
+      <div class="what">A specific peer dropped out of a quorum</div>
+      <span class="grep">grep 'federation: peer .* failed' daemon.log</span>
+      <span class="meaning">Format: <code>federation: peer {peer_id} failed for {memory_id}: {reason}</code>. Quorum still completes if W of N succeed; this line tells you which N-W peers were missing.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">post-quorum partial failure</div>
+      <div class="what">Local commit landed but fanout to some peers errored out</div>
+      <span class="grep">grep 'fanout error (local committed)' daemon.log</span>
+      <span class="meaning">Used by <code>register_agent</code>, <code>link</code>, <code>consolidate</code>. The local row is durable; sync_pull from those peers will reconcile.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">SSRF defense (W10/W11 hardening)</div>
+      <div class="what">A webhook URL was rejected by the URL or DNS guard</div>
+      <span class="grep">grep 'SSRF guard rejected' daemon.log</span>
+      <span class="meaning">Format: <code>SSRF guard rejected webhook URL {url}: {reason}</code>. Reasons include "private network," "loopback resolved," "scheme not http/https." Two SSRF defects were closed in commit <code>9eeb453</code> for v0.6.3.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">embedder fallback</div>
+      <div class="what">Recall couldn't get a query embedding; degraded to FTS5-only</div>
+      <span class="grep">grep 'falling back to keyword-only' daemon.log</span>
+      <span class="meaning">Recall still returns results — the 70/30 hybrid becomes 100/0 keyword for that one request. If frequent, check Ollama health.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">embedding write failure</div>
+      <div class="what">A memory was stored but its vector wasn't indexed</div>
+      <span class="grep">grep 'failed to store embedding for' daemon.log</span>
+      <span class="meaning">The memory is persisted; FTS5 covers it. Semantic recall will miss it until <code>memory_reindex</code> rebuilds the HNSW.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">model pull lifecycle</div>
+      <div class="what">Ollama model fetch on first start</div>
+      <span class="grep">grep "Pulling Ollama" daemon.log
+grep "pulled successfully" daemon.log</span>
+      <span class="meaning">Pull is async and can take minutes on cold start. The "successfully" line is the OK signal — recall semantic ranking is live from that point on.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">catchup cycle</div>
+      <div class="what">Federation catchup summary at the end of a sync window</div>
+      <span class="grep">grep 'catchup:' daemon.log</span>
+      <span class="meaning">Per-peer pulls + the rollup. Includes parse-failure warnings (<code>unparseable memory from peer</code>) when a peer ships malformed data — those rows are skipped, not retried.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">execute-pending replay</div>
+      <div class="what">A pending action was approved and the replay path failed</div>
+      <span class="grep">grep 'execute pending error:' daemon.log</span>
+      <span class="meaning">Approval decision flipped status to <code>approved</code> but replay couldn't complete (deleted target, namespace gone, validator now rejects). Status remains <code>approved</code>; the row is loud in logs but the user-visible state is unchanged.</span>
+    </div>
+
+    <div class="recipe">
+      <div class="when">webhook delivery failure</div>
+      <div class="what">A subscription's POST to its webhook URL failed</div>
+      <span class="grep">grep 'webhook POST to' daemon.log</span>
+      <span class="meaning">Format: <code>webhook POST to {url} failed: {error}</code>. Subscription-side; not retried at the daemon (the recipient is responsible for its own retry policy).</span>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Future</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">v0.7 expansion.</h2>
+    <p class="lede">v0.7 brings the Hook Pipeline (arch-spec §2) and Sidechain Transcripts (§6). Both extend the trace surface — every hook fire becomes a span, every transcript line is durable. Once those land:</p>
+    <div class="snip" style="font-family:var(--font-sans);white-space:normal;line-height:1.7">
+      <div><strong style="color:var(--good)">Hook spans</strong> — <code>info_span!("hook", event=..., subscriber=...)</code> wrapping each hook callback so the trace tree shows which hook ran where</div>
+      <div><strong style="color:var(--good)">Transcript stream</strong> — every governed action lands a row in the transcript table with the full payload + verdict, queryable independent of the daemon log</div>
+      <div><strong style="color:var(--good)">OpenTelemetry hookup</strong> — v1.0 charter; the <code>tracing-opentelemetry</code> bridge so traces can ship to a collector</div>
+      <div><strong style="color:var(--good)">memory_capabilities introspection</strong> (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/architectural-enhancement-spec-v1.md#7-capabilities-introspection-extension" style="color:var(--p1)">v0.6.3.1 quick patch</a>) — the daemon will report <code>hooks.registered_count</code>, <code>transcripts.total_count</code>, etc. so AI clients can answer "what's enforced here?" honestly</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3 · Apache 2.0 · tracing crate 0.1 · <a href="https://github.com/alphaonedev/ai-memory-mcp">repo</a></p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="schema.html">Schema</a> · <a href="types.html">Types</a> · <a href="validators.html">Validators</a> · <a href="governance.html">Governance</a></p>
+</footer>
+
+</body>
+</html>

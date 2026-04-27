@@ -1,0 +1,410 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  Data Flow — animated path diagrams for write/read/federation.
+  The "money shot" engineering visualization for SMEs who want to
+  see the hybrid recall fusion model and federation sync semantics.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Data Flow — write path, read path, federation</title>
+<meta name="description" content="Animated write path, read path with hybrid recall fusion, and W-of-N quorum federation diagrams.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/data-flow.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:2rem;margin-bottom:.5rem}h3{font-size:1.2rem}
+p{color:var(--text-muted)}
+
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.5rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto 1.5rem}
+
+section{padding:5rem 0;border-bottom:1px solid var(--border)}
+section .eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+section .lede{color:var(--text-muted);font-size:1rem;max-width:780px;margin-bottom:2.5rem}
+
+.flow-svg{width:100%;max-width:1180px;margin:0 auto;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem}
+.flow-svg .stage-box{fill:var(--bg-raised);stroke:var(--border-hl);stroke-width:1.5}
+.flow-svg .stage-box.hot{stroke:var(--p1);stroke-width:2}
+.flow-svg .stage-box.optional{stroke-dasharray:4 4}
+.flow-svg .stage-box.write{stroke:var(--p2)}
+.flow-svg .stage-box.read{stroke:var(--p1)}
+.flow-svg text{fill:var(--text);font-family:monospace;font-size:13px}
+.flow-svg .label{fill:var(--text-muted);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+.flow-svg .data-line{stroke:var(--p1);stroke-width:2.5;fill:none;stroke-dasharray:5 5;animation:dash-anim 4s linear infinite}
+.flow-svg .data-line.write{stroke:var(--p2)}
+.flow-svg .data-line.opt{stroke-opacity:.5;stroke-dasharray:3 3}
+@keyframes dash-anim{to{stroke-dashoffset:-100}}
+.flow-svg .group-bg{fill:rgba(255,255,255,0.02);stroke:var(--border);stroke-width:1;stroke-dasharray:2 2}
+.flow-svg .group-label{fill:var(--text-muted);font-size:10px;letter-spacing:.1em;text-transform:uppercase}
+
+/* fusion explainer */
+.fusion-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:1rem;margin:2rem 0}
+@media(max-width:800px){.fusion-grid{grid-template-columns:1fr}}
+.fusion-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.25rem;position:relative}
+.fusion-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.fusion-card.f1::before{background:var(--p1)}.fusion-card.f2::before{background:var(--p2)}.fusion-card.f3::before{background:var(--p3)}
+.fusion-card h3{font-size:1rem;margin-bottom:.4rem;font-family:var(--font-mono)}
+.fusion-card .pct{font-family:var(--font-mono);font-size:1.5rem;font-weight:700;margin-bottom:.4rem}
+.fusion-card .pct.p1{color:var(--p1)}.fusion-card .pct.p2{color:var(--p2)}.fusion-card .pct.p3{color:var(--p3)}
+.fusion-card p{font-size:.85rem;color:var(--text-muted)}
+
+.callout{background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--p1);border-radius:8px;padding:1.25rem 1.5rem;margin:2rem 0;font-size:.95rem;color:var(--text-muted)}
+.callout strong{color:var(--text)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Data Flow</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html" class="current">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Where data flows.</h1>
+  <p class="tagline">Three end-to-end animated diagrams: write path (memory_store), read path (memory_recall with hybrid fusion), and federation (W-of-N quorum sync). Every box is a real function in <code>src/db.rs</code> or <code>src/handlers.rs</code>; every arrow is a real call.</p>
+</section>
+
+<!-- =============== WRITE PATH =============== -->
+<section id="write">
+  <div class="container">
+    <span class="eyebrow p2">Write Path · memory_store</span>
+    <h2>How a memory becomes durable.</h2>
+    <p class="lede">Validation → embedding → SQLite insert → HNSW index update → federation fanout. The full path takes ~9-86ms p95 depending on whether embedding is requested.</p>
+
+    <svg class="flow-svg" viewBox="0 0 1180 360" xmlns="http://www.w3.org/2000/svg">
+      <!-- Group: input -->
+      <rect class="group-bg" x="10" y="10" width="180" height="320"/>
+      <text class="group-label" x="20" y="30">▸ INPUT</text>
+
+      <!-- Group: core write -->
+      <rect class="group-bg" x="200" y="10" width="600" height="320"/>
+      <text class="group-label" x="210" y="30">▸ src/db.rs::store</text>
+
+      <!-- Group: post-write -->
+      <rect class="group-bg" x="810" y="10" width="360" height="320"/>
+      <text class="group-label" x="820" y="30">▸ POST-WRITE</text>
+
+      <!-- Stages -->
+      <g><rect class="stage-box write" x="30" y="120" width="140" height="80" rx="10"/><text x="100" y="155" text-anchor="middle">Memory{}</text><text x="100" y="175" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:10px">title, content, ns, tier</text></g>
+
+      <g><rect class="stage-box" x="220" y="60" width="140" height="60" rx="10"/><text x="290" y="95" text-anchor="middle">validate_*</text></g>
+      <g><rect class="stage-box" x="220" y="150" width="140" height="60" rx="10"/><text x="290" y="180" text-anchor="middle">enforce_governance</text></g>
+      <g><rect class="stage-box optional" x="220" y="240" width="140" height="60" rx="10"/><text x="290" y="270" text-anchor="middle">check_duplicate?</text><text x="290" y="285" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">if threshold set</text></g>
+
+      <g><rect class="stage-box" x="380" y="60" width="140" height="60" rx="10"/><text x="450" y="95" text-anchor="middle">resolve_agent_id</text></g>
+      <g><rect class="stage-box optional" x="380" y="150" width="140" height="60" rx="10"/><text x="450" y="180" text-anchor="middle">embed (Candle)</text><text x="450" y="195" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">semantic+ tier</text></g>
+      <g><rect class="stage-box optional" x="380" y="240" width="140" height="60" rx="10"/><text x="450" y="270" text-anchor="middle">auto_tag (LLM)</text><text x="450" y="285" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">smart+ tier</text></g>
+
+      <g><rect class="stage-box hot" x="540" y="60" width="140" height="60" rx="10"/><text x="610" y="95" text-anchor="middle">SQLite INSERT</text></g>
+      <g><rect class="stage-box hot" x="540" y="150" width="140" height="60" rx="10"/><text x="610" y="180" text-anchor="middle">FTS5 trigger</text></g>
+      <g><rect class="stage-box optional" x="540" y="240" width="140" height="60" rx="10"/><text x="610" y="270" text-anchor="middle">HNSW insert</text><text x="610" y="285" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">if embed present</text></g>
+
+      <g><rect class="stage-box optional" x="700" y="100" width="100" height="60" rx="10"/><text x="750" y="135" text-anchor="middle">contradict?</text></g>
+
+      <g><rect class="stage-box optional" x="830" y="60" width="140" height="60" rx="10"/><text x="900" y="95" text-anchor="middle">fanout_or_503</text><text x="900" y="110" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">W-of-N peers</text></g>
+      <g><rect class="stage-box optional" x="830" y="150" width="140" height="60" rx="10"/><text x="900" y="180" text-anchor="middle">dispatch_event</text><text x="900" y="195" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">webhook subs</text></g>
+      <g><rect class="stage-box" x="830" y="240" width="140" height="60" rx="10"/><text x="900" y="270" text-anchor="middle">return Memory</text><text x="900" y="285" text-anchor="middle" class="label" style="fill:var(--good);font-size:9px">with id</text></g>
+
+      <g><rect class="stage-box hot" x="990" y="150" width="160" height="60" rx="10"/><text x="1070" y="180" text-anchor="middle">caller</text><text x="1070" y="195" text-anchor="middle" class="label" style="fill:var(--good);font-size:9px">9-86ms p95</text></g>
+
+      <!-- Lines -->
+      <path class="data-line write" d="M 170 160 L 215 90"/>
+      <path class="data-line write" d="M 170 160 L 215 180"/>
+      <path class="data-line write opt" d="M 170 165 L 215 270"/>
+
+      <path class="data-line write" d="M 360 90 L 380 90"/>
+      <path class="data-line write" d="M 360 180 L 380 180"/>
+      <path class="data-line write opt" d="M 360 270 L 380 270"/>
+
+      <path class="data-line write" d="M 520 90 L 540 90"/>
+      <path class="data-line write" d="M 520 90 Q 540 130 540 180"/>
+      <path class="data-line write opt" d="M 520 180 L 540 180"/>
+      <path class="data-line write opt" d="M 520 270 L 540 270"/>
+
+      <path class="data-line write" d="M 680 90 Q 700 130 750 130"/>
+      <path class="data-line write opt" d="M 800 130 Q 815 100 830 90"/>
+      <path class="data-line write opt" d="M 800 130 Q 815 160 830 180"/>
+      <path class="data-line write" d="M 680 90 Q 720 200 830 270"/>
+
+      <path class="data-line write" d="M 970 270 L 1000 200"/>
+    </svg>
+
+    <div class="callout">
+      <strong>The dashed boxes are tier-gated.</strong> The keyword tier skips embed + auto_tag + HNSW; it stores into SQLite + FTS5 only. The semantic tier turns on embed + HNSW. The smart tier adds auto_tag. The autonomous tier additionally turns on the curator daemon for background work.
+    </div>
+  </div>
+</section>
+
+<!-- =============== READ PATH (HYBRID FUSION) =============== -->
+<section id="read">
+  <div class="container">
+    <span class="eyebrow p1">Read Path · memory_recall</span>
+    <h2>Hybrid recall: FTS5 + HNSW + reranker, fused.</h2>
+    <p class="lede">memory_recall combines three retrieval modalities and reconciles them into one ranked result set. Each modality has different strengths; the fusion model produces something none of them could alone. p95 hot-path: 18ms.</p>
+
+    <svg class="flow-svg" viewBox="0 0 1180 380" xmlns="http://www.w3.org/2000/svg">
+      <rect class="group-bg" x="10" y="10" width="170" height="340"/>
+      <text class="group-label" x="20" y="30">▸ QUERY</text>
+
+      <rect class="group-bg" x="190" y="10" width="500" height="340"/>
+      <text class="group-label" x="200" y="30">▸ THREE PARALLEL RETRIEVALS</text>
+
+      <rect class="group-bg" x="700" y="10" width="280" height="340"/>
+      <text class="group-label" x="710" y="30">▸ FUSION + RERANK</text>
+
+      <rect class="group-bg" x="990" y="10" width="180" height="340"/>
+      <text class="group-label" x="1000" y="30">▸ RESULT</text>
+
+      <!-- Query -->
+      <g><rect class="stage-box read" x="30" y="120" width="140" height="80" rx="10"/><text x="100" y="155" text-anchor="middle">query</text><text x="100" y="175" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:10px">+ ns + filters</text></g>
+
+      <!-- Optional context tokens -->
+      <g><rect class="stage-box optional" x="30" y="220" width="140" height="60" rx="10"/><text x="100" y="250" text-anchor="middle" style="font-size:11px">context_tokens</text><text x="100" y="265" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">recent conv</text></g>
+
+      <!-- Three retrievals -->
+      <g><rect class="stage-box read" x="200" y="60" width="240" height="60" rx="10"/><text x="320" y="95" text-anchor="middle">FTS5 keyword (BM25)</text></g>
+      <g><rect class="stage-box read" x="200" y="150" width="240" height="60" rx="10"/><text x="320" y="180" text-anchor="middle">embed(query) → HNSW search</text></g>
+      <g><rect class="stage-box optional" x="200" y="240" width="240" height="60" rx="10"/><text x="320" y="265" text-anchor="middle" style="font-size:11px">embed(ctx_tokens) · 70/30 fuse</text><text x="320" y="280" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">contextual recall (v0.6.0)</text></g>
+
+      <!-- Score sets -->
+      <g><rect class="stage-box" x="460" y="60" width="220" height="60" rx="10"/><text x="570" y="95" text-anchor="middle">keyword candidates {id, score}</text></g>
+      <g><rect class="stage-box" x="460" y="150" width="220" height="60" rx="10"/><text x="570" y="180" text-anchor="middle">vector candidates {id, cosine}</text></g>
+      <g><rect class="stage-box optional" x="460" y="240" width="220" height="60" rx="10"/><text x="570" y="270" text-anchor="middle" style="font-size:11px">vector + ctx blend (Embedder::fuse)</text></g>
+
+      <!-- Fusion -->
+      <g><rect class="stage-box hot" x="710" y="100" width="160" height="80" rx="10"/><text x="790" y="135" text-anchor="middle">db::recall_hybrid</text><text x="790" y="155" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:10px">union + score blend</text></g>
+      <g><rect class="stage-box optional" x="710" y="200" width="160" height="80" rx="10"/><text x="790" y="235" text-anchor="middle">cross-encoder rerank</text><text x="790" y="255" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:10px">autonomous tier</text></g>
+
+      <!-- Filters -->
+      <g><rect class="stage-box" x="890" y="60" width="80" height="60" rx="10"/><text x="930" y="95" text-anchor="middle" style="font-size:11px">budget</text><text x="930" y="110" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">tokens</text></g>
+      <g><rect class="stage-box" x="890" y="150" width="80" height="60" rx="10"/><text x="930" y="185" text-anchor="middle" style="font-size:11px">scope</text><text x="930" y="200" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">visibility</text></g>
+      <g><rect class="stage-box" x="890" y="240" width="80" height="60" rx="10"/><text x="930" y="275" text-anchor="middle" style="font-size:11px">TTL ext</text><text x="930" y="290" text-anchor="middle" class="label" style="fill:var(--text-dim);font-size:9px">touch hits</text></g>
+
+      <!-- Result -->
+      <g><rect class="stage-box hot" x="1010" y="150" width="140" height="80" rx="10"/><text x="1080" y="185" text-anchor="middle">top-K ranked</text><text x="1080" y="205" text-anchor="middle" class="label" style="fill:var(--good);font-size:9px">18ms p95 hot</text></g>
+
+      <!-- Lines -->
+      <path class="data-line" d="M 170 160 L 200 90"/>
+      <path class="data-line" d="M 170 160 L 200 180"/>
+      <path class="data-line opt" d="M 170 250 L 200 270"/>
+
+      <path class="data-line" d="M 440 90 L 460 90"/>
+      <path class="data-line" d="M 440 180 L 460 180"/>
+      <path class="data-line opt" d="M 440 270 L 460 270"/>
+
+      <path class="data-line" d="M 680 90 Q 700 110 715 130"/>
+      <path class="data-line" d="M 680 180 Q 700 165 715 145"/>
+      <path class="data-line opt" d="M 680 270 Q 700 230 715 165"/>
+
+      <path class="data-line opt" d="M 870 140 L 880 240"/>
+      <path class="data-line" d="M 870 240 Q 870 240 890 90"/>
+      <path class="data-line" d="M 870 240 L 890 180"/>
+      <path class="data-line" d="M 870 240 L 890 270"/>
+
+      <path class="data-line" d="M 970 90 Q 990 130 1010 180"/>
+      <path class="data-line" d="M 970 180 L 1010 190"/>
+      <path class="data-line" d="M 970 270 Q 990 220 1010 200"/>
+    </svg>
+
+    <h3 style="margin-top:2.5rem">The 70/30 contextual fusion (v0.6.0 feature)</h3>
+    <p style="margin-bottom:.5rem">When the caller passes <code>context_tokens=[...]</code>, the recall biases the query embedding toward recent conversation:</p>
+
+    <div class="fusion-grid">
+      <div class="fusion-card f1">
+        <h3>primary embedding</h3>
+        <div class="pct p1">70%</div>
+        <p><code>embed(query)</code> — what the caller explicitly asked. Anchors the recall.</p>
+      </div>
+      <div class="fusion-card f2">
+        <h3>context embedding</h3>
+        <div class="pct p2">30%</div>
+        <p><code>embed(context_tokens.join(" "))</code> — recent conversation tokens. Biases toward "what the agent is currently thinking about".</p>
+      </div>
+      <div class="fusion-card f3">
+        <h3>L2-renormalize</h3>
+        <div class="pct p3">unit</div>
+        <p>Final query vector = unit-norm(0.7·primary + 0.3·context). Same magnitude as either input — drop-in for HNSW search.</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Why fusion beats either alone.</strong> Pure keyword (FTS5) misses paraphrase. Pure vector (HNSW) drifts on rare terms. Pure rerank is too slow for hot path. The hybrid path uses each where it wins: BM25 for exact terms, vector for semantic neighbors, reranker only on the candidate union (top ~20 → top K). The 70/30 contextual blend is the v0.6.0 addition that makes recall feel "in-flow" with the agent's current task.
+    </div>
+  </div>
+</section>
+
+<!-- =============== FEDERATION =============== -->
+<section id="federation">
+  <div class="container">
+    <span class="eyebrow p3">Federation · W-of-N Quorum</span>
+    <h2>Multi-machine sync without a coordinator.</h2>
+    <p class="lede">Each node accepts writes locally and fans out to peers via mTLS. Quorum threshold W of N (default 2 of 3) must ack before commit. Eventual consistency. Per-peer cursors for catchup after partition. Federation private endpoints under <code>/api/v1/sync/*</code>.</p>
+
+    <svg class="flow-svg" viewBox="0 0 1180 460" xmlns="http://www.w3.org/2000/svg">
+      <!-- Three peers -->
+      <g>
+        <rect class="stage-box hot" x="40" y="200" width="170" height="100" rx="10"/>
+        <text x="125" y="235" text-anchor="middle" style="font-size:14px">node-1 (leader)</text>
+        <text x="125" y="255" text-anchor="middle" class="label" style="fill:var(--p1);font-size:10px">accepts the write</text>
+        <text x="125" y="275" text-anchor="middle" style="fill:var(--text-muted);font-size:11px;font-family:monospace">SQLite + WAL</text>
+      </g>
+      <g>
+        <rect class="stage-box" x="490" y="80" width="170" height="100" rx="10"/>
+        <text x="575" y="115" text-anchor="middle" style="font-size:14px">node-2</text>
+        <text x="575" y="135" text-anchor="middle" class="label" style="fill:var(--good);font-size:10px">ACK ✓ 240ms</text>
+        <text x="575" y="155" text-anchor="middle" style="fill:var(--text-muted);font-size:11px;font-family:monospace">replica</text>
+      </g>
+      <g>
+        <rect class="stage-box" x="490" y="320" width="170" height="100" rx="10"/>
+        <text x="575" y="355" text-anchor="middle" style="font-size:14px">node-3</text>
+        <text x="575" y="375" text-anchor="middle" class="label" style="fill:var(--good);font-size:10px">ACK ✓ 410ms</text>
+        <text x="575" y="395" text-anchor="middle" style="fill:var(--text-muted);font-size:11px;font-family:monospace">replica</text>
+      </g>
+      <g>
+        <rect class="stage-box optional" x="940" y="200" width="170" height="100" rx="10"/>
+        <text x="1025" y="235" text-anchor="middle" style="font-size:14px">node-4</text>
+        <text x="1025" y="255" text-anchor="middle" class="label" style="fill:var(--bad);font-size:10px">offline · partitioned</text>
+        <text x="1025" y="275" text-anchor="middle" style="fill:var(--text-muted);font-size:11px;font-family:monospace">catchup pending</text>
+      </g>
+
+      <!-- mTLS handshake annotations -->
+      <text x="125" y="180" text-anchor="middle" class="label" style="fill:var(--p1)">▼ mTLS · pinned cert</text>
+
+      <!-- Write fanout (orange) -->
+      <path class="data-line write" d="M 210 240 Q 350 100 490 130" marker-end="url(#warrow)"/>
+      <path class="data-line write" d="M 210 270 Q 350 400 490 370" marker-end="url(#warrow)"/>
+      <path class="data-line write opt" d="M 210 250 Q 600 250 940 250" marker-end="url(#warrow)"/>
+
+      <!-- ACK return (cyan) -->
+      <path class="data-line" d="M 490 130 Q 350 130 210 220"/>
+      <path class="data-line" d="M 490 370 Q 350 370 210 280"/>
+
+      <!-- Quorum threshold annotation -->
+      <text x="350" y="50" text-anchor="middle" style="fill:var(--good);font-family:monospace;font-size:14px;font-weight:700">W=2 of N=3 reached → COMMIT</text>
+      <text x="350" y="70" text-anchor="middle" class="label" style="fill:var(--text-muted)">leader returns 200 to caller after 410ms (slowest of 2 acks)</text>
+
+      <!-- Catchup annotation -->
+      <text x="1025" y="330" text-anchor="middle" style="fill:var(--text-muted);font-family:monospace;font-size:11px">when node-4 returns:</text>
+      <text x="1025" y="345" text-anchor="middle" style="fill:var(--p1);font-family:monospace;font-size:11px">GET /api/v1/sync/since?cursor=...</text>
+      <text x="1025" y="360" text-anchor="middle" style="fill:var(--text-muted);font-family:monospace;font-size:11px">advances local state</text>
+
+      <defs>
+        <marker id="warrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--p2)"/>
+        </marker>
+      </defs>
+    </svg>
+
+    <div class="fusion-grid" style="margin-top:2rem">
+      <div class="fusion-card f1">
+        <h3>local first</h3>
+        <p>Reads always serve from local SQLite. Zero network call. Sub-50ms regardless of peer state.</p>
+      </div>
+      <div class="fusion-card f2">
+        <h3>quorum write</h3>
+        <p>Writes return 200 only after W peers ACK. Slowest ACK determines latency. Default W=2.</p>
+      </div>
+      <div class="fusion-card f3">
+        <h3>catchup loop</h3>
+        <p>Detached peer catches up on rejoin via per-peer cursor. Convergent within one catchup_interval (default 30s).</p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>What if quorum can't be reached?</strong> The leader returns <strong>503 with structured peer status</strong>: which peers responded, which timed out, when the deadline hit. No silent partial writes. Caller can retry or escalate to the operator. The <code>QuorumNotMetPayload</code> includes per-peer error classification (Unreachable / IdDrift / InFlight / InvalidPolicy / LocalWriteFailed).
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory-mcp · Apache 2.0 · v0.6.3-rc1 · <a href="./">main</a> · <a href="at-a-glance.html">At a Glance</a> · <a href="feature-matrix.html">Feature Matrix</a> · <a href="integrations.html">Integrations</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
