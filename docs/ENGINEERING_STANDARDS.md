@@ -245,7 +245,6 @@ Every patch/release must be reviewed against these 10 areas:
    - Check phase (fmt, clippy pedantic, test, audit, build) on ubuntu + macos
    - Release phase: 5 platform binaries + `.deb`/`.rpm` packages
    - Docker: push to GHCR (`ghcr.io/alphaonedev/ai-memory:VERSION` + `:latest`)
-   - PPA: Ubuntu PPA upload (`ppa:jbridger2021/ppa`)
    - COPR: Fedora COPR upload (`alpha-one-ai/ai-memory`)
 5. Verify: `gh release view v{VERSION} --repo alphaonedev/ai-memory-mcp`
 6. Update Homebrew tap (manual): `alphaonedev/homebrew-tap` — download platform tarballs, compute SHA256 hashes, update `Formula/ai-memory.rb`
