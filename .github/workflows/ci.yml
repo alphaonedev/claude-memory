@@ -259,6 +259,43 @@ jobs:
           git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
           git push
 
+  # Dockerfile-build smoke. Runs on EVERY push to main / develop / release/**
+  # AND on EVERY PR. Builds the Docker image; does NOT push to GHCR. The
+  # purpose is to catch Dockerfile drift (missing COPY of new files
+  # referenced by include_str!, etc.) BEFORE we cut a release tag.
+  #
+  # v0.6.3 / v0.6.4 retrospective: v0.6.3 added include_str! references
+  # to migrations/sqlite/0010_v063_hierarchy_kg.sql but the Dockerfile
+  # did not COPY migrations/. We did not catch this until the release
+  # pipeline tried to push to GHCR — at which point v0.6.3 was already
+  # tagged. Fix shipped as v0.6.4 patch. This job ensures that gap is
+  # caught at PR time, not at release time.
+  dockerfile-validate:
+    name: Dockerfile build (no push)
+    runs-on: ubuntu-latest
+    # Skip on tag pushes — the docker job below handles those (with push).
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ai-memory:ci-validate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        run: |
+          docker run --rm ai-memory:ci-validate --version
+          docker run --rm ai-memory:ci-validate --help | head -20
+
   docker:
     name: Docker (GHCR)
     needs: check
