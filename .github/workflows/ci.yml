@@ -284,6 +284,44 @@ jobs:
           git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
           git push
 
+  # v0.6.5 — Dockerfile-build smoke. Runs on EVERY push to main / develop /
+  # release/** AND on EVERY PR. Builds the Docker image; does NOT push to
+  # GHCR. Catches Dockerfile drift (missing COPY of new files referenced
+  # by include_str!, glibc mismatch from build/runtime base drift, etc.)
+  # BEFORE we cut a release tag.
+  #
+  # Retrospective: v0.6.3 added include_str! refs to migrations/sqlite/
+  # but the Dockerfile didn't COPY migrations/. v0.6.4's image built
+  # but used rust:1.94-slim (trixie, glibc 2.41) on top of bookworm
+  # runtime (glibc 2.36) — built but failed at runtime with
+  # "version GLIBC_2.39 not found". Both bugs were caught at release
+  # time, not PR time. This job closes that gap.
+  dockerfile-validate:
+    name: Dockerfile build (no push)
+    runs-on: ubuntu-latest
+    # Skip on tag pushes — the docker job below handles those (with push).
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ai-memory:ci-validate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        run: |
+          docker run --rm ai-memory:ci-validate --version
+          docker run --rm ai-memory:ci-validate --help | head -20
+
   docker:
     name: Docker (GHCR)
     needs: check
