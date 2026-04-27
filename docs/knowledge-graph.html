@@ -1,0 +1,378 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Knowledge Graph atlas — memory_links + entities + temporal validity.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Knowledge Graph — links, entities, temporal validity</title>
+<meta name="description" content="ai-memory v0.6.3 knowledge graph. memory_links with 4 relations, entity registry, temporal validity columns, memory_kg_query + memory_kg_timeline + memory_kg_invalidate. The structured-cognition layer that v0.6.3 Streams B+C unlock.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/knowledge-graph.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(200,162,255,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.kg-svg{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem}
+
+.rel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:2rem}
+.rel{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.rel::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.rel.r1::before{background:var(--text-dim)}
+.rel.r2::before{background:var(--good)}
+.rel.r3::before{background:var(--bad)}
+.rel.r4::before{background:var(--p3)}
+.rel .nm{font-family:var(--font-mono);font-size:1.05rem;font-weight:700;margin-bottom:.4rem}
+.rel.r1 .nm{color:var(--text)}
+.rel.r2 .nm{color:var(--good)}
+.rel.r3 .nm{color:var(--bad)}
+.rel.r4 .nm{color:var(--p3)}
+.rel p{font-size:.85rem;color:var(--text-muted);line-height:1.5}
+.rel .ex{margin-top:.5rem;font-family:var(--font-mono);font-size:.75rem;color:var(--text-muted);font-style:italic}
+
+.tool{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.25rem;position:relative;overflow:hidden}
+.tool::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p3)}
+.tool.kg::before{background:var(--p1)}
+.tool.entity::before{background:var(--p2)}
+.tool.invalid::before{background:var(--bad)}
+.tool-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.tool-name{font-family:var(--font-mono);font-size:1.15rem;font-weight:700;color:var(--text)}
+.tool-tag{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);padding:.15em .55em;border:1px solid var(--border-hl);border-radius:4px}
+.tool-desc{color:var(--text-muted);font-size:.92rem;margin-bottom:1rem}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--gold)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+.snip .num{color:var(--p1)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Knowledge Graph</span></a>
+    <div class="right">
+      <a href="at-a-glance.html">Atlas</a>
+      <a href="hierarchies.html">Hierarchies</a>
+      <a href="memory-tiers.html">Tiers</a>
+      <a href="schema.html">Schema</a>
+      <a href="autonomous.html">Autonomous</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Knowledge Graph — structured cognition.</h1>
+  <p class="tagline">Memories aren't a flat blob — they're a graph. <strong>4 relation types</strong>, an entity registry that resolves alias-to-canonical-name, <strong>temporal validity</strong> on every edge so the past stays queryable, and three new MCP tools (<code>memory_kg_query</code>, <code>memory_kg_timeline</code>, <code>memory_kg_invalidate</code>) that turn the graph into a first-class API surface. Shipped in v0.6.3 Streams B + C — the foundation v0.7's Apache AGE acceleration replaces the dual-path stubs of.</p>
+  <div class="pills">
+    <span class="pill">4 relations</span>
+    <span class="pill">entity registry (Stream C)</span>
+    <span class="pill">temporal validity (Stream B)</span>
+    <span class="pill">3 KG MCP tools</span>
+    <span class="pill">v0.7: Apache AGE acceleration</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The graph</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Memories + edges = the KG.</h2>
+    <p class="lede">Every memory is a node. Every <code>memory_link</code> row is a directed edge with a typed relation and (since v0.6.3) a temporal validity window. The graph is queryable via recursive CTE today, and via Apache AGE Cypher in v0.7.</p>
+    <svg class="kg-svg" viewBox="0 0 1180 420" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        .nb{stroke-width:2;rx:8;ry:8}
+        .nb.m{fill:#0a0a0a;stroke:#6ee7ff}
+        .nb.e{fill:rgba(255,184,107,0.12);stroke:#ffb86b}
+        .nb.s{fill:rgba(255,107,157,0.10);stroke:#ff6b9d}
+        .ll{stroke-width:1.8;fill:none}
+        .ll.r1{stroke:#999;stroke-dasharray:none}
+        .ll.r2{stroke:#6ee7ff}
+        .ll.r3{stroke:#ff6b9d}
+        .ll.r4{stroke:#c8a2ff;stroke-dasharray:4 4}
+        .h{fill:#fff;font-family:monospace;font-size:11px;font-weight:700}
+        .s{fill:#999;font-family:monospace;font-size:9px}
+        .lab{fill:#999;font-family:monospace;font-size:10px;font-weight:700}
+      </style>
+      <defs>
+        <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#999"/></marker>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#6ee7ff"/></marker>
+        <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#ff6b9d"/></marker>
+        <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M 0 0 L 10 5 L 0 10 z" fill="#c8a2ff"/></marker>
+      </defs>
+
+      <!-- Memories -->
+      <rect class="nb m" x="60" y="50" width="180" height="60"/>
+      <text class="h" x="150" y="74" text-anchor="middle">M1: Q3 OKR draft</text>
+      <text class="s" x="150" y="92" text-anchor="middle">tier=mid · created Mar 15</text>
+
+      <rect class="nb m" x="380" y="50" width="180" height="60"/>
+      <text class="h" x="470" y="74" text-anchor="middle">M2: Q3 OKR review</text>
+      <text class="s" x="470" y="92" text-anchor="middle">tier=mid · created Apr 1</text>
+
+      <rect class="nb m" x="700" y="50" width="180" height="60"/>
+      <text class="h" x="790" y="74" text-anchor="middle">M3: Q3 retro</text>
+      <text class="s" x="790" y="92" text-anchor="middle">tier=long · consolidated</text>
+
+      <rect class="nb m" x="60" y="200" width="180" height="60"/>
+      <text class="h" x="150" y="224" text-anchor="middle">M4: We use Postgres</text>
+      <text class="s" x="150" y="242" text-anchor="middle">tier=long · created Jan 5</text>
+
+      <rect class="nb m" x="380" y="200" width="180" height="60"/>
+      <text class="h" x="470" y="224" text-anchor="middle">M5: Migrated to MySQL</text>
+      <text class="s" x="470" y="242" text-anchor="middle">tier=long · created Apr 20</text>
+
+      <rect class="nb m" x="700" y="200" width="180" height="60"/>
+      <text class="h" x="790" y="224" text-anchor="middle">M6: Postgres steps</text>
+      <text class="s" x="790" y="242" text-anchor="middle">tier=mid · derived</text>
+
+      <!-- Entity -->
+      <rect class="nb e" x="60" y="330" width="180" height="60"/>
+      <text class="h" x="150" y="354" text-anchor="middle">E1: alphaone</text>
+      <text class="s" x="150" y="372" text-anchor="middle">aliases: AO, AlphaOne LLC</text>
+
+      <rect class="nb e" x="380" y="330" width="180" height="60"/>
+      <text class="h" x="470" y="354" text-anchor="middle">E2: project-orion</text>
+      <text class="s" x="470" y="372" text-anchor="middle">aliases: Orion, Proj-O</text>
+
+      <!-- Edges -->
+      <line class="ll r1" x1="240" y1="80" x2="378" y2="80" marker-end="url(#ar1)"/>
+      <text class="lab" x="305" y="73" text-anchor="middle">related_to</text>
+
+      <line class="ll r2" x1="560" y1="80" x2="698" y2="80" marker-end="url(#ar2)"/>
+      <text class="lab" x="625" y="73" text-anchor="middle" fill="#6ee7ff">supersedes</text>
+
+      <line class="ll r4" x1="470" y1="110" x2="790" y2="200" marker-end="url(#ar4)"/>
+      <text class="lab" x="630" y="155" text-anchor="middle" fill="#c8a2ff">derived_from</text>
+
+      <line class="ll r3" x1="240" y1="230" x2="378" y2="230" marker-end="url(#ar3)"/>
+      <text class="lab" x="305" y="223" text-anchor="middle" fill="#ff6b9d">contradicts</text>
+
+      <line class="ll r1" x1="150" y1="260" x2="150" y2="328" marker-end="url(#ar1)"/>
+      <text class="lab" x="170" y="295">about_entity</text>
+
+      <line class="ll r1" x1="380" y1="240" x2="380" y2="330" marker-end="url(#ar1)"/>
+      <text class="lab" x="335" y="295">about_entity</text>
+
+      <!-- Legend -->
+      <text class="lab" x="950" y="60">Memory node</text>
+      <rect class="nb m" x="940" y="70" width="20" height="14"/>
+      <text class="lab" x="950" y="110">Entity node (KG)</text>
+      <rect class="nb e" x="940" y="120" width="20" height="14"/>
+    </svg>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The four relations</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Closed set — wire-format stable.</h2>
+    <p class="lede">Every <code>memory_link</code> row carries one of these four relation tags. The set is closed (validators reject anything else); adding a new relation is a wire-format change, not a content tweak.</p>
+    <div class="rel-grid">
+      <div class="rel r1">
+        <div class="nm">related_to</div>
+        <p>Generic association. The default. "These memories are about the same thing." No semantic claim beyond "look at both."</p>
+        <div class="ex">e.g. M1 ↔ M2: both about the same project</div>
+      </div>
+      <div class="rel r2">
+        <div class="nm">supersedes</div>
+        <p>The newer memory replaces the older. The graph captures the supersession explicitly so recall can prefer the latest.</p>
+        <div class="ex">e.g. M2 supersedes M1: review replaces draft</div>
+      </div>
+      <div class="rel r3">
+        <div class="nm">contradicts</div>
+        <p>Explicit disagreement. Often auto-created by <code>memory_detect_contradiction</code> (LLM-driven). Surfaces conflicts on recall.</p>
+        <div class="ex">e.g. "we use Postgres" contradicts "migrated to MySQL"</div>
+      </div>
+      <div class="rel r4">
+        <div class="nm">derived_from</div>
+        <p>Provenance. Used by <code>memory_consolidate</code> to link N source memories to the consolidated output. Audit chain stays intact.</p>
+        <div class="ex">e.g. consolidated retro derived_from each weekly note</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Temporal validity — v0.6.3 Stream B</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Edges with a window.</h2>
+    <p class="lede">Schema v15 (v0.6.3) adds four nullable columns to <code>memory_links</code>: <code>valid_from</code>, <code>valid_until</code>, <code>observed_by</code>, and <code>signature</code> (placeholder for v0.7 attested identity). Edges now carry a window — "this relation was true between Mar 15 and Apr 20." Past states stay queryable via <code>memory_kg_timeline</code>; the present query (<code>memory_kg_query</code>) walks only currently-valid edges.</p>
+    <div class="snip"><span class="cm">// SQL — schema v15 memory_links columns</span>
+CREATE TABLE memory_links (
+  source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  target_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+  relation     TEXT NOT NULL,
+  created_at   TEXT NOT NULL,
+  <span class="ok">valid_from   TEXT</span>,        <span class="cm">// when the edge started being true (default = source.created_at)</span>
+  <span class="ok">valid_until  TEXT</span>,        <span class="cm">// NULL = still valid; non-null = invalidated at this time</span>
+  <span class="ok">observed_by  TEXT</span>,        <span class="cm">// agent_id of the observer (provenance)</span>
+  <span class="ok">signature    BLOB</span>,        <span class="cm">// v0.7 placeholder for Ed25519 attestation</span>
+  PRIMARY KEY (source_id, target_id, relation)
+);
+
+<span class="cm">// Indexes that make recursive CTE fast</span>
+CREATE INDEX idx_links_temporal_src (source_id, valid_from, valid_until);
+CREATE INDEX idx_links_temporal_tgt (target_id, valid_from, valid_until);
+CREATE INDEX idx_links_relation     (relation, valid_from);</div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Entity registry — v0.6.3 Stream C</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Aliases resolved to canonical names.</h2>
+    <p class="lede">Entities are first-class. An entity is a long-tier memory tagged <code>entity</code> with <code>metadata.kind = "entity"</code>; its aliases live in the <code>entity_aliases</code> side table. <code>memory_entity_register</code> creates one (idempotent on <code>(canonical_name, namespace)</code>); <code>memory_entity_get_by_alias</code> resolves any alias to the canonical entity.</p>
+
+    <div class="tool entity">
+      <div class="tool-head"><span class="tool-name">memory_entity_register</span><span class="tool-tag">since v0.6.3 Stream C</span></div>
+      <div class="tool-desc">Idempotent on <code>(canonical_name, namespace)</code> — re-registering reuses the entity_id and merges new aliases via <code>INSERT OR IGNORE</code>. A non-entity memory occupying the same <code>(title, namespace)</code> hard-errors rather than letting the upsert silently overwrite unrelated content.</div>
+      <div class="snip"><span class="cm">// MCP — memory_entity_register</span>
+{
+  <span class="key">"canonical_name"</span>: <span class="val">"AlphaOne LLC"</span>,
+  <span class="key">"namespace"</span>:      <span class="val">"alphaone/research/papers"</span>,
+  <span class="key">"aliases"</span>:        [<span class="val">"AlphaOne"</span>, <span class="val">"AO"</span>, <span class="val">"alpha-one"</span>],
+  <span class="key">"kind"</span>:           <span class="val">"organization"</span>      <span class="cm">// optional · arbitrary tag</span>
+}
+
+<span class="ok">→ {"entity_id": "550e8400-…", "created": true, "aliases_added": ["AlphaOne","AO","alpha-one"]}</span></div>
+    </div>
+
+    <div class="tool entity">
+      <div class="tool-head"><span class="tool-name">memory_entity_get_by_alias</span><span class="tool-tag">since v0.6.3 Stream C</span></div>
+      <div class="tool-desc">Resolve any alias to the canonical entity. Returns the most-recently-created entity if multiple match.</div>
+      <div class="snip"><span class="cm">// MCP — memory_entity_get_by_alias</span>
+{<span class="key">"alias"</span>: <span class="val">"AO"</span>, <span class="key">"namespace"</span>: <span class="val">"alphaone/research/papers"</span>}
+
+<span class="ok">→ {"entity_id": "550e8400-…", "canonical_name": "AlphaOne LLC", "all_aliases": ["AlphaOne","AO","alpha-one"]}</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">KG query tools — v0.6.3 Stream C</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Walk the graph as data.</h2>
+
+    <div class="tool kg">
+      <div class="tool-head"><span class="tool-name">memory_kg_query</span><span class="tool-tag">since v0.6.3</span></div>
+      <div class="tool-desc">Walks currently-valid edges from a starting memory or entity. Recursive CTE in v0.6.3, replaced by Apache AGE Cypher in v0.7. Supports filters by relation type, depth, and namespace.</div>
+      <div class="snip"><span class="cm">// MCP — memory_kg_query</span>
+{
+  <span class="key">"start_id"</span>:  <span class="val">"550e8400-…"</span>,
+  <span class="key">"relations"</span>: [<span class="val">"supersedes"</span>, <span class="val">"derived_from"</span>],   <span class="cm">// optional filter</span>
+  <span class="key">"depth"</span>:     <span class="num">3</span>,                              <span class="cm">// optional · default 3 · max 8</span>
+  <span class="key">"as_of"</span>:     <span class="val">"2026-04-15T00:00:00Z"</span>            <span class="cm">// optional · point-in-time (default: now)</span>
+}
+
+<span class="ok">→ {"nodes": [...], "edges": [...], "depth_reached": 3, "edges_walked": 47}</span></div>
+    </div>
+
+    <div class="tool kg">
+      <div class="tool-head"><span class="tool-name">memory_kg_timeline</span><span class="tool-tag">since v0.6.3</span></div>
+      <div class="tool-desc">Returns the chronological sequence of edges that connect to a memory or entity. Includes both currently-valid and historically-valid (now-invalidated) edges. Powers "how did we arrive at this?" UIs.</div>
+      <div class="snip"><span class="cm">// MCP — memory_kg_timeline</span>
+{
+  <span class="key">"node_id"</span>:   <span class="val">"550e8400-…"</span>,        <span class="cm">// memory OR entity id</span>
+  <span class="key">"since"</span>:     <span class="val">"2026-01-01T00:00:00Z"</span>,
+  <span class="key">"until"</span>:     <span class="val">"2026-04-30T00:00:00Z"</span>,
+  <span class="key">"relations"</span>: [<span class="val">"supersedes"</span>, <span class="val">"contradicts"</span>]
+}
+
+<span class="ok">→ {"events": [
+    {"at": "2026-03-15T…", "type": "edge_added",      "relation": "related_to", "target_id": "…"},
+    {"at": "2026-04-01T…", "type": "edge_added",      "relation": "supersedes", "target_id": "…"},
+    {"at": "2026-04-20T…", "type": "edge_invalidated", "relation": "related_to", "target_id": "…"}
+  ]}</span></div>
+    </div>
+
+    <div class="tool invalid">
+      <div class="tool-head"><span class="tool-name">memory_kg_invalidate</span><span class="tool-tag">since v0.6.3</span></div>
+      <div class="tool-desc">Soft-deletes an edge by stamping <code>valid_until = now()</code>. The edge stays in the database (<code>memory_kg_timeline</code> still surfaces it) but disappears from <code>memory_kg_query</code>'s present-tense walk. Past-state queries with <code>as_of &lt; valid_until</code> continue to traverse it.</div>
+      <div class="snip"><span class="cm">// MCP — memory_kg_invalidate</span>
+{
+  <span class="key">"source_id"</span>: <span class="val">"550e8400-…"</span>,
+  <span class="key">"target_id"</span>: <span class="val">"abc12345-…"</span>,
+  <span class="key">"relation"</span>:  <span class="val">"related_to"</span>
+}
+
+<span class="ok">→ {"invalidated": true, "valid_until": "2026-04-27T05:30:00Z"}</span>
+
+<span class="cm">// Soft-delete preserves audit. To hard-delete the edge row,
+// use the existing memory_link delete path (federation-fanout aware).</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">v0.7 — Apache AGE acceleration</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">From recursive CTE to Cypher.</h2>
+    <p class="lede">v0.6.3's KG queries use Postgres recursive CTEs (or SQLite WITH RECURSIVE). Performance is fine up to a few hundred thousand edges; past that, Apache AGE's Cypher engine is materially faster on graph workloads. v0.7 Bucket 2 (per the v0.7 charter) wraps v0.6.3's KG schema with AGE and replaces the dual-path stubs that v0.6.3 ships as scaffolding.</p>
+    <div class="snip"><span class="cm">// v0.6.3 — recursive CTE walk (current)</span>
+WITH RECURSIVE walk(source, target, depth) <span class="key">AS</span> (
+  <span class="key">SELECT</span> source_id, target_id, <span class="num">1</span> <span class="key">FROM</span> memory_links
+  <span class="key">WHERE</span> source_id = ?1 <span class="key">AND</span> (valid_until <span class="key">IS NULL OR</span> valid_until &gt; now())
+  <span class="key">UNION ALL</span>
+  <span class="key">SELECT</span> ml.source_id, ml.target_id, w.depth + <span class="num">1</span>
+  <span class="key">FROM</span> memory_links ml <span class="key">JOIN</span> walk w <span class="key">ON</span> ml.source_id = w.target
+  <span class="key">WHERE</span> w.depth &lt; <span class="num">8</span>
+)
+<span class="key">SELECT</span> * <span class="key">FROM</span> walk;
+
+<span class="cm">// v0.7 — Apache AGE Cypher (planned)</span>
+MATCH (m:Memory {id: $id})-[r:RELATED_TO|SUPERSEDES*1..8]-&gt;(target)
+WHERE r.valid_until IS NULL OR r.valid_until &gt; datetime()
+RETURN target, r;</div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Why this is "structured cognition"</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">What the KG actually buys you.</h2>
+    <div class="snip" style="font-family:var(--font-sans);white-space:normal;line-height:1.7">
+      <div><strong style="color:var(--good)">Provenance survives consolidation.</strong> When <code>memory_consolidate</code> collapses 12 weekly notes into one retro, the original 12 don't disappear from the audit trail — each gets a <code>derived_from</code> edge to the retro. "Show me the source memories for this consolidated decision" is a one-query KG walk.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Contradictions are explicit.</strong> "We use Postgres" + "We migrated to MySQL" with a <code>contradicts</code> edge surface together on recall. The agent sees the conflict; the operator decides which is current via <code>supersedes</code>.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Time travel is free.</strong> <code>as_of</code> on KG queries returns the graph as it was at any past moment — useful for "what did we believe last quarter?" forensics. Without temporal validity columns, this requires a snapshot-based backup strategy.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Entity-centric recall.</strong> "All memories about AlphaOne" no longer requires fuzzy text matching — the entity registry resolves aliases, and edges to the entity node enumerate every related memory.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3 · Apache 2.0 · KG schema in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/migrations/sqlite/0010_v063_hierarchy_kg.sql">migrations/sqlite/0010</a> · query layer in <code>db.rs</code> · v0.7 AGE wrapper planned per v0.7 charter Bucket 2</p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="schema.html">Schema</a> · <a href="hierarchies.html">Hierarchies</a></p>
+</footer>
+
+</body>
+</html>

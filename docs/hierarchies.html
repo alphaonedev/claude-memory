@@ -1,0 +1,330 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Hierarchies atlas — namespace trees + scope visibility.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Hierarchies — namespace trees, 8 deep</title>
+<meta name="description" content="ai-memory v0.6.3 hierarchical namespaces. 8-level deep paths, scope visibility (private/team/unit/org/collective), namespace standards inheritance, memory_get_taxonomy tree walker. The 'memory tree' the v0.6.3 grand-slam unlocks.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/hierarchies.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(165,214,167,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.tree-svg{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem}
+
+.scope-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:2rem}
+.scope{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.scope::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.scope.s0::before{background:var(--bad)}
+.scope.s1::before{background:var(--p2)}
+.scope.s2::before{background:var(--p3)}
+.scope.s3::before{background:var(--good)}
+.scope.s4::before{background:var(--gold)}
+.scope .nm{font-family:var(--font-mono);font-size:1rem;font-weight:700;margin-bottom:.4rem}
+.scope.s0 .nm{color:var(--bad)}
+.scope.s1 .nm{color:var(--p2)}
+.scope.s2 .nm{color:var(--p3)}
+.scope.s3 .nm{color:var(--good)}
+.scope.s4 .nm{color:var(--gold)}
+.scope .visi{font-size:.78rem;font-family:var(--font-mono);color:var(--text-dim);margin-bottom:.5rem}
+.scope p{font-size:.85rem;color:var(--text-muted);line-height:1.45}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--gold)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+.snip .num{color:var(--p1)}
+
+.tax-tree{font-family:var(--font-mono);font-size:.85rem;color:var(--text-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;line-height:1.7;white-space:pre}
+.tax-tree .root{color:var(--text)}
+.tax-tree .branch{color:var(--p3)}
+.tax-tree .leaf{color:var(--p1)}
+.tax-tree .count{color:var(--p2)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Hierarchies</span></a>
+    <div class="right">
+      <a href="at-a-glance.html">Atlas</a>
+      <a href="memory-tiers.html">Tiers</a>
+      <a href="memory-rules.html">Rules</a>
+      <a href="knowledge-graph.html">Knowledge Graph</a>
+      <a href="schema.html">Schema</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Memory trees, 8 levels deep.</h1>
+  <p class="tagline">Namespaces aren't tags — they're <strong>paths</strong>. <code>alphaone/engineering/platform/team-a/squad-1/alice</code> is a real, valid namespace. Hierarchical paths give you team isolation, organizational inheritance, and visibility scopes that mirror how real organizations work. v0.6.3 ships the <strong>memory_get_taxonomy</strong> tool that walks the tree and returns it as a queryable structure.</p>
+  <div class="pills">
+    <span class="pill">8-level depth</span>
+    <span class="pill">5 visibility scopes</span>
+    <span class="pill">parent inheritance</span>
+    <span class="pill">memory_get_taxonomy (v0.6.3)</span>
+    <span class="pill">v0.6.3 Stream A</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The tree itself</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">A real namespace path, 8 levels.</h2>
+    <p class="lede">Flat namespaces (<code>"global"</code>, <code>"ai-memory-dev"</code>) still work — hierarchy is opt-in. When you go hierarchical, segments split on <code>/</code>, and depth caps at <code>MAX_NAMESPACE_DEPTH = 8</code>. Validators reject leading/trailing slashes, empty segments, and path-traversal segments (<code>.</code> / <code>..</code>) per red-team #240.</p>
+    <svg class="tree-svg" viewBox="0 0 1180 460" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        .nb{stroke-width:1.8;rx:8;ry:8}
+        .nb.l1{fill:rgba(255,184,107,0.15);stroke:#ffb86b}
+        .nb.l2{fill:rgba(200,162,255,0.12);stroke:#c8a2ff}
+        .nb.l3{fill:rgba(110,231,255,0.10);stroke:#6ee7ff}
+        .nb.l4{fill:rgba(165,214,167,0.10);stroke:#a5d6a7}
+        .nb.l5{fill:rgba(255,215,0,0.08);stroke:#ffd700}
+        .nb.l6{fill:rgba(255,107,157,0.08);stroke:#ff6b9d}
+        .nb.l7{fill:rgba(110,231,255,0.06);stroke:#6ee7ff}
+        .nb.l8{fill:rgba(200,162,255,0.06);stroke:#c8a2ff}
+        .ll{stroke:#666;stroke-width:1.2;fill:none}
+        .h{fill:#fff;font-family:monospace;font-size:11px;font-weight:700}
+        .s{fill:#999;font-family:monospace;font-size:9px}
+        .lab{fill:#999;font-family:monospace;font-size:11px;font-weight:700}
+      </style>
+
+      <!-- Level 1: alphaone -->
+      <rect class="nb l1" x="500" y="20" width="180" height="44"/>
+      <text class="h" x="590" y="40" text-anchor="middle">alphaone</text>
+      <text class="s" x="590" y="56" text-anchor="middle">L1 · org root</text>
+
+      <!-- Level 2 -->
+      <rect class="nb l2" x="500" y="90" width="180" height="44"/>
+      <text class="h" x="590" y="110" text-anchor="middle">engineering</text>
+      <text class="s" x="590" y="126" text-anchor="middle">L2 · division</text>
+      <line class="ll" x1="590" y1="64" x2="590" y2="90"/>
+
+      <!-- Level 3 -->
+      <rect class="nb l3" x="500" y="160" width="180" height="44"/>
+      <text class="h" x="590" y="180" text-anchor="middle">platform</text>
+      <text class="s" x="590" y="196" text-anchor="middle">L3 · group</text>
+      <line class="ll" x1="590" y1="134" x2="590" y2="160"/>
+
+      <!-- Level 4 -->
+      <rect class="nb l4" x="380" y="230" width="160" height="44"/>
+      <text class="h" x="460" y="250" text-anchor="middle">team-a</text>
+      <text class="s" x="460" y="266" text-anchor="middle">L4 · team</text>
+      <rect class="nb l4" x="640" y="230" width="160" height="44"/>
+      <text class="h" x="720" y="250" text-anchor="middle">team-b</text>
+      <text class="s" x="720" y="266" text-anchor="middle">L4 · team</text>
+      <line class="ll" x1="590" y1="204" x2="460" y2="230"/>
+      <line class="ll" x1="590" y1="204" x2="720" y2="230"/>
+
+      <!-- Level 5 -->
+      <rect class="nb l5" x="290" y="300" width="160" height="44"/>
+      <text class="h" x="370" y="320" text-anchor="middle">squad-1</text>
+      <text class="s" x="370" y="336" text-anchor="middle">L5 · squad</text>
+      <rect class="nb l5" x="470" y="300" width="160" height="44"/>
+      <text class="h" x="550" y="320" text-anchor="middle">squad-2</text>
+      <text class="s" x="550" y="336" text-anchor="middle">L5 · squad</text>
+      <line class="ll" x1="460" y1="274" x2="370" y2="300"/>
+      <line class="ll" x1="460" y1="274" x2="550" y2="300"/>
+
+      <!-- Level 6 -->
+      <rect class="nb l6" x="200" y="370" width="160" height="44"/>
+      <text class="h" x="280" y="390" text-anchor="middle">pod-x</text>
+      <text class="s" x="280" y="406" text-anchor="middle">L6 · pod</text>
+      <rect class="nb l6" x="380" y="370" width="160" height="44"/>
+      <text class="h" x="460" y="390" text-anchor="middle">pod-y</text>
+      <text class="s" x="460" y="406" text-anchor="middle">L6 · pod</text>
+      <line class="ll" x1="370" y1="344" x2="280" y2="370"/>
+      <line class="ll" x1="370" y1="344" x2="460" y2="370"/>
+
+      <!-- Level 7 -->
+      <rect class="nb l7" x="170" y="430" width="120" height="24"/>
+      <text class="h" x="230" y="446" text-anchor="middle">role-eng</text>
+      <line class="ll" x1="280" y1="414" x2="230" y2="430"/>
+
+      <!-- Level 8 -->
+      <rect class="nb l8" x="50" y="430" width="100" height="24"/>
+      <text class="h" x="100" y="446" text-anchor="middle">alice</text>
+      <line class="ll" x1="170" y1="442" x2="150" y2="442"/>
+
+      <!-- Annotation -->
+      <text class="lab" x="900" y="30">8 levels max — MAX_NAMESPACE_DEPTH</text>
+      <text class="lab" x="900" y="60">flat namespaces still work</text>
+      <text class="lab" x="900" y="90">("global", "ai-memory-dev")</text>
+      <text class="lab" x="900" y="200">Path-traversal blocked:</text>
+      <text class="lab" x="900" y="220">alphaone/.. → REJECTED</text>
+      <text class="lab" x="900" y="240">alphaone//eng → REJECTED</text>
+      <text class="lab" x="900" y="260">/alphaone → REJECTED (no leading /)</text>
+      <text class="lab" x="900" y="380">Each level can carry a</text>
+      <text class="lab" x="900" y="400">namespace_meta standard,</text>
+      <text class="lab" x="900" y="420">parents inherited automatically</text>
+    </svg>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Scope visibility — Task 1.5</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Five rings of "who can see this."</h2>
+    <p class="lede">Every memory carries a <code>metadata.scope</code>. The query layer combines that scope with the calling agent's namespace position (<code>as_agent</code>) to decide if the memory is visible. Memories with no explicit scope are treated as <code>private</code>.</p>
+    <div class="scope-grid">
+      <div class="scope s0">
+        <div class="nm">private</div>
+        <div class="visi">visibility · 1 agent</div>
+        <p>Only the originating <code>metadata.agent_id</code> can read it. The default for any memory without an explicit scope. Personal notes, draft thoughts.</p>
+      </div>
+      <div class="scope s1">
+        <div class="nm">team</div>
+        <div class="visi">visibility · same namespace prefix</div>
+        <p>Visible to any agent whose <code>as_agent</code> shares the same namespace prefix as the memory. <code>team-a/alice</code> + <code>team-a/bob</code> see each other; <code>team-b/charlie</code> doesn't.</p>
+      </div>
+      <div class="scope s2">
+        <div class="nm">unit</div>
+        <div class="visi">visibility · 2 levels up</div>
+        <p>Walks two levels up. <code>platform/team-a/alice</code> is visible to all of <code>platform/*</code>. The "your immediate organization" ring.</p>
+      </div>
+      <div class="scope s3">
+        <div class="nm">org</div>
+        <div class="visi">visibility · entire org root</div>
+        <p>Visible to every agent under the same root namespace. Org-wide announcements, charters, public-by-default policies.</p>
+      </div>
+      <div class="scope s4">
+        <div class="nm">collective</div>
+        <div class="visi">visibility · federation-wide</div>
+        <p>Visible to every peer in the federation. Cross-org public knowledge — open standards, public APIs.</p>
+      </div>
+    </div>
+    <div class="snip"><span class="cm">// On write — scope is opt-in (defaults to "private")</span>
+{<span class="key">"title"</span>: <span class="val">"Q3 OKR draft"</span>, <span class="key">"namespace"</span>: <span class="val">"alphaone/eng/platform/team-a"</span>, <span class="key">"scope"</span>: <span class="val">"team"</span>}
+
+<span class="cm">// On read — caller stamps as_agent so the daemon knows where they are
+// in the hierarchy. The query filter then decides which scopes match.</span>
+{<span class="key">"q"</span>: <span class="val">"OKR"</span>, <span class="key">"as_agent"</span>: <span class="val">"alphaone/eng/platform/team-a/bob"</span>}
+<span class="ok">→ sees: scope=team where namespace prefix matches "alphaone/eng/platform/team-a"</span>
+<span class="ok">→ sees: scope=unit where namespace prefix matches "alphaone/eng/platform"</span>
+<span class="ok">→ sees: scope=org where namespace prefix matches "alphaone"</span>
+<span class="ok">→ sees: scope=private only when metadata.agent_id == "bob"</span></div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">memory_get_taxonomy — v0.6.3 Stream A</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Walk the tree as data.</h2>
+    <p class="lede">The grand-slam <code>memory_get_taxonomy</code> tool returns the live tree of namespaces with per-node counts. Drives dashboards, taxonomy-aware UIs, and the org-overview narrative without needing to enumerate every memory.</p>
+    <div class="snip"><span class="cm">// MCP — memory_get_taxonomy</span>
+{
+  <span class="key">"namespace_prefix"</span>: <span class="val">"alphaone/engineering"</span>,  <span class="cm">// optional · scopes the walk</span>
+  <span class="key">"depth"</span>:            <span class="num">8</span>,                          <span class="cm">// default 8 = MAX_NAMESPACE_DEPTH</span>
+  <span class="key">"limit"</span>:            <span class="num">1000</span>                        <span class="cm">// default 1000, max 10000</span>
+}</div>
+    <p class="lede" style="margin-top:1rem">Returns a <code>TaxonomyNode</code> tree with per-node <code>count</code> (memories at exactly this namespace) and <code>subtree_count</code> (count plus every descendant). The envelope adds <code>total_count</code> (independent aggregation, honest even when limit truncates) and a <code>truncated</code> flag.</p>
+    <div class="tax-tree"><span class="root">alphaone/engineering/</span>                       <span class="count">total_count: 1247  truncated: false</span>
+├── <span class="branch">platform/</span>                            <span class="count">subtree: 856</span>
+│   ├── <span class="branch">team-a/</span>                          <span class="count">subtree: 412</span>
+│   │   ├── <span class="branch">squad-1/</span>                     <span class="count">subtree: 211</span>
+│   │   │   ├── <span class="leaf">pod-x/</span>                     <span class="count">count: 87</span>
+│   │   │   └── <span class="leaf">pod-y/</span>                     <span class="count">count: 124</span>
+│   │   └── <span class="branch">squad-2/</span>                     <span class="count">subtree: 201</span>
+│   └── <span class="branch">team-b/</span>                          <span class="count">subtree: 444</span>
+└── <span class="branch">research/</span>                            <span class="count">subtree: 391</span>
+    ├── <span class="leaf">papers/</span>                            <span class="count">count: 178</span>
+    └── <span class="leaf">experiments/</span>                       <span class="count">count: 213</span></div>
+    <p class="lede" style="margin-top:1rem"><strong>Why <code>subtree_count</code> matters:</strong> "How big is the platform org's memory footprint?" — one number, one lookup. Without subtree aggregation you'd have to enumerate and count yourself, which scales poorly past a few thousand rows.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Namespace standards — inheritance</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Set policy once, inherit everywhere.</h2>
+    <p class="lede">Every namespace can have a <strong>standard memory</strong> — the canonical row at that path whose <code>metadata</code> carries the per-namespace policy (governance + default scope + parent_namespace pointer). When a write hits a namespace with no standard, the resolver walks up the path until it finds one. Set the standard at <code>alphaone/eng</code> once, every sub-namespace inherits.</p>
+    <div class="snip"><span class="cm">// Set the standard at the platform group level</span>
+<span class="cm">// MCP — memory_namespace_set_standard</span>
+{
+  <span class="key">"namespace"</span>: <span class="val">"alphaone/engineering/platform"</span>,
+  <span class="key">"title"</span>:     <span class="val">"Platform standard"</span>,
+  <span class="key">"content"</span>:   <span class="val">"Platform-wide architectural decisions and conventions."</span>,
+  <span class="key">"metadata"</span>: {
+    <span class="key">"governance"</span>: { <span class="key">"write"</span>: <span class="val">"registered"</span>, <span class="key">"promote"</span>: <span class="val">"approve"</span>, <span class="key">"delete"</span>: <span class="val">"owner"</span>, <span class="key">"approver"</span>: {<span class="key">"consensus"</span>: <span class="num">2</span>} },
+    <span class="key">"scope"</span>: <span class="val">"team"</span>,                              <span class="cm">// default scope for new memories under this ns</span>
+    <span class="key">"parent_namespace"</span>: <span class="val">"alphaone/engineering"</span>     <span class="cm">// explicit parent link</span>
+  }
+}
+
+<span class="cm">// Now — every write to alphaone/engineering/platform/* applies these rules.
+// alphaone/engineering/platform/team-a/squad-1/pod-x has no standard of its own,
+// so the resolver walks up the chain:</span>
+write to: alphaone/engineering/platform/team-a/squad-1/pod-x
+  ↓ no standard
+walk to: alphaone/engineering/platform/team-a/squad-1
+  ↓ no standard
+walk to: alphaone/engineering/platform/team-a
+  ↓ no standard
+walk to: alphaone/engineering/platform
+  ↓ <span class="ok">FOUND</span> — apply this standard's governance + scope</div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Federation propagation — v0.6.2 S35</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Every peer agrees on the tree.</h2>
+    <p class="lede">A namespace standard's metadata gets pushed to peers via the <code>sync_push.namespace_meta</code> field (S35 fanout). Without this propagation, peers would see the standard memory itself but miss the <code>(namespace, standard_id, parent_namespace)</code> tuple, and inheritance walks on the peer would fall back to <code>auto_detect_parent</code> — different answers on different peers.</p>
+    <div class="snip"><span class="cm">// sync_push body — the additive namespace_meta field</span>
+{
+  <span class="key">"memories"</span>: [...],                <span class="cm">// the standard memory itself</span>
+  <span class="key">"namespace_meta"</span>: [
+    {
+      <span class="key">"namespace"</span>:        <span class="val">"alphaone/engineering/platform"</span>,
+      <span class="key">"standard_id"</span>:      <span class="val">"550e8400-…"</span>,
+      <span class="key">"parent_namespace"</span>: <span class="val">"alphaone/engineering"</span>,
+      <span class="key">"updated_at"</span>:       <span class="val">"2026-04-27T05:00:00Z"</span>
+    }
+  ]
+}
+
+<span class="cm">// Peer applies via db::set_namespace_standard, mirrors our local row.</span></div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3 · Apache 2.0 · namespace logic in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/validate.rs">validate.rs</a> · <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/db.rs">db.rs</a> (<code>namespace_meta</code> table) · taxonomy walker in <code>handlers.rs</code></p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="memory-tiers.html">Tiers</a> · <a href="memory-rules.html">Rules</a> · <a href="knowledge-graph.html">Knowledge Graph</a></p>
+</footer>
+
+</body>
+</html>

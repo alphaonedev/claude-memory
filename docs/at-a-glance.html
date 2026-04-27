@@ -749,16 +749,28 @@ footer.site-foot a { color: var(--text-muted); }
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ At a Glance</span></a>
     <div class="right">
       <a href="whats-new-v063.html" style="color:var(--pillar-1)">v0.6.3</a>
+      <a href="memory-tiers.html">Tiers</a>
+      <a href="memory-rules.html">Rules</a>
+      <a href="ttl-controls.html">TTLs</a>
+      <a href="archival.html">Archival</a>
+      <a href="encryption.html">Encryption</a>
+      <a href="hierarchies.html">Hierarchies</a>
+      <a href="knowledge-graph.html">KG</a>
+      <a href="autonomous.html">Autonomous</a>
+      <a href="a2a-messaging.html">A2A</a>
+      <a href="lifecycle.html">Lifecycle</a>
+      <a href="performance.html">Perf</a>
       <a href="feature-matrix.html">Features</a>
-      <a href="data-flow.html">Data Flow</a>
+      <a href="data-flow.html">Flow</a>
       <a href="integrations.html">Integrations</a>
-      <a href="for-everyone.html">For Everyone</a>
+      <a href="for-everyone.html">Audiences</a>
       <a href="release-pipeline.html">Release</a>
       <a href="schema.html">Schema</a>
       <a href="types.html">Types</a>
       <a href="validators.html">Validators</a>
       <a href="governance.html">Governance</a>
       <a href="tracing.html">Tracing</a>
+      <a href="credits.html">Credits</a>
       <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
     </div>
   </div>
@@ -1844,8 +1856,8 @@ footer.site-foot a { color: var(--text-muted); }
 <section id="atlas">
   <div class="container">
     <span class="eyebrow">Visualization Atlas</span>
-    <h2>Eleven pages. Every facet, dedicated visualizations.</h2>
-    <p class="lede">This page is the hub. Each companion below dives deep into one slice of the system with its own visualization style. Six audience-facing pages plus five SME-detail deep-dives (schema, types, validators, governance, tracing). <strong>Pick what your audience needs.</strong></p>
+    <h2>Twenty-three pages. Every facet, dedicated visualizations.</h2>
+    <p class="lede">This page is the hub. Three concentric rings: <strong>six audience-facing</strong> pages (release spotlight, feature matrix, data flow, integrations, audiences, release pipeline), <strong>twelve feature deep-dives</strong> (tiers, rules, TTLs, archival, encryption, hierarchies, KG, autonomous, A2A, lifecycle, performance, credits), and <strong>five SME-detail references</strong> (schema, types, validators, governance, tracing). <strong>Pick what your audience needs.</strong></p>
 
     <div class="grid-3" style="gap:1rem">
       <a href="whats-new-v063.html" style="text-decoration:none">
@@ -1899,6 +1911,122 @@ footer.site-foot a { color: var(--text-muted); }
           <div class="card-title">Release Pipeline</div>
           <p class="card-body">Tag → 5 platforms → 5 distribution channels → all signed. CI gates. SBOM. Reproducible builds. Procurement-ready operational spec.</p>
           <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">release-pipeline.html →</div>
+        </div>
+      </a>
+    </div>
+
+    <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid var(--border)">
+      <span class="eyebrow">Feature Deep-Dive Atlas</span>
+      <h2 style="margin-top:.5rem">Eleven big-sell features, one page each.</h2>
+      <p class="lede">The grand-slam features. Tiers + TTLs (the retention story). Rules (per-namespace policy stack). Archival (two-stage soft-then-hard delete). Encryption (SQLCipher, mTLS, HMAC). Hierarchies (8-level memory trees). Knowledge Graph (4 relations + temporal validity). Autonomous (Gemma 4-powered). A2A messaging. Full lifecycle. Performance + bench tool. Credits (Google Gemma 4, Nomic, Hugging Face, Ollama, SQLite, Rust ecosystem).</p>
+    </div>
+
+    <div class="grid-3" style="gap:1rem;margin-top:1.5rem">
+      <a href="memory-tiers.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ THREE TIERS</div>
+          <div class="card-title">Memory Tiers</div>
+          <p class="card-body">Short (6h) / Mid (7d) / Long (no TTL). Mirrors human memory architecture. Promotion path with governance gates. The default that lets agents forget noise.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">memory-tiers.html →</div>
+        </div>
+      </a>
+
+      <a href="memory-rules.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ FIVE LAYERS</div>
+          <div class="card-title">Memory Rules</div>
+          <p class="card-body">Validation → scope → governance → namespace standard → parent inheritance. Five rule layers, every refusal named with a reason. Multi-tenant isolation, compliance retention, AI-supervisor patterns.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">memory-rules.html →</div>
+        </div>
+      </a>
+
+      <a href="ttl-controls.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ EIGHT DIALS</div>
+          <div class="card-title">TTL Controls</div>
+          <p class="card-body">Per-write expires_at + ttl_secs. Per-tier defaults. Daemon-config overrides. Access-driven extension. archive_on_gc. Every dial that controls memory lifetime.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">ttl-controls.html →</div>
+        </div>
+      </a>
+
+      <a href="archival.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ SOFT THEN HARD</div>
+          <div class="card-title">Archival</div>
+          <p class="card-body">archive → restore or purge. Five archive MCP tools. archive_on_gc soft-delete. auto_purge retention windows. Compliance patterns for GDPR, retention SLAs, forensics.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">archival.html →</div>
+        </div>
+      </a>
+
+      <a href="encryption.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ FOUR SURFACES</div>
+          <div class="card-title">Encryption</div>
+          <p class="card-body">SQLCipher AES-256 at-rest. mTLS + fingerprint allowlist for federation. HMAC-SHA256 webhooks. Signed git tags + SBOM. v0.7 Ed25519 attested identity roadmap.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">encryption.html →</div>
+        </div>
+      </a>
+
+      <a href="hierarchies.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ MEMORY TREES</div>
+          <div class="card-title">Hierarchies</div>
+          <p class="card-body">8-level deep namespace paths. 5 visibility scopes (private/team/unit/org/collective). Namespace standards inheritance. memory_get_taxonomy tree walker. v0.6.3 Stream A.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">hierarchies.html →</div>
+        </div>
+      </a>
+
+      <a href="knowledge-graph.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ STRUCTURED COGNITION</div>
+          <div class="card-title">Knowledge Graph</div>
+          <p class="card-body">4 relation types. Entity registry with alias resolution. Temporal validity columns. memory_kg_query / kg_timeline / kg_invalidate. v0.6.3 Streams B + C.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">knowledge-graph.html →</div>
+        </div>
+      </a>
+
+      <a href="autonomous.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ POWERED BY GEMMA 4</div>
+          <div class="card-title">Autonomous</div>
+          <p class="card-body">Auto-tag, consolidate, expand-query, contradiction detection, memory reflection, session-start. All powered by Google's open-source Gemma 4 via Ollama. Local-first.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">autonomous.html →</div>
+        </div>
+      </a>
+
+      <a href="a2a-messaging.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ AGENT-TO-AGENT</div>
+          <div class="card-title">A2A Messaging</div>
+          <p class="card-body">memory_notify pushes to inbox (federation-aware). memory_subscribe webhooks fan out events. HMAC-SHA256 signed dispatch. Two patterns, one toolkit.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">a2a-messaging.html →</div>
+        </div>
+      </a>
+
+      <a href="lifecycle.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ END TO END</div>
+          <div class="card-title">Lifecycle</div>
+          <p class="card-body">store → access → consolidate → promote → archive → restore or purge. Six stages, eleven transitions, every transition leaves an audit trail. Timeline visualization.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">lifecycle.html →</div>
+        </div>
+      </a>
+
+      <a href="performance.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ MEASURED + GATED</div>
+          <div class="card-title">Performance</div>
+          <p class="card-body">Public p95 budgets per operation. bench tool with --baseline / --history / --update-performance-md. CI bench gate that fails on regressions. v0.6.3 Streams E + F.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">performance.html →</div>
+        </div>
+      </a>
+
+      <a href="credits.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ THANKS</div>
+          <div class="card-title">Credits</div>
+          <p class="card-body">Open-source acknowledgements. Google for Gemma 4. Nomic AI for embeddings. Hugging Face for tokenizers + reranker. Ollama, SQLite, the Rust ecosystem.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">credits.html →</div>
         </div>
       </a>
     </div>
