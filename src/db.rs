@@ -4207,6 +4207,48 @@ pub fn is_namespace_standard(conn: &Connection, id: &str) -> bool {
         > 0
 }
 
+/// v0.6.3 (capabilities schema v2): count namespace standards whose
+/// `metadata.governance` is non-null. A "rule" here means a namespace
+/// has an explicit governance policy attached to its standard memory.
+/// The count is a transparent passthrough — the full permission system
+/// arrives in v0.7 (arch-enhancement-spec §3).
+pub fn count_active_governance_rules(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories m
+             INNER JOIN namespace_meta nm ON nm.standard_id = m.id
+             WHERE json_extract(m.metadata, '$.governance') IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(usize::try_from(count.max(0)).unwrap_or(0))
+}
+
+/// v0.6.3 (capabilities schema v2): count rows in the `subscriptions`
+/// table. Used by `handle_capabilities` as a proxy for "registered
+/// hooks" — the hook pipeline itself is v0.7 Bucket 0 work.
+pub fn count_subscriptions(conn: &Connection) -> Result<usize> {
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM subscriptions", [], |r| r.get(0))
+        .unwrap_or(0);
+    Ok(usize::try_from(count.max(0)).unwrap_or(0))
+}
+
+/// v0.6.3 (capabilities schema v2): count `pending_actions` rows whose
+/// `status` matches the predicate. Used by `handle_capabilities` to
+/// surface live approval queue depth.
+pub fn count_pending_actions_by_status(conn: &Connection, status: &str) -> Result<usize> {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pending_actions WHERE status = ?1",
+            params![status],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(usize::try_from(count.max(0)).unwrap_or(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

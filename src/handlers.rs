@@ -3915,10 +3915,10 @@ fn resolve_caller_agent_id(
 // --- /api/v1/capabilities (GET) -------------------------------------------
 
 pub async fn get_capabilities(State(app): State<AppState>) -> impl IntoResponse {
-    // Mirrors `mcp::handle_capabilities`. Reranker state isn't tracked on the
-    // HTTP AppState (HTTP daemons that wire a cross-encoder record it via
-    // the tier config's `cross_encoder` flag, which is enough for scenario
-    // S30's equivalence check).
+    // Mirrors `mcp::handle_capabilities_with_conn`. Reranker state isn't
+    // tracked on the HTTP AppState (HTTP daemons that wire a cross-encoder
+    // record it via the tier config's `cross_encoder` flag, which is
+    // enough for scenario S30's equivalence check).
     //
     // v0.6.2 (S18): forward the *runtime* embedder state so
     // `features.embedder_loaded` reports whether the HF model actually
@@ -3927,8 +3927,22 @@ pub async fn get_capabilities(State(app): State<AppState>) -> impl IntoResponse 
     // end up with `semantic_search=true` (from config) but no embedder in
     // the AppState — setup scripts need this signal to refuse to start
     // scenarios that depend on semantic recall.
+    //
+    // v0.6.3 (capabilities schema v2): hold the DB lock briefly so the
+    // dynamic blocks (active_rules, registered_count, pending_requests)
+    // can be filled from live counts. Each query is a single COUNT(*) so
+    // the lock window stays sub-millisecond.
     let embedder_loaded = app.embedder.as_ref().is_some();
-    match crate::mcp::handle_capabilities(app.tier_config.as_ref(), None, embedder_loaded) {
+    let lock = app.db.lock().await;
+    let conn = &lock.0;
+    let result = crate::mcp::handle_capabilities_with_conn(
+        app.tier_config.as_ref(),
+        None,
+        embedder_loaded,
+        Some(conn),
+    );
+    drop(lock);
+    match result {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => {
             tracing::error!("capabilities: {e}");
@@ -12886,6 +12900,52 @@ mod tests {
         assert_eq!(v["features"]["keyword_search"], true);
         assert_eq!(v["features"]["semantic_search"], false);
         assert_eq!(v["features"]["query_expansion"], false);
+    }
+
+    /// v0.6.3 (capabilities schema v2 — arch-enhancement-spec §7).
+    /// HTTP surface mirrors the MCP shape: every new top-level block is
+    /// present and `schema_version="2"`.
+    #[tokio::test]
+    async fn http_capabilities_v2_schema_includes_all_blocks() {
+        let state = test_state();
+        let app = Router::new()
+            .route("/api/v1/capabilities", axum_get(get_capabilities))
+            .with_state(test_app_state(state));
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/capabilities")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(v["schema_version"], "2");
+
+        assert!(v["permissions"].is_object());
+        assert_eq!(v["permissions"]["mode"], "ask");
+        assert!(v["permissions"]["active_rules"].is_number());
+        assert!(v["permissions"]["rule_summary"].is_array());
+
+        assert!(v["hooks"].is_object());
+        assert!(v["hooks"]["registered_count"].is_number());
+        assert!(v["hooks"]["by_event"].is_object());
+
+        assert!(v["compaction"].is_object());
+        assert_eq!(v["compaction"]["enabled"], false);
+
+        assert!(v["approval"].is_object());
+        assert!(v["approval"]["pending_requests"].is_number());
+        assert_eq!(v["approval"]["default_timeout_seconds"], 30);
+
+        assert!(v["transcripts"].is_object());
+        assert_eq!(v["transcripts"]["enabled"], false);
     }
 
     #[tokio::test]

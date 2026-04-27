@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Capabilities schema v2 — `memory_capabilities` introspection extension
+  (arch-enhancement-spec §7)**. The capabilities report (MCP
+  `memory_capabilities` + HTTP `GET /api/v1/capabilities`) gains a
+  `schema_version: "2"` discriminator and five new top-level blocks:
+  `permissions`, `hooks`, `compaction`, `approval`, `transcripts`. Pre-v0.7
+  the `permissions.active_rules` field reflects a live count of namespace
+  standards carrying `metadata.governance` (transparent passthrough; the
+  full permission system is v0.7 work — arch-spec §3); `hooks.registered_count`
+  reflects the live `subscriptions` table count (proxy for hook subscribers
+  pre-v0.7 Bucket 0); `approval.pending_requests` reflects the live count
+  of `pending_actions` rows with `status='pending'`. `compaction.enabled`
+  and `transcripts.enabled` report `false` until v0.8 / v0.7-Bucket-1.7 land
+  the underlying systems. **All v1 fields preserved at the same top-level
+  paths** — older clients reading `tier`, `version`, `features`, `models`
+  by name continue to work without modification. New tests:
+  `mcp::tests::mcp_capabilities_v2_schema_includes_all_blocks`,
+  `mcp::tests::mcp_capabilities_v2_backwards_compatible`,
+  `mcp::tests::mcp_capabilities_pending_requests_reflects_db`,
+  `handlers::tests::http_capabilities_v2_schema_includes_all_blocks`,
+  `config::tests::capabilities_v2_zero_state_round_trip`. New helpers:
+  `db::count_active_governance_rules`, `db::count_subscriptions`,
+  `db::count_pending_actions_by_status`. Pure additive — no migration,
+  no behavior change to any existing tool.
+
 - **Hierarchical namespace taxonomy (Pillar 1 / Stream A)** — new
   `memory_get_taxonomy` MCP tool plus REST mirror at
   `GET /api/v1/taxonomy`. Walks live (non-expired) memories grouped by
@@ -239,6 +263,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tolerance. Encountered in the a2a-gate mTLS matrix; the gate-side
   generator fix in `ai-memory-ai2ai-gate#35` already worked around it for
   v0.6.2 — this is the parser-side resolution.
+
+### Changed
+
+- **CI coverage gate — fail-under 92%**. The `coverage` job in
+  `.github/workflows/ci.yml` now invokes `cargo llvm-cov` with
+  `--fail-under-lines 92`, locking in the v0.6.3 baseline of 93.05%
+  with a 1% absorb buffer. PRs that drop total line coverage below
+  92% will fail the gate. Per-module floors (`handlers.rs`, `db.rs`,
+  `federation.rs`, `mcp.rs`, `governance.rs` ≥90%) are tracked in the
+  v0.7 assertion table for follow-up enforcement.
 
 ### Tests
 

@@ -470,7 +470,23 @@ jobs:
           AI_MEMORY_NO_CONFIG: "1"
         run: |
           cargo llvm-cov --features sal --no-fail-fast --html --output-dir coverage -- --test-threads=2
-          cargo llvm-cov report --features sal --summary-only | tee coverage/summary.txt
+          # `cargo llvm-cov report` reads the saved profile data and does
+          # not accept `--features` (would error: "invalid option
+          # '--features' for subcommand 'report'"). The earlier pipe-to-
+          # `tee` form masked that failure since `tee` always exits 0.
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
+
+      # v0.6.3 coverage gate — fail-under 92% lines.
+      # Locks in the v0.6.3 baseline of 93.05% with a 1% absorb buffer so
+      # routine churn doesn't trip the gate but a regression of >1% does.
+      # Per-module floors for hot modules (handlers, db, federation, mcp,
+      # governance) are tracked in the v0.7 assertion table; this is the
+      # total-line floor.
+      - name: Enforce coverage floor (≥92% lines)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo llvm-cov report --fail-under-lines 92
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v5

@@ -1314,10 +1314,18 @@ fn handle_recall(
     Ok(resp)
 }
 
-pub(crate) fn handle_capabilities(
+/// v0.6.3 (capabilities schema v2): the canonical capabilities entry
+/// point. When `conn` is `Some`, the dynamic blocks
+/// (`permissions.active_rules`, `hooks.registered_count`,
+/// `approval.pending_requests`) are populated from live DB counts.
+/// When `None`, they remain at the zero-state defaults set in
+/// `TierConfig::capabilities`. Both shapes are valid schema-v2 output —
+/// old clients reading by named path continue to work either way.
+pub(crate) fn handle_capabilities_with_conn(
     tier_config: &TierConfig,
     reranker: Option<&CrossEncoder>,
     embedder_loaded: bool,
+    conn: Option<&rusqlite::Connection>,
 ) -> Result<Value, String> {
     let mut caps = tier_config.capabilities();
     // Report actual cross-encoder state, not just config (#93)
@@ -1333,6 +1341,23 @@ pub(crate) fn handle_capabilities(
     // this bool reflects the RUNTIME — the two can diverge when the HF
     // model fetch fails on an offline runner.
     caps.features.embedder_loaded = embedder_loaded;
+
+    // v0.6.3 (capabilities schema v2): when we have a connection, fill
+    // the dynamic blocks with live counts. Failures here are non-fatal —
+    // the report still serializes with the zero-state defaults so a
+    // transient DB blip can't 500 the capabilities endpoint.
+    if let Some(c) = conn {
+        if let Ok(n) = db::count_active_governance_rules(c) {
+            caps.permissions.active_rules = n;
+        }
+        if let Ok(n) = db::count_subscriptions(c) {
+            caps.hooks.registered_count = n;
+        }
+        if let Ok(n) = db::count_pending_actions_by_status(c, "pending") {
+            caps.approval.pending_requests = n;
+        }
+    }
+
     serde_json::to_value(caps).map_err(|e| e.to_string())
 }
 
@@ -3025,9 +3050,12 @@ fn handle_request(
                 "memory_consolidate" => {
                     handle_consolidate(conn, arguments, llm, embedder, vector_index, mcp_client)
                 }
-                "memory_capabilities" => {
-                    handle_capabilities(tier_config, reranker, embedder.is_some())
-                }
+                "memory_capabilities" => handle_capabilities_with_conn(
+                    tier_config,
+                    reranker,
+                    embedder.is_some(),
+                    Some(conn),
+                ),
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
                 "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
@@ -4407,6 +4435,113 @@ mod tests {
         let val: Value = serde_json::from_str(&text).unwrap();
         assert!(val["tier"].is_string());
         assert!(val["features"].is_object());
+    }
+
+    /// v0.6.3 (capabilities schema v2 — arch-enhancement-spec §7).
+    /// Every new top-level block is present with the expected shape.
+    #[test]
+    fn mcp_capabilities_v2_schema_includes_all_blocks() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_capabilities", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(val["schema_version"], "2", "schema_version bumped to 2");
+
+        // permissions block
+        assert!(val["permissions"].is_object(), "permissions block present");
+        assert!(val["permissions"]["mode"].is_string());
+        assert_eq!(val["permissions"]["mode"], "ask");
+        assert!(val["permissions"]["active_rules"].is_number());
+        assert!(val["permissions"]["rule_summary"].is_array());
+
+        // hooks block
+        assert!(val["hooks"].is_object(), "hooks block present");
+        assert!(val["hooks"]["registered_count"].is_number());
+        assert!(val["hooks"]["by_event"].is_object());
+
+        // compaction block — pre-v0.8 reports zero-state
+        assert!(val["compaction"].is_object(), "compaction block present");
+        assert_eq!(val["compaction"]["enabled"], false);
+        assert!(val["compaction"]["interval_minutes"].is_null());
+        assert!(val["compaction"]["last_run_at"].is_null());
+        assert!(val["compaction"]["last_run_stats"].is_null());
+
+        // approval block
+        assert!(val["approval"].is_object(), "approval block present");
+        assert!(val["approval"]["subscribers"].is_number());
+        assert!(val["approval"]["pending_requests"].is_number());
+        assert_eq!(val["approval"]["default_timeout_seconds"], 30);
+
+        // transcripts block — pre-v0.7 reports zero-state
+        assert!(val["transcripts"].is_object(), "transcripts block present");
+        assert_eq!(val["transcripts"]["enabled"], false);
+        assert_eq!(val["transcripts"]["total_count"], 0);
+        assert_eq!(val["transcripts"]["total_size_mb"], 0);
+    }
+
+    /// v0.6.3 (capabilities schema v2). Old clients reading the v1 paths
+    /// must continue to find them at the same top-level keys.
+    #[test]
+    fn mcp_capabilities_v2_backwards_compatible() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_capabilities", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+
+        // v1 fields preserved at the same paths
+        assert!(val["tier"].is_string(), "v1: tier preserved");
+        assert!(val["version"].is_string(), "v1: version preserved");
+        assert!(val["features"].is_object(), "v1: features preserved");
+        assert!(val["models"].is_object(), "v1: models preserved");
+
+        // Specifically, well-known v1 sub-fields still resolve.
+        assert!(val["features"]["keyword_search"].is_boolean());
+        assert!(val["features"]["semantic_search"].is_boolean());
+        assert!(val["features"]["embedder_loaded"].is_boolean());
+        assert!(val["models"]["embedding"].is_string());
+        assert!(val["models"]["llm"].is_string());
+        assert!(val["models"]["cross_encoder"].is_string());
+    }
+
+    /// v0.6.3 (capabilities schema v2). `approval.pending_requests`
+    /// reflects the live `pending_actions` count — the one block that is
+    /// already wired through to a real subsystem instead of zero-state.
+    #[test]
+    fn mcp_capabilities_pending_requests_reflects_db() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Insert a pending action by hand (the queue path is exercised
+        // elsewhere; here we only need the count to bump).
+        let payload = serde_json::json!({"foo": "bar"}).to_string();
+        conn.execute(
+            "INSERT INTO pending_actions (id, action_type, memory_id, namespace,
+                payload, requested_by, requested_at, status)
+             VALUES ('p-1', 'store', NULL, 'global', ?1, 'agent-1',
+                '2026-04-27T00:00:00Z', 'pending')",
+            rusqlite::params![payload],
+        )
+        .unwrap();
+
+        let req = make_tools_call("memory_capabilities", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+
+        assert_eq!(
+            val["approval"]["pending_requests"], 1,
+            "pending_actions(status=pending) count surfaces live"
+        );
     }
 
     #[test]
