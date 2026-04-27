@@ -466,7 +466,7 @@ footer a{color:var(--text-muted)}
       <div><strong style="color:var(--bad)">Not covered:</strong> read paths (<code>memory_get</code>, <code>memory_list</code>, <code>memory_recall</code>, <code>memory_search</code>) — those use the <code>scope</code>/<code>as_agent</code> visibility filter, not governance.</div>
       <div><strong style="color:var(--bad)">Not covered:</strong> link creation (<code>memory_link</code>) — passes <code>validate_link</code> only; KG edges are not gated. May change in v0.7 (Hook Pipeline can run KG-write hooks).</div>
       <div><strong style="color:var(--bad)">Not covered:</strong> sync push receive — peers trust each other on validated payloads, but governance is <em>not</em> re-checked on the receiver. The sender's verdict is authoritative.</div>
-      <div><strong style="color:var(--bad)">Not covered (yet):</strong> hooks (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/architectural-enhancement-spec-v1.md" style="color:var(--p1)">v0.7 Bucket 0</a>) and Permission System refactor (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/ai-memory-v0.7-grand-slam.md" style="color:var(--p1)">v0.7 Bucket 3</a>) — current governance is the foundation those layers extend.</div>
+      <div><strong style="color:var(--bad)">Not covered (yet):</strong> hooks (Hook Pipeline — future release) and Permission System refactor (future release) — current governance is the foundation those layers extend.</div>
     </div>
   </div>
 </section>

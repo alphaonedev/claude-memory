@@ -388,7 +388,7 @@ grep "pulled successfully" daemon.log</span>
       <div><strong style="color:var(--good)">Hook spans</strong> — <code>info_span!("hook", event=..., subscriber=...)</code> wrapping each hook callback so the trace tree shows which hook ran where</div>
       <div><strong style="color:var(--good)">Transcript stream</strong> — every governed action lands a row in the transcript table with the full payload + verdict, queryable independent of the daemon log</div>
       <div><strong style="color:var(--good)">OpenTelemetry hookup</strong> — v1.0 charter; the <code>tracing-opentelemetry</code> bridge so traces can ship to a collector</div>
-      <div><strong style="color:var(--good)">memory_capabilities introspection</strong> (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/architectural-enhancement-spec-v1.md#7-capabilities-introspection-extension" style="color:var(--p1)">v0.6.3.1 quick patch</a>) — the daemon will report <code>hooks.registered_count</code>, <code>transcripts.total_count</code>, etc. so AI clients can answer "what's enforced here?" honestly</div>
+      <div><strong style="color:var(--good)">memory_capabilities introspection</strong> — already shipped in v0.6.3 (<code>schema_version="2"</code>): the daemon reports <code>hooks.registered_count</code>, <code>permissions.active_rules</code>, <code>approval.pending_requests</code>, <code>transcripts.total_count</code>, etc. so AI clients can answer "what's enforced here?" honestly. See the <a href="schema.html" style="color:var(--p1)">schema atlas</a> for the response shape.</div>
     </div>
   </div>
 </section>

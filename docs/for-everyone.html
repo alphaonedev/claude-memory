@@ -357,7 +357,7 @@ ai-memory mcp --tier autonomous</pre>
       </div>
       <div class="aud-fix">
         <h3>▲ The Fix</h3>
-        <p><strong>Apache 2.0 OSS</strong>. Single Rust binary. Zero outbound calls. Public source code, auditable from <code>git clone</code>. Hardware-attested keys (v0.7 → HSM, TPM, Secure Enclave). FedRAMP / IL5 path via the AgenticMem Sovereign tier. <strong>Domestic supplier (US-based AlphaOne LLC) for procurement.</strong></p>
+        <p><strong>Apache 2.0 OSS</strong>. Single Rust binary. Zero outbound calls. Public source code, auditable from <code>git clone</code>. Hardware-attested keys on the OSS roadmap (HSM / TPM / Secure Enclave integrations). <strong>Domestic supplier (US-based AlphaOne LLC) for procurement.</strong></p>
       </div>
       <div class="aud-roi">
         <h3>▼ The ROI</h3>
@@ -365,7 +365,7 @@ ai-memory mcp --tier autonomous</pre>
           <li><strong>100% air-gap operable</strong> — no exceptions, no special "offline mode" — just doesn't make outbound calls</li>
           <li><strong>Public source-code audit</strong> — your security team reads the entire codebase in a week</li>
           <li><strong>No vendor lock-in</strong> — single Rust binary, single SQLite file, copy is backup</li>
-          <li><strong>FedRAMP / IL5 path</strong> via AgenticMem Sovereign commercial tier (Q3 2026 GA)</li>
+          <li><strong>FedRAMP / IL5 path</strong> on the roadmap — air-gap operable today; certification work tracked in public ROADMAP.md</li>
           <li><strong>Domestic supplier</strong> — US-incorporated, no foreign-ownership concerns</li>
           <li><strong>SBOM clean</strong> — Cargo.toml is the SBOM; <code>cargo audit</code> runs in CI</li>
         </ul>
@@ -375,7 +375,7 @@ ai-memory mcp --tier autonomous</pre>
         <div class="aud-stack-row"><span class="badge">air-gap</span> Build from source on the secure subnet; no internet</div>
         <div class="aud-stack-row"><span class="badge">SQLCipher</span> Encryption-at-rest via <code>--features sqlcipher</code></div>
         <div class="aud-stack-row"><span class="badge">FIPS</span> v0.7 attested-identity for FIPS 140-3 path</div>
-        <div class="aud-stack-row"><span class="badge">HSM</span> Hardware key custody via AgenticMem Attest commercial tier</div>
+        <div class="aud-stack-row"><span class="badge">HSM</span> Hardware key custody on the OSS roadmap (TPM / HSM / Secure Enclave integrations)</div>
         <div class="aud-stack-row"><span class="badge">audit</span> Append-only signed event log; no operator can rewrite history</div>
         <div class="aud-stack-row"><span class="badge">domestic</span> AlphaOne LLC (US, Delaware) is the sole responsible party</div>
       </div>

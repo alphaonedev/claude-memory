@@ -1540,7 +1540,7 @@ footer.site-foot a { color: var(--text-muted); }
     </div>
 
     <div class="callout" style="margin-top:2.5rem;">
-      <strong>The AgenticMem commercial tiers are an addition, not a requirement.</strong> Every audience above can run the OSS ai-memory binary indefinitely with no commercial product needed. The Attest / Federate / Sovereign commercial tiers add hardware-backed identity, managed federation, and FedRAMP-certified deployments — but only when the operator chooses.
+      <strong>The OSS binary covers every audience above on its own.</strong> Apache 2.0 licensed, single Rust binary, single SQLite file, no central service, no telemetry, no signup. Run it on a laptop, run it on a fleet, run it on an air-gapped network. Every feature documented across this atlas ships in the OSS release.
     </div>
   </div>
 </section>
@@ -1564,7 +1564,7 @@ footer.site-foot a { color: var(--text-muted); }
         </div>
         <div class="roadmap-content">
           <div class="rmt-theme">Structured Memory + Performance · <span style="color:var(--good)">SHIPPED rc1</span></div>
-          <div class="rmt-eta">May 2026 · 4-week sprint</div>
+          <div class="rmt-eta">Released candidate · final shipping</div>
           <div class="rmt-desc">Hierarchy + Knowledge Graph + Performance Budgets. The grand-slam release.</div>
           <ul class="rmt-bullets">
             <li>Hierarchical namespace paths (<code>projects/alpha/decisions</code>)</li>
@@ -1583,7 +1583,7 @@ footer.site-foot a { color: var(--text-muted); }
         </div>
         <div class="roadmap-content">
           <div class="rmt-theme">Trust + A2A Maturity</div>
-          <div class="rmt-eta">End Q2 2026 · gates Q3 commercial Attest launch</div>
+          <div class="rmt-eta">Next major release</div>
           <div class="rmt-desc">Ed25519 attested identity, Apache AGE acceleration, A2A messaging maturity, programmable hook pipeline.</div>
           <ul class="rmt-bullets">
             <li>Ed25519 signatures on every memory_link write — fills v0.6.3 placeholder column</li>
@@ -1603,7 +1603,7 @@ footer.site-foot a { color: var(--text-muted); }
         </div>
         <div class="roadmap-content">
           <div class="rmt-theme">Coordination Primitives</div>
-          <div class="rmt-eta">Q4 2026</div>
+          <div class="rmt-eta">After v0.7</div>
           <div class="rmt-desc">Distributed task queue, typed cognition, CRDTs. The multi-agent substrate.</div>
           <ul class="rmt-bullets">
             <li>Task queue with attested claim/complete/abandon (replay-safe)</li>
@@ -1621,7 +1621,7 @@ footer.site-foot a { color: var(--text-muted); }
         </div>
         <div class="roadmap-content">
           <div class="rmt-theme">Agentic Substrate</div>
-          <div class="rmt-eta">Q1 2027</div>
+          <div class="rmt-eta">After v0.8</div>
           <div class="rmt-desc">Function calling, skill memories, streaming.</div>
         </div>
       </div>
@@ -1633,7 +1633,7 @@ footer.site-foot a { color: var(--text-muted); }
         </div>
         <div class="roadmap-content">
           <div class="rmt-theme">Federation Maturity</div>
-          <div class="rmt-eta">Q2 2027</div>
+          <div class="rmt-eta">After v0.9</div>
           <div class="rmt-desc">Auto-discovery (mDNS), end-to-end encryption, MVCC, OpenTelemetry standardization, strict semver discipline.</div>
         </div>
       </div>
@@ -1697,9 +1697,9 @@ footer.site-foot a { color: var(--text-muted); }
 <section id="trust">
   <div class="container">
     <span class="eyebrow p3">Trust Ladder</span>
-    <h2>Five steps from laptop to FedRAMP.</h2>
+    <h2>Three steps the OSS binary already gives you.</h2>
     <p class="lede">
-      Each step strengthens the trust boundary without breaking the layer below it. The OSS binary is operable at every step. The AgenticMem commercial tiers add managed services on top of what's already shipped.
+      Each step strengthens the trust boundary without breaking the layer below it. All three ship in the OSS binary — no signup, no commercial product required.
     </p>
 
     <div class="trust-ladder">
@@ -1717,21 +1717,9 @@ footer.site-foot a { color: var(--text-muted); }
       </div>
       <div class="trust-step next">
         <div class="step-num">3</div>
-        <div class="step-tier">v0.7 · OSS</div>
+        <div class="step-tier">Future release · OSS</div>
         <div class="step-title">Ed25519 attested identity</div>
         <div class="step-desc">Every link write signed end-to-end. Verifiable provenance for the audit trail.</div>
-      </div>
-      <div class="trust-step">
-        <div class="step-num">4</div>
-        <div class="step-tier">AgenticMem · Attest</div>
-        <div class="step-title">Hardware-backed keys</div>
-        <div class="step-desc">TPM / HSM / Secure Enclave for key storage. Compliance-ready Q3 2026.</div>
-      </div>
-      <div class="trust-step">
-        <div class="step-num">5</div>
-        <div class="step-tier">AgenticMem · Sovereign</div>
-        <div class="step-title">FedRAMP / IL5</div>
-        <div class="step-desc">Government-grade deployments. Air-gapped, audited, contractually committed.</div>
       </div>
     </div>
   </div>
