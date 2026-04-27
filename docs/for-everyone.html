@@ -1,0 +1,395 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  For Everyone — value proposition for every end-user type, from
+  solo dev to federal/state/local/municipal government. Each
+  audience gets a focused page panel with their pain → fix → ROI.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · For Everyone — value proposition by audience</title>
+<meta name="description" content="ai-memory value proposition tailored for individuals, startups, mid-market, enterprises, and government. Pain → fix → ROI per audience.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/for-everyone.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.65;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:2rem;margin-bottom:.5rem}h3{font-size:1.25rem;margin-bottom:.5rem}
+p{color:var(--text-muted)}
+
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.05),transparent 60%),radial-gradient(ellipse at bottom,rgba(255,184,107,0.04),transparent 70%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,5vw,4rem);line-height:1.05;letter-spacing:-0.04em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.15rem;max-width:780px;margin:0 auto}
+
+/* Audience nav (sticky pill row) */
+.aud-nav{position:sticky;top:65px;z-index:40;background:rgba(0,0,0,0.9);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:.85rem 0}
+.aud-nav-inner{display:flex;gap:.5rem;justify-content:center;flex-wrap:wrap;max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+.aud-nav a{padding:.45rem 1rem;border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);border:1px solid var(--border-hl)}
+.aud-nav a:hover{color:var(--text);border-color:var(--text)}
+
+/* Audience panels — large bold sections */
+.audience{padding:5rem 0;border-bottom:1px solid var(--border)}
+.audience .container{display:grid;grid-template-columns:1fr 1.25fr;gap:3rem;align-items:start}
+@media(max-width:920px){.audience .container{grid-template-columns:1fr}}
+.audience .left{position:sticky;top:8rem}
+.audience .scale-num{font-family:var(--font-mono);font-size:6rem;font-weight:900;line-height:.9;letter-spacing:-0.08em;background:linear-gradient(135deg,var(--p1),var(--p3));-webkit-background-clip:text;background-clip:text;color:transparent;margin-bottom:.5rem}
+.audience .scale-tag{font-family:var(--font-mono);font-size:.75rem;letter-spacing:.15em;text-transform:uppercase;color:var(--text-dim);margin-bottom:1.5rem}
+.audience h2{font-size:2.5rem;line-height:1.1;letter-spacing:-0.03em;margin-bottom:.75rem}
+.audience .scale-icon{font-size:3rem;margin-bottom:1rem}
+.audience .scale-pop{font-family:var(--font-mono);font-size:.85rem;color:var(--text-muted);background:var(--bg-card);padding:.65rem .85rem;border-radius:8px;border:1px solid var(--border);display:inline-block;margin-top:.5rem}
+
+.audience .right{display:flex;flex-direction:column;gap:1rem}
+.aud-pain{background:linear-gradient(135deg,rgba(255,107,157,0.08),rgba(255,107,157,0.02));border:1px solid rgba(255,107,157,0.3);border-radius:12px;padding:1.5rem}
+.aud-pain h3{color:#ffa0c0;margin-bottom:.5rem;font-size:1rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.aud-pain p{color:#ffd0e0;font-size:1rem;line-height:1.55}
+.aud-fix{background:linear-gradient(135deg,rgba(110,231,255,0.07),rgba(110,231,255,0.02));border:1px solid rgba(110,231,255,0.3);border-radius:12px;padding:1.5rem}
+.aud-fix h3{color:var(--p1);margin-bottom:.5rem;font-size:1rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.aud-fix p{color:#a8eeff;font-size:1rem;line-height:1.55}
+.aud-roi{background:linear-gradient(135deg,rgba(255,215,0,0.06),rgba(255,184,107,0.04));border:1px solid rgba(255,215,0,0.25);border-radius:12px;padding:1.5rem}
+.aud-roi h3{color:var(--gold);margin-bottom:.5rem;font-size:1rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.aud-roi ul{list-style:none}
+.aud-roi li{padding-left:1.4rem;position:relative;margin:.4rem 0;font-size:.95rem;color:var(--text-muted)}
+.aud-roi li::before{content:"$";position:absolute;left:0;color:var(--gold);font-weight:700}
+.aud-roi li strong{color:var(--text)}
+
+.aud-deploy{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem}
+.aud-deploy h3{color:var(--text);margin-bottom:.65rem;font-size:1rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em}
+.aud-deploy pre{background:var(--bg-code);border:1px solid var(--border);border-radius:8px;padding:.85rem 1rem;font-family:var(--font-mono);font-size:.8rem;color:var(--text-muted);overflow-x:auto;line-height:1.5;white-space:pre-wrap}
+
+.aud-stack{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem 1.5rem;display:flex;flex-direction:column;gap:.75rem}
+.aud-stack h3{font-size:.95rem;font-family:var(--font-mono);text-transform:uppercase;letter-spacing:.1em;color:var(--text)}
+.aud-stack-row{display:flex;align-items:center;gap:.75rem;font-size:.88rem;color:var(--text-muted)}
+.aud-stack-row .badge{display:inline-block;padding:.2rem .55rem;border:1px solid var(--border-hl);border-radius:4px;font-family:var(--font-mono);font-size:.7rem;color:var(--p1);min-width:90px;text-align:center}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+.cta-section{padding:5rem 1.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.05),transparent 70%)}
+.cta-section h2{margin-bottom:1rem}
+.cta-section p{max-width:640px;margin:0 auto 2rem}
+.cta-row{display:flex;gap:1rem;justify-content:center;flex-wrap:wrap}
+.cta{display:inline-block;padding:.85rem 1.5rem;border:1px solid var(--border-hl);color:var(--text);font-weight:600;border-radius:8px}
+.cta.primary{background:var(--text);color:var(--bg);border-color:var(--text)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ For Everyone</span></a>
+    <div class="right">
+      <a href="at-a-glance.html">At a Glance</a>
+      <a href="feature-matrix.html">Feature Matrix</a>
+      <a href="data-flow.html">Data Flow</a>
+      <a href="integrations.html">Integrations</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Same binary.<br>Every scale.</h1>
+  <p class="tagline">From a solo developer's laptop to a federation of state-government data centers — the <strong>same Rust binary</strong> runs the same way. Below is the value story for every audience size, with deployment patterns, ROI math, and procurement-ready specs.</p>
+</section>
+
+<nav class="aud-nav">
+  <div class="aud-nav-inner">
+    <a href="#a1">▸ 01 · Individual</a>
+    <a href="#a2">▸ 02 · Startup</a>
+    <a href="#a3">▸ 03 · Mid-market</a>
+    <a href="#a4">▸ 04 · Enterprise</a>
+    <a href="#a5">▸ 05 · Government</a>
+  </div>
+</nav>
+
+<!-- ============== AUDIENCE 1: INDIVIDUAL ============== -->
+<section class="audience" id="a1">
+  <div class="container">
+    <div class="left">
+      <div class="scale-icon">👤</div>
+      <div class="scale-num">01</div>
+      <div class="scale-tag">SOLO · INDIVIDUAL</div>
+      <h2>The solo developer.</h2>
+      <p>One person. One laptop. Multiple AIs. Memory that vanishes every conversation.</p>
+      <div class="scale-pop">1 user · 1 box · &lt; 5 GB RAM</div>
+    </div>
+    <div class="right">
+      <div class="aud-pain">
+        <h3>▼ The Pain</h3>
+        <p>"Claude forgets between sessions. Cursor doesn't know what ChatGPT learned. I re-paste the same project context 30 times a day. My most expensive cognitive asset — the context I've built with these tools — evaporates every 4 hours."</p>
+      </div>
+      <div class="aud-fix">
+        <h3>▲ The Fix</h3>
+        <p>One <code>brew install ai-memory</code>. Three lines in your MCP config. Every AI you use plugs into the same memory. <strong>Persistent across reboots, machines, AI vendors. Local-first — your data never leaves your laptop unless you explicitly federate.</strong></p>
+      </div>
+      <div class="aud-roi">
+        <h3>▼ The ROI (estimated, single user)</h3>
+        <ul>
+          <li><strong>~30 conversations/day</strong> × 365 days = ~11,000 cold-start contexts/year</li>
+          <li><strong>5-10 minutes/day</strong> saved on re-explaining project state to AIs</li>
+          <li><strong>$0 SaaS spend</strong> — zero per-month memory subscription</li>
+          <li><strong>100% data ownership</strong> — no vendor lock-in, no privacy spillover</li>
+        </ul>
+      </div>
+      <div class="aud-deploy">
+        <h3>▼ Deployment Pattern</h3>
+        <pre>brew install ai-memory
+# Add ai-memory to Claude / Cursor / Codex MCP config
+# That's it.
+
+# Optional: bump to autonomous tier for self-curating memory
+ollama pull gemma3:e2b
+ai-memory mcp --tier autonomous</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== AUDIENCE 2: STARTUP ============== -->
+<section class="audience" id="a2">
+  <div class="container">
+    <div class="left">
+      <div class="scale-icon">👥</div>
+      <div class="scale-num">02</div>
+      <div class="scale-tag">SCALE · STARTUP</div>
+      <h2>The 2–25 person team.</h2>
+      <p>A small group of humans + a growing fleet of AI sessions. Tribal knowledge dies when someone leaves.</p>
+      <div class="scale-pop">2-25 users · 1-3 nodes · shared engineering memory</div>
+    </div>
+    <div class="right">
+      <div class="aud-pain">
+        <h3>▼ The Pain</h3>
+        <p>"Senior engineer leaves. Six months of context goes with them. New hires re-discover landmines we already paid to find. Each engineer's Claude has different memory. The AI knows the codebase but can't share what it learned."</p>
+      </div>
+      <div class="aud-fix">
+        <h3>▲ The Fix</h3>
+        <p>Federated 3-node ai-memory cluster on your VPC. Per-namespace shared memory: <code>onboarding/</code>, <code>decisions/</code>, <code>infra/</code>. <strong>Every team member's AI plugs in and shares understanding.</strong> mTLS handshake on every cross-node call. Zero per-seat cost.</p>
+      </div>
+      <div class="aud-roi">
+        <h3>▼ The ROI</h3>
+        <ul>
+          <li><strong>40-60% faster onboarding</strong> — new hire's AI walks into project conversation already in progress</li>
+          <li><strong>~$0 / seat / month</strong> vs $20-50/seat for SaaS memory products at this size</li>
+          <li><strong>Decision audit trail</strong> — every "we decided X because Y" memory survives staff turnover</li>
+          <li><strong>SOC2-friendly</strong> from day 1 — local data, audit logs, governance hooks</li>
+        </ul>
+      </div>
+      <div class="aud-stack">
+        <h3>▼ Architecture</h3>
+        <div class="aud-stack-row"><span class="badge">3 nodes</span> mTLS-federated VPC cluster, Linux x64</div>
+        <div class="aud-stack-row"><span class="badge">W=2 / N=3</span> quorum write — survives 1-node loss</div>
+        <div class="aud-stack-row"><span class="badge">tier=smart</span> Ollama gemma3:e2b for auto-tag + contradict</div>
+        <div class="aud-stack-row"><span class="badge">webhook</span> SIEM → Slack on contradiction-detected</div>
+        <div class="aud-stack-row"><span class="badge">backup</span> Daily VACUUM INTO + S3 sync of *.db.gz</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== AUDIENCE 3: MID-MARKET ============== -->
+<section class="audience" id="a3">
+  <div class="container">
+    <div class="left">
+      <div class="scale-icon">🏢</div>
+      <div class="scale-num">03</div>
+      <div class="scale-tag">SCALE · MID-MARKET</div>
+      <h2>The 25–500 person org.</h2>
+      <p>Multi-team. Multi-namespace. Procurement caught on. Compliance is calling.</p>
+      <div class="scale-pop">25-500 users · 5-15 nodes · per-team isolation</div>
+    </div>
+    <div class="right">
+      <div class="aud-pain">
+        <h3>▼ The Pain</h3>
+        <p>"AI usage exploded across teams. Each one signed up for a different SaaS memory product. Different vendors. Different DPAs. Different security postures. Audit asks 'where does our data live?' and we don't have one answer."</p>
+      </div>
+      <div class="aud-fix">
+        <h3>▲ The Fix</h3>
+        <p>One ai-memory deployment per business unit. Per-team namespace. Governance hooks intercept destructive ops. Webhook integration ships to corporate SIEM. Single source of truth for data residency: <strong>"on this VPC, that's it."</strong></p>
+      </div>
+      <div class="aud-roi">
+        <h3>▼ The ROI</h3>
+        <ul>
+          <li><strong>Centralized memory governance</strong> — one DPA, not 7</li>
+          <li><strong>Per-team compliance scope</strong> — finance memories never reach engineering</li>
+          <li><strong>SaaS spend elimination</strong>: typical $30K-200K/year on per-team memory products → $0</li>
+          <li><strong>Faster security review</strong>: Apache 2.0 OSS source, single Rust binary, no SBOM mystery</li>
+        </ul>
+      </div>
+      <div class="aud-stack">
+        <h3>▼ Architecture</h3>
+        <div class="aud-stack-row"><span class="badge">per-BU</span> Each business unit gets its own 3-5 node cluster</div>
+        <div class="aud-stack-row"><span class="badge">SIEM</span> Webhook → Splunk / Datadog / Sumo on every write</div>
+        <div class="aud-stack-row"><span class="badge">RBAC</span> Per-namespace governance (Allow/Deny/Pending)</div>
+        <div class="aud-stack-row"><span class="badge">IAM</span> mTLS client certs from corp PKI</div>
+        <div class="aud-stack-row"><span class="badge">backup</span> Snapshot on every change-of-state, retain 90d</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== AUDIENCE 4: ENTERPRISE ============== -->
+<section class="audience" id="a4">
+  <div class="container">
+    <div class="left">
+      <div class="scale-icon">🏛️</div>
+      <div class="scale-num">04</div>
+      <div class="scale-tag">SCALE · LARGE ENTERPRISE</div>
+      <h2>The 500–50,000 corporation.</h2>
+      <p>Multi-region. Multi-jurisdiction. Multi-language compliance. Air-gapped business units.</p>
+      <div class="scale-pop">500-50K users · 20-100 nodes · multi-region federation</div>
+    </div>
+    <div class="right">
+      <div class="aud-pain">
+        <h3>▼ The Pain</h3>
+        <p>"Each BU wants AI. Each lawyer wants air-gapped. Each auditor wants logs. Each region has different data-residency rules. Our AI vendors keep getting acquired. Every approved tool gets deprecated 18 months later."</p>
+      </div>
+      <div class="aud-fix">
+        <h3>▲ The Fix</h3>
+        <p>Per-BU federated cluster. Cross-region quorum-aware sync. PII redaction hooks. Backup + restore + retention. <strong>Air-gap operable</strong> for sensitive BUs. <strong>Vendor-acquisition immune</strong> — Apache 2.0 OSS, you have the source.</p>
+      </div>
+      <div class="aud-roi">
+        <h3>▼ The ROI</h3>
+        <ul>
+          <li><strong>Air-gap deployments</strong> for sensitive BUs without losing AI capability</li>
+          <li><strong>Per-BU policy enforcement</strong> via governance + hooks; one platform, N policies</li>
+          <li><strong>Hooks for DLP integration</strong> — your existing data-loss-prevention pipeline plugs in</li>
+          <li><strong>Vendor-risk-zero</strong> — Apache 2.0, full source, single binary, no SaaS dependency</li>
+          <li><strong>FIPS path</strong> via v0.7 attested identity (ed25519 → HSM-backed)</li>
+        </ul>
+      </div>
+      <div class="aud-stack">
+        <h3>▼ Architecture</h3>
+        <div class="aud-stack-row"><span class="badge">multi-region</span> AWS / Azure / GCP / on-prem; cross-region mTLS</div>
+        <div class="aud-stack-row"><span class="badge">air-gap</span> No outbound calls; internal-only mirror of crates.io for updates</div>
+        <div class="aud-stack-row"><span class="badge">DLP hooks</span> pre_store hook redacts PII before persist</div>
+        <div class="aud-stack-row"><span class="badge">audit</span> Sidechain transcripts (v0.7) — every memory has full conversation</div>
+        <div class="aud-stack-row"><span class="badge">DR</span> Cross-region quorum + nightly backup → glacier</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== AUDIENCE 5: GOVERNMENT ============== -->
+<section class="audience" id="a5">
+  <div class="container">
+    <div class="left">
+      <div class="scale-icon">🇺🇸</div>
+      <div class="scale-num">05</div>
+      <div class="scale-tag">SCALE · GOVERNMENT</div>
+      <h2>Federal · State · Local · Municipal.</h2>
+      <p>AI mandate is real. Cloud ban is real. Foreign vendor scrutiny is real. Audit trail is mandatory.</p>
+      <div class="scale-pop">Sovereign · Air-gapped · FIPS / IL5 path</div>
+    </div>
+    <div class="right">
+      <div class="aud-pain">
+        <h3>▼ The Pain</h3>
+        <p>"AI is a White House priority. Cloud is forbidden by policy. Most vendors are foreign. Every commercial product wants telemetry. Every offering needs FedRAMP authorization. We're caught between the modernization mandate and the security mandate."</p>
+      </div>
+      <div class="aud-fix">
+        <h3>▲ The Fix</h3>
+        <p><strong>Apache 2.0 OSS</strong>. Single Rust binary. Zero outbound calls. Public source code, auditable from <code>git clone</code>. Hardware-attested keys (v0.7 → HSM, TPM, Secure Enclave). FedRAMP / IL5 path via the AgenticMem Sovereign tier. <strong>Domestic supplier (US-based AlphaOne LLC) for procurement.</strong></p>
+      </div>
+      <div class="aud-roi">
+        <h3>▼ The ROI</h3>
+        <ul>
+          <li><strong>100% air-gap operable</strong> — no exceptions, no special "offline mode" — just doesn't make outbound calls</li>
+          <li><strong>Public source-code audit</strong> — your security team reads the entire codebase in a week</li>
+          <li><strong>No vendor lock-in</strong> — single Rust binary, single SQLite file, copy is backup</li>
+          <li><strong>FedRAMP / IL5 path</strong> via AgenticMem Sovereign commercial tier (Q3 2026 GA)</li>
+          <li><strong>Domestic supplier</strong> — US-incorporated, no foreign-ownership concerns</li>
+          <li><strong>SBOM clean</strong> — Cargo.toml is the SBOM; <code>cargo audit</code> runs in CI</li>
+        </ul>
+      </div>
+      <div class="aud-stack">
+        <h3>▼ Deployment Pattern</h3>
+        <div class="aud-stack-row"><span class="badge">air-gap</span> Build from source on the secure subnet; no internet</div>
+        <div class="aud-stack-row"><span class="badge">SQLCipher</span> Encryption-at-rest via <code>--features sqlcipher</code></div>
+        <div class="aud-stack-row"><span class="badge">FIPS</span> v0.7 attested-identity for FIPS 140-3 path</div>
+        <div class="aud-stack-row"><span class="badge">HSM</span> Hardware key custody via AgenticMem Attest commercial tier</div>
+        <div class="aud-stack-row"><span class="badge">audit</span> Append-only signed event log; no operator can rewrite history</div>
+        <div class="aud-stack-row"><span class="badge">domestic</span> AlphaOne LLC (US, Delaware) is the sole responsible party</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== UNIVERSAL VALUE ============== -->
+<section style="padding:5rem 0;border-bottom:1px solid var(--border)">
+  <div class="container">
+    <span style="display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px">Universal</span>
+    <h2 style="font-size:2.5rem;line-height:1.1;margin-bottom:1rem">What every audience gets, automatically.</h2>
+    <p style="color:var(--text-muted);font-size:1.05rem;max-width:780px;margin-bottom:2.5rem">Some properties of ai-memory are non-negotiable benefits — they apply at every scale, with no upgrade or paid tier required.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p1)">
+        <h3 style="margin-bottom:.5rem">Local-first</h3>
+        <p style="font-size:.9rem">SQLite file on disk. WAL-mode for concurrent reads. <code>cp</code> is a backup. <strong>Your data never leaves your hardware unless you explicitly turn on federation.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p1)">
+        <h3 style="margin-bottom:.5rem">Sub-100ms session-start</h3>
+        <p style="font-size:.9rem">42ms p95 measured. Published budget. CI guard fails any PR that breaks it. <strong>Latency contract enforced, not aspirational.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p1)">
+        <h3 style="margin-bottom:.5rem">Apache 2.0 OSS</h3>
+        <p style="font-size:.9rem">Commercial-friendly license. Patent grant included. <strong>You can read every line, fork it, sell what you build on top.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p2)">
+        <h3 style="margin-bottom:.5rem">93.05% test coverage</h3>
+        <p style="font-size:.9rem">1,809 tests. Zero ignored. Four-platform CI (macOS / Ubuntu / Windows / Coverage). <strong>Every PR runs the full matrix.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p2)">
+        <h3 style="margin-bottom:.5rem">Single binary</h3>
+        <p style="font-size:.9rem">No Python install. No Node toolchain. No Docker required. Just one ~30MB Rust binary. <strong>Five distribution targets (macOS x64/arm, Linux x64/arm, Windows x64).</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p2)">
+        <h3 style="margin-bottom:.5rem">MCP-native</h3>
+        <p style="font-size:.9rem">Open Model Context Protocol. <strong>Every MCP-compliant host autodiscovers all 26 ai-memory tools.</strong> Future AI hosts work for free.</p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p3)">
+        <h3 style="margin-bottom:.5rem">Reversibility</h3>
+        <p style="font-size:.9rem">Soft-delete to archive tier. Restore anytime. <strong>Hard delete only via explicit purge with governance approval.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p3)">
+        <h3 style="margin-bottom:.5rem">Self-curating</h3>
+        <p style="font-size:.9rem">Curator daemon auto-tags, detects contradictions, consolidates similar memories. <strong>Your memory store stays tidy without manual hygiene.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p3)">
+        <h3 style="margin-bottom:.5rem">Auditable</h3>
+        <p style="font-size:.9rem">Pending actions queue. Webhook event stream. (v0.7) Ed25519 signatures on every write. <strong>Compliance officers see what they need.</strong></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-section">
+  <h2>Pick your scale. Same binary.</h2>
+  <p>Whether you're a solo developer or a federal agency, the install path is the same.</p>
+  <div class="cta-row">
+    <a class="cta primary" href="./#install">Install Guide</a>
+    <a class="cta" href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    <a class="cta" href="at-a-glance.html">At a Glance</a>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory-mcp · Apache 2.0 · v0.6.3-rc1 · <a href="./">main</a> · <a href="at-a-glance.html">At a Glance</a> · <a href="feature-matrix.html">Feature Matrix</a> · <a href="data-flow.html">Data Flow</a> · <a href="integrations.html">Integrations</a> · <a href="release-pipeline.html">Release Pipeline</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

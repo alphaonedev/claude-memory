@@ -748,14 +748,12 @@ footer.site-foot a { color: var(--text-muted); }
   <div class="inner">
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ At a Glance</span></a>
     <div class="right">
-      <a href="#what">What</a>
-      <a href="#three-pillars">Pillars</a>
-      <a href="#architecture">Architecture</a>
-      <a href="#tiers">Tiers</a>
-      <a href="#performance">Performance</a>
-      <a href="#audiences">Audiences</a>
-      <a href="#roadmap">Roadmap</a>
-      <a href="#compare">vs Alternatives</a>
+      <a href="whats-new-v063.html" style="color:var(--pillar-1)">v0.6.3</a>
+      <a href="feature-matrix.html">Features</a>
+      <a href="data-flow.html">Data Flow</a>
+      <a href="integrations.html">Integrations</a>
+      <a href="for-everyone.html">For Everyone</a>
+      <a href="release-pipeline.html">Release</a>
       <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
     </div>
   </div>
@@ -1831,6 +1829,77 @@ footer.site-foot a { color: var(--text-muted); }
         </p>
         <p style="color:var(--text-muted); font-size:.9rem">v0.7's attested-identity work targets FIPS-grade key handling. v1.0's federation maturity work targets multi-region resilience. Today's v0.6.3 already runs air-gapped with no compromise.</p>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: COMPANION PAGES (visualization atlas)
+     ============================================================= -->
+<section id="atlas">
+  <div class="container">
+    <span class="eyebrow">Visualization Atlas</span>
+    <h2>Six pages. Every facet, dedicated visualizations.</h2>
+    <p class="lede">This page is the hub. Each companion below dives deep into one slice of the system with its own visualization style. <strong>Pick what your audience needs.</strong></p>
+
+    <div class="grid-3" style="gap:1rem">
+      <a href="whats-new-v063.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ NEW · RELEASE SPOTLIGHT</div>
+          <div class="card-title">What's New in v0.6.3</div>
+          <p class="card-body">The 6 streams shipped, the 9 coverage waves, the 2 SSRF defects fixed, the upgrade path. Animated coverage timeline + before/after security diff.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">whats-new-v063.html →</div>
+        </div>
+      </a>
+
+      <a href="feature-matrix.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ COMPLETE SURFACE AREA</div>
+          <div class="card-title">Feature Matrix</div>
+          <p class="card-body">Every MCP tool, every HTTP endpoint, every CLI command — categorized, cross-referenced. 26 + 39 + 28 = 93 operations. The SME's full reference.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">feature-matrix.html →</div>
+        </div>
+      </a>
+
+      <a href="data-flow.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ ENGINEERING DEEP DIVE</div>
+          <div class="card-title">Data Flow</div>
+          <p class="card-body">Animated write path, read path with hybrid 70/30 fusion, federation W=2 of N=3 quorum diagram. Where every byte goes.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">data-flow.html →</div>
+        </div>
+      </a>
+
+      <a href="integrations.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ EVERY AI HOST</div>
+          <div class="card-title">Integrations</div>
+          <p class="card-body">13 AI clients tested with one-block setup snippets each. Claude · ChatGPT · Cursor · Windsurf · Continue · Codex · Gemini · Grok · OpenClaw · Hermes · Llama.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">integrations.html →</div>
+        </div>
+      </a>
+
+      <a href="for-everyone.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ AUDIENCE-BY-SCALE</div>
+          <div class="card-title">For Everyone</div>
+          <p class="card-body">Solo dev → Startup → Mid-market → Enterprise → Government. Pain → Fix → ROI per audience. Deployment patterns. Procurement-ready specs.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">for-everyone.html →</div>
+        </div>
+      </a>
+
+      <a href="release-pipeline.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ OPERATIONAL MATURITY</div>
+          <div class="card-title">Release Pipeline</div>
+          <p class="card-body">Tag → 5 platforms → 5 distribution channels → all signed. CI gates. SBOM. Reproducible builds. Procurement-ready operational spec.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">release-pipeline.html →</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="callout" style="margin-top:2.5rem">
+      <strong>The atlas is print-friendly too.</strong> Every page in the visualization set has a <code>@media print</code> stylesheet that strips chrome, switches to white background, and applies page-break-protection. Print as a PDF for board decks, procurement reviews, or a "give this to your security team" packet.
     </div>
   </div>
 </section>
