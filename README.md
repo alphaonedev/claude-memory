@@ -11,8 +11,9 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
 [![Tests](https://img.shields.io/badge/tests-1%2C600_lib_%E2%80%A2_93.08%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
 [![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
-[![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-6ee7ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
@@ -83,7 +84,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **OpenClaw** | MCP stdio | JSON (`mcp.servers` in config) | Fully supported |
 | **Any MCP client** | MCP stdio or HTTP | Varies | Universal |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (24 endpoints on localhost) and the **CLI** (26 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (42 endpoints on localhost) and the **CLI** (26 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -437,7 +438,7 @@ ai-memory serve
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 26 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has 43 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -484,7 +485,7 @@ ai-memory recall "database"
 ai-memory stats
 ```
 
-**6. Use with your AI.** Restart your AI client. It now has **26 memory tools** available via MCP -- it can store and recall memories natively during conversations.
+**6. Use with your AI.** Restart your AI client. It now has **43 memory tools** available via MCP -- it can store and recall memories natively during conversations.
 
 ---
 
@@ -500,14 +501,14 @@ It runs as an MCP (Model Context Protocol) tool server -- a background process t
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 9077) and a complete CLI (26 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (42 endpoints on port 9077) and a complete CLI (26 commands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
 ## Features
 
 ### Core
-- **MCP tool server** -- 26 tools over stdio JSON-RPC, compatible with any MCP client
+- **MCP tool server** -- 43 tools over stdio JSON-RPC, compatible with any MCP client
 - **Three-tier memory** -- short (6h TTL default), mid (7d TTL default), long (permanent) -- TTLs are configurable
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
 - **Hybrid recall** -- FTS5 keyword + cosine similarity with fixed 0.6 semantic / 0.4 keyword (60/40) blend weights
@@ -662,9 +663,9 @@ ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --ti
 | Tier | Recall Method | Extra Capabilities | Approx. Overhead |
 |------|---------------|-------------------|-----------------|
 | **keyword** | FTS5 only | Baseline 26 tools | 0 MB |
-| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 26 tools | ~256 MB |
-| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 26 tools | ~1 GB |
-| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 26 tools | ~4 GB |
+| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, semantic tier (subset of 43-tool surface) | ~256 MB |
+| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, full 43-tool surface | ~1 GB |
+| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, full 43-tool surface | ~4 GB |
 
 ### Capability Matrix
 
@@ -696,7 +697,7 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 
-**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 26 tools + reranker) with the faster e2b model:
+**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (full 43-tool surface + reranker) with the faster e2b model:
 
 ```toml
 # ~/.config/ai-memory/config.toml
@@ -726,7 +727,7 @@ The `memory_capabilities` tool reports the active tier, loaded models, and avail
 
 ## MCP Tools
 
-These 26 tools are available to any MCP-compatible AI when configured as an MCP server:
+These 43 tools are available to any MCP-compatible AI when configured as an MCP server (canonical count on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); the table below documents the core subset most clients use day-to-day):
 
 | Tool | Description |
 |------|-------------|
@@ -756,7 +757,7 @@ These 26 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## HTTP API
 
-24 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
+42 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
 > **Security:** The HTTP server binds to 127.0.0.1 with no authentication and permissive CORS. Do not expose to the network without a reverse proxy with authentication.
 

@@ -408,7 +408,7 @@ ai-memory --db ~/.claude/ai-memory.db stats</code></pre>
     <span class="eyebrow">Source</span>
     <h2>Source-of-truth references.</h2>
     <ul>
-      <li><code>src/main.rs</code> — daemon setup, command dispatch (~27 CLI commands)</li>
+      <li><code>src/main.rs</code> — daemon setup, command dispatch (26 CLI commands)</li>
       <li><code>src/mcp.rs</code> — MCP tool handlers wired to the same DB layer</li>
       <li><code>src/handlers.rs</code> — HTTP route handlers (the Axum router in <code>main.rs</code> registers 48 <code>/api/v1/*</code> routes)</li>
       <li><code>src/db.rs</code> — schema, recall scoring, GC, migrations (current schema v15 per v0.6.3 release notes)</li>

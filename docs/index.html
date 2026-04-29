@@ -430,8 +430,17 @@
         </div>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
             <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
-            <a href="at-a-glance.html" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">📊 Visualization Atlas — 6 pages, every facet →</a>
+            <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Live Test Results — 1,600 lib · 93.08% cov →</a>
+            <a href="evidence.html" class="hero-cta" style="background:transparent;border:1px solid #c8a2ff;color:#c8a2ff">📐 Frozen Claims (Evidence) →</a>
+            <a href="at-a-glance.html" class="hero-cta" style="background:transparent;border:1px solid #999;color:#999">📊 Visualization Atlas →</a>
             <a href="whats-new-v063.html" class="hero-cta" style="background:transparent;border:1px solid #ffb86b;color:#ffb86b">✨ What's New in v0.6.3 →</a>
+        </div>
+        <div style="margin-top:1.5rem;display:flex;justify-content:center;gap:1.5rem;font-size:.78rem;color:#999;flex-wrap:wrap">
+          <span>📊 <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="color:#6ee7ff;text-decoration:none">v0.6.3 evidence on test-hub</a></span>
+          <span>·</span>
+          <span>🚢 <a href="https://alphaonedev.github.io/ai-memory-ship-gate/" style="color:#999;text-decoration:none">ship-gate</a></span>
+          <span>·</span>
+          <span>🤝 <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/" style="color:#999;text-decoration:none">A2A gate</a></span>
         </div>
     </div>
 </section>
@@ -1082,7 +1091,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">The MCP server exposes 26 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
+                    <p style="font-size:.85rem">The MCP server exposes 43 tools over stdio using JSON-RPC. Any client that speaks MCP will discover them automatically. Adjust the <code>--db</code> path to your preferred location.</p>
                 </div>
             </li>
             <li>
@@ -1221,7 +1230,7 @@ ai-memory list -n my-project                                         <span class
 <section id="features" class="alt">
     <div class="container">
         <h2>What It Does</h2>
-        <p class="section-subtitle">Every capability at a glance. 4 feature tiers (keyword to autonomous), 26 MCP tools, four operational modes (MCP, HTTP, curator, sync), one shared SQLite database. Works with any AI that supports MCP or HTTP.</p>
+        <p class="section-subtitle">Every capability at a glance. 4 feature tiers (keyword to autonomous), 43 MCP tools, four operational modes (MCP, HTTP, curator, sync), one shared SQLite database. Works with any AI that supports MCP or HTTP. <a href="evidence.html" style="color:#6ee7ff">Canonical claims →</a></p>
 
         <div class="feature-grid">
             <div class="feature-card" style="border:1px solid var(--green);background:rgba(63,185,80,.04)">
@@ -1293,7 +1302,7 @@ ai-memory list -n my-project                                         <span class
                         <td class="matrix-dash">&mdash;</td>
                         <td class="matrix-dash">&mdash;</td>
                         <td>None</td>
-                        <td>FTS5 full-text search, 13 MCP tools</td>
+                        <td>FTS5 full-text search, keyword tier (subset of 43 tools)</td>
                     </tr>
                     <tr>
                         <td><span class="tier-tag tier-tag-semantic">semantic</span></td>
@@ -1301,7 +1310,7 @@ ai-memory list -n my-project                                         <span class
                         <td>all-MiniLM-L6-v2 <span style="color:var(--text-muted);font-size:.75rem">(384-dim, local via Candle)</span></td>
                         <td class="matrix-dash">&mdash;</td>
                         <td>None <span style="color:var(--text-muted);font-size:.75rem">(model auto-downloads ~90MB)</span></td>
-                        <td>+ Hybrid recall (FTS5 + cosine similarity), HNSW vector index, 14 MCP tools</td>
+                        <td>+ Hybrid recall (FTS5 + cosine similarity), HNSW vector index, semantic tier (subset of 43 tools)</td>
                     </tr>
                     <tr>
                         <td><span class="tier-tag tier-tag-smart">smart</span></td>
@@ -1309,7 +1318,7 @@ ai-memory list -n my-project                                         <span class
                         <td>nomic-embed-text-v1.5 <span style="color:var(--text-muted);font-size:.75rem">(768-dim, via Ollama)</span></td>
                         <td>Gemma 4 E2B <span style="color:var(--text-muted);font-size:.75rem">(~1GB)</span></td>
                         <td><a href="https://ollama.com">Ollama</a></td>
-                        <td>+ LLM query expansion, auto-tagging, auto-consolidation, 26 MCP tools</td>
+                        <td>+ LLM query expansion, auto-tagging, auto-consolidation, 43 MCP tools (full surface)</td>
                     </tr>
                     <tr>
                         <td><span class="tier-tag tier-tag-autonomous">autonomous</span></td>
@@ -1317,7 +1326,7 @@ ai-memory list -n my-project                                         <span class
                         <td>nomic-embed-text-v1.5 <span style="color:var(--text-muted);font-size:.75rem">(768-dim, via Ollama)</span></td>
                         <td>Gemma 4 E4B <span style="color:var(--text-muted);font-size:.75rem">(~2.3GB)</span></td>
                         <td><a href="https://ollama.com">Ollama</a></td>
-                        <td>+ Neural cross-encoder reranking (ms-marco-MiniLM), contradiction analysis, 26 MCP tools</td>
+                        <td>+ Neural cross-encoder reranking (ms-marco-MiniLM), contradiction analysis, 43 MCP tools (full surface)</td>
                     </tr>
                 </tbody>
             </table>
@@ -1417,11 +1426,11 @@ ai-memory list -n my-project                                         <span class
 </section>
 
 <!-- ================================================================
-     17 MCP TOOLS
+     43 MCP TOOLS
      ================================================================ -->
 <section id="mcp">
     <div class="container">
-        <h2>23 MCP Tools <span class="badge">Universal Integration</span></h2>
+        <h2>43 MCP Tools <span class="badge">Universal Integration</span></h2>
         <p class="section-subtitle">
             ai-memory runs as a Model Context Protocol (MCP) tool server over stdio.
             Any MCP-compatible AI client -- Claude, ChatGPT, Grok, Llama, or custom agents -- discovers these tools automatically.
@@ -1461,7 +1470,7 @@ ai-memory list -n my-project                                         <span class
                 <!-- MCP Server -->
                 <rect x="275" y="80" width="190" height="60" rx="8" fill="#111111" stroke="#bbbbbb" stroke-width="2"/>
                 <text x="370" y="100" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="13" font-weight="700">MCP Server</text>
-                <text x="370" y="116" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">JSON-RPC / up to 26 tools</text>
+                <text x="370" y="116" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">JSON-RPC / up to 43 tools</text>
                 <text x="370" y="131" text-anchor="middle" fill="#999999" font-family="monospace" font-size="8">--tier keyword|semantic|smart|autonomous</text>
 
                 <!-- Arrow to SQLite -->
@@ -1571,11 +1580,11 @@ ai-memory list -n my-project                                         <span class
 </section>
 
 <!-- ================================================================
-     20 HTTP API ENDPOINTS
+     42 HTTP API ENDPOINTS
      ================================================================ -->
 <section id="api" class="alt">
     <div class="container">
-        <h2>20 HTTP API Endpoints <span class="badge">Universal Fallback</span></h2>
+        <h2>42 HTTP API Endpoints <span class="badge">Universal Fallback</span></h2>
         <p class="section-subtitle">
             Start with <code>ai-memory serve</code> (default: <code>http://127.0.0.1:9077</code>).
             The HTTP API works with any AI platform, any programming language, any framework. If it can make an HTTP request, it can use ai-memory.
@@ -1630,11 +1639,11 @@ ai-memory list -n my-project                                         <span class
 </section>
 
 <!-- ================================================================
-     25 CLI COMMANDS
+     26 CLI COMMANDS
      ================================================================ -->
 <section id="cli">
     <div class="container">
-        <h2>25 CLI Commands <span class="badge">Universal</span></h2>
+        <h2>26 CLI Commands <span class="badge">Universal</span></h2>
         <p class="section-subtitle">
             Global flags: <code>--db &lt;path&gt;</code> and <code>--json</code>.
             Scriptable, pipeable, works in any shell. Use directly or wrap in your AI's tool layer.
@@ -1936,15 +1945,15 @@ ai-memory list -n my-project                                         <span class
                 <!-- Three interfaces -->
                 <rect x="30" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
                 <text x="100" y="102" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="12" font-weight="700">CLI</text>
-                <text x="100" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">25 commands</text>
+                <text x="100" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">26 commands</text>
 
                 <rect x="280" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
                 <text x="350" y="102" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="12" font-weight="700">MCP Server</text>
-                <text x="350" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">26 tools / stdio</text>
+                <text x="350" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">43 tools / stdio</text>
 
                 <rect x="530" y="80" width="140" height="48" rx="8" fill="#111111" stroke="#999999" stroke-width="1.5"/>
                 <text x="600" y="102" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="12" font-weight="700">HTTP API</text>
-                <text x="600" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">24 endpoints / Axum</text>
+                <text x="600" y="118" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">42 endpoints / Axum</text>
 
                 <!-- Labels under interfaces -->
                 <text x="100" y="146" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">Universal</text>
@@ -1973,13 +1982,13 @@ ai-memory list -n my-project                                         <span class
                 <rect x="45" y="252" width="140" height="55" rx="6" fill="#111111" stroke="#cccccc" stroke-width="1.5"/>
                 <text x="115" y="271" text-anchor="middle" fill="#cccccc" font-family="system-ui" font-size="11" font-weight="700">Keyword</text>
                 <text x="115" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">FTS5 only</text>
-                <text x="115" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">0 MB | 13 tools</text>
+                <text x="115" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">0 MB | keyword</text>
 
                 <!-- Semantic tier -->
                 <rect x="200" y="252" width="140" height="55" rx="6" fill="#111111" stroke="#ffffff" stroke-width="1.5"/>
                 <text x="270" y="271" text-anchor="middle" fill="#ffffff" font-family="system-ui" font-size="11" font-weight="700">Semantic</text>
                 <text x="270" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">MiniLM-L6 384d</text>
-                <text x="270" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">256 MB | 14 tools</text>
+                <text x="270" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">256 MB | semantic</text>
                 <!-- Candle label -->
                 <text x="270" y="250" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="7" opacity=".6">candle (local)</text>
 
@@ -1991,7 +2000,7 @@ ai-memory list -n my-project                                         <span class
                 <rect x="355" y="252" width="155" height="55" rx="6" fill="#111111" stroke="#999999" stroke-width="1.5"/>
                 <text x="432" y="271" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="11" font-weight="700">Smart</text>
                 <text x="432" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E2B</text>
-                <text x="432" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">1 GB | 26 tools</text>
+                <text x="432" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">1 GB | smart (full surface)</text>
 
                 <!-- Arrow from semantic to smart -->
                 <line x1="340" y1="280" x2="355" y2="280" stroke="#333333" stroke-width="1" class="animate-flow"/>
@@ -2001,7 +2010,7 @@ ai-memory list -n my-project                                         <span class
                 <rect x="525" y="252" width="190" height="55" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1.5"/>
                 <text x="620" y="271" text-anchor="middle" fill="#bbbbbb" font-family="system-ui" font-size="11" font-weight="700">Autonomous</text>
                 <text x="620" y="284" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">nomic 768d + Gemma4 E4B + reranker</text>
-                <text x="620" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">4 GB | 26 tools + cross-encoder</text>
+                <text x="620" y="298" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="8">4 GB | autonomous + cross-encoder</text>
 
                 <!-- Arrow from smart to autonomous -->
                 <line x1="510" y1="280" x2="525" y2="280" stroke="#333333" stroke-width="1" class="animate-flow"/>

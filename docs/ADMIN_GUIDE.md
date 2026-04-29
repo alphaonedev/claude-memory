@@ -134,10 +134,10 @@ The `--tier` flag controls which features are enabled. Each tier builds on the p
 
 | Tier | Tools | Embedding Model | LLM Required | Approx. Memory |
 |------|-------|----------------|--------------|----------------|
-| `keyword` | 21 | No | No | Minimal |
-| `semantic` (default) | 21 | Yes (HuggingFace) | No | ~256 MB |
-| `smart` | 21 | Yes | Yes (Ollama) | ~1 GB |
-| `autonomous` | 21 | Yes | Yes (Ollama) | ~4 GB |
+| `keyword` | keyword subset | No | No | Minimal |
+| `semantic` (default) | semantic subset | Yes (HuggingFace) | No | ~256 MB |
+| `smart` | smart subset (LLM tools enabled) | Yes | Yes (Ollama) | ~1 GB |
+| `autonomous` | full 43-tool surface | Yes | Yes (Ollama) | ~4 GB |
 
 Set the tier when starting the MCP server or HTTP daemon:
 
@@ -750,7 +750,7 @@ Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint
 
 Maximum request body size: 50 MB.
 
-The HTTP daemon exposes **24 endpoints** under `/api/v1`:
+The HTTP daemon exposes **42 endpoints** under `/api/v1`:
 
 | Method | Path | Description |
 |--------|------|-------------|

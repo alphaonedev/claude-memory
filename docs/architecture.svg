@@ -95,11 +95,11 @@
 
     <rect x="345" y="140" width="160" height="60" class="card-green"/>
     <text x="425" y="164" text-anchor="middle" class="title">HTTP API</text>
-    <text x="425" y="181" text-anchor="middle" class="subtitle">REST · 24 endpoints · :9077</text>
+    <text x="425" y="181" text-anchor="middle" class="subtitle">REST · 42 endpoints · :9077</text>
 
     <rect x="600" y="140" width="160" height="60" class="card-green"/>
     <text x="680" y="164" text-anchor="middle" class="title">CLI</text>
-    <text x="680" y="181" text-anchor="middle" class="subtitle">25 commands · scriptable</text>
+    <text x="680" y="181" text-anchor="middle" class="subtitle">26 commands · scriptable</text>
   </g>
 
   <!-- Flow lines down to validation -->

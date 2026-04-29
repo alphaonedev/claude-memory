@@ -156,7 +156,7 @@ footer a{color:var(--text-muted)}
 
 <section class="hero">
   <h1>Every AI. Every IDE.</h1>
-  <p class="tagline">ai-memory speaks MCP — the open Model Context Protocol. Any compliant host autodiscovers all 26 tools. <strong>Plug in once, share memory across every AI you use.</strong></p>
+  <p class="tagline">ai-memory speaks MCP — the open Model Context Protocol. Any compliant host autodiscovers all 43 tools. <strong>Plug in once, share memory across every AI you use.</strong></p>
   <div class="pill-row">
     <span class="pill">13 clients tested</span>
     <span class="pill">3 tiers (first-class · supported · works-with-MCP)</span>
@@ -194,7 +194,7 @@ footer a{color:var(--text-muted)}
         <div class="client-meta-row">
           <span><span class="ok">✓</span> stdio</span>
           <span><span class="ok">✓</span> session_start hook</span>
-          <span><span class="ok">✓</span> all 26 tools</span>
+          <span><span class="ok">✓</span> all 43 tools</span>
         </div>
         <a class="client-link" href="./#claude-integration">Setup guide →</a>
       </div>
@@ -218,7 +218,7 @@ footer a{color:var(--text-muted)}
   }
 }</pre>
         <div class="client-meta-row">
-          <span><span class="ok">✓</span> ~40 tool limit (we use 26)</span>
+          <span><span class="ok">✓</span> ~40 tool limit (we use 43)</span>
           <span><span class="ok">✓</span> envFile support</span>
         </div>
       </div>
@@ -418,7 +418,7 @@ ai-memory mcp [<span class="key">--tier</span> &lt;keyword|semantic|smart|autono
             <span class="client-tier t3">▸ TIER 3 · DIY</span>
           </div>
         </div>
-        <p class="client-desc">Roll-your-own agents talk to the HTTP daemon. 39 endpoints. Or implement an MCP host shim using the official spec libraries.</p>
+        <p class="client-desc">Roll-your-own agents talk to the HTTP daemon. 42 endpoints. Or implement an MCP host shim using the official spec libraries.</p>
         <pre class="client-config"><span class="cmt"># Python example</span>
 import requests
 r = requests.post(<span class="str">"http://localhost:9077/api/v1/recall"</span>,
@@ -442,7 +442,7 @@ r = requests.post(<span class="str">"http://localhost:9077/api/v1/recall"</span>
         <li>Host sends JSON-RPC <code>initialize</code> with protocolVersion + clientInfo</li>
         <li>ai-memory responds with capabilities + serverInfo</li>
         <li>Host sends <code>tools/list</code></li>
-        <li>ai-memory responds with all 26 tool definitions (name, description, JSON Schema)</li>
+        <li>ai-memory responds with all 43 tool definitions (name, description, JSON Schema)</li>
         <li>Host registers the tools with its model, presents to user as available actions</li>
         <li>User says "remember that I prefer..." → host calls <code>tools/call memory_store ...</code></li>
         <li>ai-memory does the work, returns the result</li>
