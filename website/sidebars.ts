@@ -6,13 +6,13 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Getting started',
       collapsed: false,
-      items: ['intro', 'user/install', 'user/quickstart'],
+      items: ['intro', 'user/install', 'user/quickstart', 'user/import-history'],
     },
     {
       type: 'category',
       label: 'Concepts',
       collapsed: false,
-      items: ['user/tiers', 'user/recall', 'user/namespaces'],
+      items: ['user/tiers', 'user/recall', 'user/namespaces', 'user/agent-identity'],
     },
     {
       type: 'category',

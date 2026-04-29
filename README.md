@@ -26,6 +26,40 @@
 
 ---
 
+## 🆔 Every recall shows you which AI learned the memory
+
+Provenance is built in. Every memory carries `metadata.agent_id` — claimed at write, immutable across update, dedup, sync, consolidate, and import. The default TOON-compact recall format includes `agent_id` as the trailing column, so every AI client sees *who learned* every result alongside *what was learned*:
+
+```
+memories[id|title|tier|namespace|priority|score|tags|agent_id]:
+a1b2|Project DB is PostgreSQL 16|long|infra|8|0.91|database,postgres|ai:claude-code@workstation:pid-3812
+c3d4|API rate limit is 100 rps|long|infra|7|0.87|api,limits|ai:claude-desktop@laptop:pid-5219
+```
+
+No other memory product ships AI provenance as a day-one primitive. Filter recall by agent (`--agent-id`), enforce per-namespace governance, and (in v0.7) extend `agent_id` from claimed to cryptographically signed without changing the schema. → **[Agent identity (NHI) docs](https://alphaonedev.github.io/ai-memory-mcp/docs/user/agent-identity)**
+
+---
+
+## 📥 Five-minute onboarding — paste your conversation history
+
+Make every AI you've ever talked to remember from day one. `ai-memory mine` parses **Claude**, **ChatGPT**, and **Slack** exports into ranked, tiered, recall-ready memories. No re-typing. No copy-paste. No knowledge loss across model changes.
+
+```bash
+# 1. Drop your export here
+# 2. Dry-run to preview
+ai-memory mine ./conversations.json --format chatgpt --dry-run
+
+# 3. Import for real
+ai-memory mine ./conversations.json --format chatgpt
+
+# 4. Recall — ranked across imported + native memories together
+ai-memory recall "what database did we decide on for analytics"
+```
+
+Three formats out of the box: `claude`, `chatgpt`, `slack`. Auto-namespacing, deduplication on `(title, namespace)`, full integration with the recall pipeline + scope visibility + governance. → **[Import your conversation history docs](https://alphaonedev.github.io/ai-memory-mcp/docs/user/import-history)**
+
+---
+
 ## Compatible AI Platforms
 
 ai-memory integrates with any AI platform that supports the **Model Context Protocol (MCP)**. MCP is the universal standard for connecting AI assistants to external tools and data sources.

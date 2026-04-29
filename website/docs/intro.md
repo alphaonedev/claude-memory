@@ -15,6 +15,14 @@ AI agents are stateless by default. Every session starts from zero. Models get r
 
 > No AI agent should ever have to relearn what any AI agent already knows.
 
+## Two day-one differentiators
+
+**🆔 Every recall shows you which AI learned the memory.**
+Provenance is built in. Every memory carries `metadata.agent_id` — claimed at write, immutable across update / sync / consolidate / import, and surfaced as the trailing column on the default TOON-compact recall format. No other memory product ships AI provenance on day one. → [Agent identity (NHI)](/docs/user/agent-identity)
+
+**📥 Five-minute onboarding: paste your old conversations.**
+`ai-memory mine` ingests Claude, ChatGPT, and Slack exports into ranked, tiered, recall-ready memories. Switch tools without losing context. Start your next agent with everything the last one already knew. → [Import your conversation history](/docs/user/import-history)
+
 ## Three audiences
 
 This documentation site is organized for three readers:
