@@ -424,13 +424,13 @@
         </p>
         <div class="stats-row">
             <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
-            <div class="stat"><span class="num">26</span><span class="label">MCP Tools</span></div>
+            <div class="stat"><span class="num">43</span><span class="label">MCP Tools</span></div>
             <div class="stat"><span class="num">4</span><span class="label">Operational Modes</span></div>
-            <div class="stat"><span class="num">191</span><span class="label">Tests</span></div>
+            <div class="stat"><span class="num">1,809</span><span class="label">Tests</span></div>
         </div>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
             <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
-            <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Live Test Results — 1,600 lib · 93.08% cov →</a>
+            <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Live Test Results — 1,809 tests · 93.08% cov →</a>
             <a href="evidence.html" class="hero-cta" style="background:transparent;border:1px solid #c8a2ff;color:#c8a2ff">📐 Frozen Claims (Evidence) →</a>
             <a href="at-a-glance.html" class="hero-cta" style="background:transparent;border:1px solid #999;color:#999">📊 Visualization Atlas →</a>
             <a href="whats-new-v063.html" class="hero-cta" style="background:transparent;border:1px solid #ffb86b;color:#ffb86b">✨ What's New in v0.6.3 →</a>
@@ -489,13 +489,13 @@
             <div class="platform-card" style="text-align:left">
                 <span class="platform-icon">⌥</span>
                 <h4>stdio MCP server</h4>
-                <p>26 native tools over JSON-RPC for Claude, Codex, Cursor, Gemini, Grok, OpenClaw, and any MCP client. Reactive — answers per turn. <code>ai-memory mcp</code></p>
+                <p>43 native tools over JSON-RPC for Claude, Codex, Cursor, Gemini, Grok, OpenClaw, and any MCP client. Reactive — answers per turn. <code>ai-memory mcp</code></p>
                 <span class="platform-tag tag-mcp">MCP</span>
             </div>
             <div class="platform-card" style="text-align:left">
                 <span class="platform-icon">⎈</span>
                 <h4>HTTP / mTLS daemon</h4>
-                <p>24 REST endpoints on <code>127.0.0.1:9077</code>. TLS, optional mTLS allowlist, API-key auth. Runs a background GC loop. <code>ai-memory serve</code></p>
+                <p>42 REST endpoints on <code>127.0.0.1:9077</code>. TLS, optional mTLS allowlist, API-key auth. Runs a background GC loop. <code>ai-memory serve</code></p>
                 <span class="platform-tag tag-http">HTTP</span>
             </div>
             <div class="platform-card" style="text-align:left">
@@ -853,7 +853,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 26 memory tools natively. No daemon, no ports. MCP servers do <strong>not</strong> go in <code>settings.json</code> or <code>settings.local.json</code>. The <code>--tier</code> flag is required — options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
+                    <p style="font-size:.85rem">Restart Claude Code. It will discover all 43 memory tools natively. No daemon, no ports. MCP servers do <strong>not</strong> go in <code>settings.json</code> or <code>settings.local.json</code>. The <code>--tier</code> flag is required — options: <code>keyword</code>, <code>semantic</code> (default), <code>smart</code>, <code>autonomous</code>. Smart/autonomous require <a href="https://ollama.com">Ollama</a>.</p>
                     <p style="font-size:.85rem"><strong>Windows:</strong> Use <code>ai-memory.exe</code> for the command and forward slashes in paths: <code>"C:/Users/YourName/.claude/ai-memory.db"</code></p>
                 </div>
 
@@ -1128,7 +1128,7 @@
     }
   }
 }<span class="lang-label">json</span></code></pre>
-                <p style="font-size:.8rem;color:var(--text-muted)">This gives Claude 17 native memory tools. No daemon, no ports.</p>
+                <p style="font-size:.8rem;color:var(--text-muted)">This gives Claude 43 native memory tools. No daemon, no ports.</p>
             </div>
 
             <!-- Step 2: Disable auto-memory -->
@@ -1398,7 +1398,7 @@ ai-memory list -n my-project                                         <span class
                     <tr><td colspan="5" style="color:var(--text-muted);font-weight:600;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;background:var(--bg-raised)">Resources</td></tr>
                     <tr><td>Total RAM</td><td>0 MB</td><td>~256 MB</td><td>~1 GB</td><td>~4 GB</td></tr>
                     <tr><td>External dependencies</td><td>None</td><td>None</td><td>Ollama</td><td>Ollama</td></tr>
-                    <tr><td>MCP tools exposed</td><td>13</td><td>14</td><td>17</td><td>17</td></tr>
+                    <tr><td>MCP tools exposed</td><td>keyword subset</td><td>semantic subset</td><td>smart subset</td><td>full 43-tool surface</td></tr>
                     <tr><td>Ollama models to pull</td><td class="matrix-dash">&mdash;</td><td class="matrix-dash">&mdash;</td><td><code>nomic-embed-text</code> + <code>gemma4:e2b</code></td><td><code>nomic-embed-text</code> + <code>gemma4:e4b</code></td></tr>
                 </tbody>
             </table>
@@ -2038,7 +2038,7 @@ ai-memory list -n my-project                                         <span class
                 <!-- DB layer -->
                 <rect x="120" y="352" width="360" height="55" rx="8" fill="#111111" stroke="#dddddd" stroke-width="2"/>
                 <text x="300" y="375" text-anchor="middle" fill="#dddddd" font-family="system-ui" font-size="13" font-weight="700">SQLite + FTS5 + HNSW (db.rs)</text>
-                <text x="300" y="395" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">WAL mode | schema v5 | embeddings | 1,600 tests</text>
+                <text x="300" y="395" text-anchor="middle" fill="#999999" font-family="system-ui" font-size="10">WAL mode | schema v5 | embeddings | 1,809 tests</text>
 
                 <!-- Memory tiers -->
                 <rect x="145" y="420" width="70" height="22" rx="4" fill="rgba(255,255,255,.15)" stroke="#ffffff" stroke-width="1"/>
@@ -2217,7 +2217,7 @@ ai-memory list -n my-project                                         <span class
 
                 <rect x="327" y="30" width="80" height="40" rx="6" fill="#111111" stroke="#bbbbbb" stroke-width="1"/>
                 <text x="367" y="48" text-anchor="middle" fill="#bbbbbb" font-family="monospace" font-size="10">test</text>
-                <text x="367" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">1,600 tests</text>
+                <text x="367" y="62" text-anchor="middle" fill="#999999" font-family="monospace" font-size="9">1,809 tests</text>
 
                 <line x1="407" y1="50" x2="427" y2="50" stroke="#333333" stroke-width="1.5" class="animate-flow"/>
 
@@ -2310,7 +2310,7 @@ ai-memory list -n my-project                                         <span class
 <span class="tok-cm"># 3. Run (keyword -- 2.2s)</span>
 <span class="tok-cmd">python3</span> benchmarks/longmemeval/harness_99.py <span class="tok-flag">--dataset-path</span> /tmp/LongMemEval <span class="tok-flag">--variant</span> S <span class="tok-flag">--no-expand</span> <span class="tok-flag">--workers</span> <span class="tok-num">10</span>
 
-<span class="tok-cm"># 4. Run (LLM-expanded -- requires Ollama with gemma3:4b)</span>
+<span class="tok-cm"># 4. Run (LLM-expanded -- benchmark was last run with Ollama gemma3:4b; Gemma 4 refresh pending)</span>
 <span class="tok-cmd">python3</span> benchmarks/longmemeval/harness_99.py <span class="tok-flag">--dataset-path</span> /tmp/LongMemEval <span class="tok-flag">--variant</span> S <span class="tok-flag">--workers</span> <span class="tok-num">10</span><span class="lang-label">bash</span></code></pre>
     </div>
 </section>
@@ -2330,7 +2330,7 @@ ai-memory list -n my-project                                         <span class
             <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/README.md">README</a>
         </div>
         <p>
-            <strong>ai-memory&trade;</strong> v0.5.4 &mdash; AI-Agnostic MCP Memory Server
+            <strong>ai-memory&trade;</strong> v0.6.3 &mdash; AI-Agnostic MCP Memory Server
         </p>
         <p style="margin-top:.5rem">
             Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. ai-memory is a trademark of AlphaOne LLC.

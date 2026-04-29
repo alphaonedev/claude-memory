@@ -174,7 +174,7 @@ footer a{color:var(--text-muted)}
       <div class="summary-tile"><div class="num" style="color:var(--p1)">3</div><div class="lab">Tier 1 · first-class</div></div>
       <div class="summary-tile"><div class="num" style="color:var(--p2)">7</div><div class="lab">Tier 2 · supported</div></div>
       <div class="summary-tile"><div class="num" style="color:var(--p3)">3</div><div class="lab">Tier 3 · works-via-MCP</div></div>
-      <div class="summary-tile"><div class="num">26</div><div class="lab">Tools auto-discovered</div></div>
+      <div class="summary-tile"><div class="num">43</div><div class="lab">Tools auto-discovered</div></div>
     </div>
 
     <div class="client-grid">
@@ -377,8 +377,8 @@ curl https://memory.local:9077/api/v1/recall \
           </div>
         </div>
         <p class="client-desc">Local LLM hosts. ai-memory uses Ollama itself for the smart/autonomous tier; same Ollama instance can also be the agent host.</p>
-        <pre class="client-config"><span class="cmt"># Smart tier requires Ollama running with gemma3:e2b</span>
-ollama pull gemma3:e2b
+        <pre class="client-config"><span class="cmt"># Smart tier requires Ollama running with gemma4:e2b</span>
+ollama pull gemma4:e2b
 ai-memory mcp --tier smart</pre>
       </div>
 

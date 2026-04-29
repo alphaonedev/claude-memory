@@ -189,8 +189,9 @@ footer a{color:var(--text-muted)}
       </thead>
       <tbody>
         <tr><td>Current release</td><td class="num">v0.6.3</td><td class="src">git tag <code>v0.6.3</code> on <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3">main</a> · cut 2026-04-24</td></tr>
-        <tr><td>Test count (lib)</td><td class="num">1,600</td><td class="src">Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> — "1 600/1 600 lib tests pass"</td></tr>
-        <tr><td>Test coverage</td><td class="num">93.08%</td><td class="src">Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> · cargo llvm-cov · gate ≥92%</td></tr>
+        <tr><td>Test count (total)</td><td class="num">1,809</td><td class="src">1,600 lib (cargo test --lib) + 209 integration (cargo test --tests). Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> — "1 600/1 600 lib tests pass" plus integration suite</td></tr>
+        <tr><td>Test count (lib only)</td><td class="num">1,600</td><td class="src">Library tests only — Tier 1 PASS row, "1 600/1 600 lib tests pass"</td></tr>
+        <tr><td>Test coverage</td><td class="num">93.08%</td><td class="src">Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> · cargo llvm-cov · gate ≥92% · release-cut measurement was 93.05% (within rounding of most-recent 93.08%)</td></tr>
         <tr><td>MCP tools (unique)</td><td class="num">43</td><td class="src">Counted from <code>tool_definitions()</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/mcp.rs">src/mcp.rs</a></td></tr>
         <tr><td>HTTP endpoints (unique routes)</td><td class="num">42</td><td class="src">Counted from <code>.route(...)</code> calls across <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/handlers.rs">handlers.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/federation.rs">federation.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/lib.rs">lib.rs</a></td></tr>
         <tr><td>CLI commands</td><td class="num">26</td><td class="src">Counted from the <code>Command</code> enum + dispatch in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/main.rs">src/main.rs</a></td></tr>
@@ -200,7 +201,7 @@ footer a{color:var(--text-muted)}
       </tbody>
     </table>
     <div class="callout">
-      <strong>Note on test-count drift across older pages.</strong> Some older pages reference 191 tests (~v0.6.0 era) or 1,809 tests (mid-v0.6.3 dev cycle). The frozen v0.6.3 release figure is <strong>1,600 lib tests</strong> as published on the test-hub at release-cut. The 1,898 figure from a raw <code>grep #[test]</code> includes attributes inside <code>#[cfg(test)]</code> guards that are not always compiled, plus benchmark scaffolding — it is <em>not</em> the canonical test-pass count. Use 1,600 lib tests as the public number.
+      <strong>Note on test-count framing.</strong> Public materials should lead with the <strong>1,809 total tests</strong> figure (1,600 lib + 209 integration); the 1,600 lib-only number remains exposed as the test-hub Tier 1 row "1 600/1 600 lib tests pass" for procurement teams who want to see library-test isolation. Older pages may reference 191 tests (~v0.6.0 era) — those are stale and should be replaced. The 1,898 figure from a raw <code>grep #[test]</code> includes attributes inside <code>#[cfg(test)]</code> guards that are not always compiled, plus benchmark scaffolding — it is <em>not</em> the canonical test-pass count.
     </div>
   </div>
 </section>
@@ -227,7 +228,7 @@ footer a{color:var(--text-muted)}
       <div class="status-card production">
         <span class="tag">Production-ready</span>
         <h3>MCP + HTTP + CLI surface</h3>
-        <p>43 MCP tools, 42 HTTP routes, 26 CLI commands. Stable contract. Used by Claude Code, Codex, Cursor, Windsurf, Continue.dev, Grok, OpenClaw, Hermes, and Llama integrations today.</p>
+        <p>43 MCP tools, 42 HTTP routes, 26 CLI commands. Stable contract. 1,809 tests passing (1,600 lib + 209 integration) at 93.08% line coverage. Used by Claude Code, Codex, Cursor, Windsurf, Continue.dev, Grok, OpenClaw, Hermes, and Llama integrations today.</p>
       </div>
 
       <div class="status-card production">

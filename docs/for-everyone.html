@@ -223,7 +223,7 @@ footer a{color:var(--text-muted)}
 # That's it.
 
 # Optional: bump to autonomous tier for self-curating memory
-ollama pull gemma3:e2b
+ollama pull gemma4:e2b
 ai-memory mcp --tier autonomous</pre>
       </div>
     </div>
@@ -263,7 +263,7 @@ ai-memory mcp --tier autonomous</pre>
         <h3>▼ Architecture</h3>
         <div class="aud-stack-row"><span class="badge">3 nodes</span> mTLS-federated VPC cluster, Linux x64</div>
         <div class="aud-stack-row"><span class="badge">W=2 / N=3</span> quorum write — survives 1-node loss</div>
-        <div class="aud-stack-row"><span class="badge">tier=smart</span> Ollama gemma3:e2b for auto-tag + contradict</div>
+        <div class="aud-stack-row"><span class="badge">tier=smart</span> Ollama gemma4:e2b for auto-tag + contradict</div>
         <div class="aud-stack-row"><span class="badge">webhook</span> SIEM → Slack on contradiction-detected</div>
         <div class="aud-stack-row"><span class="badge">backup</span> Daily VACUUM INTO + S3 sync of *.db.gz</div>
       </div>
@@ -420,7 +420,7 @@ ai-memory mcp --tier autonomous</pre>
       </div>
       <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p2)">
         <h3 style="margin-bottom:.5rem">93.08% test coverage</h3>
-        <p style="font-size:.9rem">1,600 lib tests. Zero ignored. Four-platform CI (macOS / Ubuntu / Windows / Coverage). <strong>Every PR runs the full matrix.</strong></p>
+        <p style="font-size:.9rem">1,809 tests (1,600 lib + 209 integration). Zero ignored. Four-platform CI (macOS / Ubuntu / Windows / Coverage). <strong>Every PR runs the full matrix.</strong></p>
       </div>
       <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--p2)">
         <h3 style="margin-bottom:.5rem">Single binary</h3>

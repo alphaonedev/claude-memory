@@ -10,7 +10,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-1%2C600_lib_%E2%80%A2_93.08%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Tests](https://img.shields.io/badge/tests-1%2C809_%E2%80%A2_93.08%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
 [![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
 [![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
@@ -551,7 +551,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (42 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **1,600 lib tests** -- 93.08% coverage (gate ≥92%). All numbers frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); per-release detail on the [test-hub v0.6.3 evidence](https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/).
+- **1,809 tests** (1,600 lib + 209 integration) -- 93.08% line coverage (gate ≥92%). All numbers frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); per-release detail on the [test-hub v0.6.3 evidence](https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/).
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
