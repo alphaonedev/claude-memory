@@ -135,7 +135,7 @@ embeddings lose information on long text.
 ## MCP (Model Context Protocol)
 
 Anthropic's JSON-RPC protocol for AI-tool integration. ai-memory ships
-an MCP server via `ai-memory mcp` exposing 23 tools (memory_store,
+an MCP server via `ai-memory mcp` exposing 43 tools (memory_store,
 memory_recall, etc.) + 2 prompts over stdio. Works with Claude Code,
 Claude Desktop, Cursor, Codex, Grok, Gemini, Llama Stack. See
 `docs/USER_GUIDE.md`.

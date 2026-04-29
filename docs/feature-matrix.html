@@ -12,7 +12,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ai-memory · Feature Matrix — every tool, endpoint, command</title>
-<meta name="description" content="Complete surface-area atlas: 26 MCP tools, 39 HTTP endpoints, 28 CLI commands. Every operation cross-referenced across the three protocol fronts.">
+<meta name="description" content="Complete surface-area atlas: 43 MCP tools, 42 HTTP endpoints, 26 CLI commands (canonical counts on the evidence page). Every operation cross-referenced across the three protocol fronts.">
 <meta name="theme-color" content="#0d1117">
 <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/feature-matrix.html">
 <style>
@@ -171,14 +171,16 @@ footer a{color:var(--text-muted)}
   <div class="inner">
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Feature Matrix</span></a>
     <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
       <div class="menu">
         <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
-          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="for-everyone.html">For Everyone</a>
           <a href="feature-matrix.html" class="current">Feature Matrix</a>
           <a href="data-flow.html">Data Flow</a>
           <a href="integrations.html">Integrations</a>
-          <a href="for-everyone.html">For Everyone</a>
+          <a href="import-history.html">Import History</a>
           <a href="release-pipeline.html">Release Pipeline</a>
         </div>
       </div>
@@ -196,6 +198,18 @@ footer a{color:var(--text-muted)}
           <a href="a2a-messaging.html">A2A Messaging</a>
           <a href="lifecycle.html">Lifecycle</a>
           <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
         </div>
       </div>
       <div class="menu">
@@ -209,8 +223,9 @@ footer a{color:var(--text-muted)}
         </div>
       </div>
       <div class="menu">
-        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
         <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
           <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
@@ -280,7 +295,7 @@ footer a{color:var(--text-muted)}
 <!-- =============== MCP TOOLS =============== -->
 <section id="mcp-tools">
   <div class="container">
-    <span class="eyebrow">26 MCP Tools</span>
+    <span class="eyebrow">43 MCP Tools</span>
     <h2>Every tool a host AI can call.</h2>
     <p class="lede">Auto-discovered by Claude Code, Cursor, Codex, Continue, Gemini CLI, Windsurf, and any MCP-compliant client. Tool names follow <code>memory_&lt;verb&gt;</code> convention.</p>
 
@@ -534,7 +549,7 @@ footer a{color:var(--text-muted)}
 <!-- =============== HTTP ENDPOINTS =============== -->
 <section id="http-endpoints">
   <div class="container">
-    <span class="eyebrow">39 HTTP Endpoints</span>
+    <span class="eyebrow">42 HTTP Endpoints</span>
     <h2>REST surface for services + federation peers.</h2>
     <p class="lede">Axum-served. mTLS-aware. CORS layer. Prometheus metrics at <code>/metrics</code>. Body limit 2 MiB. Trace spans on every request. The same operations as MCP, plus federation-private peer endpoints.</p>
 
@@ -626,7 +641,7 @@ footer a{color:var(--text-muted)}
 <!-- =============== CLI =============== -->
 <section id="cli-commands">
   <div class="container">
-    <span class="eyebrow">28 CLI Commands</span>
+    <span class="eyebrow">26 CLI Commands</span>
     <h2>For humans, scripts, and CI.</h2>
     <p class="lede">Direct subcommands of the <code>ai-memory</code> binary. No daemon required for read/write commands. Run against any database file via <code>--db &lt;path&gt;</code>.</p>
 

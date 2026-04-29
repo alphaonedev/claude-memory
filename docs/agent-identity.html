@@ -1,0 +1,325 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Agent identity (NHI) — every memory carries the AI that learned it.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Agent identity (NHI) — provenance for AI knowledge</title>
+<meta name="description" content="Every memory carries the identity of the AI that learned it. Every recall surfaces it. Provenance for AI knowledge — built in from day one.">
+<meta property="og:title" content="ai-memory · Agent identity (NHI)">
+<meta property="og:description" content="metadata.agent_id is a first-class field on every memory. Provenance built in from day one.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/agent-identity.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+pre{font-family:var(--font-mono);font-size:.82rem;background:var(--bg-code);padding:1rem 1.1rem;border-radius:8px;border:1px solid var(--border);overflow-x:auto;line-height:1.55;color:var(--text-muted);margin:1rem 0}
+pre code{padding:0;background:none;font-size:.82rem}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem;margin:1.25rem 0 .35rem}
+p{color:var(--text-muted);margin-bottom:.85rem}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+section h2{font-family:var(--font-sans);font-size:1.6rem;margin-bottom:.6rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+
+ul,ol{padding-left:1.5rem;color:var(--text-muted);font-size:.92rem;margin:.5rem 0 1rem}
+ul li,ol li{margin-bottom:.4rem}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0 1.5rem;font-size:.85rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+table th,table td{padding:.65rem .85rem;text-align:left;border-bottom:1px solid var(--border)}
+table th{background:var(--bg-elev);font-family:var(--font-mono);font-size:.78rem;font-weight:600;color:var(--text);letter-spacing:.04em}
+table td{color:var(--text-muted)}
+table tr:last-child td{border-bottom:none}
+
+blockquote{border-left:4px solid var(--p1);background:rgba(110,231,255,.05);padding:1rem 1.25rem;margin:1.25rem 0;border-radius:0 8px 8px 0;color:var(--text-muted)}
+blockquote strong{color:var(--p1)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Agent Identity</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html" class="current">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Agent identity (NHI)</h1>
+  <p class="tagline">Every memory carries the identity of the AI that learned it. Every recall surfaces it. Provenance for AI knowledge — built in from day one.</p>
+  <div class="pills">
+    <span class="pill">metadata.agent_id</span>
+    <span class="pill">first-class field</span>
+    <span class="pill">claimed → attested</span>
+    <span class="pill">defense in depth</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <blockquote>
+      <strong>Every recall result tells you which AI learned the memory.</strong> This is the differentiator: <code>ai-memory</code> doesn't just store knowledge — it remembers <em>who</em> added it, and that information is in front of every agent that recalls.
+    </blockquote>
+    <p><code>metadata.agent_id</code> is a first-class field on every memory. When your AI calls <code>memory_recall</code>, the response includes a column telling you which agent each result came from — by default, in the token-efficient TOON compact format that AI clients are already optimised for.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">In action</span>
+    <h2>See it.</h2>
+    <p>Default recall output (TOON compact format):</p>
+<pre><code>count:5|mode:hybrid|tokens_used:842
+memories[id|title|tier|namespace|priority|score|tags|agent_id]:
+a1b2|Project DB is PostgreSQL 16|long|infra|8|0.91|database,postgres|ai:claude-code@workstation:pid-3812
+c3d4|API rate limit is 100 rps|long|infra|7|0.87|api,limits|ai:claude-desktop@laptop:pid-5219
+e5f6|Use TOON not JSON for MCP|long|protocol|9|0.82|toon,mcp,tokens|host:pop-os:pid-1144-ad1b9c
+g7h8|Deploy gate fixed for v0.6.3|long|releases|6|0.79|deploy,gate|ai:codex@server:pid-9911
+i9j0|Ship-gate cleanup complete|long|releases|5|0.74|cleanup|alice</code></pre>
+    <p>Eight columns. Last column is <code>agent_id</code>. The recall blends what's relevant (text, semantics, priority, recency) <strong>and</strong> tells you who wrote it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Definition</span>
+    <h2>What <code>agent_id</code> means.</h2>
+    <p><code>agent_id</code> is a <em>claimed</em> identity attached to every memory at write time. It survives every operation that touches the memory: update, dedup, import, sync, consolidate. It's the substrate for filtering, scoping, governance, and (in v0.7) cryptographic attestation.</p>
+    <blockquote>
+      <strong>Honest framing:</strong> <code>agent_id</code> today is <em>claimed</em>, not <em>attested</em>. Don't make security decisions on it without pairing with agent registration (Task 1.3 — upcoming) or attestation (v0.7+). The schema reservation for cryptographic signatures lives at <code>memory_links.signature</code> (schema v15, v0.6.3) and gets wired in v0.7.
+    </blockquote>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Resolution</span>
+    <h2>Resolution precedence.</h2>
+    <p>When <code>ai-memory</code> decides what <code>agent_id</code> to stamp on a new memory:</p>
+
+    <h3>CLI and MCP path</h3>
+    <ol>
+      <li>Explicit value from caller — <code>--agent-id &lt;id&gt;</code> flag, or <code>agent_id</code> field on the MCP tool, or <code>metadata.agent_id</code> embedded in a store request</li>
+      <li><code>AI_MEMORY_AGENT_ID</code> environment variable</li>
+      <li>(MCP only) Captured from <code>initialize.clientInfo.name</code> → e.g. <code>ai:claude-code@workstation:pid-3812</code></li>
+      <li>Stable per-process fallback → <code>host:&lt;hostname&gt;:pid-&lt;pid&gt;-&lt;uuid8&gt;</code></li>
+      <li><code>anonymous:pid-&lt;pid&gt;-&lt;uuid8&gt;</code> if hostname unavailable</li>
+    </ol>
+
+    <h3>HTTP daemon path (multi-tenant — no process-level default)</h3>
+    <ol>
+      <li><code>agent_id</code> field in <code>POST /api/v1/memories</code> body</li>
+      <li><code>X-Agent-Id</code> request header</li>
+      <li>Per-request <code>anonymous:req-&lt;uuid8&gt;</code> (logged at WARN)</li>
+    </ol>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Validation</span>
+    <h2>What's valid.</h2>
+    <ul>
+      <li>Format: <code>^[A-Za-z0-9_\-:@./]{1,128}$</code></li>
+      <li>Permits: <code>ai:</code>, <code>host:</code>, <code>anonymous:</code> prefixes; <code>@</code> scope separator; <code>/</code> for SPIFFE-style IDs</li>
+      <li>Rejects: whitespace, null bytes, control chars, shell metacharacters</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Immutability</span>
+    <h2>Defense in depth.</h2>
+    <p>Once a memory is stored, its <code>agent_id</code> doesn't drift. <strong>Both</strong> the caller layer (<code>identity::preserve_agent_id</code>) and the SQL layer (<code>json_set</code> CASE clauses in <code>db::insert</code> and <code>db::insert_if_newer</code>) enforce preservation across:</p>
+    <ul>
+      <li><code>memory_update</code></li>
+      <li>Upsert / dedup on <code>(title, namespace)</code></li>
+      <li>HTTP <code>PUT /memories/{id}</code></li>
+      <li><code>import</code> from JSON</li>
+      <li><code>sync_push</code> from a peer</li>
+      <li><code>memory_consolidate</code></li>
+    </ul>
+    <p>If a malicious or buggy caller tries to overwrite <code>agent_id</code>, the SQL layer refuses. This is the defense-in-depth NHI invariant from issue #148 / Task 1.2.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Filtering</span>
+    <h2>Filter by agent.</h2>
+    <p>Every recall, list, and search supports <code>agent_id</code> filtering:</p>
+<pre><code># CLI
+ai-memory list --agent-id ai:claude-desktop@laptop:pid-5219
+ai-memory search --agent-id alice "deploy"
+
+# MCP — the agent_id property
+{"name": "memory_search", "arguments": {"query": "deploy", "agent_id": "alice"}}
+
+# HTTP
+curl 'http://127.0.0.1:9077/api/v1/memories?agent_id=alice&query=deploy'</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">System metadata</span>
+    <h2>System-stamped metadata (don't overwrite).</h2>
+    <p>These keys are produced by ai-memory; the system sets them, callers must not.</p>
+    <table>
+      <thead>
+        <tr><th>Key</th><th>When stamped</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>imported_from_agent_id</code></td><td><code>ai-memory import</code> re-stamps the originator's <code>agent_id</code> (absent when <code>--trust-source</code> is passed)</td></tr>
+        <tr><td><code>consolidated_from_agents</code></td><td><code>memory_consolidate</code> records the array of source authors; the consolidator's id becomes the new <code>agent_id</code></td></tr>
+        <tr><td><code>mined_from</code></td><td><code>ai-memory mine</code> stamps the source format (<code>claude</code> / <code>chatgpt</code> / <code>slack</code>) alongside the caller's <code>agent_id</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Privacy</span>
+    <h2>Scrub the leaky default.</h2>
+    <p>The fallback <code>host:&lt;hostname&gt;:pid-&lt;pid&gt;-&lt;uuid8&gt;</code> exposes hostname and PID. <strong>When writing memories to a shared or upstream database, set an opaque <code>--agent-id</code> or <code>AI_MEMORY_AGENT_ID</code>.</strong> Tracking issue: #198.</p>
+<pre><code># Production daemon — opaque identity
+AI_MEMORY_AGENT_ID=fleet-prod-9 ai-memory serve --bind 0.0.0.0:9077
+
+# Or per-CLI-call
+ai-memory --agent-id alice store -T "Auth flow notes" -c "..."</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Why this matters</span>
+    <h2>Provenance is infrastructure.</h2>
+    <p>Every other memory product treats AI knowledge as <strong>anonymous text in a vector DB</strong>. ai-memory treats every memory as a <strong>dated, attributable assertion</strong>. When your fleet of agents grows from one to ten to hundreds:</p>
+    <ul>
+      <li>You can answer <em>"who wrote this?"</em> in every recall — instantly.</li>
+      <li>You can scope retrieval to <em>"show me what <code>ai:secops-skill@*</code> learned this week."</em></li>
+      <li>Per-namespace governance can require approval for writes from specific agents (see <a href="architectures-t2.html" style="color:var(--p1)">Architectures · T2</a> and <a href="architectures-t3.html" style="color:var(--p1)">T3</a>).</li>
+      <li>v0.7 attestation extends <code>agent_id</code> from claimed to cryptographically signed — same field, stronger guarantee.</li>
+    </ul>
+    <p><code>ai-memory</code> ships provenance on day one.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Next</span>
+    <h2>Where to go.</h2>
+    <ul>
+      <li>→ <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/develop/docs/USER_GUIDE.md" style="color:var(--p1)">Recall</a> — full scoring + ranking (in the User Guide)</li>
+      <li>→ <a href="hierarchies.html" style="color:var(--p1)">Namespaces &amp; hierarchies</a> — scope visibility on top of NHI</li>
+      <li>→ <a href="architectures-t2.html" style="color:var(--p1)">Architectures · T2</a> — multi-agent isolation in practice</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+</footer>
+
+</body>
+</html>

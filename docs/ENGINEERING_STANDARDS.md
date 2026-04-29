@@ -121,7 +121,7 @@ cargo audit
 
 ### 2.3 Full Spectrum Functional Test
 
-Run against the compiled binary via CLI. Covers all 26 commands with edge cases. When adding a new command, add a corresponding row to this table.
+Run against the compiled binary via CLI. Covers all 26 CLI commands with edge cases. When adding a new command, add a corresponding row to this table.
 
 | Category | Tests | Scope |
 |----------|:-----:|-------|

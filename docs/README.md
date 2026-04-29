@@ -2,16 +2,16 @@
 
 <div align="center">
 
-## 🎯 Current stable release · **v0.6.2** · A2A-CERTIFIED
+## 🎯 Current stable release · **v0.6.3** · A2A-CERTIFIED · 1,600 lib tests · 93.08% cov
 
-[![Release](https://img.shields.io/badge/release-v0.6.2-brightgreen?logo=github)](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.2)
+[![Release](https://img.shields.io/badge/release-v0.6.3-brightgreen?logo=github)](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3)
 [![A2A Gate](https://img.shields.io/badge/A2A_gate-9%2F9_green-brightgreen)](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)
 [![Ship Gate](https://img.shields.io/badge/ship_gate-green-brightgreen)](https://alphaonedev.github.io/ai-memory-ship-gate/)
 [![crates.io](https://img.shields.io/crates/v/ai-memory)](https://crates.io/crates/ai-memory)
 
-**v0.6.2** cleared the a2a-gate certification bar: three consecutive full-testbook green runs across three agent frameworks and three transport modes — **324 passing scenarios**, zero partial greens.
+**v0.6.3** cleared the a2a-gate certification bar: three consecutive full-testbook green runs across three agent frameworks and three transport modes — **324 passing scenarios**, zero partial greens.
 
-**📦 [Release v0.6.2](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.2)** ·
+**📦 [Release v0.6.3](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3)** ·
 **📊 [A2A gate evidence](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)** ·
 **🚢 [Ship gate](https://alphaonedev.github.io/ai-memory-ship-gate/)** ·
 **📖 [AI-NHI insights](https://alphaonedev.github.io/ai-memory-ai2ai-gate/insights/)** ·

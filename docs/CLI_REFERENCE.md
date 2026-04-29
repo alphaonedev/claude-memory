@@ -179,7 +179,7 @@ records the original claim.
 
 ### `mcp`
 
-Run as an MCP tool server over stdio (JSON-RPC 2.0, 23 tools + 2
+Run as an MCP tool server over stdio (JSON-RPC 2.0, 43 tools + 2
 prompts).
 
 ```bash
