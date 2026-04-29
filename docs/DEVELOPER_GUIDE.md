@@ -1007,7 +1007,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **191 tests** total: 140 unit tests across all 15 modules + 51 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
+The project has **1,600 lib tests at 93.08% coverage** as of v0.6.3 — canonical numbers are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); per-release detail on the [test-hub v0.6.3 evidence](https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/). Modules each carry their own unit-test suite; integration tests live under `tests/`.
 
 ```bash
 # Run all tests

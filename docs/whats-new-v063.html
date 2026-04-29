@@ -13,7 +13,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>What's New in v0.6.3 — Structured Memory + Performance</title>
-<meta name="description" content="v0.6.3 release highlights: hierarchical namespaces, temporal-validity knowledge graph, published performance budgets, 93.05% test coverage, 1809 tests, 2 SSRF defects fixed.">
+<meta name="description" content="v0.6.3 release highlights: hierarchical namespaces, temporal-validity knowledge graph, published performance budgets, 93.08% test coverage, 1,600 lib tests, 2 SSRF defects fixed.">
 <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/whats-new-v063.html">
 <style>
 :root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--warn:#ffb86b;--bad:#ff6b9d;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
@@ -123,14 +123,16 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
   <div class="inner">
     <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ What's New v0.6.3</span></a>
     <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
       <div class="menu">
-        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
-          <a href="whats-new-v063.html" class="current">What's New in v0.6.3</a>
+          <a href="for-everyone.html">For Everyone</a>
           <a href="feature-matrix.html">Feature Matrix</a>
           <a href="data-flow.html">Data Flow</a>
           <a href="integrations.html">Integrations</a>
-          <a href="for-everyone.html">For Everyone</a>
+          <a href="import-history.html">Import History</a>
           <a href="release-pipeline.html">Release Pipeline</a>
         </div>
       </div>
@@ -148,6 +150,18 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
           <a href="a2a-messaging.html">A2A Messaging</a>
           <a href="lifecycle.html">Lifecycle</a>
           <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
         </div>
       </div>
       <div class="menu">
@@ -161,8 +175,9 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
         </div>
       </div>
       <div class="menu">
-        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
         <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
           <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
@@ -183,7 +198,7 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
   <div class="meta">
     <span>56.7% → <strong style="color:var(--good)">93.05%</strong> coverage</span>
     <span style="opacity:.4">·</span>
-    <span><strong style="color:var(--text)">1,809</strong> tests passing</span>
+    <span><strong style="color:var(--text)">1,600</strong> tests passing</span>
     <span style="opacity:.4">·</span>
     <span><strong style="color:var(--text)">26</strong> closers · <strong style="color:var(--text)">9</strong> waves</span>
     <span style="opacity:.4">·</span>
@@ -410,7 +425,7 @@ fn is_private(ip: IpAddr) -> bool {
 
     <div style="background:var(--bg-card);border:1px solid var(--good);border-radius:12px;padding:1.5rem;margin-top:2rem">
       <strong style="color:var(--good)">No outstanding security defects post-campaign.</strong>
-      <p style="margin-top:.5rem">The SSRF fixes shipped with rc1. Both <code>#[ignore]</code> tests are un-ignored and passing. <strong>Zero ignored tests across the whole 1,809-test suite.</strong>
+      <p style="margin-top:.5rem">The SSRF fixes shipped with rc1. Both <code>#[ignore]</code> tests are un-ignored and passing. <strong>Zero ignored tests across the whole 1,600-test suite.</strong>
     </p>
     </div>
   </div>
@@ -427,7 +442,7 @@ fn is_private(ip: IpAddr) -> bool {
       <div class="tile p1"><div class="tile-label">Line coverage</div><div class="tile-num">93.05<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">42,894 / 46,099 lines</div></div>
       <div class="tile p1"><div class="tile-label">Region coverage</div><div class="tile-num">93.11<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">73,150 / 78,564 regions</div></div>
       <div class="tile p1"><div class="tile-label">Function coverage</div><div class="tile-num">92.55<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">3,527 / 3,811 functions</div></div>
-      <div class="tile good"><div class="tile-label">Tests passing</div><div class="tile-num">1,809</div><div class="tile-sub">0 failed · 0 ignored</div></div>
+      <div class="tile good"><div class="tile-label">Tests passing</div><div class="tile-num">1,600</div><div class="tile-sub">0 failed · 0 ignored</div></div>
       <div class="tile good"><div class="tile-label">Net new tests</div><div class="tile-num">~1,200</div><div class="tile-sub">across W3-W12</div></div>
       <div class="tile p2"><div class="tile-label">Closers dispatched</div><div class="tile-num">26</div><div class="tile-sub">across 9 waves</div></div>
       <div class="tile p2"><div class="tile-label">main.rs reduction</div><div class="tile-num">98.3<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">4,511 → 75 lines</div></div>
