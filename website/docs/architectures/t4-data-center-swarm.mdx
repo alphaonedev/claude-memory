@@ -1,0 +1,275 @@
+---
+title: "Tier 4 — Data-center swarm"
+description: Multi-rack deployment with Postgres+pgvector backbone, mTLS peer mesh, per-rack governance — agents swarm across pods. v0.7 roadmap, with shipping primitives called out.
+sidebar_label: T4 · Data-center swarm
+---
+
+<span className="cap-badge cap-today">CORE TODAY · v0.6.3</span>
+<span className="cap-badge cap-roadmap">PG+pgvector GA · v0.7</span>
+
+# Tier 4 — Data-center swarm
+
+Hundreds of nodes. Thousands of agents. Multiple racks. **One coherent memory fabric.**
+
+The core fabric ships in v0.6.3: the peer mesh, **W-of-N quorum-writes**, mTLS with fingerprint allowlist, federated governance, pending decisions, namespace metadata, capabilities introspection v2. The piece still maturing toward GA at this scale is the **shared distributed store** (Postgres + pgvector, behind the `sal-postgres` Cargo feature today, GA targeted v0.7).
+
+The diagram distinguishes shipping vs roadmap: solid edges = today, indigo dashed = v0.7 GA piece.
+
+## Architecture diagram
+
+<div className="arch-diagram">
+  <div className="arch-diagram-title">T4 · Multi-rack swarm · pgvector backbone (roadmap) · quorum writes (roadmap)</div>
+
+  <svg className="arch-svg" viewBox="0 0 940 620" role="img" aria-label="Multi-rack ai-memory data center swarm with Postgres pgvector backbone">
+
+    <defs>
+      <marker id="t4-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+      </marker>
+
+      <linearGradient id="t4-rack-grad" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stopColor="#2dd4bf" stopOpacity="0.10"/>
+        <stop offset="100%" stopColor="#0d9488" stopOpacity="0.04"/>
+      </linearGradient>
+
+      <linearGradient id="t4-pg-grad" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stopColor="#a78bfa" stopOpacity="0.20"/>
+        <stop offset="100%" stopColor="#6366f1" stopOpacity="0.10"/>
+      </linearGradient>
+
+      {/* rack-to-rack mesh */}
+      <path id="t4-RaRb" d="M 230 290 C 320 280, 470 280, 540 290" />
+      <path id="t4-RbRa" d="M 540 310 C 470 320, 320 320, 230 310" />
+      <path id="t4-RbRc" d="M 700 290 C 760 280, 820 280, 850 290" />
+      <path id="t4-RcRb" d="M 850 310 C 820 320, 760 320, 700 310" />
+      <path id="t4-RaRc" d="M 200 320 C 380 480, 700 480, 850 320" />
+
+      {/* nodes-to-pgvector */}
+      <path id="t4-RaPg" d="M 150 380 L 470 545" />
+      <path id="t4-RbPg" d="M 620 380 L 480 545" />
+      <path id="t4-RcPg" d="M 870 380 L 510 545" />
+
+      {/* governance plane */}
+      <path id="t4-gov-Ra" d="M 470 95 L 150 240" />
+      <path id="t4-gov-Rb" d="M 470 95 L 620 240" />
+      <path id="t4-gov-Rc" d="M 470 95 L 870 240" />
+    </defs>
+
+    {/* CENTRAL GOVERNANCE PLANE */}
+    <g>
+      <rect x="350" y="40" width="240" height="65" rx="10" fill="rgba(250,204,21,0.14)" stroke="#facc15" strokeWidth="1.6" />
+      <text x="470" y="60" textAnchor="middle" className="node-label">Federated control plane</text>
+      <text x="470" y="76" textAnchor="middle" className="sub-label">namespace_meta · governance policy</text>
+      <text x="470" y="91" textAnchor="middle" className="sub-label">pending decisions · capabilities v2</text>
+    </g>
+
+    {/* GOVERNANCE EDGES */}
+    {['t4-gov-Ra','t4-gov-Rb','t4-gov-Rc'].map(id => (
+      <use key={id} href={`#${id}`} className="edge" stroke="#facc15" strokeWidth="1.4" markerEnd="url(#t4-arrow)" style={{color: '#facc15', opacity: 0.55}} strokeDasharray="3 2" />
+    ))}
+
+    {/* RACKS */}
+    {[
+      {x: 50,  label: 'Rack A · zone-a', ip: '10.1.0.0/24'},
+      {x: 510, label: 'Rack B · zone-a', ip: '10.1.1.0/24'},
+      {x: 760, label: 'Rack C · zone-b', ip: '10.1.2.0/24'},
+    ].map((rack, ri) => (
+      <g key={ri}>
+        <rect x={rack.x} y="160" width="180" height="240" rx="12"
+              fill="url(#t4-rack-grad)" stroke="#2dd4bf" strokeWidth="1.4" />
+        <text x={rack.x + 90} y="180" textAnchor="middle" className="node-label" style={{fontSize: '12px'}}>{rack.label}</text>
+        <text x={rack.x + 90} y="195" textAnchor="middle" className="sub-label">{rack.ip}</text>
+
+        {/* 4 ai-memory nodes per rack */}
+        {[0, 1, 2, 3].map(i => (
+          <g key={i}>
+            <rect x={rack.x + 14} y={210 + i * 45} width="152" height="36" rx="6" className="node" />
+            <text x={rack.x + 22} y={228 + i * 45} className="sub-label" style={{fontSize: '10px'}} fontWeight="600">ai-memory-{ri}-{i}</text>
+            <text x={rack.x + 22} y={240 + i * 45} className="sub-label">8 agents · scope-isolated</text>
+            {/* per-node mini icons */}
+            <circle cx={rack.x + 130} cy={228 + i * 45} r="3" fill="#2dd4bf" />
+            <circle cx={rack.x + 140} cy={228 + i * 45} r="3" fill="#facc15" />
+            <circle cx={rack.x + 150} cy={228 + i * 45} r="3" fill="#a78bfa" />
+          </g>
+        ))}
+      </g>
+    ))}
+
+    {/* RACK-TO-RACK MESH (sync_push, today) */}
+    {['t4-RaRb','t4-RbRa','t4-RbRc','t4-RcRb','t4-RaRc'].map(id => (
+      <use key={id} href={`#${id}`} className="edge" stroke="#a78bfa" strokeWidth="1.5" markerEnd="url(#t4-arrow)" style={{color: '#a78bfa', opacity: 0.55}} />
+    ))}
+
+    {/* PGVECTOR BACKBONE — ROADMAP */}
+    <g>
+      <rect x="370" y="510" width="240" height="80" rx="12"
+            fill="url(#t4-pg-grad)" stroke="#a78bfa" strokeWidth="1.6" strokeDasharray="6 3" />
+      <text x="490" y="533" textAnchor="middle" className="node-label" style={{fontSize: '12px'}}>Postgres + pgvector</text>
+      <text x="490" y="550" textAnchor="middle" className="sub-label">--features sal-postgres</text>
+      <text x="490" y="565" textAnchor="middle" className="sub-label">shared store · shared HNSW</text>
+      <text x="490" y="580" textAnchor="middle" className="sub-label" fontWeight="700" fill="#a78bfa">ROADMAP · v0.7 Track B</text>
+    </g>
+
+    {/* node-to-pgvector edges (roadmap) */}
+    {['t4-RaPg','t4-RbPg','t4-RcPg'].map(id => (
+      <use key={id} href={`#${id}`} className="edge-roadmap" markerEnd="url(#t4-arrow)" style={{color: '#a78bfa'}} />
+    ))}
+
+    {/* PARTICLES — sync_push (today) */}
+    {['t4-RaRb','t4-RbRa','t4-RbRc','t4-RcRb','t4-RaRc'].map((id, i) => (
+      <circle key={`fp-${id}`} r="3.5" className="flow flow-sync">
+        <animateMotion dur="3.2s" repeatCount="indefinite" begin={`${(i * 0.4) % 3.2}s`}>
+          <mpath href={`#${id}`} />
+        </animateMotion>
+      </circle>
+    ))}
+
+    {/* PARTICLES — governance plane fanout */}
+    {['t4-gov-Ra','t4-gov-Rb','t4-gov-Rc'].map((id, i) => (
+      <circle key={`gp-${id}`} r="3" className="flow flow-policy">
+        <animateMotion dur="3.6s" repeatCount="indefinite" begin={`${i * 0.6}s`}>
+          <mpath href={`#${id}`} />
+        </animateMotion>
+      </circle>
+    ))}
+
+    {/* PARTICLES — pgvector (slower, indigo, dashed look) */}
+    {['t4-RaPg','t4-RbPg','t4-RcPg'].map((id, i) => (
+      <circle key={`pg-${id}`} r="2.5" className="flow flow-sync" opacity="0.6">
+        <animateMotion dur="4.8s" repeatCount="indefinite" begin={`${i * 0.8}s`}>
+          <mpath href={`#${id}`} />
+        </animateMotion>
+      </circle>
+    ))}
+
+    {/* QUORUM ANNOTATION — now SHIPPING */}
+    <g transform="translate(40, 430)">
+      <rect x="0" y="0" width="350" height="60" rx="8" fill="rgba(34,197,94,0.10)" stroke="#22c55e" strokeWidth="1.4" />
+      <text x="12" y="22" className="sub-label" fontWeight="700" fill="#16a34a">Quorum-write contract — SHIPS TODAY</text>
+      <text x="12" y="38" className="sub-label">--quorum-writes N --quorum-peers a,b,c</text>
+      <text x="12" y="52" className="sub-label">503 quorum_not_met on timeout · ADR-0001 realised</text>
+    </g>
+
+    {/* mTLS annotation — fingerprint allowlist real */}
+    <g transform="translate(560, 430)">
+      <rect x="0" y="0" width="340" height="60" rx="8" fill="rgba(45,212,191,0.10)" stroke="#2dd4bf" strokeWidth="1.4" />
+      <text x="12" y="22" className="sub-label" fontWeight="700" fill="#0d9488">mTLS peer mesh + fingerprint allowlist</text>
+      <text x="12" y="38" className="sub-label">--tls-cert · --tls-key · --mtls-allowlist (SHA-256)</text>
+      <text x="12" y="52" className="sub-label">peer-mesh identity gate — refuses unknown certs</text>
+    </g>
+
+  </svg>
+
+  <div className="arch-legend">
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#a78bfa'}}></span>sync_push mesh (today)</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#facc15'}}></span>federated control plane</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#a78bfa', opacity: 0.5}}></span>pgvector / quorum (roadmap)</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#2dd4bf'}}></span>mTLS peer transport</span>
+  </div>
+
+  <div className="arch-diagram-caption">
+    Solid lines ship today. Dashed indigo lines are v0.7 Track B (Postgres + pgvector backbone) and Track C (quorum-write contract).
+    The federated control plane already propagates governance policy and pending decisions across all racks via sync_push.
+  </div>
+</div>
+
+## Quorum-write contract — shipping
+
+The big T4-relevant capability that's already wired:
+
+- `src/main.rs:405-411` — `--quorum-writes N` enables W-of-N replication; `--quorum-peers a,b,c` lists targets.
+- `src/handlers.rs:442-454` — write path calls `broadcast_store_quorum` then `finalise_quorum`. Local commit + (W-1) peer acks within `--quorum-timeout-ms` (default 2000) → `200 OK` with the achieved ack count returned in the response. Falling short → `503 quorum_not_met`.
+- Same wiring on `link`, `consolidate`, `pending_decision`, `namespace_meta`, and the `clear_namespace_meta` path.
+- mTLS for the outbound side via `--quorum-client-cert` / `--quorum-client-key` / `--quorum-ca-cert`.
+
+ADR-0001 is realised, not aspirational. Phase 1 (scaffold) and Phase 2 (wired into write path) shipped. Phase 3 (chaos harness) and Phase 4 (formal convergence-bound report) are still work — the convergence guarantees in production are exercised by the a2a-gate scenario suite (CHANGELOG #325/#326/#327).
+
+## Track B — Postgres + pgvector backbone
+
+The single-SQLite-per-node ceiling bites at T4 scale (>10⁶ memories per node, hot writers). The structural fix is a **shared store**.
+
+**Today (v0.6.x):** `sal-postgres` Cargo feature flag exists; `sqlx` + `pgvector` deps wired. The Postgres adapter compiles and runs; correctness fixes shipped in v0.6.0 pre-tag (#294 SAL upsert key alignment, #295 `metadata.agent_id` immutability via `jsonb_set`, #296 tier-downgrade protection via SQL `tier_rank()`, #297 schema parity with 6 tables + generated `scope_idx` column). That work is the foundation.
+
+**v0.7 GA:** Performance maturation, migration tool for SQLite→Postgres on existing fleets, pgvector index tuning at >10⁷ memories, official deployment recipes.
+
+What the shared store unlocks at GA:
+
+- Horizontal read scaling (Postgres read replicas).
+- Shared vector index across the fleet — one embedding stored once.
+- Standard Postgres operational primitives — backups, PITR, monitoring.
+- Network filesystems no longer dangerous (the SQLite `fcntl` lock issue goes away).
+
+## What ships today at this scale
+
+Every primitive used in the T3 diagram extends to T4 — the topology just gets denser.
+
+- **Rack-to-rack peer mesh** — `sync_push` works the same whether you have 4 nodes or 40. The number of edges is `n*(n-1)/2` for full mesh, which is a gossip cost the operator should plan for. Most T4 deployments will use a **partial mesh** with a few designated bridge nodes per rack.
+- **Federated governance plane** — `broadcast_namespace_meta_quorum` and `broadcast_pending_decision_quorum` mean a tightening of policy on `org/eu/finance` propagates to every rack, every node. v0.6.3 capabilities introspection lets every agent and operator confirm that the policy version they're seeing matches the published version.
+- **Per-rack pending queues** — Approval workflows can be scoped to a rack (`rack-a/approvers`) so on-call shifts work cleanly even at fleet scale.
+- **mTLS** — `rustls` is already wired in the peer transport. Enforcement is opt-in today; it's the obvious default at T4.
+- **Capabilities introspection v2** — Operators can fleet-scan `/api/v1/capabilities` to confirm every node is on the same schema version and feature tier. Drift is an alerting condition, not a surprise.
+
+## Honest limits
+
+| Dimension | Today (v0.6.3) | v0.7 GA |
+|---|---|---|
+| Total memories per cluster | bounded by per-node HNSW RAM | pgvector → 10⁸+ |
+| Write durability across racks | **W-of-N quorum** (`--quorum-writes N`) | unchanged |
+| Partition tolerance | quorum-bounded divergence; `503 quorum_not_met` on shortfall | unchanged |
+| Operational primitives | per-node SQLite, replicated; backups per node | Postgres ecosystem (PITR, replicas, central monitoring) |
+| Vector index drift | each node embeds & indexes independently | shared pgvector |
+| mTLS | enforced via fingerprint allowlist | unchanged |
+
+A 10-rack, 100-node fleet with 3-of-5 quorum is in scope today. The v0.7 piece that's still maturing is the **Postgres backbone** — the vector-index drift across nodes and the per-node SQLite operational footprint are the things shared-store fixes.
+
+## Deployment recipe
+
+Today, with quorum + mTLS allowlist:
+
+```bash
+# rack-a/node-2 — quorum 3-of-5 across the rack, mTLS enforced
+ai-memory --db /var/lib/ai-memory/store.db serve \
+  --bind 0.0.0.0:9077 \
+  --tier semantic \
+  --quorum-writes 3 \
+  --quorum-peers https://rack-a-1:9077,https://rack-a-3:9077,https://rack-b-1:9077,https://rack-b-2:9077,https://rack-c-1:9077 \
+  --quorum-timeout-ms 1500 \
+  --tls-cert /etc/ai-memory/tls.crt \
+  --tls-key /etc/ai-memory/tls.key \
+  --mtls-allowlist /etc/ai-memory/peer-fingerprints.txt \
+  --quorum-client-cert /etc/ai-memory/client.crt \
+  --quorum-client-key /etc/ai-memory/client.key \
+  --quorum-ca-cert /etc/ai-memory/ca.crt \
+  --catchup-interval-secs 15
+```
+
+v0.7 GA target — same node, swap to Postgres-backed store:
+
+```bash
+ai-memory serve \
+  --store-url postgres://ai-memory@pg-cluster.svc.cluster.local:5432/store \
+  --bind 0.0.0.0:9077 \
+  --tier semantic \
+  --quorum-writes 3 \
+  --quorum-peers https://rack-a-1:9077,https://rack-a-3:9077,https://rack-b-1:9077
+```
+
+The `peer-fingerprints.txt` file lists trusted SHA-256 fingerprints (one per line, optional `:` separators, `#` comments). The `--mtls-allowlist` flag's presence is what makes mTLS enforcement *required* — if a peer's cert isn't on the list, the connection is refused at TLS handshake.
+
+## Governance, skills, and attestations at T4
+
+- **Governance** — Same machinery as T2/T3, just at scale. The federated control plane is the central nervous system: a single policy update on `org/eu/finance` reaches every node within seconds. Pending-action queues are visible per-rack for on-call routing.
+- **Skills** — Skills register as agents and get the same scope visibility. At T4, skills are typically pinned to specific racks (latency, data-residency) but their outputs (tags, contradictions, consolidations) propagate fleet-wide via `sync_push`.
+- **Attestations** — v0.7 attested identity is the gating capability for trustworthy multi-tenant T4. Without it, the cluster is "trust-the-network" — operationally fine inside a controlled VPC, not fine for cross-tenant or cross-organization deployments.
+
+## Source-of-truth references
+
+- `src/main.rs:405-447` — quorum-write CLI surface
+- `src/main.rs:230` — `--store-url postgres://...` URL syntax
+- `src/main.rs:380-393` — TLS / mTLS allowlist enforcement
+- `src/handlers.rs:442-454, 524-540` — `broadcast_store_quorum` + ack counting
+- `src/replication.rs` (422 lines) — `QuorumWriter` + `AckTracker` (functional)
+- `Cargo.toml` — `sal-postgres` feature, sqlx + pgvector deps
+- `CHANGELOG.md` — v0.6.0 pre-tag SAL fixes (#294-#297), v0.6.2 fanout bugs (#325-#327)
+- `docs/ADR-0001-quorum-replication.md` — realised design
+- `docs/ARCHITECTURAL_LIMITS.md` — the honest ceiling on each dimension

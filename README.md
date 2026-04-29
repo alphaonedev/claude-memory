@@ -5,6 +5,13 @@
 <h1 align="center">ai-memory&trade;</h1>
 <p align="center"><em>universal AI memory</em></p>
 
+<p align="center">
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/"><strong>📖 Documentation</strong></a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/user/quickstart">Quickstart</a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/admin/deployment">Admin guide</a> &middot;
+  <a href="https://alphaonedev.github.io/ai-memory-mcp/docs/developer/architecture">Developer guide</a>
+</p>
+
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
 [![Bench](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml)
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
@@ -34,6 +41,40 @@ The MCP, HTTP, and CLI surfaces are reactive. The curator is the part that makes
 **Substrate for multi-agent AI.** ai-memory is not an agent runtime and not "autonomous AI" on its own. It is the memory layer that *multi-agent* autonomous deployments need underneath them. Federation (`broadcast_store_quorum` + `spawn_catchup_loop`) handles W-of-N consistency across peers when many agents write in parallel; the curator daemon keeps the shared corpus from degrading into noise as a swarm scribbles into it; webhook subscriptions (HMAC-signed, namespace/agent-filtered, SSRF-hardened) turn the store into a message bus that triggers downstream agents on memory events; namespace hierarchy with N-level inheritance and per-namespace governance policies (write/promote/delete authority, approver type, optional N-of-M consensus) bound the swarm. Stack this under a 24/7 multi-machine agent runner with auto-generated skills, and the combined system clears the *behavioral* bar for autonomous AI. The remaining gaps (no weight-level learning, stateless reasoning kernel, human-seeded root goals) are real and not what ai-memory addresses; ai-memory provides the multi-agent memory substrate that any serious attempt at closing those gaps will need.
 
 **Zero token cost until recall.** Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation -- burning tokens and money on every message -- ai-memory uses zero context tokens until the AI explicitly calls `memory_recall`. Only relevant memories come back, ranked by a 6-factor scoring algorithm. **TOON format** (Token-Oriented Object Notation) cuts response tokens by another 40-60% by eliminating repeated field names -- 3 memories in JSON = 1,600 bytes; in TOON = 626 bytes (61% smaller); in TOON compact = 336 bytes (79% smaller). For Claude Code users: **disable auto-memory** (`"autoMemoryEnabled": false` in settings.json) and replace it with ai-memory to stop paying for 200+ lines of memory context on every single message.
+
+---
+
+## 🆔 Every recall shows you which AI learned the memory
+
+Provenance is built in. Every memory carries `metadata.agent_id` — claimed at write, immutable across update, dedup, sync, consolidate, and import. The default TOON-compact recall format includes `agent_id` as the trailing column, so every AI client sees *who learned* every result alongside *what was learned*:
+
+```
+memories[id|title|tier|namespace|priority|score|tags|agent_id]:
+a1b2|Project DB is PostgreSQL 16|long|infra|8|0.91|database,postgres|ai:claude-code@workstation:pid-3812
+c3d4|API rate limit is 100 rps|long|infra|7|0.87|api,limits|ai:claude-desktop@laptop:pid-5219
+```
+
+No other memory product ships AI provenance as a day-one primitive. Filter recall by agent (`--agent-id`), enforce per-namespace governance, and (in v0.7) extend `agent_id` from claimed to cryptographically signed without changing the schema. → **[Agent identity (NHI) docs](https://alphaonedev.github.io/ai-memory-mcp/docs/user/agent-identity)**
+
+---
+
+## 📥 Five-minute onboarding — paste your conversation history
+
+Make every AI you've ever talked to remember from day one. `ai-memory mine` parses **Claude**, **ChatGPT**, and **Slack** exports into ranked, tiered, recall-ready memories. No re-typing. No copy-paste. No knowledge loss across model changes.
+
+```bash
+# 1. Drop your export here
+# 2. Dry-run to preview
+ai-memory mine ./conversations.json --format chatgpt --dry-run
+
+# 3. Import for real
+ai-memory mine ./conversations.json --format chatgpt
+
+# 4. Recall — ranked across imported + native memories together
+ai-memory recall "what database did we decide on for analytics"
+```
+
+Three formats out of the box: `claude`, `chatgpt`, `slack`. Auto-namespacing, deduplication on `(title, namespace)`, full integration with the recall pipeline + scope visibility + governance. → **[Import your conversation history docs](https://alphaonedev.github.io/ai-memory-mcp/docs/user/import-history)**
 
 ---
 

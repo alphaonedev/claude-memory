@@ -1,0 +1,199 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620" font-family="'Segoe UI',system-ui,-apple-system,sans-serif" font-size="13">
+  <defs>
+    <style>
+      .bg { fill: #0d1117; }
+      .card { fill: #161b22; stroke: #30363d; stroke-width: 1.5; rx: 8; }
+      .card-accent { fill: #161b22; stroke: #58a6ff; stroke-width: 1.5; rx: 8; }
+      .card-green { fill: #161b22; stroke: #3fb950; stroke-width: 1.5; rx: 8; }
+      .card-orange { fill: #161b22; stroke: #d29922; stroke-width: 1.5; rx: 8; }
+      .card-purple { fill: #161b22; stroke: #bc8cff; stroke-width: 1.5; rx: 8; }
+      .title { fill: #f0f6fc; font-weight: 700; font-size: 14px; }
+      .subtitle { fill: #8b949e; font-size: 11px; }
+      .label { fill: #c9d1d9; font-size: 12px; }
+      .label-bold { fill: #f0f6fc; font-size: 12px; font-weight: 600; }
+      .dim { fill: #484f58; }
+      .line { stroke: #30363d; stroke-width: 1.5; fill: none; }
+      .line-flow { stroke: #58a6ff; stroke-width: 1.5; fill: none; stroke-dasharray: 6 4; }
+      .line-green { stroke: #3fb950; stroke-width: 1.5; fill: none; stroke-dasharray: 6 4; }
+      .dot { fill: #58a6ff; }
+      .dot-green { fill: #3fb950; }
+
+      @keyframes dash { to { stroke-dashoffset: -40; } }
+      @keyframes pulse { 0%,100% { opacity: 0.4; } 50% { opacity: 1; } }
+      @keyframes fadein { from { opacity: 0; } to { opacity: 1; } }
+
+      .flow-anim { animation: dash 2s linear infinite; }
+      .flow-anim-green { animation: dash 2.5s linear infinite; }
+      .pulse { animation: pulse 2s ease-in-out infinite; }
+      .fade1 { animation: fadein 0.5s ease both; }
+      .fade2 { animation: fadein 0.5s ease 0.15s both; }
+      .fade3 { animation: fadein 0.5s ease 0.3s both; }
+      .fade4 { animation: fadein 0.5s ease 0.45s both; }
+      .fade5 { animation: fadein 0.5s ease 0.6s both; }
+    </style>
+  </defs>
+
+  <!-- Background -->
+  <rect width="900" height="620" class="bg"/>
+
+  <!-- ========== ROW 1: AI Platforms ========== -->
+  <g class="fade1">
+    <rect x="30" y="20" width="100" height="52" class="card-accent"/>
+    <text x="80" y="42" text-anchor="middle" class="title">Claude</text>
+    <text x="80" y="57" text-anchor="middle" class="subtitle">Anthropic</text>
+
+    <rect x="145" y="20" width="100" height="52" class="card-accent"/>
+    <text x="195" y="42" text-anchor="middle" class="title">ChatGPT</text>
+    <text x="195" y="57" text-anchor="middle" class="subtitle">OpenAI</text>
+
+    <rect x="260" y="20" width="100" height="52" class="card-accent"/>
+    <text x="310" y="42" text-anchor="middle" class="title">Grok</text>
+    <text x="310" y="57" text-anchor="middle" class="subtitle">xAI</text>
+
+    <rect x="375" y="20" width="100" height="52" class="card-accent"/>
+    <text x="425" y="42" text-anchor="middle" class="title">Cursor</text>
+    <text x="425" y="57" text-anchor="middle" class="subtitle">IDE</text>
+
+    <rect x="490" y="20" width="100" height="52" class="card-accent"/>
+    <text x="540" y="42" text-anchor="middle" class="title">Windsurf</text>
+    <text x="540" y="57" text-anchor="middle" class="subtitle">Codeium</text>
+
+    <rect x="605" y="20" width="100" height="52" class="card-accent"/>
+    <text x="655" y="42" text-anchor="middle" class="title">OpenClaw</text>
+    <text x="655" y="57" text-anchor="middle" class="subtitle">🦞</text>
+
+    <rect x="720" y="20" width="100" height="52" class="card-accent"/>
+    <text x="770" y="42" text-anchor="middle" class="title">Llama</text>
+    <text x="770" y="57" text-anchor="middle" class="subtitle">META</text>
+
+    <rect x="835" y="20" width="40" height="52" class="card"/>
+    <text x="855" y="50" text-anchor="middle" class="label" style="font-size:18px">…</text>
+  </g>
+
+  <!-- Flow lines from platforms down -->
+  <g>
+    <line x1="80" y1="72" x2="80" y2="110" class="line-flow flow-anim"/>
+    <line x1="195" y1="72" x2="195" y2="110" class="line-flow flow-anim"/>
+    <line x1="310" y1="72" x2="310" y2="110" class="line-flow flow-anim"/>
+    <line x1="425" y1="72" x2="425" y2="110" class="line-flow flow-anim"/>
+    <line x1="540" y1="72" x2="540" y2="110" class="line-flow flow-anim"/>
+    <line x1="655" y1="72" x2="655" y2="110" class="line-flow flow-anim"/>
+    <line x1="770" y1="72" x2="770" y2="110" class="line-flow flow-anim"/>
+    <!-- Horizontal connector -->
+    <line x1="80" y1="110" x2="770" y2="110" class="line-flow flow-anim"/>
+    <!-- Down to interfaces -->
+    <line x1="170" y1="110" x2="170" y2="140" class="line-flow flow-anim"/>
+    <line x1="425" y1="110" x2="425" y2="140" class="line-flow flow-anim"/>
+    <line x1="680" y1="110" x2="680" y2="140" class="line-flow flow-anim"/>
+  </g>
+
+  <!-- ========== ROW 2: Interfaces ========== -->
+  <g class="fade2">
+    <rect x="90" y="140" width="160" height="60" class="card-green"/>
+    <text x="170" y="164" text-anchor="middle" class="title">MCP Server</text>
+    <text x="170" y="181" text-anchor="middle" class="subtitle">stdio · JSON-RPC · 21 tools</text>
+
+    <rect x="345" y="140" width="160" height="60" class="card-green"/>
+    <text x="425" y="164" text-anchor="middle" class="title">HTTP API</text>
+    <text x="425" y="181" text-anchor="middle" class="subtitle">REST · 24 endpoints · :9077</text>
+
+    <rect x="600" y="140" width="160" height="60" class="card-green"/>
+    <text x="680" y="164" text-anchor="middle" class="title">CLI</text>
+    <text x="680" y="181" text-anchor="middle" class="subtitle">25 commands · scriptable</text>
+  </g>
+
+  <!-- Flow lines down to validation -->
+  <g>
+    <line x1="170" y1="200" x2="170" y2="230" class="line-flow flow-anim"/>
+    <line x1="425" y1="200" x2="425" y2="230" class="line-flow flow-anim"/>
+    <line x1="680" y1="200" x2="680" y2="230" class="line-flow flow-anim"/>
+    <line x1="170" y1="230" x2="680" y2="230" class="line-flow flow-anim"/>
+    <line x1="425" y1="230" x2="425" y2="250" class="line-flow flow-anim"/>
+  </g>
+
+  <!-- ========== ROW 3: Validation ========== -->
+  <g class="fade3">
+    <rect x="300" y="250" width="250" height="50" class="card"/>
+    <text x="425" y="272" text-anchor="middle" class="title">Validation &amp; Error Handling</text>
+    <text x="425" y="288" text-anchor="middle" class="subtitle">validate.rs · errors.rs · models.rs</text>
+  </g>
+
+  <!-- Flow down to core -->
+  <g>
+    <line x1="425" y1="300" x2="425" y2="330" class="line-flow flow-anim"/>
+  </g>
+
+  <!-- ========== ROW 4: Core Engine ========== -->
+  <g class="fade4">
+    <rect x="130" y="330" width="590" height="80" class="card-purple"/>
+
+    <!-- DB -->
+    <text x="220" y="355" text-anchor="middle" class="title">SQLite + FTS5</text>
+    <text x="220" y="372" text-anchor="middle" class="subtitle">WAL mode · 3 tables</text>
+    <text x="220" y="398" text-anchor="middle" class="subtitle">db.rs · schema v4</text>
+
+    <!-- Divider -->
+    <line x1="330" y1="340" x2="330" y2="400" class="line" style="opacity:0.3"/>
+
+    <!-- Recall -->
+    <text x="425" y="355" text-anchor="middle" class="title">Hybrid Recall</text>
+    <text x="425" y="372" text-anchor="middle" class="subtitle">60/40 semantic/keyword</text>
+    <text x="425" y="398" text-anchor="middle" class="subtitle">reranker.rs · hnsw.rs</text>
+
+    <!-- Divider -->
+    <line x1="520" y1="340" x2="520" y2="400" class="line" style="opacity:0.3"/>
+
+    <!-- Config -->
+    <text x="630" y="355" text-anchor="middle" class="title">Tier Engine</text>
+    <text x="630" y="372" text-anchor="middle" class="subtitle">keyword → autonomous</text>
+    <text x="630" y="398" text-anchor="middle" class="subtitle">config.rs · 4 tiers</text>
+  </g>
+
+  <!-- Flow down to pipelines -->
+  <g>
+    <line x1="280" y1="410" x2="280" y2="445" class="line-green flow-anim-green"/>
+    <line x1="570" y1="410" x2="570" y2="445" class="line-green flow-anim-green"/>
+  </g>
+
+  <!-- ========== ROW 5: ML Pipelines ========== -->
+  <g class="fade5">
+    <rect x="130" y="445" width="280" height="65" class="card-orange"/>
+    <text x="270" y="468" text-anchor="middle" class="title">Embedding Pipeline</text>
+    <text x="270" y="484" text-anchor="middle" class="subtitle">candle ML · MiniLM-L6-v2 (384d)</text>
+    <text x="270" y="499" text-anchor="middle" class="subtitle">nomic-embed-text (768d) · semantic+</text>
+
+    <rect x="440" y="445" width="280" height="65" class="card-orange"/>
+    <text x="580" y="468" text-anchor="middle" class="title">LLM Pipeline</text>
+    <text x="580" y="484" text-anchor="middle" class="subtitle">Ollama · Gemma 4 E2B/E4B</text>
+    <text x="580" y="499" text-anchor="middle" class="subtitle">query expansion · auto-tag · smart+</text>
+  </g>
+
+  <!-- ========== ROW 6: Memory Tiers ========== -->
+  <g>
+    <line x1="425" y1="410" x2="425" y2="535" class="line-green flow-anim-green"/>
+  </g>
+  <g class="fade5">
+    <rect x="215" y="535" width="110" height="55" class="card"/>
+    <text x="270" y="557" text-anchor="middle" class="label-bold" style="color:#3fb950">short</text>
+    <text x="270" y="575" text-anchor="middle" class="subtitle">TTL: 6 hours</text>
+
+    <rect x="345" y="535" width="110" height="55" class="card"/>
+    <text x="400" y="557" text-anchor="middle" class="label-bold" style="color:#d29922">mid</text>
+    <text x="400" y="575" text-anchor="middle" class="subtitle">TTL: 7 days</text>
+
+    <rect x="475" y="535" width="110" height="55" class="card"/>
+    <text x="530" y="557" text-anchor="middle" class="label-bold" style="color:#58a6ff">long</text>
+    <text x="530" y="575" text-anchor="middle" class="subtitle">permanent</text>
+
+    <!-- Auto-promote arrow -->
+    <path d="M 380 590 Q 400 608 420 590" class="line-green flow-anim-green" marker-end="none"/>
+    <text x="400" y="615" text-anchor="middle" class="subtitle" style="fill:#3fb950">auto-promote @ 5 accesses</text>
+  </g>
+
+  <!-- Pulsing dots on flow lines -->
+  <circle cx="425" cy="120" r="3" class="dot pulse"/>
+  <circle cx="425" cy="240" r="3" class="dot pulse" style="animation-delay:0.3s"/>
+  <circle cx="425" cy="315" r="3" class="dot pulse" style="animation-delay:0.6s"/>
+  <circle cx="280" cy="430" r="3" class="dot-green pulse" style="animation-delay:0.9s"/>
+  <circle cx="570" cy="430" r="3" class="dot-green pulse" style="animation-delay:1.2s"/>
+</svg>

@@ -1,0 +1,263 @@
+---
+title: "Tier 5 — Global hive"
+description: Multi-region cloud, attested agent identity, federated governance, hundreds of thousands to millions of agents acting as a unified collective. The vision tier.
+sidebar_label: T5 · Global hive
+---
+
+<span className="cap-badge cap-future">VISION · v1.0+</span>
+<span className="cap-badge cap-today">primitives composable today</span>
+
+# Tier 5 — Global hive
+
+The north star.
+
+Multiple cloud regions. Hundreds of thousands to millions of agents. Cross-organization federation with **cryptographically attested identity**. A unified collective of artificial minds that can reason over a shared knowledge graph while still respecting trust boundaries, jurisdictional rules, and per-namespace governance.
+
+This tier is **vision territory**. It is what ai-memory is being built toward. The honest framing: every primitive on every diagram below is either shipping in v0.6.3, on the v0.7 roadmap, or scoped explicitly for v1.0+ with the design documented in an ADR or roadmap doc. There is **no fiction** on this page — only the destination, drawn explicitly so the path is legible.
+
+## Architecture diagram
+
+<div className="arch-diagram">
+  <div className="arch-diagram-title">T5 · Multi-region · attested · federated · collective</div>
+
+  <svg className="arch-svg" viewBox="0 0 940 660" role="img" aria-label="Multi-region global hive of ai-memory clusters with attested agent identity">
+
+    <defs>
+      <marker id="t5-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+      </marker>
+
+      <radialGradient id="t5-globe-grad" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stopColor="#2dd4bf" stopOpacity="0.18"/>
+        <stop offset="70%" stopColor="#0d9488" stopOpacity="0.06"/>
+        <stop offset="100%" stopColor="#0d9488" stopOpacity="0"/>
+      </radialGradient>
+
+      <linearGradient id="t5-attest-grad" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0%" stopColor="#f472b6" stopOpacity="0.20"/>
+        <stop offset="100%" stopColor="#be185d" stopOpacity="0.08"/>
+      </linearGradient>
+
+      {/* region-to-region inter-cloud edges */}
+      <path id="t5-NA-EU" d="M 200 280 C 350 200, 540 200, 660 280" />
+      <path id="t5-EU-NA" d="M 660 300 C 540 380, 350 380, 200 300" />
+      <path id="t5-EU-APAC" d="M 720 280 C 800 220, 870 220, 870 290" />
+      <path id="t5-APAC-EU" d="M 850 290 C 820 340, 760 340, 720 300" />
+      <path id="t5-NA-APAC" d="M 180 320 C 350 540, 730 540, 870 320" />
+
+      {/* attest plane */}
+      <path id="t5-att-NA" d="M 470 80 L 200 250" />
+      <path id="t5-att-EU" d="M 470 80 L 660 250" />
+      <path id="t5-att-APAC" d="M 470 80 L 870 250" />
+
+      {/* hive consensus pulses */}
+      <path id="t5-hive" d="M 200 280 Q 470 480, 870 280" />
+    </defs>
+
+    {/* ATTESTATION ROOT */}
+    <g>
+      <rect x="320" y="32" width="300" height="80" rx="14"
+            fill="url(#t5-attest-grad)" stroke="#f472b6" strokeWidth="1.6" />
+      <text x="470" y="55" textAnchor="middle" className="node-label" style={{fontSize: '13px'}}>Federated identity & attestation root</text>
+      <text x="470" y="73" textAnchor="middle" className="sub-label">agent keypairs · signed memories · signed links</text>
+      <text x="470" y="88" textAnchor="middle" className="sub-label">memory_links.signature (v0.6.3 reserved · v0.7 wired)</text>
+      <text x="470" y="103" textAnchor="middle" className="sub-label" fontWeight="700" fill="#be185d">v1.0+ · zero-trust cross-org</text>
+    </g>
+
+    {/* ATTEST EDGES */}
+    {['t5-att-NA','t5-att-EU','t5-att-APAC'].map(id => (
+      <use key={id} href={`#${id}`} className="edge-roadmap" stroke="#f472b6" markerEnd="url(#t5-arrow)" style={{color: '#f472b6'}} />
+    ))}
+
+    {/* REGIONS — NA, EU, APAC */}
+    {[
+      {x: 80,  y: 200, label: 'us-east · us-west', tag: 'NA region', count: '12 clusters'},
+      {x: 540, y: 200, label: 'eu-west · eu-central', tag: 'EU region', count: '8 clusters'},
+      {x: 770, y: 200, label: 'ap-northeast · ap-south', tag: 'APAC region', count: '6 clusters'},
+    ].map((reg, ri) => (
+      <g key={ri}>
+        <rect x={reg.x} y={reg.y} width="160" height="135" rx="14"
+              fill="url(#t5-globe-grad)" stroke="#2dd4bf" strokeWidth="1.5" />
+        <text x={reg.x + 80} y={reg.y + 22} textAnchor="middle" className="node-label">{reg.tag}</text>
+        <text x={reg.x + 80} y={reg.y + 38} textAnchor="middle" className="sub-label">{reg.label}</text>
+        <text x={reg.x + 80} y={reg.y + 53} textAnchor="middle" className="sub-label">{reg.count}</text>
+
+        {/* mini cluster icons */}
+        {[0, 1, 2].map(c => (
+          <g key={c}>
+            <rect x={reg.x + 18 + c * 44} y={reg.y + 65} width="36" height="36" rx="6" className="node" />
+            <text x={reg.x + 36 + c * 44} y={reg.y + 80} textAnchor="middle" className="sub-label" style={{fontSize: '8px'}}>cluster</text>
+            <text x={reg.x + 36 + c * 44} y={reg.y + 92} textAnchor="middle" className="sub-label">{c + 1}</text>
+          </g>
+        ))}
+
+        <text x={reg.x + 80} y={reg.y + 117} textAnchor="middle" className="sub-label">~10⁵ agents</text>
+        <text x={reg.x + 80} y={reg.y + 130} textAnchor="middle" className="sub-label">jurisdictional governance</text>
+      </g>
+    ))}
+
+    {/* INTER-REGION MESH */}
+    {['t5-NA-EU','t5-EU-NA','t5-EU-APAC','t5-APAC-EU','t5-NA-APAC'].map(id => (
+      <use key={id} href={`#${id}`} className="edge" stroke="#a78bfa" strokeWidth="1.5" markerEnd="url(#t5-arrow)" style={{color: '#a78bfa', opacity: 0.5}} />
+    ))}
+
+    {/* PARTICLES — inter-region sync */}
+    {['t5-NA-EU','t5-EU-NA','t5-EU-APAC','t5-APAC-EU','t5-NA-APAC'].map((id, i) => (
+      <circle key={`fp-${id}`} r="3.5" className="flow flow-sync">
+        <animateMotion dur="5.4s" repeatCount="indefinite" begin={`${(i * 0.7) % 5.4}s`}>
+          <mpath href={`#${id}`} />
+        </animateMotion>
+      </circle>
+    ))}
+
+    {/* ATTESTATION particles */}
+    {['t5-att-NA','t5-att-EU','t5-att-APAC'].map((id, i) => (
+      <circle key={`ap-${id}`} r="3" className="flow flow-attest">
+        <animateMotion dur="4.2s" repeatCount="indefinite" begin={`${i * 0.5}s`}>
+          <mpath href={`#${id}`} />
+        </animateMotion>
+      </circle>
+    ))}
+
+    {/* DISTRIBUTED CONSENSUS RAIL */}
+    <g>
+      <rect x="60" y="400" width="820" height="80" rx="12" fill="rgba(99,102,241,0.10)" stroke="#a78bfa" strokeWidth="1.4" strokeDasharray="6 3" />
+      <text x="470" y="425" textAnchor="middle" className="node-label" style={{fontSize: '13px'}}>Distributed consensus rail · Raft / Paxos / Tangle</text>
+      <text x="470" y="442" textAnchor="middle" className="sub-label">strong consistency for governance writes · split-brain resolution · jurisdictional boundary enforcement</text>
+      <text x="470" y="458" textAnchor="middle" className="sub-label">gossip / DHT for many-node discovery</text>
+      <text x="470" y="475" textAnchor="middle" className="sub-label" fontWeight="700" fill="#a78bfa">v1.0+ VISION · scoped, not yet designed</text>
+    </g>
+
+    {/* HIVE EMERGENT BEHAVIOR */}
+    <g transform="translate(60, 510)">
+      <rect x="0" y="0" width="820" height="115" rx="12" fill="rgba(45,212,191,0.06)" stroke="#2dd4bf" strokeWidth="1.4" />
+      <text x="410" y="22" textAnchor="middle" className="node-label" style={{fontSize: '13px'}}>Hive properties — what becomes possible at this scale</text>
+      <text x="410" y="40" textAnchor="middle" className="sub-label">emergent collective recall · cross-region knowledge transfer · jurisdictional sandboxing</text>
+      <text x="410" y="56" textAnchor="middle" className="sub-label">attested provenance for every memory · zero-trust agent-to-agent · auditable lineage</text>
+      <text x="410" y="72" textAnchor="middle" className="sub-label">temporal-validity KG (v0.6.3) replays past states · point-in-time recall across the fleet</text>
+      <text x="410" y="88" textAnchor="middle" className="sub-label">policy-as-code at every namespace level · differential privacy on cross-tenant recall</text>
+      <text x="410" y="104" textAnchor="middle" className="sub-label" fontWeight="700" fill="#0d9488">composed from primitives shipping today + v0.7 + v1.0</text>
+    </g>
+
+  </svg>
+
+  <div className="arch-legend">
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#a78bfa'}}></span>inter-region sync (eventually consistent today, quorum v0.7)</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#f472b6'}}></span>attested identity (v0.7 wired, v1.0 fleet-trust)</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#a78bfa', opacity: 0.5}}></span>consensus rail (v1.0+ vision)</span>
+    <span className="arch-legend-item"><span className="arch-legend-dot" style={{background: '#2dd4bf'}}></span>regional cluster (T4 pattern)</span>
+  </div>
+
+  <div className="arch-diagram-caption">
+    Each region is a T4 cluster pattern — composed of T3 cluster cells, composed of T2 multi-tenant nodes, composed of T1 primitives.
+    What's new at T5: cryptographic attestation, distributed consensus for governance, and emergent collective behavior.
+  </div>
+</div>
+
+## What's actually new at T5 (vs T4)
+
+T5 is **not** "more nodes than T4." The same cluster shape scales to thousands of nodes via T4's mechanisms. T5 is the tier where **trust** and **consistency model** change qualitatively.
+
+### Cryptographic agent attestation
+
+At T1–T4, an agent's identity is **claimed** via `metadata.agent_id`. At T5 it must be **proven**.
+
+The plumbing is already in v0.6.3 schema:
+- `memory_links.signature` column (schema v15) — reserved at v0.6.3, populated with claimed identity, will be cryptographically signed at v0.7.
+- The `observed_by` column on `memory_links` records which agent observed the relationship — paired with `signature` this becomes provable provenance.
+
+What's needed to reach the T5 trust model:
+- Agent keypair issuance and rotation.
+- Signature verification on every `sync_push` ingress — peers refuse incoming memories with bad signatures.
+- Revocation list distribution.
+- Hardware-backed key custody for high-trust agents (TPM / Secure Enclave / Cloud KMS).
+
+This is **v1.0+ work**. The schema reservation at v0.6.3 is the down-payment.
+
+### Distributed consensus for governance
+
+At T3/T4, governance policies and pending decisions are **eventually consistent**. Two operators on partitioned sides of the cluster can both approve the same pending action. Last-write-wins resolves it on rejoin.
+
+At T5 — with millions of agents and cross-jurisdictional rules — that's not enough. A change to `org/eu/personal-data` policy under GDPR has to be **strongly consistent** before any agent in any region commits a write under the new rule. This is the use case for a Raft-class consensus log on the **governance plane only** (not on the memory write path — that stays eventually consistent for performance).
+
+The architectural separation:
+- **Memory writes** — eventually consistent, quorum-bounded (v0.7 Track C).
+- **Governance writes** — strongly consistent via consensus rail (v1.0+).
+
+Memories are append-mostly; governance is small, infrequent, and high-stakes. Different consistency models for different planes.
+
+### Jurisdictional boundary enforcement
+
+At T5, namespaces aren't just visibility scopes — they're legal boundaries. The federated control plane has to enforce things like:
+
+- *"`org/eu/*` memories may only be physically resident in `eu-*` regions."*
+- *"Cross-region recall against `org/healthcare/*` requires policy assertion `hipaa_compliant=true` on the requesting agent."*
+- *"Audit log for any `org/finance/trading/*` write must be fsync'd to two independent storage backends in distinct AZs."*
+
+These policies compose from existing primitives (namespace + governance + capabilities introspection + attested identity). They become enforceable when v1.0 wires the consensus rail and the attestation chain.
+
+### Emergent collective behavior
+
+What makes T5 a **hive** rather than just a big cluster:
+
+- **Cross-region knowledge transfer** — A discovery in NA can propagate (or be rejected) by every other region's policy engine within seconds.
+- **Temporal-validity KG replay** — v0.6.3's `memory_kg_query(as_of=...)` plus the temporal columns (`valid_from`, `valid_until`, `observed_by`) means an agent can ask "what did the collective know at 14:23 UTC last Tuesday?" and get a deterministic answer across the fleet.
+- **Point-in-time provenance** — Every memory has a signed origin and a tracked validity window. A regulator's request "show me what informed this decision" returns a verifiable lineage.
+- **Differential privacy on cross-tenant recall** — Roadmap. The scope-visibility filter is the foundational primitive; DP noise on aggregated recalls is the v1.0+ cap.
+
+Each of these is a composition of primitives that ship today + v0.7 + v1.0. Nothing on the T5 list is a new fundamental capability — it's what becomes **operationally possible** when the lower-tier pieces are all in place at scale.
+
+## What ships today that contributes to the hive vision
+
+A pleasant amount, actually:
+
+- **Hierarchical namespace + scope visibility** — the substrate for jurisdictional boundaries.
+- **Per-namespace governance with pending workflows** — the substrate for policy-as-code.
+- **Federated governance fanout** — every node sees the same policy, eventually.
+- **Federated pending-decision sync** — approve/reject propagates fleet-wide.
+- **Vector-clock causality** — the substrate for "what did the fleet know when."
+- **Temporal-validity KG (v0.6.3)** — `valid_from` / `valid_until` / `observed_by` columns on every link.
+- **Capabilities introspection v2 (v0.6.3)** — runtime trust assessment per node.
+- **Hierarchical taxonomy (v0.6.3)** — tree views over the global namespace tree.
+- **`signature` column reserved (v0.6.3)** — the schema down-payment for attestation.
+- **Entity registry & aliases (v0.6.3)** — global entity identity, the substrate for cross-tenant identity resolution.
+
+## Honest gap analysis — what blocks T5 today
+
+| Capability | Today | v0.7 | v1.0+ |
+|---|---|---|---|
+| Quorum-write contract | ❌ | ✅ Track C | — |
+| Postgres + pgvector backbone | ❌ | ✅ Track B | — |
+| Cryptographic agent attestation | reserved | partial wiring | full chain |
+| Distributed consensus (governance plane) | ❌ | ❌ | designed |
+| Gossip / DHT (many-node discovery) | ❌ | ❌ | designed |
+| Cross-region failover / quorum bounds | ❌ | ❌ | designed |
+| Differential privacy on recall | ❌ | ❌ | designed |
+| Hardware-backed key custody | ❌ | ❌ | designed |
+| Multi-tenant policy-as-code DSL | partial (JSON policies) | enriched | full DSL |
+
+This is the honest road. Each row that flips from ❌ to ✅ is a discrete piece of engineering with a tracked owner and an ADR.
+
+## Why this tier matters
+
+ai-memory is a primitive. **Primitives compose.** The same MCP protocol surface, the same recall pipeline, the same governance contract that runs on a developer's laptop is what runs in the fleet at T5. There is no separate "enterprise edition" or rebuild — there is the primitive, scaled.
+
+That property — **identical surface area from one agent to the global hive** — is what makes the architecture credible. It's what lets a startup at T2 grow to T5 without rewriting their integration. It's what lets a research collective federate with a corporation while preserving each side's governance.
+
+The compounding value:
+
+- **Memory becomes infrastructure** — like a CDN, like DNS. Any agent, anywhere, can ask "what does the collective know about X?" and get an answer that respects every relevant policy.
+- **Trust becomes verifiable** — attested provenance means "agent A asserted this at time T from cluster C with these capabilities" is provable, not merely claimed.
+- **Governance becomes federated** — a policy update in one rack lands in every rack. A pending approval on one continent is visible on every other.
+- **Knowledge becomes durable** — the temporal-validity KG means past states are queryable. "What did the fleet think on 2026-01-15?" is a deterministic answer.
+
+That's the hive. It's worth building toward, even if v0.7 and v1.0 are still out there.
+
+## Source-of-truth references
+
+- `docs/ROADMAP-ladybug.md` — Track A (T1/T2 polish), B (Postgres), C (quorum), D (attestation)
+- `docs/ADR-0001-quorum-replication.md` — quorum write design
+- `docs/ARCHITECTURAL_LIMITS.md` — honest ceiling on every dimension
+- `src/models.rs` — `MemoryLink` (with v15 `valid_from`, `valid_until`, `observed_by`, `signature`)
+- `src/db.rs` — schema v15 migration (entity_aliases, KG tables, temporal indexes)
+- v0.6.3 release notes — taxonomy, KG layer, capabilities v2, entity registry
