@@ -2,6 +2,27 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Required Reading at Session Start (AI agents)
+
+Before proposing any change to this repository, load the following into context:
+
+- [`docs/AI_DEVELOPER_WORKFLOW.md`](docs/AI_DEVELOPER_WORKFLOW.md) — the eight-phase
+  workflow every AI session must follow (recall → plan → branch → implement → gates →
+  self-review → PR → handoff).
+- [`docs/AI_DEVELOPER_GOVERNANCE.md`](docs/AI_DEVELOPER_GOVERNANCE.md) — authority
+  classes (Trivial / Standard / Sensitive / Restricted), attribution rules, security
+  policy, memory governance, and the hard prohibitions you must never violate.
+- [`docs/ENGINEERING_STANDARDS.md`](docs/ENGINEERING_STANDARDS.md) — code, test,
+  security, and release standards.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor procedures.
+
+Then run `memory_session_start` followed by `memory_recall <task topic>` to load
+project memory before responding. Default namespace for this repo is `ai-memory-mcp`.
+
+Every commit you author must end with a `Co-Authored-By:` trailer naming the model.
+Every PR you open must include the **AI involvement** section described in
+[`AI_DEVELOPER_WORKFLOW.md` §8.2](docs/AI_DEVELOPER_WORKFLOW.md).
+
 ## Build & Test Commands
 
 ```bash
@@ -65,7 +86,7 @@ All three interfaces share the same database (`src/db.rs`) and validation (`src/
 Recall is multi-stage and **never read-only** — every recall mutates the database:
 
 1. **FTS5 keyword search** — fuzzy OR query, scored by `fts.rank + priority*0.5 + access_count*0.1 + confidence*2.0 + tier_bonus + recency_factor`
-2. **Semantic search** — cosine similarity via HNSW index (or linear scan fallback), threshold >0.3
+2. **Semantic search** — cosine similarity via HNSW index (or linear scan fallback), threshold >0.2 (relaxed from 0.3 in v0.6.2 Patch 2 after scenario-18 caught a miss at 0.25-0.29 cosine for legitimately-related content)
 3. **Adaptive blending** — `final = semantic_weight * cosine + (1 - semantic_weight) * norm_fts`. Semantic weight varies 0.50 (short content ≤500 chars) → 0.15 (long content ≥5000 chars) because embeddings lose information on long text
 4. **Touch operations** (atomic) — increment `access_count`, extend TTL (1h short / 1d mid), auto-promote mid→long at 5 accesses, increment priority every 10 accesses
 
@@ -81,9 +102,60 @@ SQLite with WAL mode, FTS5 virtual table for full-text search, schema version v7
 
 - `AI_MEMORY_DB` — database path override
 - `AI_MEMORY_NO_CONFIG=1` — skip loading `~/.config/ai-memory/config.toml`
+- `AI_MEMORY_AGENT_ID` — default `agent_id` for memories this process writes (see §Agent Identity below)
 - `RUST_LOG` — tracing filter (e.g. `RUST_LOG=ai_memory=debug`)
 
 Config precedence: CLI flags > config file > compiled defaults.
+
+### Agent Identity (NHI) — `metadata.agent_id`
+
+Every stored memory carries `metadata.agent_id` — a best-effort Non-Human Identity
+marker. See design discussion on issue #148. **agent_id is a *claimed* identity,
+not an *attested* one** — do not use it for security decisions without pairing
+with agent registration (Task 1.3, upcoming).
+
+**Resolution precedence (CLI and MCP):**
+
+1. Explicit value from caller (`--agent-id` flag, MCP `agent_id` tool param, or
+   `metadata.agent_id` embedded in an MCP store request)
+2. `AI_MEMORY_AGENT_ID` environment variable
+3. (MCP only) Value captured from `initialize.clientInfo.name` →
+   `ai:<client>@<hostname>:pid-<pid>`
+4. `host:<hostname>:pid-<pid>-<uuid8>` (stable per-process)
+5. `anonymous:pid-<pid>-<uuid8>` (fallback if hostname unavailable)
+
+**HTTP daemon mode** is multi-tenant, so there is no process-level default:
+
+1. `agent_id` field in `POST /api/v1/memories` body
+2. `X-Agent-Id` request header
+3. Per-request `anonymous:req-<uuid8>` (logged at WARN)
+
+**Validation:** `^[A-Za-z0-9_\-:@./]{1,128}$` — permits prefixed forms
+(`ai:`, `host:`, `anonymous:`), `@` scope separator, `/` for future SPIFFE-style
+ids. Rejects whitespace, null bytes, control chars, shell metacharacters.
+
+**Immutability:** Once a memory is stored, `metadata.agent_id` is preserved across
+update, dedup (UPSERT), MCP `memory_update`, HTTP `PUT /memories/{id}`, import,
+sync, and consolidate. Preservation is enforced at both caller layer
+(`identity::preserve_agent_id`) and SQL layer (`json_set` CASE clauses in
+`db::insert` and `db::insert_if_newer`).
+
+**Filter by agent_id:** `list` and `search` accept `--agent-id <id>` (CLI), the
+`agent_id` property (MCP tool), or `?agent_id=<id>` (HTTP query param).
+
+**Special metadata keys produced by the system** (do not overwrite):
+
+- `imported_from_agent_id` — original claim preserved when `ai-memory import`
+  restamps agent_id with caller's id (absent when `--trust-source` is passed)
+- `consolidated_from_agents` — array of source authors, preserved on
+  `memory_consolidate` (the consolidator's id becomes `agent_id`)
+- `mined_from` — source format tag (`claude` / `chatgpt` / `slack`) stamped by
+  `ai-memory mine` alongside the caller's `agent_id`
+
+**Defaults that leak:** The fallback `host:<hostname>:pid-…` exposes hostname and
+PID. When writing memories to a shared or upstream database, set `--agent-id` or
+`AI_MEMORY_AGENT_ID` to something scrubbed (an opaque identifier, `alice`, etc.).
+Tracking issue: #198.
 
 ## Adding New Functionality
 

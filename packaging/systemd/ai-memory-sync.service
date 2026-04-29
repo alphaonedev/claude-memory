@@ -1,0 +1,60 @@
+[Unit]
+Description=ai-memory sync-daemon — pulls/pushes memories to peer instances
+Documentation=https://github.com/alphaonedev/ai-memory-mcp
+After=network-online.target ai-memory.service
+Wants=network-online.target
+# Co-running only — sync-daemon talks to the local ai-memory.service via its
+# HTTP port, so the parent service must be up.
+Requires=ai-memory.service
+
+[Service]
+Type=simple
+User=ai-memory
+Group=ai-memory
+# Peers are per-deployment. Set via Environment file or drop-in:
+#   /etc/ai-memory/sync.env   →   PEERS=https://peer-a.example:9077,https://peer-b.example:9077
+EnvironmentFile=-/etc/ai-memory/sync.env
+# Interval tuned conservatively; operators may override.
+# --client-cert / --client-key / --mtls-allowlist come from the env file
+# when mTLS is required between peers.
+ExecStart=/bin/sh -c '/usr/bin/ai-memory sync-daemon --peers "$PEERS" --interval 60 $EXTRA_ARGS'
+Restart=on-failure
+RestartSec=15s
+
+Environment=RUST_LOG=ai_memory=info
+
+# --- hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Read-only access to the TLS key material directory if configured.
+ReadOnlyPaths=-/etc/ai-memory
+# Shares the state dir with ai-memory.service so sync state is visible.
+ReadWritePaths=/var/lib/ai-memory
+
+LimitNOFILE=16384
+MemoryMax=512M
+TasksMax=128
+
+[Install]
+WantedBy=multi-user.target

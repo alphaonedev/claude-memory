@@ -1,0 +1,346 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Memory lifecycle atlas — full end-to-end memory journey.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Lifecycle — store to purge, end to end</title>
+<meta name="description" content="ai-memory v0.6.3 memory lifecycle. The full journey of a memory from store → tier → access → promote → link → consolidate → expire → archive → restore or purge. With timeline visualization.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/lifecycle.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(255,184,107,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.timeline-svg{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;margin-bottom:1.5rem}
+
+.stage{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1rem;position:relative;overflow:hidden}
+.stage::before{content:"";position:absolute;top:0;left:0;bottom:0;width:4px;background:var(--p1)}
+.stage.s1::before{background:var(--good)}
+.stage.s2::before{background:var(--p3)}
+.stage.s3::before{background:var(--p2)}
+.stage.s4::before{background:var(--gold)}
+.stage.s5::before{background:#a5d6a7}
+.stage.s6::before{background:var(--bad)}
+.stage-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.stage-num{font-family:var(--font-mono);font-size:.78rem;color:var(--text-dim);letter-spacing:.04em}
+.stage-name{font-family:var(--font-mono);font-size:1.15rem;font-weight:700;color:var(--text)}
+.stage-when{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);padding:.15em .55em;border:1px solid var(--border-hl);border-radius:4px}
+.stage-desc{color:var(--text-muted);font-size:.9rem;margin-bottom:.85rem}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--gold)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+.snip .num{color:var(--p1)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Lifecycle</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html" class="current">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The full journey of a memory.</h1>
+  <p class="tagline">From <strong>store</strong> to <strong>archived</strong> (or <strong>purged</strong>) — every state a memory can hold, every transition between them, every MCP tool that drives the change. Six stages. One narrative. The lifecycle that makes "memory that doesn't drown you" possible.</p>
+  <div class="pills">
+    <span class="pill">6 stages</span>
+    <span class="pill">11 transitions</span>
+    <span class="pill">restore-by-default</span>
+    <span class="pill">audit-trailed end-to-end</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Timeline</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">A memory through time.</h2>
+    <p class="lede">An illustrative example: a memory enters at Mid tier, gets accessed twice (each access bumps the TTL), gets linked to a related memory, gets consolidated with siblings into a Long-tier retro, the original ages into the archive, and finally gets purged after a 30-day compliance window.</p>
+    <svg class="timeline-svg" viewBox="0 0 1180 320" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        .axis{stroke:#3d3d3d;stroke-width:1.2}
+        .grid{stroke:#262626;stroke-width:1;stroke-dasharray:2 4}
+        .lab{fill:#999;font-family:monospace;font-size:11px}
+        .lab.big{fill:#fff;font-size:13px;font-weight:700}
+        .ev{font-family:monospace;font-size:10px}
+        .ev.t1{fill:#6ee7ff}
+        .ev.t2{fill:#c8a2ff}
+        .ev.t3{fill:#ffb86b}
+        .ev.t4{fill:#ffd700}
+        .ev.t5{fill:#a5d6a7}
+        .ev.t6{fill:#ff6b9d}
+        .pt{stroke-width:0}
+        .pt.t1{fill:#6ee7ff}
+        .pt.t2{fill:#c8a2ff}
+        .pt.t3{fill:#ffb86b}
+        .pt.t4{fill:#ffd700}
+        .pt.t5{fill:#a5d6a7}
+        .pt.t6{fill:#ff6b9d}
+        .lifeline{stroke:#999;stroke-width:2;fill:none}
+      </style>
+      <!-- X axis -->
+      <line class="axis" x1="60" y1="240" x2="1130" y2="240"/>
+      <!-- Time markers -->
+      <text class="lab" x="100" y="260" text-anchor="middle">day 0</text>
+      <text class="lab" x="280" y="260" text-anchor="middle">day 1</text>
+      <text class="lab" x="460" y="260" text-anchor="middle">day 3</text>
+      <text class="lab" x="640" y="260" text-anchor="middle">day 7</text>
+      <text class="lab" x="820" y="260" text-anchor="middle">day 14</text>
+      <text class="lab" x="1000" y="260" text-anchor="middle">day 44</text>
+      <text class="lab big" x="600" y="290" text-anchor="middle">elapsed time →</text>
+
+      <!-- Lifeline -->
+      <line class="lifeline" x1="100" y1="240" x2="950" y2="240" stroke="#6ee7ff"/>
+      <line class="lifeline" x1="950" y1="240" x2="1000" y2="240" stroke="#ffb86b"/>
+      <line class="lifeline" x1="1000" y1="240" x2="1100" y2="240" stroke="#ff6b9d" stroke-dasharray="6 6"/>
+
+      <!-- Events -->
+      <circle class="pt t1" cx="100" cy="240" r="6"/>
+      <text class="ev t1" x="100" y="220" text-anchor="middle">store</text>
+      <text class="ev t1" x="100" y="205" text-anchor="middle">tier=mid</text>
+      <text class="ev t1" x="100" y="190" text-anchor="middle">expires_at=+7d</text>
+
+      <circle class="pt t2" cx="280" cy="240" r="6"/>
+      <text class="ev t2" x="280" y="220" text-anchor="middle">access</text>
+      <text class="ev t2" x="280" y="205" text-anchor="middle">expires_at += 1d</text>
+
+      <circle class="pt t3" cx="460" cy="240" r="6"/>
+      <text class="ev t3" x="460" y="220" text-anchor="middle">link added</text>
+      <text class="ev t3" x="460" y="205" text-anchor="middle">related_to M2</text>
+
+      <circle class="pt t2" cx="510" cy="240" r="5"/>
+      <text class="ev t2" x="510" y="170" text-anchor="middle">access #2</text>
+
+      <circle class="pt t4" cx="640" cy="240" r="6"/>
+      <text class="ev t4" x="640" y="220" text-anchor="middle">consolidate</text>
+      <text class="ev t4" x="640" y="205" text-anchor="middle">into retro</text>
+      <text class="ev t4" x="640" y="190" text-anchor="middle">derived_from edge</text>
+
+      <circle class="pt t5" cx="820" cy="240" r="6"/>
+      <text class="ev t5" x="820" y="220" text-anchor="middle">tier promote</text>
+      <text class="ev t5" x="820" y="205" text-anchor="middle">retro → long</text>
+      <text class="ev t5" x="820" y="190" text-anchor="middle">expires_at = NULL</text>
+
+      <circle class="pt t3" cx="950" cy="240" r="6"/>
+      <text class="ev t3" x="950" y="220" text-anchor="middle">expired</text>
+      <text class="ev t3" x="950" y="205" text-anchor="middle">archive_on_gc</text>
+      <text class="ev t3" x="950" y="190" text-anchor="middle">→ archived_memories</text>
+
+      <circle class="pt t6" cx="1100" cy="240" r="6"/>
+      <text class="ev t6" x="1100" y="220" text-anchor="middle">purged</text>
+      <text class="ev t6" x="1100" y="205" text-anchor="middle">30d retention</text>
+      <text class="ev t6" x="1100" y="190" text-anchor="middle">irreversible</text>
+
+      <!-- Status legend -->
+      <text class="lab big" x="60" y="40">Live</text>
+      <rect x="100" y="32" width="20" height="12" fill="#6ee7ff"/>
+      <text class="lab big" x="200" y="40">Archived</text>
+      <rect x="270" y="32" width="20" height="12" fill="#ffb86b"/>
+      <text class="lab big" x="370" y="40">Gone</text>
+      <rect x="425" y="32" width="20" height="12" fill="#ff6b9d"/>
+    </svg>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The six stages</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">From birth to retirement.</h2>
+
+    <div class="stage s1">
+      <div class="stage-head"><span class="stage-num">stage 1</span><span class="stage-name">Created</span><span class="stage-when">day 0 · memory_store</span></div>
+      <div class="stage-desc">A new row in <code>memories</code>. Validators run, governance gate runs, federation fanout writes to W of N peers, FTS5 indexes the title+content, HNSW vector inserted (if embedder loaded). The <code>created_at</code> timestamp is permanent — it never updates after this.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"created"</span>, <span class="key">"id"</span>: <span class="val">"550e8400-…"</span>, <span class="key">"tier"</span>: <span class="val">"mid"</span>, <span class="key">"expires_at"</span>: <span class="val">"+7 days"</span>, <span class="key">"namespace"</span>: <span class="val">"alphaone/eng"</span>}</div>
+    </div>
+
+    <div class="stage s2">
+      <div class="stage-head"><span class="stage-num">stage 2</span><span class="stage-name">Active — accessed, recalled, linked</span><span class="stage-when">days 0–N · while live</span></div>
+      <div class="stage-desc">Every <code>memory_get</code>, recall hit, and search hit bumps <code>access_count</code> and <code>last_accessed_at</code>. Mid-tier memories also get their <code>expires_at</code> bumped forward by <code>mid_extend_secs</code> (default 1 day). Memories that get used earn more time. Updates (<code>memory_update</code>) preserve <code>created_at</code> but bump <code>updated_at</code>. KG edges added via <code>memory_link</code> at any time.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"accessed"</span>,  <span class="key">"access_count"</span>: <span class="num">3</span>, <span class="key">"last_accessed_at"</span>: <span class="val">"day 3"</span>, <span class="key">"expires_at"</span>: <span class="val">"+1d"</span>}
+{<span class="key">"event"</span>: <span class="val">"link_added"</span>, <span class="key">"relation"</span>: <span class="val">"related_to"</span>, <span class="key">"target_id"</span>: <span class="val">"…"</span>}
+{<span class="key">"event"</span>: <span class="val">"updated"</span>,   <span class="key">"updated_at"</span>: <span class="val">"day 5"</span>, <span class="key">"changes"</span>: [<span class="val">"tags"</span>, <span class="val">"priority"</span>]}</div>
+    </div>
+
+    <div class="stage s3">
+      <div class="stage-head"><span class="stage-num">stage 3</span><span class="stage-name">Consolidated</span><span class="stage-when">N source memories → 1 derived</span></div>
+      <div class="stage-desc">Optional but powerful. <code>memory_consolidate</code> takes 2-100 source memories and produces a derived memory (LLM-summarized at smart/autonomous tier, plain-text-concatenated at lower tiers). Each source gets a <code>derived_from</code> KG edge to the new memory — provenance chain stays intact even though the consolidated row is the canonical one going forward.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"consolidated"</span>,
+ <span class="key">"into"</span>: <span class="val">"new-id"</span>,
+ <span class="key">"from"</span>: [<span class="val">"src-1"</span>, <span class="val">"src-2"</span>, <span class="val">"src-3"</span>, …],
+ <span class="key">"links_created"</span>: <span class="num">12</span>}</div>
+    </div>
+
+    <div class="stage s4">
+      <div class="stage-head"><span class="stage-num">stage 4</span><span class="stage-name">Promoted</span><span class="stage-when">Mid → Long · governance-gated</span></div>
+      <div class="stage-desc">The most consequential transition. <code>memory_promote</code> moves a memory from Mid to Long, clearing <code>expires_at</code> and routing through governance. Outcomes: <code>Allow</code> → promoted immediately. <code>Pending(id)</code> → queued for approval; replays automatically once approved. <code>Deny(reason)</code> → 403 with the reason.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"promoted"</span>,
+ <span class="key">"from_tier"</span>: <span class="val">"mid"</span>,
+ <span class="key">"to_tier"</span>: <span class="val">"long"</span>,
+ <span class="key">"expires_at"</span>: <span class="err">null</span>,
+ <span class="key">"governance"</span>: {<span class="key">"verdict"</span>: <span class="val">"allow"</span>, <span class="key">"approver"</span>: <span class="val">"alice"</span>}}</div>
+    </div>
+
+    <div class="stage s5">
+      <div class="stage-head"><span class="stage-num">stage 5</span><span class="stage-name">Archived</span><span class="stage-when">TTL expiry · or memory_forget · or memory_delete</span></div>
+      <div class="stage-desc">The row leaves <code>memories</code> and lands in <code>archived_memories</code> with full metadata + a reason ("ttl_expired" / "manual" / "forget_pattern"). FTS index updated; HNSW vector evicted. Recall + search exclude archived rows. Restorable via <code>memory_archive_restore</code> until purged.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"archived"</span>,
+ <span class="key">"id"</span>: <span class="val">"550e8400-…"</span>,
+ <span class="key">"reason"</span>: <span class="val">"ttl_expired"</span>,
+ <span class="key">"archived_at"</span>: <span class="val">"day 14"</span>}</div>
+    </div>
+
+    <div class="stage s6">
+      <div class="stage-head"><span class="stage-num">stage 6</span><span class="stage-name">Purged</span><span class="stage-when">memory_archive_purge · IRREVERSIBLE</span></div>
+      <div class="stage-desc">Final state. The row is removed from <code>archived_memories</code>. No way back. Federation fanout removes peer copies. Useful for compliance regimes that require erasure after a defined retention window — soft-delete first, hard-delete on a schedule.</div>
+      <div class="snip">{<span class="key">"event"</span>: <span class="val">"purged"</span>,
+ <span class="key">"id"</span>: <span class="val">"550e8400-…"</span>,
+ <span class="key">"after_days"</span>: <span class="num">30</span>,
+ <span class="key">"by"</span>: <span class="val">"auto_purge_archive (cron)"</span>}</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Alternate paths</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Branches off the happy path.</h2>
+    <div class="snip" style="font-family:var(--font-sans);white-space:normal;line-height:1.7">
+      <div><strong style="color:var(--good)">Restored from archive</strong> — <code>memory_archive_restore</code> brings an archived row back to <code>memories</code>. <code>expires_at</code> is cleared on restore so a stale timestamp doesn't immediately re-expire. FTS5 + HNSW are rebuilt for the row.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Long tier — never expires</strong> — A memory written directly to Long tier (or promoted there) has <code>expires_at = NULL</code>. GC's <code>WHERE expires_at &lt; now()</code> never matches it. Only explicit <code>memory_delete</code> or <code>memory_forget</code> ever removes it.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Hard-delete</strong> — <code>memory_delete</code> + <code>archive_on_gc=false</code> in config produces irreversible erasure on the spot. Rare; usually only seen in regulated environments where archive itself is considered retention.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Forget pattern</strong> — <code>memory_forget</code> sweeps a namespace + FTS pattern + optional tier filter. Each match goes through stage 5 (archived). Use the broom when you don't want to wait for TTL.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Federation receive</strong> — A memory pushed by a peer arrives at stage 1 on the receiving daemon, but with the original <code>created_at</code> preserved. Validators run again on the receiver — peer trust is at the mTLS layer, but content correctness is locally re-verified.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Audit trail</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Every transition leaves evidence.</h2>
+    <p class="lede">There is no stage transition that doesn't write something queryable. Operators (or auditors) can reconstruct the full history of any memory by joining a few tables.</p>
+    <div class="snip"><span class="cm">// Live row — current state</span>
+SELECT id, tier, namespace, created_at, updated_at, last_accessed_at, expires_at,
+       access_count, source, metadata
+  FROM memories WHERE id = ?1;
+
+<span class="cm">// KG edges — who linked to / from this memory</span>
+SELECT * FROM memory_links WHERE source_id = ?1 OR target_id = ?1;
+
+<span class="cm">// Promotion / approval history (governance-gated transitions)</span>
+SELECT id, action_type, status, requested_by, requested_at, decided_by, decided_at, approvals
+  FROM pending_actions WHERE memory_id = ?1
+  ORDER BY requested_at DESC;
+
+<span class="cm">// If archived</span>
+SELECT id, archived_at, reason, namespace, tier, original_metadata
+  FROM archived_memories WHERE id = ?1;
+
+<span class="cm">// Daemon log captures every error/warn — grep by id:
+//   grep "550e8400-" daemon.log</span></div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3 · Apache 2.0 · lifecycle paths cross every module — primary entry points: <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/handlers.rs">handlers.rs</a>, <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/db.rs">db.rs</a>, <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/governance.rs">governance.rs</a>, <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/curator.rs">curator.rs</a></p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="memory-tiers.html">Tiers</a> · <a href="ttl-controls.html">TTLs</a> · <a href="archival.html">Archival</a> · <a href="schema.html">Schema</a></p>
+</footer>
+
+</body>
+</html>

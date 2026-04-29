@@ -1,0 +1,520 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Schema atlas — every SQLite/Postgres table, every column, with relationships.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Schema — every table, every column</title>
+<meta name="description" content="ai-memory v0.6.3 SQL schema reference. Memories, links, archived, namespace_meta, pending_actions, sync_state, subscriptions, entity_aliases, schema_version. SQLite default; Postgres mirror via SAL.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/schema.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:780px;margin-bottom:2rem}
+
+.tbl{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:2rem;position:relative;overflow:hidden}
+.tbl::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p1)}
+.tbl.t-archived::before{background:var(--p3)}
+.tbl.t-meta::before{background:var(--p2)}
+.tbl.t-fed::before{background:#a5d6a7}
+.tbl-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.tbl-name{font-family:var(--font-mono);font-size:1.2rem;font-weight:700;color:var(--text)}
+.tbl-tag{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted)}
+.tbl-since{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim)}
+.tbl-desc{color:var(--text-muted);font-size:.92rem;margin-bottom:1rem}
+.cols{width:100%;border-collapse:collapse;font-size:.85rem}
+.cols th{text-align:left;padding:.5rem .65rem;font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--border-hl)}
+.cols td{padding:.55rem .65rem;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:.78rem;vertical-align:top}
+.cols td.col{color:var(--text);font-weight:600;white-space:nowrap}
+.cols td.type{color:var(--p1)}
+.cols td.note{color:var(--text-muted);font-family:var(--font-sans);font-size:.85rem;line-height:1.5}
+.flag{display:inline-block;font-family:var(--font-mono);font-size:.65rem;padding:.1em .45em;border-radius:3px;letter-spacing:.05em;margin-right:.25em;vertical-align:middle}
+.flag.pk{background:rgba(255,215,0,0.12);color:var(--gold);border:1px solid rgba(255,215,0,0.4)}
+.flag.fk{background:rgba(110,231,255,0.12);color:var(--p1);border:1px solid rgba(110,231,255,0.4)}
+.flag.idx{background:rgba(200,162,255,0.12);color:var(--p3);border:1px solid rgba(200,162,255,0.4)}
+.flag.new{background:rgba(255,184,107,0.12);color:var(--p2);border:1px solid rgba(255,184,107,0.4)}
+.flag.null{color:var(--text-dim)}
+.flag.notnull{color:var(--good)}
+.idx-list{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.6rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55}
+.idx-list .idx-name{color:var(--p3)}
+
+.relations-svg{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:2rem}
+.relations-svg .table-box{fill:var(--bg-raised);stroke:var(--border-hl);stroke-width:1.5}
+.relations-svg .table-box.primary{stroke:var(--p1);stroke-width:2}
+.relations-svg .table-name{fill:var(--text);font-family:monospace;font-size:13px;font-weight:700}
+.relations-svg .table-cols{fill:var(--text-muted);font-family:monospace;font-size:10px}
+.relations-svg .fk-line{stroke:var(--p2);stroke-width:1.5;fill:none;stroke-dasharray:4 4}
+.relations-svg .fk-label{fill:var(--text-muted);font-size:9px;font-family:monospace}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Schema</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html" class="current">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The schema, table by table.</h1>
+  <p class="tagline">Every SQLite table ai-memory creates, every column, every index, every foreign key. Postgres mirror via the SAL adapter (<code>--features sal</code>). Schema version: <strong>v15</strong>.</p>
+  <div class="pills">
+    <span class="pill">9 tables</span>
+    <span class="pill">15+ indexes</span>
+    <span class="pill">v15 schema</span>
+    <span class="pill">SQLite + Postgres mirror</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Table-relationship map</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">9 tables, 6 foreign keys.</h2>
+    <p class="lede">Every relation flows from the central <code>memories</code> table. Foreign-key cascade-on-delete protects against orphan rows. <code>memory_links</code> is the KG primitive; <code>pending_actions</code> is the governance queue; <code>sync_state</code> is the federation cursor table.</p>
+
+    <svg class="relations-svg" viewBox="0 0 1200 540" xmlns="http://www.w3.org/2000/svg">
+      <!-- Central: memories -->
+      <g>
+        <rect class="table-box primary" x="500" y="220" width="200" height="120" rx="8"/>
+        <text class="table-name" x="600" y="250" text-anchor="middle">memories</text>
+        <text class="table-cols" x="600" y="270" text-anchor="middle">id (PK)</text>
+        <text class="table-cols" x="600" y="285" text-anchor="middle">tier · namespace · title</text>
+        <text class="table-cols" x="600" y="300" text-anchor="middle">content · tags · priority</text>
+        <text class="table-cols" x="600" y="315" text-anchor="middle">created_at · expires_at</text>
+        <text class="table-cols" x="600" y="330" text-anchor="middle">metadata (JSON)</text>
+      </g>
+
+      <!-- memory_links -->
+      <g>
+        <rect class="table-box" x="100" y="220" width="180" height="120" rx="8"/>
+        <text class="table-name" x="190" y="250" text-anchor="middle">memory_links</text>
+        <text class="table-cols" x="190" y="270" text-anchor="middle">source_id (FK)</text>
+        <text class="table-cols" x="190" y="285" text-anchor="middle">target_id (FK)</text>
+        <text class="table-cols" x="190" y="300" text-anchor="middle">relation</text>
+        <text class="table-cols" x="190" y="315" text-anchor="middle">valid_from / valid_until</text>
+        <text class="table-cols" x="190" y="330" text-anchor="middle">observed_by · signature</text>
+      </g>
+
+      <!-- archived_memories -->
+      <g>
+        <rect class="table-box" x="500" y="40" width="200" height="100" rx="8"/>
+        <text class="table-name" x="600" y="70" text-anchor="middle">archived_memories</text>
+        <text class="table-cols" x="600" y="90" text-anchor="middle">id (PK)</text>
+        <text class="table-cols" x="600" y="105" text-anchor="middle">[same shape as memories]</text>
+        <text class="table-cols" x="600" y="120" text-anchor="middle">archived_at</text>
+      </g>
+
+      <!-- entity_aliases -->
+      <g>
+        <rect class="table-box" x="100" y="40" width="180" height="100" rx="8"/>
+        <text class="table-name" x="190" y="70" text-anchor="middle">entity_aliases</text>
+        <text class="table-cols" x="190" y="90" text-anchor="middle">entity_id (FK)</text>
+        <text class="table-cols" x="190" y="105" text-anchor="middle">alias (PK + idx)</text>
+        <text class="table-cols" x="190" y="120" text-anchor="middle">created_at</text>
+      </g>
+
+      <!-- pending_actions -->
+      <g>
+        <rect class="table-box" x="920" y="40" width="180" height="120" rx="8"/>
+        <text class="table-name" x="1010" y="70" text-anchor="middle">pending_actions</text>
+        <text class="table-cols" x="1010" y="90" text-anchor="middle">id (PK)</text>
+        <text class="table-cols" x="1010" y="105" text-anchor="middle">action_type · ns</text>
+        <text class="table-cols" x="1010" y="120" text-anchor="middle">requested_by</text>
+        <text class="table-cols" x="1010" y="135" text-anchor="middle">approvals (JSON)</text>
+        <text class="table-cols" x="1010" y="150" text-anchor="middle">decision</text>
+      </g>
+
+      <!-- namespace_meta -->
+      <g>
+        <rect class="table-box" x="920" y="220" width="180" height="100" rx="8"/>
+        <text class="table-name" x="1010" y="250" text-anchor="middle">namespace_meta</text>
+        <text class="table-cols" x="1010" y="270" text-anchor="middle">namespace (PK)</text>
+        <text class="table-cols" x="1010" y="285" text-anchor="middle">standard_id (FK)</text>
+        <text class="table-cols" x="1010" y="300" text-anchor="middle">parent · created_at</text>
+      </g>
+
+      <!-- subscriptions -->
+      <g>
+        <rect class="table-box" x="920" y="380" width="180" height="120" rx="8"/>
+        <text class="table-name" x="1010" y="410" text-anchor="middle">subscriptions</text>
+        <text class="table-cols" x="1010" y="430" text-anchor="middle">id (PK)</text>
+        <text class="table-cols" x="1010" y="445" text-anchor="middle">url · events</text>
+        <text class="table-cols" x="1010" y="460" text-anchor="middle">secret_hash</text>
+        <text class="table-cols" x="1010" y="475" text-anchor="middle">dispatch_count</text>
+      </g>
+
+      <!-- sync_state -->
+      <g>
+        <rect class="table-box" x="500" y="420" width="200" height="100" rx="8"/>
+        <text class="table-name" x="600" y="450" text-anchor="middle">sync_state</text>
+        <text class="table-cols" x="600" y="470" text-anchor="middle">agent_id · peer_url (PK)</text>
+        <text class="table-cols" x="600" y="485" text-anchor="middle">last_pulled_at</text>
+        <text class="table-cols" x="600" y="500" text-anchor="middle">last_pushed_at</text>
+      </g>
+
+      <!-- agent_registry (in _agents namespace) -->
+      <g>
+        <rect class="table-box" x="100" y="420" width="200" height="100" rx="8"/>
+        <text class="table-name" x="200" y="450" text-anchor="middle">_agents namespace</text>
+        <text class="table-cols" x="200" y="470" text-anchor="middle">(stored as memories</text>
+        <text class="table-cols" x="200" y="485" text-anchor="middle">in reserved namespace)</text>
+        <text class="table-cols" x="200" y="500" text-anchor="middle">no separate table</text>
+      </g>
+
+      <!-- schema_version -->
+      <g>
+        <rect class="table-box" x="730" y="170" width="160" height="50" rx="8"/>
+        <text class="table-name" x="810" y="195" text-anchor="middle">schema_version</text>
+        <text class="table-cols" x="810" y="210" text-anchor="middle">version (currently 15)</text>
+      </g>
+
+      <!-- FK lines -->
+      <path class="fk-line" d="M 280 280 L 500 280" marker-end="url(#farr)"/>
+      <text class="fk-label" x="390" y="275" text-anchor="middle">FK source_id → id</text>
+      <text class="fk-label" x="390" y="290" text-anchor="middle">FK target_id → id</text>
+
+      <path class="fk-line" d="M 600 220 L 600 140" marker-end="url(#farr)"/>
+      <text class="fk-label" x="615" y="180">archive ← memories (data shape)</text>
+
+      <path class="fk-line" d="M 280 90 L 280 220" marker-end="url(#farr)"/>
+      <text class="fk-label" x="295" y="160">aliases reference entity (memory id)</text>
+
+      <path class="fk-line" d="M 920 270 L 700 280" marker-end="url(#farr)"/>
+      <text class="fk-label" x="800" y="265">FK standard_id → memories.id</text>
+
+      <defs>
+        <marker id="farr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#ffb86b"/>
+        </marker>
+      </defs>
+    </svg>
+  </div>
+</section>
+
+<!-- ============== TABLES ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Core tables</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">memories &amp; memory_links · the heart.</h2>
+
+    <div class="tbl">
+      <div class="tbl-head">
+        <span class="tbl-name">memories</span>
+        <span class="tbl-tag">▸ CORE · ALL TIERS</span>
+        <span class="tbl-since">since v0.1</span>
+      </div>
+      <div class="tbl-desc">The primary memory store. One row per stored memory. <code>tier</code> determines lifecycle (short / mid / long / archived). FTS5 virtual table mirrors title+content for keyword search.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>id</td><td class="type">TEXT</td><td class="note">UUIDv4 stringified. Stable across federation.</td></tr>
+          <tr><td class="col">tier</td><td class="type">TEXT NOT NULL</td><td class="note">One of <code>short</code> · <code>mid</code> · <code>long</code> · <code>archived</code>. Drives TTL + visibility.</td></tr>
+          <tr><td class="col">namespace</td><td class="type">TEXT NOT NULL</td><td class="note">Hierarchical path with <code>/</code> delimiter (v0.6.3 Stream A). Max depth 8 segments.</td></tr>
+          <tr><td class="col">title</td><td class="type">TEXT NOT NULL</td><td class="note">Human-readable summary, ≤ 256 chars. FTS5-indexed.</td></tr>
+          <tr><td class="col">content</td><td class="type">TEXT NOT NULL</td><td class="note">Body text. Up to 1 MiB. FTS5-indexed.</td></tr>
+          <tr><td class="col">tags</td><td class="type">TEXT</td><td class="note">JSON array. Validator caps count at 32, length at 64 each.</td></tr>
+          <tr><td class="col">priority</td><td class="type">INTEGER</td><td class="note">1-10 scale. Drives auto-promote eligibility.</td></tr>
+          <tr><td class="col">confidence</td><td class="type">REAL</td><td class="note">0.0-1.0. Displayed as % when &lt; 1.0.</td></tr>
+          <tr><td class="col">source</td><td class="type">TEXT</td><td class="note">Origin tag: <code>user</code> · <code>claude</code> · <code>hook</code> · <code>api</code> · <code>import</code> · <code>cli</code> · <code>consolidation</code>.</td></tr>
+          <tr><td class="col">access_count</td><td class="type">INTEGER</td><td class="note">Bumped on each recall hit. Triggers auto-promote at ≥ 5.</td></tr>
+          <tr><td class="col">created_at</td><td class="type">TEXT</td><td class="note">RFC3339 UTC. Immutable.</td></tr>
+          <tr><td class="col">updated_at</td><td class="type">TEXT</td><td class="note">RFC3339 UTC. Bumped on update.</td></tr>
+          <tr><td class="col">last_accessed_at</td><td class="type">TEXT NULL</td><td class="note">RFC3339. Touched on recall. Drives recency-decay scoring.</td></tr>
+          <tr><td class="col">expires_at</td><td class="type">TEXT NULL</td><td class="note">RFC3339. NULL = never. GC sweep purges past-due.</td></tr>
+          <tr><td class="col">embedding</td><td class="type">BLOB NULL</td><td class="note">f32 array, 768 dims (nomic-embed-text). Set if semantic+ tier.</td></tr>
+          <tr><td class="col">metadata</td><td class="type">TEXT</td><td class="note">JSON. Holds <code>agent_id</code>, <code>scope</code>, <code>governance</code> policy, <code>chunked_from</code>.</td></tr>
+        </tbody>
+      </table>
+      <div class="idx-list"><span class="idx-name">▸ idx_memories_namespace</span> · <span class="idx-name">▸ idx_memories_tier</span> · <span class="idx-name">▸ idx_memories_priority_desc</span> · <span class="idx-name">▸ idx_memories_expires_at</span> · <span class="idx-name">▸ memories_fts (FTS5 virtual)</span></div>
+    </div>
+
+    <div class="tbl">
+      <div class="tbl-head">
+        <span class="tbl-name">memory_links</span>
+        <span class="tbl-tag">▸ KNOWLEDGE GRAPH</span>
+        <span class="tbl-since">extended in v0.6.3 (4 new columns)</span>
+      </div>
+      <div class="tbl-desc">Typed directed links between memories. The KG primitive. v0.6.3 added <span class="flag new">NEW</span> temporal-validity columns (valid_from, valid_until, observed_by, signature placeholder) for time-aware traversal.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag fk">FK</span>source_id</td><td class="type">TEXT NOT NULL</td><td class="note">→ <code>memories(id)</code> ON DELETE CASCADE</td></tr>
+          <tr><td class="col"><span class="flag fk">FK</span>target_id</td><td class="type">TEXT NOT NULL</td><td class="note">→ <code>memories(id)</code> ON DELETE CASCADE</td></tr>
+          <tr><td class="col">relation</td><td class="type">TEXT NOT NULL</td><td class="note">One of: <code>related_to</code>, <code>supersedes</code>, <code>refines</code>, <code>contradicts</code>, <code>derived_from</code>, <code>superseded_duplicate</code>, plus arbitrary user-defined.</td></tr>
+          <tr><td class="col">created_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC.</td></tr>
+          <tr><td class="col"><span class="flag new">NEW</span>valid_from</td><td class="type">TIMESTAMP NULL</td><td class="note">v0.6.3: when the assertion became true. Backfilled to source's created_at on migration.</td></tr>
+          <tr><td class="col"><span class="flag new">NEW</span>valid_until</td><td class="type">TIMESTAMP NULL</td><td class="note">v0.6.3: when the assertion was superseded. NULL = still valid.</td></tr>
+          <tr><td class="col"><span class="flag new">NEW</span>observed_by</td><td class="type">TEXT NULL</td><td class="note">v0.6.3: agent_id of the observer. Powers per-agent visibility filter.</td></tr>
+          <tr><td class="col"><span class="flag new">NEW</span>signature</td><td class="type">BLOB NULL</td><td class="note">v0.6.3 placeholder · v0.7 will populate with Ed25519 signature for attested provenance.</td></tr>
+        </tbody>
+      </table>
+      <div class="idx-list"><span class="idx-name">▸ idx_links_temporal_src</span> (source_id, valid_from, valid_until) · <span class="idx-name">▸ idx_links_temporal_tgt</span> · <span class="idx-name">▸ idx_links_relation</span></div>
+    </div>
+
+    <div class="tbl">
+      <div class="tbl-head">
+        <span class="tbl-name">schema_version</span>
+        <span class="tbl-tag">▸ MIGRATION</span>
+      </div>
+      <div class="tbl-desc">Single-row table. Tracks current schema version. Daemon checks at startup; runs forward migrations idempotently. Current version: <strong>15</strong> (Stream B hierarchy + KG additions).</div>
+      <table class="cols">
+        <tbody>
+          <tr><td class="col">version</td><td class="type">INTEGER NOT NULL</td><td class="note">Currently 15. Bumped only on additive migrations.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============== ARCHIVE / META TABLES ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Archive &amp; metadata</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Soft-delete + namespace policy.</h2>
+
+    <div class="tbl t-archived">
+      <div class="tbl-head">
+        <span class="tbl-name">archived_memories</span>
+        <span class="tbl-tag">▸ SOFT DELETE TIER</span>
+      </div>
+      <div class="tbl-desc">Same shape as <code>memories</code> table. Memories transition here on <code>memory_delete</code> or curator soft-delete. Excluded from default reads. Restorable.</div>
+      <table class="cols">
+        <tbody>
+          <tr><td class="col" colspan="3" style="color:var(--text-muted);font-style:italic;font-family:var(--font-sans)">Mirrors <code>memories</code> schema column-for-column, plus:</td></tr>
+          <tr><td class="col">archived_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC. Drives <code>archive purge --older-than N</code>.</td></tr>
+          <tr><td class="col">archived_reason</td><td class="type">TEXT NULL</td><td class="note">Free-form (e.g. "user_deleted", "consolidation_supersede", "auto_curator_dedup").</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tbl t-meta">
+      <div class="tbl-head">
+        <span class="tbl-name">namespace_meta</span>
+        <span class="tbl-tag">▸ POLICY</span>
+      </div>
+      <div class="tbl-desc">Per-namespace policy attached via a "standard memory" — a special memory whose JSON metadata holds the governance policy for that namespace and its descendants.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>namespace</td><td class="type">TEXT</td><td class="note">Hierarchical path. Inheriting children walk up.</td></tr>
+          <tr><td class="col"><span class="flag fk">FK</span>standard_id</td><td class="type">TEXT NULL</td><td class="note">→ <code>memories(id)</code>. The memory holding the policy in metadata.</td></tr>
+          <tr><td class="col">parent</td><td class="type">TEXT NULL</td><td class="note">Ancestor namespace (computed for fast walk).</td></tr>
+          <tr><td class="col">created_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tbl t-meta">
+      <div class="tbl-head">
+        <span class="tbl-name">entity_aliases</span>
+        <span class="tbl-tag">▸ ENTITY REGISTRY</span>
+        <span class="tbl-since">v0.6.3 Stream B</span>
+      </div>
+      <div class="tbl-desc">Alias → canonical-entity resolution side table. Each entity is a memory (in any namespace); this table holds zero-or-more alternate names per entity.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>entity_id</td><td class="type">TEXT NOT NULL</td><td class="note">→ <code>memories(id)</code> (the canonical entity memory).</td></tr>
+          <tr><td class="col"><span class="flag pk">PK</span>alias</td><td class="type">TEXT NOT NULL</td><td class="note">Alternate name. Composite PK (entity_id, alias).</td></tr>
+          <tr><td class="col">created_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC.</td></tr>
+        </tbody>
+      </table>
+      <div class="idx-list"><span class="idx-name">▸ idx_entity_aliases_alias</span> (alias) — fast reverse lookup</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== GOVERNANCE / FED TABLES ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Governance &amp; federation</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">pending_actions · sync_state · subscriptions.</h2>
+
+    <div class="tbl t-meta">
+      <div class="tbl-head">
+        <span class="tbl-name">pending_actions</span>
+        <span class="tbl-tag">▸ GOVERNANCE QUEUE</span>
+      </div>
+      <div class="tbl-desc">When governance policy says "Approve", the requested action lands here instead of executing immediately. Cleared on approve (executes the action) or reject.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>id</td><td class="type">TEXT</td><td class="note">UUIDv4 of the pending action.</td></tr>
+          <tr><td class="col">action_type</td><td class="type">TEXT NOT NULL</td><td class="note">One of <code>store</code> · <code>delete</code> · <code>promote</code> (the GovernedAction enum).</td></tr>
+          <tr><td class="col">namespace</td><td class="type">TEXT NOT NULL</td><td class="note">Target namespace (drives policy lookup).</td></tr>
+          <tr><td class="col">requested_by</td><td class="type">TEXT NOT NULL</td><td class="note">agent_id of the caller.</td></tr>
+          <tr><td class="col">requested_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC.</td></tr>
+          <tr><td class="col">payload</td><td class="type">TEXT NOT NULL</td><td class="note">JSON. The full memory + context to execute on approval.</td></tr>
+          <tr><td class="col">approvals</td><td class="type">TEXT NOT NULL</td><td class="note">JSON array of {agent_id, approved_at}. Consensus mode counts entries.</td></tr>
+          <tr><td class="col">decision</td><td class="type">TEXT NULL</td><td class="note">NULL = pending · "approved" · "rejected".</td></tr>
+          <tr><td class="col">decided_at</td><td class="type">TEXT NULL</td><td class="note">RFC3339 UTC when decision finalized.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tbl t-fed">
+      <div class="tbl-head">
+        <span class="tbl-name">sync_state</span>
+        <span class="tbl-tag">▸ FEDERATION CURSOR</span>
+      </div>
+      <div class="tbl-desc">Per-(local-agent, peer-URL) sync cursors. Drives the catchup loop. <code>last_pulled_at</code> advances after successful <code>/api/v1/sync/since</code> pulls.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>agent_id</td><td class="type">TEXT NOT NULL</td><td class="note">Local node's agent_id.</td></tr>
+          <tr><td class="col"><span class="flag pk">PK</span>peer_url</td><td class="type">TEXT NOT NULL</td><td class="note">Federation peer's HTTPS URL.</td></tr>
+          <tr><td class="col">last_pulled_at</td><td class="type">TEXT NULL</td><td class="note">RFC3339 UTC of last successful pull from this peer.</td></tr>
+          <tr><td class="col">last_pushed_at</td><td class="type">TEXT NULL</td><td class="note">RFC3339 UTC of last push.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="tbl t-fed">
+      <div class="tbl-head">
+        <span class="tbl-name">subscriptions</span>
+        <span class="tbl-tag">▸ WEBHOOKS</span>
+      </div>
+      <div class="tbl-desc">Outbound webhook subscriptions. Each row spawns a dispatch thread on matching event. HMAC-SHA256 signed bodies. Retry-on-5xx with bounded attempts.</div>
+      <table class="cols">
+        <thead><tr><th>Column</th><th>Type</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="col"><span class="flag pk">PK</span>id</td><td class="type">TEXT</td><td class="note">UUIDv4.</td></tr>
+          <tr><td class="col">url</td><td class="type">TEXT NOT NULL</td><td class="note">Webhook endpoint. Validated against SSRF guard (<code>validate_url_dns</code>).</td></tr>
+          <tr><td class="col">events</td><td class="type">TEXT NOT NULL</td><td class="note">Comma-separated or <code>*</code>. e.g. <code>store,delete,contradiction</code>.</td></tr>
+          <tr><td class="col">namespace_filter</td><td class="type">TEXT NULL</td><td class="note">Glob pattern. NULL = all namespaces.</td></tr>
+          <tr><td class="col">agent_filter</td><td class="type">TEXT NULL</td><td class="note">Filter by <code>metadata.agent_id</code>. NULL = all agents.</td></tr>
+          <tr><td class="col">secret_hash</td><td class="type">TEXT NULL</td><td class="note">SHA-256 of the plaintext shared secret. Plaintext returned once on subscribe.</td></tr>
+          <tr><td class="col">created_by</td><td class="type">TEXT NULL</td><td class="note">agent_id of subscriber.</td></tr>
+          <tr><td class="col">created_at</td><td class="type">TEXT NOT NULL</td><td class="note">RFC3339 UTC.</td></tr>
+          <tr><td class="col">dispatch_count</td><td class="type">INTEGER</td><td class="note">Successful dispatches.</td></tr>
+          <tr><td class="col">failure_count</td><td class="type">INTEGER</td><td class="note">Failed dispatches (non-2xx OR connect timeout).</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============== MIGRATION / VERSIONING ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Migrations</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Schema is versioned. Migrations are idempotent.</h2>
+    <p class="lede">Every schema change is a forward migration applied at daemon startup. Idempotent so re-runs are safe. v15 was the v0.6.3 Stream B addition. Older versions are inline in <code>db.rs::migrate</code>; v15 is the first extracted to <code>migrations/sqlite/0010_v063_hierarchy_kg.sql</code>.</p>
+
+    <div class="tbl t-meta">
+      <div class="tbl-head">
+        <span class="tbl-name">Version timeline</span>
+      </div>
+      <table class="cols">
+        <thead><tr><th>Version</th><th>Release</th><th>Change</th></tr></thead>
+        <tbody>
+          <tr><td class="col">1-3</td><td class="type">v0.1-0.4</td><td class="note">memories table; basic CRUD; tier enum; FTS5 virtual.</td></tr>
+          <tr><td class="col">4-7</td><td class="type">v0.4-0.5</td><td class="note">memory_links; tags JSON; expires_at; embedding BLOB.</td></tr>
+          <tr><td class="col">8-10</td><td class="type">v0.5</td><td class="note">archived_memories; subscriptions; webhook dispatch_count.</td></tr>
+          <tr><td class="col">11-13</td><td class="type">v0.6.0-0.6.1</td><td class="note">pending_actions; sync_state; namespace_meta; governance policy in metadata; agent_id resolution.</td></tr>
+          <tr><td class="col">14</td><td class="type">v0.6.2</td><td class="note">SAL adapter prep; postgres_schema.sql; chunked_from metadata.</td></tr>
+          <tr><td class="col">15</td><td class="type">v0.6.3</td><td class="note"><strong>Hierarchy + KG additions.</strong> 4 new memory_links columns; entity_aliases table; 3 temporal indexes. <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/migrations/sqlite/0010_v063_hierarchy_kg.sql" style="color:var(--p1)">Migration file →</a></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory-mcp · Apache 2.0 · v0.6.3-rc1 · <a href="./">main</a> · <a href="at-a-glance.html">Atlas</a> · <a href="types.html">Types</a> · <a href="validators.html">Validators</a> · <a href="governance.html">Governance</a> · <a href="tracing.html">Tracing</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

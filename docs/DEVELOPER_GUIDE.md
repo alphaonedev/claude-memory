@@ -201,7 +201,66 @@ In-memory HNSW (Hierarchical Navigable Small World) vector index for approximate
 
 ### `src/toon.rs`
 
-TOON (Token-Oriented Object Notation) serializer. Converts JSON recall/search/list responses into the compact TOON wire format. The format spec is documented in the [TOON Format Specification](#toon-format-specification) section below.
+TOON (Token-Oriented Object Notation) serializer. Converts JSON recall/search/list responses into the compact TOON wire format. The format spec is documented in the [TOON Format Specification](#toon-format-specification) section below. Public API: `memories_to_toon()`, `search_to_toon()`. Compact mode emits a 6-field projection (id/tier/title/namespace/score/created_at); full mode emits the complete record.
+
+### `src/config.rs`
+
+Tier configuration system + global runtime config. Parses `~/.config/ai-memory/config.toml`, applies environment-variable overrides (`AI_MEMORY_*`), validates tier capabilities (`keyword`, `semantic`, `smart`, `autonomous`), and emits the immutable `Config` consumed by every other module. Includes `TtlConfig` (per-tier TTL + extension windows), `archive_on_gc`, embedding-model selection, Ollama URL, and feature gating that disables higher-tier code paths when the configured tier doesn't permit them.
+
+### `src/embeddings.rs`
+
+Embedding pipeline for `semantic+` tiers. Loads HuggingFace sentence-transformer models (`all-MiniLM-L6-v2` 384-dim or `nomic-embed-text-v1.5` 768-dim) on first run via `hf-hub`, runs inference via Candle, generates dense vectors at insert time, and backfills missing embeddings on first startup. Vectors are stored as BLOBs in the `memories.embedding` column. Consumed by `reranker.rs` for hybrid recall and `hnsw.rs` for approximate nearest-neighbour indexing.
+
+### `src/llm.rs`
+
+LLM integration via Ollama for query expansion, auto-tagging, and contradiction detection. Implements `OllamaClient` (HTTP via `reqwest`) and supplies the production implementation of the `AutonomyLlm` trait (see `src/autonomy.rs`). Prompts are kept short and structured to minimize token cost; failures are non-fatal — the curator and autonomy passes log and continue.
+
+### `src/mine.rs`
+
+Retroactive conversation import — bulk-imports historical Claude / ChatGPT / Slack export files into ai-memory as backfilled memories. Each conversation becomes a single memory; metadata captures `source`, `agent_id`, and timestamps from the export. Used to seed memory before live capture is available.
+
+### `src/reranker.rs`
+
+Hybrid recall algorithm. Blends the FTS5 keyword score and the embedding cosine similarity into a single ranking, applying configurable weighting and a 6-factor scoring formula (recency, priority, access count, tier weight, content match, namespace match). Returns a score field in every recall response so callers can audit ranking decisions.
+
+### `src/identity.rs`
+
+Non-Human Identity (NHI) resolution for `agent_id`. Centralises the precedence chain across CLI, MCP, and HTTP entry points so `metadata.agent_id` is uniformly populated. Public API: `resolve_agent_id()` (CLI/MCP), `resolve_http_agent_id()` (HTTP body + `X-Agent-Id` header), `preserve_agent_id()` (round-trip), `process_discriminator()` (stable per-process identifier). Default-id formats: `ai:<client>@<hostname>:pid-<pid>` (MCP), `host:<hostname>:pid-<pid>-<uuid8>` (CLI), `anonymous:req-<uuid8>` (HTTP per-request fallback). `agent_id` is a *claimed* identity, not attested.
+
+### `src/curator.rs`
+
+Autonomous curator daemon (v0.6.1). Runs a periodic sweep over stored memories, invoking `auto_tag` and `detect_contradiction` via the configured LLM and persisting results into each memory's metadata. Complements the synchronous post-store hooks (#265). Hard cap on operations per cycle (default 100); skips internal `_`-prefixed namespaces; honours include/exclude lists; dry-run mode emits a report without touching rows; LLM errors are logged but never abort a cycle. Public API: `CuratorConfig`, `CuratorReport`, `run_once()`, `run_daemon()`.
+
+### `src/autonomy.rs`
+
+Full-autonomy loop — stacks on the curator daemon. Four passes beyond auto-tag:
+
+1. **Consolidation** — find near-duplicate memories in the same namespace (Jaccard ≥ 0.55, max cluster size 8), LLM-summarise into a single canonical memory, archive originals.
+2. **Forgetting of superseded memories** — when `metadata.confirmed_contradictions` is set, demote/forget the contradicted entry.
+3. **Priority feedback** — nudge `priority` up for hot memories, down for cold ones (purely arithmetic, no LLM call).
+4. **Rollback log + self-report** — every autonomous action lands in `_curator/rollback/<ts>` (reversible) and every cycle in `_curator/reports/<ts>`.
+
+Defines the `AutonomyLlm` trait so the curator can be unit-tested without a live Ollama instance. Public API: `run_autonomy_passes()`, `persist_self_report()`, `reverse_rollback_entry()`, `RollbackEntry`, `AutonomyPassReport`.
+
+### `src/replication.rs`
+
+W-of-N quorum-write layer for the peer-mesh sync (v0.7 track C). Scaffolds the contract described in [`ADR-0001-quorum-replication.md`](ADR-0001-quorum-replication.md). The `QuorumWriter` sits ABOVE the existing sync-daemon — deployments without `--quorum-writes` keep the v0.6.0 one-way push behaviour byte-for-byte. Public API: `QuorumPolicy`, `QuorumWriter::commit`, `AckTracker`. Emits metrics: `replication_quorum_ack_total{result}`, `replication_quorum_failures_total{reason}`, `replication_clock_skew_seconds`.
+
+### `src/federation.rs`
+
+Federation autonomy — wires the quorum primitives from `replication` into the HTTP write path (v0.7 track C, PR 2 of N). When `ai-memory serve` is started with `--quorum-writes N --quorum-peers <urls>`, every successful HTTP write fans out a 1-memory `/api/v1/sync/push` POST to each peer; the write returns OK only once `W-1` peer acks land within `--quorum-timeout-ms`. Fewer acks → `503 quorum_not_met`. Public API: `FederationConfig`, `broadcast_store_quorum()`.
+
+### `src/subscriptions.rs`
+
+v0.6.0.0 webhook subscriptions. Subscribers register a URL + shared secret + event/namespace/agent filters; matching events POST an HMAC-SHA256-signed JSON payload (header `X-Ai-Memory-Signature: sha256=<hex>`) over a fire-and-forget thread. SSRF hardening: `http://` only to `127.0.0.0/8` or `localhost`; everywhere else requires `https://`; RFC1918 / RFC4193 / link-local hosts rejected unless `allow_private_networks=true`. Stored secret is SHA-256 of the plaintext (plaintext returned once at registration). Public API: `Subscription`, `NewSubscription`, `insert()`, `delete()`, `list()`, `dispatch_event()`, `validate_url()`.
+
+### `src/migrate.rs`
+
+Cross-backend migration tool — streams memories from one SAL backend to another (v0.7 track B, PR 2 of N). Gated behind `--features sal`; extended transparently by `--features sal-postgres`. Supported URLs: `sqlite:///abs/path.db`, `sqlite://./relative.db`, `postgres://user:pass@host:port/db`. CLI: `ai-memory migrate --from <url> --to <url> [--batch 1000] [--dry-run] [--namespace foo]`. Reads via `MemoryStore::list`, writes via `MemoryStore::store` with the source memory's id verbatim — adapter upsert-on-id semantics make repeated migration idempotent.
+
+### `src/metrics.rs`
+
+v0.6.0.0 Prometheus metrics, exposed at `GET /metrics` by the daemon. Minimal, non-invasive instrumentation — single global `Registry`, a handful of `IntCounter` / `IntCounterVec` / `IntGauge` / `HistogramVec` handles. Callers increment via typed helpers (`record_store(tier, ok)`, `record_recall(mode, latency_seconds)`, `record_autonomy_hook(kind, ok)`, `curator_cycle_completed(...)`) rather than poking the registry directly so a future metrics-backend swap stays internal. Public API: `Metrics` (struct), `registry()`, `render()`.
 
 ## Database Schema
 
@@ -1054,3 +1113,54 @@ Release profile settings (from `Cargo.toml`):
 - `opt-level = 3`
 - `strip = true` (removes debug symbols)
 - `lto = "thin"` (link-time optimization)
+
+---
+
+## Working Under an Autonomous Campaign
+
+When this repository is being driven by the `campaign` Python harness
+(at `alphaonedev/agentic-mem-labs/tools/campaign/`, Apache 2.0 ©
+AlphaOne LLC), the development workflow is the same workflow described
+above plus the constraints in
+[`ENGINEERING_STANDARDS.md` §7](ENGINEERING_STANDARDS.md#7-autonomous-campaign-workflow).
+
+### Concurrent operation
+
+- A live campaign holds a designated `release/vX.Y.Z` branch as its
+  exclusive merge target. Human contributors can still open PRs against
+  `develop` (or pre-existing release branches) without conflict.
+- The campaign records every decision and PR to its ai-memory namespace
+  (named after the campaign, e.g. `campaign-v063`). To see what the
+  agent has done in the current iteration window:
+
+      ai-memory --db ~/.claude/ai-memory.db list --namespace campaign-v063
+
+- The append-only audit trail lives on a `campaign-log/vX.Y.Z` branch
+  of `agentic-mem-labs`. One markdown report per iteration:
+
+      git -C ~/agentic-mem-labs-log log --oneline campaign-log/v0.6.3
+
+### Memory namespace as the campaign's operating substrate
+
+Every campaign uses an ai-memory namespace named after the campaign.
+The namespace contains: the campaign's overview/scope/hard rules,
+approvals, code-quality standards, Engineering Standards alignment, a
+snapshot of open issues + PRs at campaign start, one summary memory per
+iteration, decisions, blockers, and "future"/deferred items.
+
+Treat the namespace as both the agent's working memory and the
+historical record. After a campaign ends, the namespace is preserved
+indefinitely (`tier = long`).
+
+### What human reviewers should focus on under a campaign
+
+PRs from `campaign/<slug>` branches into `release/vX.Y.Z` get
+`gh pr merge --squash --delete-branch` once CI is green. The agent
+self-reviews quality (clippy pedantic, fmt, tests). For human
+spot-checks: charter alignment, hard-rule compliance, test coverage,
+audit consistency on the `campaign-log/vX.Y.Z` branch.
+
+The campaign is a *complement* to human development, not a replacement.
+For everything outside the active charter — bug triage, design ADRs,
+release cuts, dependency upgrades, security response — humans still
+own the work.

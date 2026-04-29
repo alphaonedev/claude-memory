@@ -1,3 +1,24 @@
+ai-memory (0.6.0-1) noble; urgency=medium
+
+  * Phase 1 complete: Tasks 1.1 schema metadata, 1.2 agent identity (NHI),
+    1.3 agent registration + _agents namespace, 1.5 scope-based visibility,
+    1.6 N-level namespace standards, 1.7 vertical memory promotion,
+    1.8 horizontal forget, 1.9 per-namespace governance + consensus,
+    1.10 pending-action approvals, 1.11 budget-aware recall,
+    1.12 hierarchy-aware recall + scope_idx + proximity boost
+  * Peer-mesh sync-daemon with vector clocks + timestamp-aware merge
+  * Native TLS + mTLS fingerprint allowlist (Layer 1 + 2)
+  * v0.6.0.0 sprint: time-decay half-life on recall scoring,
+    contextual recall via context-token embedding fusion,
+    post-store LLM autonomy hooks (auto_tag + detect_contradiction),
+    TypeScript + Python SDK scaffolds, hardened systemd units
+  * 23 MCP tools, HTTP API with 24+ endpoints, CLI with 26+ commands
+  * MANDATORY disclosures: consensus governance breaking change (#234),
+    sync-endpoint TLS requirement (#231), mTLS trust boundary (#239).
+    Read CHANGELOG.md before deploying.
+
+ -- Justin Jessup <Justin@alpha-one.mobi>  Sun, 19 Apr 2026 00:00:00 +0000
+
 ai-memory (0.5.1-1) noble; urgency=medium
 
   * Docker image on GHCR, auto-built on tag push

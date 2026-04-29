@@ -1,0 +1,60 @@
+[Unit]
+Description=ai-memory autonomous curator (v0.6.1)
+Documentation=https://github.com/alphaonedev/ai-memory-mcp
+# Run after the main service so the DB is guaranteed to exist, and after
+# a reachable Ollama endpoint (the ai-memory main unit ships with
+# Wants=ollama.service when Ollama is colocated). This unit assumes
+# Ollama is reachable on the default port; override Environment=
+# AI_MEMORY_OLLAMA_URL if it lives elsewhere.
+After=ai-memory.service
+Wants=ai-memory.service
+
+[Service]
+Type=simple
+User=ai-memory
+Group=ai-memory
+# Default sweep: every hour, at most 100 LLM-invoking operations per
+# cycle. Tune via EnvironmentFile=/etc/ai-memory/curator.env:
+#   AI_MEMORY_CURATOR_INTERVAL_SECS=3600
+#   AI_MEMORY_CURATOR_MAX_OPS=100
+#   AI_MEMORY_CURATOR_DRY_RUN=0
+EnvironmentFile=-/etc/ai-memory/curator.env
+Environment=AI_MEMORY_CURATOR_INTERVAL_SECS=3600
+Environment=AI_MEMORY_CURATOR_MAX_OPS=100
+ExecStart=/usr/bin/ai-memory curator --daemon \
+  --interval-secs ${AI_MEMORY_CURATOR_INTERVAL_SECS} \
+  --max-ops ${AI_MEMORY_CURATOR_MAX_OPS}
+
+# Restart on any unexpected exit. systemd will honour the daemon's
+# SIGTERM handler and wait up to TimeoutStopSec before SIGKILL.
+Restart=on-failure
+RestartSec=30s
+TimeoutStopSec=60s
+
+# --- hardening (matches the main daemon's sandbox) ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/ai-memory
+ReadOnlyPaths=/etc/ai-memory
+
+[Install]
+WantedBy=multi-user.target

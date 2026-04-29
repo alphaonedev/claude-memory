@@ -1,0 +1,61 @@
+[Unit]
+Description=ai-memory — persistent memory for AI agents (HTTP + MCP daemon)
+Documentation=https://github.com/alphaonedev/ai-memory-mcp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ai-memory
+Group=ai-memory
+ExecStart=/usr/bin/ai-memory serve --host 127.0.0.1 --port 9077
+Restart=on-failure
+RestartSec=5s
+
+# State location. The package installer creates /var/lib/ai-memory owned by
+# ai-memory:ai-memory with mode 0750.
+Environment=AI_MEMORY_DB=/var/lib/ai-memory/ai-memory.db
+Environment=RUST_LOG=ai_memory=info
+StateDirectory=ai-memory
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/ai-memory
+
+# --- hardening ---
+# Keeps the daemon from being used as a beachhead if a crate in the dep
+# tree is ever compromised. Review before loosening.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectClock=yes
+ProtectProc=invisible
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# rustls/ring uses mmap+exec for JIT-free crypto; no need to relax MDWE.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@mount @swap @reboot @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+# Only touch AI_MEMORY_DB's parent. Everything else is ProtectSystem=strict
+# read-only, with PrivateTmp for scratch.
+ReadWritePaths=/var/lib/ai-memory
+
+# resource caps — tuned for a single-node operator profile.
+# Operators running bigger fleets should override these via drop-in.
+LimitNOFILE=65535
+MemoryMax=2G
+TasksMax=512
+
+[Install]
+WantedBy=multi-user.target

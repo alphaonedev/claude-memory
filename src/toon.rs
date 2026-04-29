@@ -30,6 +30,9 @@ const MEMORY_FIELDS: &[&str] = &[
 ];
 
 /// Compact memory fields — omits timestamps for tighter output.
+/// Includes `agent_id` (pulled out of `metadata.agent_id`) so AI clients using
+/// the default compact format can see provenance without switching to
+/// non-compact TOON or JSON. See issue #199.
 const MEMORY_FIELDS_COMPACT: &[&str] = &[
     "id",
     "title",
@@ -38,6 +41,7 @@ const MEMORY_FIELDS_COMPACT: &[&str] = &[
     "priority",
     "score",
     "tags",
+    "agent_id",
 ];
 
 /// Serialize a recall/list/search response to TOON format.
@@ -67,6 +71,13 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
     }
     if let Some(mode) = response.get("mode").and_then(|v| v.as_str()) {
         meta.push(format!("mode:{mode}"));
+    }
+    // Task 1.11: surface token budget info in the meta line when present.
+    if let Some(used) = response.get("tokens_used") {
+        meta.push(format!("tokens_used:{used}"));
+    }
+    if let Some(budget) = response.get("budget_tokens") {
+        meta.push(format!("budget_tokens:{budget}"));
     }
     if !meta.is_empty() {
         out.push_str(&meta.join("|"));
@@ -101,7 +112,15 @@ pub fn memories_to_toon(response: &Value, compact: bool) -> String {
         for mem in memories {
             let row: Vec<String> = fields
                 .iter()
-                .map(|&field| format_value(mem.get(field)))
+                .map(|&field| {
+                    // #199: `agent_id` is nested inside metadata in the Memory struct.
+                    // Surface it as a top-level TOON column by digging into metadata.
+                    if field == "agent_id" {
+                        format_value(mem.get("metadata").and_then(|m| m.get("agent_id")))
+                    } else {
+                        format_value(mem.get(field))
+                    }
+                })
                 .collect();
             out.push_str(&row.join("|"));
             out.push('\n');
@@ -229,9 +248,33 @@ mod tests {
             "count": 1
         });
         let toon = memories_to_toon(&resp, true);
-        assert!(toon.contains("memories[id|title|tier|namespace|priority|score|tags]:"));
+        // #199: agent_id is in the compact header; it's empty when metadata is absent
+        assert!(toon.contains("memories[id|title|tier|namespace|priority|score|tags|agent_id]:"));
         assert!(!toon.contains("created_at"));
         assert!(!toon.contains("confidence"));
+    }
+
+    #[test]
+    fn compact_mode_surfaces_agent_id_from_metadata() {
+        let resp = json!({
+            "memories": [{
+                "id": "x",
+                "title": "Test",
+                "tier": "mid",
+                "namespace": "test",
+                "priority": 5,
+                "score": 0.5,
+                "tags": [],
+                "metadata": {"agent_id": "alice"}
+            }],
+            "count": 1
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(
+            row.ends_with("|alice"),
+            "agent_id must be the last compact column; row: {row}"
+        );
     }
 
     #[test]
@@ -270,5 +313,352 @@ mod tests {
         let toon = search_to_toon(&resp, true);
         assert!(toon.contains("memories["));
         assert!(toon.contains("Found"));
+    }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — token-savings size invariant + round-trip-ish check
+    // -----------------------------------------------------------------
+
+    /// Build a fixed 5-memory fixture so the size invariant is reproducible.
+    fn five_memory_fixture() -> Value {
+        json!({
+            "memories": [
+                {
+                    "id": "01",
+                    "title": "PostgreSQL config",
+                    "tier": "long",
+                    "namespace": "infra",
+                    "priority": 9,
+                    "confidence": 1.0,
+                    "score": 0.91,
+                    "access_count": 4,
+                    "tags": ["postgres", "database"],
+                    "source": "claude",
+                    "created_at": "2026-04-03T15:00:00+00:00",
+                    "updated_at": "2026-04-03T15:00:00+00:00",
+                    "metadata": {"agent_id": "alice"}
+                },
+                {
+                    "id": "02",
+                    "title": "Redis cache strategy",
+                    "tier": "long",
+                    "namespace": "infra",
+                    "priority": 8,
+                    "confidence": 0.95,
+                    "score": 0.84,
+                    "access_count": 2,
+                    "tags": ["redis", "cache"],
+                    "source": "claude",
+                    "created_at": "2026-04-03T15:01:00+00:00",
+                    "updated_at": "2026-04-03T15:01:00+00:00",
+                    "metadata": {"agent_id": "alice"}
+                },
+                {
+                    "id": "03",
+                    "title": "BIND9 custom build",
+                    "tier": "mid",
+                    "namespace": "infra/dns",
+                    "priority": 7,
+                    "confidence": 0.9,
+                    "score": 0.71,
+                    "access_count": 1,
+                    "tags": ["bind", "dns"],
+                    "source": "user",
+                    "created_at": "2026-04-03T15:02:00+00:00",
+                    "updated_at": "2026-04-03T15:02:00+00:00",
+                    "metadata": {"agent_id": "bob"}
+                },
+                {
+                    "id": "04",
+                    "title": "Kubernetes pod recovery",
+                    "tier": "mid",
+                    "namespace": "platform/k8s",
+                    "priority": 6,
+                    "confidence": 0.85,
+                    "score": 0.62,
+                    "access_count": 0,
+                    "tags": ["k8s", "ops"],
+                    "source": "hook",
+                    "created_at": "2026-04-03T15:03:00+00:00",
+                    "updated_at": "2026-04-03T15:03:00+00:00",
+                    "metadata": {"agent_id": "carol"}
+                },
+                {
+                    "id": "05",
+                    "title": "Vault secrets rotation",
+                    "tier": "short",
+                    "namespace": "security",
+                    "priority": 5,
+                    "confidence": 0.8,
+                    "score": 0.55,
+                    "access_count": 3,
+                    "tags": ["vault", "secrets"],
+                    "source": "api",
+                    "created_at": "2026-04-03T15:04:00+00:00",
+                    "updated_at": "2026-04-03T15:04:00+00:00",
+                    "metadata": {"agent_id": "dave"}
+                }
+            ],
+            "count": 5,
+            "mode": "hybrid"
+        })
+    }
+
+    #[test]
+    fn test_toon_size_invariant_5_memories_under_threshold() {
+        // Published claim: TOON shaves ~40-79% off JSON for memory rows.
+        // We pin a lenient 65% upper bound (≤ 0.65 * JSON_BYTES) for the
+        // compact format on a fixed 5-memory fixture. Catches regressions
+        // without being so tight that minor format tweaks break CI.
+        let fixture = five_memory_fixture();
+        let json_bytes = serde_json::to_string(&fixture).unwrap().len();
+        let toon_bytes = memories_to_toon(&fixture, true).len();
+
+        let ratio = (toon_bytes as f64) / (json_bytes as f64);
+        assert!(
+            ratio < 0.65,
+            "TOON size invariant violated: toon={toon_bytes} json={json_bytes} \
+             ratio={ratio:.3} (must be < 0.65 for 5-memory compact fixture)"
+        );
+
+        // Lower-bound sanity: TOON output must be non-empty and contain
+        // at least all 5 ids.
+        let toon = memories_to_toon(&fixture, true);
+        for id in ["01", "02", "03", "04", "05"] {
+            assert!(toon.contains(id), "TOON output missing id `{id}`");
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // W12-H — escape_toon char-by-char + format_value branch coverage
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn escape_toon_pipe() {
+        let s = escape_toon("a|b");
+        assert_eq!(s, "a\\|b");
+    }
+
+    #[test]
+    fn escape_toon_newline() {
+        let s = escape_toon("a\nb");
+        assert_eq!(s, "a\\nb");
+    }
+
+    #[test]
+    fn escape_toon_carriage_return() {
+        let s = escape_toon("a\rb");
+        assert_eq!(s, "a\\rb");
+    }
+
+    #[test]
+    fn escape_toon_backslash() {
+        let s = escape_toon("a\\b");
+        // Backslash is doubled first, so `\` → `\\`.
+        assert_eq!(s, "a\\\\b");
+    }
+
+    #[test]
+    fn escape_toon_colon() {
+        let s = escape_toon("a:b");
+        assert_eq!(s, "a\\:b");
+    }
+
+    #[test]
+    fn escape_toon_no_special_chars_passthrough() {
+        let s = escape_toon("plain text 123");
+        assert_eq!(s, "plain text 123");
+    }
+
+    #[test]
+    fn escape_toon_multiple_specials() {
+        let s = escape_toon("a|b:c\nd");
+        assert!(s.contains("\\|"));
+        assert!(s.contains("\\:"));
+        assert!(s.contains("\\n"));
+    }
+
+    #[test]
+    fn format_value_null_is_empty() {
+        let resp = json!({
+            "memories": [{"id": null, "title": "t"}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        // First field (id) is null → empty string before pipe.
+        assert!(row.starts_with("|t|"), "got: {row}");
+    }
+
+    #[test]
+    fn format_value_bool_serializes_as_zero_one() {
+        // Bool → "1" or "0" via format_value. Use a synthetic field.
+        let resp = json!({
+            "memories": [{"id": "x", "title": true}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(row.contains("|1|"), "true → 1; got: {row}");
+    }
+
+    #[test]
+    fn format_value_bool_false() {
+        let resp = json!({
+            "memories": [{"id": "x", "title": false}],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, true);
+        let row = toon.lines().last().unwrap();
+        assert!(row.contains("|0|"), "false → 0; got: {row}");
+    }
+
+    #[test]
+    fn format_value_object_empty_is_empty_string() {
+        // Empty metadata object → empty string in TOON output.
+        let resp = json!({
+            "memories": [{
+                "id": "x", "title": "t", "tier": "long", "namespace": "n",
+                "priority": 1, "confidence": 1.0, "score": 0.5, "access_count": 0,
+                "tags": [], "source": "", "created_at": "", "updated_at": "",
+                "metadata": {}
+            }],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Metadata column (last) is empty.
+        let row = toon.lines().last().unwrap();
+        assert!(row.ends_with('|') || row.ends_with("||"), "got: {row}");
+    }
+
+    #[test]
+    fn format_value_object_non_empty_serialized_json() {
+        let resp = json!({
+            "memories": [{
+                "id": "x", "title": "t", "tier": "long", "namespace": "n",
+                "priority": 1, "confidence": 1.0, "score": 0.5, "access_count": 0,
+                "tags": [], "source": "", "created_at": "", "updated_at": "",
+                "metadata": {"k": "v"}
+            }],
+            "count": 1,
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Object becomes JSON-serialized + escaped (`:` → `\:`).
+        assert!(toon.contains("k") && toon.contains("v"));
+    }
+
+    #[test]
+    fn standards_section_emitted_when_present() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "standard": {"id": "s1", "title": "policy", "content": "be nice"}
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("standards[id|title|content]:"));
+        assert!(toon.contains("s1"));
+    }
+
+    #[test]
+    fn standards_array_emitted_when_present() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "standards": [
+                {"id": "s1", "title": "p1", "content": "c1"},
+                {"id": "s2", "title": "p2", "content": "c2"},
+            ],
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("standards["));
+        assert!(toon.contains("s1"));
+        assert!(toon.contains("s2"));
+    }
+
+    #[test]
+    fn meta_line_includes_token_budget() {
+        let resp = json!({
+            "memories": [],
+            "count": 0,
+            "tokens_used": 100,
+            "budget_tokens": 500,
+        });
+        let toon = memories_to_toon(&resp, true);
+        assert!(toon.contains("tokens_used:100"));
+        assert!(toon.contains("budget_tokens:500"));
+    }
+
+    #[test]
+    fn search_to_toon_passes_through_when_memories_present() {
+        // When both `results` and `memories` exist, `memories_to_toon` is
+        // called directly without normalizing.
+        let resp = json!({
+            "memories": [{"id": "a", "title": "t1"}],
+            "results": [{"id": "b", "title": "t2"}],
+            "count": 1,
+        });
+        let toon = search_to_toon(&resp, true);
+        // Should use `memories` path, not `results`.
+        assert!(toon.contains("a"));
+        assert!(toon.contains("t1"));
+    }
+
+    #[test]
+    fn test_toon_round_trip_preserves_visible_fields() {
+        // No bidirectional parser exists in-tree (TOON is one-way for
+        // LLM output). Instead we assert "round-trip-ish": every input
+        // field that maps to a TOON column appears verbatim in the output
+        // for the non-compact format on a single memory.
+        let resp = json!({
+            "memories": [{
+                "id": "abc-xyz",
+                "title": "Round-trip test",
+                "tier": "long",
+                "namespace": "test",
+                "priority": 9,
+                "confidence": 1.0,
+                "score": 0.5,
+                "access_count": 7,
+                "tags": ["alpha", "beta"],
+                "source": "claude",
+                "created_at": "2026-04-03T15:00:00+00:00",
+                "updated_at": "2026-04-03T15:00:30+00:00",
+                "metadata": {"agent_id": "alice"}
+            }],
+            "count": 1
+        });
+        let toon = memories_to_toon(&resp, false);
+        // Header lists every non-compact column.
+        for col in [
+            "id",
+            "title",
+            "tier",
+            "namespace",
+            "priority",
+            "confidence",
+            "score",
+            "access_count",
+            "tags",
+            "source",
+            "created_at",
+            "updated_at",
+            "metadata",
+        ] {
+            assert!(
+                toon.contains(col),
+                "TOON header must list column `{col}`; got:\n{toon}"
+            );
+        }
+        // Data row preserves visible string values.
+        assert!(toon.contains("abc-xyz"));
+        assert!(toon.contains("Round-trip test"));
+        assert!(toon.contains("alpha,beta")); // tag array joined w/ comma
+        // Timestamps contain `:` which TOON escapes as `\:`. Both forms ship
+        // the same logical value; check the escaped variant emitted by
+        // `escape_toon` when ':' triggers the escape branch.
+        assert!(
+            toon.contains(r"2026-04-03T15\:00\:00+00\:00"),
+            "TOON should contain timestamp (with escaped ':'): {toon}"
+        );
     }
 }

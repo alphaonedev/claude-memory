@@ -1,0 +1,5 @@
+# All blanks and comments — must produce an empty allowlist.
+
+# Another comment
+
+   # Indented comment

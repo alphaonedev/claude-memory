@@ -1,0 +1,507 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  What's New in v0.6.3 — release-spotlight page covering Streams A-F,
+  the W3-W12 coverage campaign, the SSRF security finding+fix, and
+  the v0.6.3.1 capabilities-extension queued patch. Companion to
+  at-a-glance.html.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>What's New in v0.6.3 — Structured Memory + Performance</title>
+<meta name="description" content="v0.6.3 release highlights: hierarchical namespaces, temporal-validity knowledge graph, published performance budgets, 93.05% test coverage, 1809 tests, 2 SSRF defects fixed.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/whats-new-v063.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--warn:#ffb86b;--bad:#ff6b9d;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:2rem;margin-bottom:.5rem}h3{font-size:1.2rem;margin-bottom:.5rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;align-items:center;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a.active,.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:6rem 1.5rem 4rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.08),transparent 60%),radial-gradient(ellipse at bottom,rgba(200,162,255,0.05),transparent 70%);border-bottom:1px solid var(--border)}
+.hero .badge{display:inline-block;padding:.4rem 1rem;background:rgba(110,231,255,0.1);border:1px solid var(--p1);color:var(--p1);border-radius:999px;font-family:var(--font-mono);font-size:.85rem;margin-bottom:1.5rem;animation:glow 2.5s infinite ease-in-out}
+@keyframes glow{0%,100%{box-shadow:0 0 0 0 rgba(110,231,255,0.4)}50%{box-shadow:0 0 0 12px rgba(110,231,255,0)}}
+.hero h1{font-size:clamp(2.5rem,5vw,4rem);line-height:1.05;letter-spacing:-0.04em;margin-bottom:1rem}
+.hero .subtitle{font-size:1.2rem;color:var(--text-muted);max-width:720px;margin:0 auto 2rem}
+.hero .meta{display:flex;justify-content:center;gap:2rem;color:var(--text-dim);font-family:var(--font-mono);font-size:.85rem;flex-wrap:wrap}
+section{padding:5rem 0;border-bottom:1px solid var(--border)}
+section .eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+section .lede{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin-bottom:3rem}
+
+/* STREAMS GRID */
+.streams-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1.25rem}
+.stream{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;position:relative;overflow:hidden}
+.stream::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.stream.A::before{background:var(--p1)}.stream.B::before{background:var(--p2)}.stream.C::before{background:var(--p2)}.stream.D::before{background:var(--p2)}.stream.E::before{background:var(--p3)}.stream.F::before{background:var(--p3)}
+.stream .stream-letter{position:absolute;top:1.5rem;right:1.5rem;font-family:var(--font-mono);font-size:3rem;font-weight:900;opacity:.08;color:var(--text)}
+.stream .stream-tag{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;color:var(--text-muted);text-transform:uppercase;margin-bottom:.5rem}
+.stream h3{margin-bottom:.65rem}
+.stream .stream-desc{color:var(--text-muted);font-size:.9rem;margin-bottom:1rem}
+.stream .stream-deliverables{list-style:none;font-size:.85rem;color:var(--text-muted)}
+.stream .stream-deliverables li{padding-left:1.2rem;position:relative;margin:.3rem 0}
+.stream .stream-deliverables li::before{content:"✓";position:absolute;left:0;color:var(--good);font-weight:700}
+.stream .stream-status{margin-top:1rem;padding-top:1rem;border-top:1px solid var(--border);font-family:var(--font-mono);font-size:.78rem;color:var(--good)}
+
+/* CAMPAIGN WAVES */
+.waves-track{position:relative;padding:1rem 0;overflow-x:auto}
+.waves-row{display:flex;gap:.5rem;min-width:900px;align-items:flex-end}
+.wave{flex:1;display:flex;flex-direction:column;align-items:center;gap:.5rem;padding:.85rem .35rem;background:var(--bg-card);border:1px solid var(--border);border-radius:8px;position:relative;min-width:80px}
+.wave .wave-name{font-family:var(--font-mono);font-size:.75rem;font-weight:700;color:var(--text)}
+.wave .wave-cov{font-family:var(--font-mono);font-size:.95rem;font-weight:700}
+.wave .wave-delta{font-family:var(--font-mono);font-size:.65rem;color:var(--good)}
+.wave .wave-bar{width:8px;background:linear-gradient(to top,var(--p1),var(--p3));border-radius:4px;margin-top:.4rem}
+.wave .wave-closers{font-size:.65rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em}
+
+/* COVERAGE BAR ANIMATION */
+.cov-progress{display:flex;flex-direction:column;gap:1rem;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem}
+.cov-progress h3{font-family:var(--font-mono);margin-bottom:0}
+.cov-bar-row{display:flex;align-items:center;gap:1rem}
+.cov-bar-label{font-family:var(--font-mono);font-size:.8rem;color:var(--text-muted);min-width:100px}
+.cov-bar-track{flex:1;height:24px;background:var(--bg-code);border-radius:6px;position:relative;overflow:hidden}
+.cov-bar-fill-anim{height:100%;background:linear-gradient(90deg,var(--p3),var(--p1));border-radius:6px;animation:fill-anim 3s ease-out forwards;width:0}
+@keyframes fill-anim{to{width:var(--target)}}
+.cov-bar-pct{font-family:var(--font-mono);font-size:.95rem;font-weight:700;min-width:90px;text-align:right}
+
+/* SECURITY CALLOUT */
+.sec-card{background:linear-gradient(135deg,rgba(255,107,157,0.08),rgba(255,184,107,0.05));border:1px solid rgba(255,107,157,0.3);border-radius:14px;padding:1.75rem;margin:2rem 0}
+.sec-card h3{color:var(--bad);margin-bottom:.5rem}
+.sec-card .sec-body{color:#ffb0c8;margin-bottom:1rem}
+.sec-defect{background:var(--bg-code);border:1px solid rgba(255,107,157,0.2);border-radius:8px;padding:.85rem 1rem;margin:.5rem 0;font-size:.85rem;color:var(--text-muted)}
+.sec-defect .sec-id{font-family:var(--font-mono);color:var(--bad);font-weight:700;margin-right:.5rem}
+.sec-defect .sec-fixed{display:inline-block;color:var(--good);font-family:var(--font-mono);font-size:.75rem;margin-left:.5rem}
+
+/* COMPARISON TWO-UP */
+.beforeafter{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin:2rem 0}
+@media(max-width:800px){.beforeafter{grid-template-columns:1fr}}
+.ba-card{padding:1.5rem;border-radius:12px;border:1px solid var(--border)}
+.ba-card.before{background:rgba(255,107,157,0.04);border-color:rgba(255,107,157,0.2)}
+.ba-card.after{background:rgba(110,231,255,0.04);border-color:rgba(110,231,255,0.2)}
+.ba-tag{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;margin-bottom:.6rem}
+.ba-card.before .ba-tag{color:var(--bad)}
+.ba-card.after .ba-tag{color:var(--p1)}
+.ba-card pre{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);background:transparent;border:none;padding:0;line-height:1.55;white-space:pre-wrap;word-break:break-all}
+
+/* TILES */
+.tile-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}
+.tile{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;display:flex;flex-direction:column;gap:.4rem}
+.tile.p1{border-top:3px solid var(--p1)}.tile.p2{border-top:3px solid var(--p2)}.tile.p3{border-top:3px solid var(--p3)}.tile.good{border-top:3px solid var(--good)}
+.tile .tile-num{font-family:var(--font-mono);font-size:1.85rem;font-weight:700;line-height:1}
+.tile .tile-label{font-size:.75rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-bottom:.4rem}
+.tile .tile-sub{font-size:.78rem;color:var(--text-dim)}
+
+/* FOOTER */
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ What's New v0.6.3</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html" class="current">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="badge">v0.6.3-rc1 · TAGGED 2026-04-26</div>
+  <h1>Structured Memory<br>+ Performance.</h1>
+  <p class="subtitle">The grand-slam release. Three pillars shipped in one focused 4-week sprint: hierarchical namespace tree, temporal-validity knowledge graph, and CI-enforced sub-100ms performance budgets.</p>
+  <div class="meta">
+    <span>56.7% → <strong style="color:var(--good)">93.05%</strong> coverage</span>
+    <span style="opacity:.4">·</span>
+    <span><strong style="color:var(--text)">1,809</strong> tests passing</span>
+    <span style="opacity:.4">·</span>
+    <span><strong style="color:var(--text)">26</strong> closers · <strong style="color:var(--text)">9</strong> waves</span>
+    <span style="opacity:.4">·</span>
+    <span><strong style="color:var(--bad)">2</strong> SSRF defects fixed</span>
+  </div>
+</section>
+
+<!-- =============== THE THREE PILLARS, EXPANDED =============== -->
+<section id="streams">
+  <div class="container">
+    <span class="eyebrow">6 Engineering Streams</span>
+    <h2>Streams A–F. Six teams. One release.</h2>
+    <p class="lede">v0.6.3 was scoped as six work-streams, each independently shippable but compounding when released together. All six landed; campaign closed at 93.05% line coverage.</p>
+
+    <div class="streams-grid">
+      <div class="stream A">
+        <div class="stream-letter">A</div>
+        <div class="stream-tag">PILLAR 1 · STREAM A</div>
+        <h3>Hierarchy</h3>
+        <div class="stream-desc">Namespaces gain <code>/</code>-delimited tree paths. Recall walks ancestors. <code>memory_get_taxonomy</code> returns the full tree with per-node memory counts.</div>
+        <ul class="stream-deliverables">
+          <li>MAX_NAMESPACE_DEPTH enforcement</li>
+          <li>Lossless flat → hierarchy migration (existing namespaces become single-segment paths)</li>
+          <li>memory_get_taxonomy MCP tool + HTTP endpoint</li>
+          <li>TaxonomyNode model + recursive walker</li>
+          <li>Subtree-scoped recall via namespace prefix match</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+
+      <div class="stream B">
+        <div class="stream-letter">B</div>
+        <div class="stream-tag">PILLAR 2 · STREAM B</div>
+        <h3>KG Schema + Entities</h3>
+        <div class="stream-desc">memory_links gains four columns (valid_from / valid_until / observed_by / signature). entity_aliases side table. Backfill of existing links to created_at.</div>
+        <ul class="stream-deliverables">
+          <li>Schema v15 migration (sqlite + postgres mirror)</li>
+          <li>Versioned migration files extracted from inline SQL</li>
+          <li>Entity registry with alias resolution</li>
+          <li>memory_entity_register / memory_entity_get_by_alias</li>
+          <li>Indexes: temporal_src, temporal_tgt, relation</li>
+          <li>signature column placeholder ready for v0.7 Ed25519</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+
+      <div class="stream C">
+        <div class="stream-letter">C</div>
+        <div class="stream-tag">PILLAR 2 · STREAM C</div>
+        <h3>KG Query Layer</h3>
+        <div class="stream-desc">Recursive-CTE traversal with time + scope + observed-by filters. memory_kg_query at depth ≤ 5. memory_kg_timeline. memory_kg_invalidate. Cypher stubs for v0.7 AGE.</div>
+        <ul class="stream-deliverables">
+          <li>memory_kg_query MCP tool + HTTP endpoint</li>
+          <li>memory_kg_timeline ordered-fact return</li>
+          <li>memory_kg_invalidate sets valid_until on a link</li>
+          <li>Cypher stubs documented in db.rs for v0.7 AGE wrapper</li>
+          <li>Cycle detection via path-LIKE check</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+
+      <div class="stream D">
+        <div class="stream-letter">D</div>
+        <div class="stream-tag">PILLAR 2 · STREAM D</div>
+        <h3>Duplicate Check</h3>
+        <div class="stream-desc">Pre-write similarity check. Reuses embedding pipeline. Returns nearest-neighbor cosine + above-threshold flag + suggested merge target.</div>
+        <ul class="stream-deliverables">
+          <li>memory_check_duplicate MCP tool + HTTP endpoint</li>
+          <li>Configurable threshold (default 0.85)</li>
+          <li>Tier-aware: requires semantic+ for embeddings</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+
+      <div class="stream E">
+        <div class="stream-letter">E</div>
+        <div class="stream-tag">PILLAR 3 · STREAM E</div>
+        <h3>Performance Instrumentation</h3>
+        <div class="stream-desc">Tracing spans on every MCP tool entrypoint. <code>ai-memory bench</code> subcommand with canonical workload + p50/p95/p99 reporting. <code>--baseline</code> regression detection.</div>
+        <ul class="stream-deliverables">
+          <li>src/bench.rs (97% covered) with 1k-memory canonical workload</li>
+          <li>p50 / p95 / p99 reporting per operation</li>
+          <li>--baseline path.json for regression detection</li>
+          <li>Tracing spans wired throughout mcp.rs and handlers.rs</li>
+          <li>Baseline numbers established on Apple M4 reference</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+
+      <div class="stream F">
+        <div class="stream-letter">F</div>
+        <div class="stream-tag">PILLAR 3 · STREAM F</div>
+        <h3>Performance Budgets + CI Guard</h3>
+        <div class="stream-desc">PERFORMANCE.md authoritative table. bench.yml CI workflow runs the bench on every PR. Build fails if any p95 exceeds budget by &gt;10%.</div>
+        <ul class="stream-deliverables">
+          <li>PERFORMANCE.md with all 13 operation budgets</li>
+          <li>.github/workflows/bench.yml on every PR + push</li>
+          <li>10% tolerance threshold encoded in workflow</li>
+          <li>Workflow summary embeds the table per-run</li>
+          <li>JSON artifact retained for trend analysis</li>
+        </ul>
+        <div class="stream-status">✓ Shipped</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== COVERAGE CAMPAIGN =============== -->
+<section id="coverage-campaign">
+  <div class="container">
+    <span class="eyebrow">W3-W12 Coverage Campaign</span>
+    <h2>56.7% → 93.05% in 9 waves.</h2>
+    <p class="lede">After streams A-F shipped, a parallel-agent coverage campaign drove ai-memory from 56.7% line coverage to 93.05% across nine waves. 26 closers in total. ~1,200 net new tests. Two production SSRF defects discovered + fixed during the work.</p>
+
+    <div class="waves-track">
+      <div class="waves-row">
+        <div class="wave"><div class="wave-name">v0.6.2</div><div class="wave-cov" style="color:var(--text-dim)">56.7%</div><div class="wave-bar" style="height:60px"></div><div class="wave-closers">baseline</div></div>
+        <div class="wave"><div class="wave-name">W2</div><div class="wave-cov" style="color:var(--text-dim)">75.31%</div><div class="wave-delta">+18.6</div><div class="wave-bar" style="height:80px"></div><div class="wave-closers">Pkg C</div></div>
+        <div class="wave"><div class="wave-name">W3</div><div class="wave-cov" style="color:var(--good)">81.02%</div><div class="wave-delta">+5.71</div><div class="wave-bar" style="height:96px"></div><div class="wave-closers">M·M'·F·T</div></div>
+        <div class="wave"><div class="wave-name">W4</div><div class="wave-cov" style="color:var(--good)">81.77%</div><div class="wave-delta">+0.75</div><div class="wave-bar" style="height:98px"></div><div class="wave-closers">T4 (TLS)</div></div>
+        <div class="wave"><div class="wave-name">W5</div><div class="wave-cov" style="color:var(--good)">85.13%</div><div class="wave-delta">+3.36</div><div class="wave-bar" style="height:108px"></div><div class="wave-closers">S5·R5·C5·X5</div></div>
+        <div class="wave"><div class="wave-name">W6</div><div class="wave-cov" style="color:var(--good)">85.61%</div><div class="wave-delta">+0.48</div><div class="wave-bar" style="height:110px"></div><div class="wave-closers">D6 (daemon)</div></div>
+        <div class="wave"><div class="wave-name">W7</div><div class="wave-cov" style="color:var(--good)">85.85%</div><div class="wave-delta">+0.24</div><div class="wave-bar" style="height:111px"></div><div class="wave-closers">I7 (integ)</div></div>
+        <div class="wave"><div class="wave-name">W8</div><div class="wave-cov" style="color:var(--good)">88.15%</div><div class="wave-delta">+2.30</div><div class="wave-bar" style="height:120px"></div><div class="wave-closers">H8a/b/c/d</div></div>
+        <div class="wave"><div class="wave-name">W9</div><div class="wave-cov" style="color:var(--good)">89.29%</div><div class="wave-delta">+1.14</div><div class="wave-bar" style="height:124px"></div><div class="wave-closers">M9·F9·A9</div></div>
+        <div class="wave"><div class="wave-name">W10</div><div class="wave-cov" style="color:var(--good)">89.74%</div><div class="wave-delta">+0.45</div><div class="wave-bar" style="height:126px"></div><div class="wave-closers">L10a·b</div></div>
+        <div class="wave"><div class="wave-name">W11</div><div class="wave-cov" style="color:var(--good)">89.75%</div><div class="wave-delta">+0.01</div><div class="wave-bar" style="height:127px"></div><div class="wave-closers">S11a·b + SSRF</div></div>
+        <div class="wave" style="border-color:var(--good)"><div class="wave-name" style="color:var(--good)">W12</div><div class="wave-cov" style="color:var(--good);font-size:1.05rem">93.05%</div><div class="wave-delta">+3.30</div><div class="wave-bar" style="height:144px;background:linear-gradient(to top,var(--good),var(--p3))"></div><div class="wave-closers" style="color:var(--good)">8 PARALLEL</div></div>
+      </div>
+    </div>
+
+    <div class="cov-progress" style="margin-top:2.5rem">
+      <h3 style="margin-bottom:1rem">Final coverage by metric</h3>
+      <div class="cov-bar-row">
+        <div class="cov-bar-label">Line</div>
+        <div class="cov-bar-track"><div class="cov-bar-fill-anim" style="--target:93.05%"></div></div>
+        <div class="cov-bar-pct" style="color:var(--good)">93.05%</div>
+      </div>
+      <div class="cov-bar-row">
+        <div class="cov-bar-label">Region</div>
+        <div class="cov-bar-track"><div class="cov-bar-fill-anim" style="--target:93.11%"></div></div>
+        <div class="cov-bar-pct" style="color:var(--good)">93.11%</div>
+      </div>
+      <div class="cov-bar-row">
+        <div class="cov-bar-label">Function</div>
+        <div class="cov-bar-track"><div class="cov-bar-fill-anim" style="--target:92.55%"></div></div>
+        <div class="cov-bar-pct" style="color:var(--good)">92.55%</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== SSRF FIXES =============== -->
+<section id="security">
+  <div class="container">
+    <span class="eyebrow">Security · L10b Findings</span>
+    <h2>Two SSRF defects discovered and fixed.</h2>
+    <p class="lede">Closer L10b was tasked with adding SSRF tests to <code>subscriptions::validate_url_dns</code>. The tests revealed two production defects. Both were fixed in commit <code>9eeb453</code> before the rc1 tag — un-ignored tests pass cleanly.</p>
+
+    <div class="sec-card">
+      <h3>What was found</h3>
+      <p class="sec-body">Both defects allowed webhook URLs to bypass the SSRF guard and hit internal addresses. Severity: <strong>Medium</strong>. Discovered during routine test-coverage work; fixed before tag.</p>
+
+      <div class="sec-defect">
+        <span class="sec-id">DEFECT-1</span>
+        <strong>Bracketed IPv6 host without explicit port bypassed validation.</strong>
+        URLs like <code>http://[fe80::1]/</code> produced <code>resolv_target = "[fe80::1]"</code> (no port). <code>to_socket_addrs()</code> errored "invalid port value" and the production DNS-failure fallback returned <code>Ok(())</code> — letting link-local IPv6 through.
+        <span class="sec-fixed">FIXED · 9eeb453</span>
+      </div>
+
+      <div class="sec-defect">
+        <span class="sec-id">DEFECT-2</span>
+        <strong>Unspecified addresses 0.0.0.0 and [::] were accepted.</strong>
+        <code>is_private()</code> didn't check <code>is_unspecified()</code>, so attacker-controlled hostnames resolving to 0.0.0.0 hit the local box (most kernels route 0.0.0.0 to localhost listeners).
+        <span class="sec-fixed">FIXED · 9eeb453</span>
+      </div>
+    </div>
+
+    <div class="beforeafter">
+      <div class="ba-card before">
+        <div class="ba-tag">▼ BEFORE</div>
+        <pre>// is_private — DEFECT-2 path
+fn is_private(ip: IpAddr) -> bool {
+  match ip {
+    IpAddr::V4(v4) =&gt; {
+      v4.is_private() ||
+      v4.is_link_local() ||
+      v4.is_multicast() ||
+      v4.is_broadcast()
+      // ← missing is_unspecified()
+    }
+    IpAddr::V6(v6) =&gt; {
+      let segs = v6.segments();
+      v6.is_multicast()
+      // ← missing is_unspecified()
+      || (segs[0] &amp; 0xfe00) == 0xfc00
+      || (segs[0] &amp; 0xffc0) == 0xfe80
+    }
+  }
+}</pre>
+      </div>
+      <div class="ba-card after">
+        <div class="ba-tag">▲ AFTER (commit 9eeb453)</div>
+        <pre>fn is_private(ip: IpAddr) -&gt; bool {
+  match ip {
+    IpAddr::V4(v4) =&gt; {
+      v4.is_private() ||
+      v4.is_link_local() ||
+      v4.is_multicast() ||
+      v4.is_broadcast() ||
+      v4.is_unspecified()  // ← FIX
+    }
+    IpAddr::V6(v6) =&gt; {
+      let segs = v6.segments();
+      v6.is_multicast() ||
+      v6.is_unspecified()  // ← FIX
+      || (segs[0] &amp; 0xfe00) == 0xfc00
+      || (segs[0] &amp; 0xffc0) == 0xfe80
+    }
+  }
+}</pre>
+      </div>
+    </div>
+
+    <div style="background:var(--bg-card);border:1px solid var(--good);border-radius:12px;padding:1.5rem;margin-top:2rem">
+      <strong style="color:var(--good)">No outstanding security defects post-campaign.</strong>
+      <p style="margin-top:.5rem">The SSRF fixes shipped with rc1. Both <code>#[ignore]</code> tests are un-ignored and passing. <strong>Zero ignored tests across the whole 1,809-test suite.</strong>
+    </p>
+    </div>
+  </div>
+</section>
+
+<!-- =============== HEADLINE NUMBERS =============== -->
+<section id="numbers">
+  <div class="container">
+    <span class="eyebrow">By the Numbers</span>
+    <h2>Every quantitative claim, sourced.</h2>
+    <p class="lede">All numbers from the v0.6.3 W12 consolidated coverage measurement (canonical command in CAMPAIGN-FINAL-METRICS.md). Hardware: Apple M4 / 32 GB / NVMe SSD.</p>
+
+    <div class="tile-grid">
+      <div class="tile p1"><div class="tile-label">Line coverage</div><div class="tile-num">93.05<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">42,894 / 46,099 lines</div></div>
+      <div class="tile p1"><div class="tile-label">Region coverage</div><div class="tile-num">93.11<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">73,150 / 78,564 regions</div></div>
+      <div class="tile p1"><div class="tile-label">Function coverage</div><div class="tile-num">92.55<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">3,527 / 3,811 functions</div></div>
+      <div class="tile good"><div class="tile-label">Tests passing</div><div class="tile-num">1,809</div><div class="tile-sub">0 failed · 0 ignored</div></div>
+      <div class="tile good"><div class="tile-label">Net new tests</div><div class="tile-num">~1,200</div><div class="tile-sub">across W3-W12</div></div>
+      <div class="tile p2"><div class="tile-label">Closers dispatched</div><div class="tile-num">26</div><div class="tile-sub">across 9 waves</div></div>
+      <div class="tile p2"><div class="tile-label">main.rs reduction</div><div class="tile-num">98.3<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">4,511 → 75 lines</div></div>
+      <div class="tile p3"><div class="tile-label">Session-start p95</div><div class="tile-num">42<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 100 ms</div></div>
+      <div class="tile p3"><div class="tile-label">Recall p95 hot</div><div class="tile-num">18<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 50 ms</div></div>
+      <div class="tile p3"><div class="tile-label">Federation ack p99</div><div class="tile-num">850<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 2 s</div></div>
+      <div class="tile"><div class="tile-label">Modules at 100%</div><div class="tile-num">7</div><div class="tile-sub">main · errors · color · ...</div></div>
+      <div class="tile"><div class="tile-label">SSRF fixed</div><div class="tile-num">2</div><div class="tile-sub">found + fixed pre-tag</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== UPGRADE PATH =============== -->
+<section id="upgrade">
+  <div class="container">
+    <span class="eyebrow">Upgrading</span>
+    <h2>v0.6.2 → v0.6.3 in one command.</h2>
+    <p class="lede">SQLite migration is idempotent. The schema-v15 migration runs at first daemon start. Existing flat namespaces become single-segment hierarchical paths losslessly. Postgres backend has a manual procedure documented in MIGRATION-v0.6.2-to-v0.6.3.md.</p>
+
+    <div style="background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:1.5rem;font-family:var(--font-mono);font-size:.85rem;line-height:1.7;color:var(--text)">
+<span style="color:var(--text-dim)"># Homebrew</span><br>
+brew upgrade ai-memory<br><br>
+<span style="color:var(--text-dim)"># cargo</span><br>
+cargo install ai-memory --force<br><br>
+<span style="color:var(--text-dim)"># APT (Debian/Ubuntu)</span><br>
+sudo apt update &amp;&amp; sudo apt install --only-upgrade ai-memory<br><br>
+<span style="color:var(--text-dim)"># DNF/YUM (Fedora/RHEL)</span><br>
+sudo dnf upgrade ai-memory<br><br>
+<span style="color:var(--text-dim)"># Verify</span><br>
+ai-memory --version <span style="color:var(--p1)"># → ai-memory 0.6.3-rc1</span>
+    </div>
+
+    <div style="background:var(--bg-card);border:1px solid var(--border-hl);border-radius:12px;padding:1.5rem;margin-top:1.5rem">
+      <strong>What happens at first start:</strong>
+      <ol style="color:var(--text-muted);margin-top:.6rem;padding-left:1.5rem;font-size:.9rem">
+        <li>Daemon detects schema version &lt; 15</li>
+        <li>Runs migrations/sqlite/0010_v063_hierarchy_kg.sql idempotently</li>
+        <li>Backfills <code>memory_links.valid_from</code> from source memory's <code>created_at</code></li>
+        <li>Adds entity_aliases table</li>
+        <li>Bumps schema_version to 15</li>
+        <li>Existing memories untouched. Existing recall continues to work.</li>
+      </ol>
+    </div>
+  </div>
+</section>
+
+<!-- =============== WHAT'S NEXT =============== -->
+<section id="next">
+  <div class="container">
+    <span class="eyebrow">Coming Next</span>
+    <h2>v0.6.3.1 patch and v0.7 charter.</h2>
+
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
+      <div class="tile p1" style="grid-column:span 1">
+        <div class="tile-label">Patch · within days</div>
+        <div class="tile-num" style="font-size:1.4rem">v0.6.3.1</div>
+        <div class="tile-sub" style="margin-top:.65rem">Capabilities Extension · <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/457" style="color:var(--p1)">#457</a><br>schema_version=2 reports hooks, permissions, compaction status, approval subscribers.</div>
+      </div>
+      <div class="tile p2" style="grid-column:span 1">
+        <div class="tile-label">Major · End Q2 2026</div>
+        <div class="tile-num" style="font-size:1.4rem">v0.7</div>
+        <div class="tile-sub" style="margin-top:.65rem">Trust + A2A Maturity · 4 buckets<br>Hook Pipeline · Ed25519 attest · Apache AGE · A2A maturity + per-agent quotas.</div>
+      </div>
+    </div>
+
+    <p style="margin-top:1.5rem;color:var(--text-muted)">See <a href="at-a-glance.html#roadmap" style="color:var(--p1)">at-a-glance.html roadmap</a> or the <a href="https://github.com/alphaonedev/ai-memory-mcp-dev/blob/develop/ROADMAP.md" style="color:var(--p1)">public ROADMAP.md</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>v0.6.3-rc1 tagged 2026-04-26 · <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3-rc1" style="color:var(--text-muted)">GitHub release</a> · <a href="./" style="color:var(--text-muted)">main</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

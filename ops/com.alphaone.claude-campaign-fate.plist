@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Per-user LaunchAgent for the ai-memory-mcp v0.6.3 grand-slam campaign.
+  Runs as fate (the dir owner determines the user).
+
+  Invokes the Python harness package at agentic-mem-labs/tools/campaign/
+  (Apache 2.0, AlphaOne LLC). PYTHONPATH below makes `python -m campaign`
+  resolve without an editable install.
+
+  Install (loads now, persists across logins):
+    launchctl bootstrap gui/$(id -u fate) /Users/fate/Library/LaunchAgents/com.alphaone.claude-campaign.plist
+
+  Status:
+    launchctl print gui/$(id -u fate)/com.alphaone.claude-campaign
+
+  Stop:
+    launchctl bootout gui/$(id -u fate)/com.alphaone.claude-campaign
+
+  Pause without uninstalling (loop checks at every iteration):
+    touch /Users/fate/ai-memory-mcp/.agentic/kill-switch
+    # resume:
+    rm /Users/fate/ai-memory-mcp/.agentic/kill-switch
+
+  KeepAlive watches kill-switch — when it exists, launchd lets the loop
+  exit cleanly without respawning.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.alphaone.claude-campaign</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/env</string>
+        <string>python3</string>
+        <string>-m</string>
+        <string>campaign</string>
+        <string>run</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/fate/ai-memory-mcp</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>PathState</key>
+        <dict>
+            <key>/Users/fate/ai-memory-mcp/.agentic/kill-switch</key>
+            <false/>
+        </dict>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/fate/ai-memory-mcp/.agentic/logs/launchd.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/fate/ai-memory-mcp/.agentic/logs/launchd.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/fate</string>
+        <key>PYTHONPATH</key>
+        <string>/Users/fate/agentic-mem-labs/tools</string>
+        <key>DEV_BRANCH</key>
+        <string>release/v0.6.3</string>
+        <key>CHARTER_REPO</key>
+        <string>/Users/fate/agentic-mem-labs</string>
+        <key>CHARTER_PATH</key>
+        <string>strategy/2026-04-25/ai-memory-v0.6.3-grand-slam.md</string>
+        <key>LOG_WORKTREE</key>
+        <string>/Users/fate/agentic-mem-labs-log</string>
+        <key>LOG_BRANCH</key>
+        <string>campaign-log/v0.6.3</string>
+        <key>LOG_DIR_REL</key>
+        <string>campaign-log/v0.6.3</string>
+        <key>INTERVAL_SECS</key>
+        <string>300</string>
+        <key>MAX_TURNS</key>
+        <string>40</string>
+        <key>MEMORY_NAMESPACE</key>
+        <string>campaign-v063</string>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

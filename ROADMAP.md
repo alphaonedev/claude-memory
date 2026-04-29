@@ -5,7 +5,7 @@
 > Single repo: `alphaonedev/ai-memory-mcp`
 > Current production version: **v0.5.4.4** (2026-04-13)
 > License: Apache-2.0 | Trademark: ai-memory(TM) USPTO Serial No. 99761257
-> Execution model: **AI-built, human-vetted** — Claude Code 24x7, orchestrated by AlphaOne
+> Execution model: **AI-built, human-vetted**
 
 ---
 
@@ -58,7 +58,6 @@ The defining capability of ai-memory beyond v1.0. Five layers, built bottom-up:
 ┌─────────────────────────────────────────────────────┐
 │              SYNC PROTOCOL LAYERS                   │
 ├─────────────────────────────────────────────────────┤
-│ L4: Federation    org ←→ org, open knowledge commons│
 │ L3: Hub           PostgreSQL shared state for teams  │
 │ L2: Mesh          agent ←→ agent, peer-to-peer sync  │
 │ L1: Transport     file copy, HTTP API, message bus   │
@@ -122,17 +121,16 @@ Namespaces become hierarchical paths. Visibility flows up. Policies flow down.
 | N-level rule inheritance | 1 | Extend three-level standard system to N levels. Org rules cascade to units, units cascade to teams, teams cascade to agents. |
 
 ```
-collective                                    ← cross-org commons
-└── alphaone                                  ← org memory
-    ├── engineering                            ← unit memory
-    │   ├── platform                           ← team memory
-    │   │   ├── agent-claude-ops-1             ← individual agent
-    │   │   └── agent-grok-monitor-2           ← individual agent
-    │   └── security                           ← team memory
-    │       └── agent-claude-sec-1             ← individual agent
-    └── operations                             ← unit memory
-        └── sre                                ← team memory
-            └── agent-codex-deploy-1           ← individual agent
+alphaone                                      ← org memory
+├── engineering                               ← unit memory
+│   ├── platform                              ← team memory
+│   │   ├── agent-claude-ops-1                ← individual agent
+│   │   └── agent-grok-monitor-2              ← individual agent
+│   └── security                              ← team memory
+│       └── agent-claude-sec-1                ← individual agent
+└── operations                                ← unit memory
+    └── sre                                   ← team memory
+        └── agent-codex-deploy-1              ← individual agent
 ```
 
 ### 1c. Governance
@@ -146,7 +144,7 @@ Every level of the hierarchy has a governance model: who can store, who can prom
 | Approval workflow | 1 | When governance requires approval for promotion or deletion, the action is queued with status `pending`. An approver (human or designated AI agent) confirms or rejects. |
 | Governance type | 0.5 | `"approver": "human"` or `"approver": "agent:agent-id"` or `"approver": "consensus:3"` (N agents must agree). The governance model itself is flexible — some orgs want humans in the loop, some want AI autonomy, some want consensus. ai-memory doesn't choose — it provides the mechanism. |
 
-**Why governance matters:** Without it, any agent can write anything anywhere. That's fine for a single agent. For 100 agents in an organization, it's chaos. Governance is the difference between collective intelligence and collective noise. But governance must be flexible — a startup with 3 agents wants zero friction. An enterprise with 1000 agents wants approval chains. The governance model is metadata, not code — it's configured per namespace, not hardcoded.
+**Why governance matters:** Without it, any agent can write anything anywhere. That's fine for a single agent. For 100 agents working together, it's chaos. Governance is the difference between collective intelligence and collective noise. But governance must be flexible — a team with 3 agents wants zero friction; a larger org wants approval chains. The governance model is metadata, not code — it's configured per namespace, not hardcoded.
 
 ### 1d. Smart Recall
 
@@ -247,69 +245,6 @@ For agent teams that need a central sync point. SQLite remains the default for i
 
 ---
 
-## Phase 5b — Data Tier Backends (Mid-to-Big Infrastructure)
-
-**Target: v0.9.5+ | LOE: 15-19 sessions | Post-GA for Tier 3-4**
-
-SQLite is the backbone for small infrastructure (single agent, single system). PostgreSQL (Phase 5) is the hub for mid infrastructure (agent teams, multi-system). For big infrastructure — enterprise scale, specialized workloads, high-throughput agent swarms — optional data tier backends unlock domain-specific performance.
-
-**Gate:** Each tier requires the `StorageBackend` trait (introduced in Phase 5 with PostgreSQL). Backends are additive — SQLite always works, backends are opt-in.
-
-### Small Infrastructure (default — ships today)
-
-| Backend | Notes |
-|---------|-------|
-| **SQLite + FTS5** | Default. Local-first. Zero infrastructure. Handles 10K+ memories, 500+ q/s keyword tier. |
-
-### Mid Infrastructure (Phase 5)
-
-| Backend | Sessions | Notes |
-|---------|:--------:|-------|
-| **PostgreSQL + pgvector** | 2-3 | Team hub. Shared sync point. `tsquery` for FTS, pgvector for embeddings. Closest SQLite analog. |
-
-### Big Infrastructure — Tier 2: Vector-Native
-
-For agent swarms needing sub-millisecond vector search at 100K+ memories.
-
-| Backend | Sessions | Difficulty | Notes |
-|---------|:--------:|:----------:|-------|
-| **Qdrant** | 1 | Low-Medium | Purpose-built vector DB, payload filtering, simple REST API. Best for pure semantic recall at scale. |
-| **Pinecone** | 1 | Low-Medium | Managed vector search, clean SDK, metadata filtering. Best for teams that want zero-ops vector search. |
-| **Weaviate** | 1-2 | Medium | Hybrid BM25 + vector built in, GraphQL query layer. Best for hybrid recall without custom blending. |
-| **Milvus / Zilliz** | 1-2 | Medium | Strong vector search, scalar filtering. Best for massive-scale (millions of memories) deployments. |
-
-### Big Infrastructure — Tier 3: Multi-Model & Graph
-
-For agent collectives needing native graph traversal and multi-model queries.
-
-| Backend | Sessions | Difficulty | Notes |
-|---------|:--------:|:----------:|-------|
-| **Neo4j** | 2-3 | High | Native graph model for memory links. Cypher queries for multi-hop traversal. Vector index (5.x+). Best for knowledge graph-heavy workloads. |
-| **SurrealDB** | 2 | Medium-High | Multi-model (document + graph + vector). SurrealQL. Best for teams wanting one backend for everything. |
-
-### Big Infrastructure — Tier 4: Relational & Cache
-
-For enterprise environments with existing database infrastructure.
-
-| Backend | Sessions | Difficulty | Notes |
-|---------|:--------:|:----------:|-------|
-| **TiDB** | 1-2 | Medium | MySQL-compatible + vector search, distributed transactions. Best for enterprises already on MySQL/TiDB. |
-| **Redis (RediSearch)** | 1-2 | Medium | In-memory FTS + vector. No ACID — eventual consistency. Best for ultra-low-latency recall where durability is handled by SQLite sync. |
-| **MongoDB Atlas Vector** | 1-2 | Medium | Document model maps to Memory struct. Atlas Vector Search. Best for teams already on MongoDB. |
-
-### Data Tier Infrastructure
-
-| Task | Sessions | Deliverable |
-|------|:--------:|-------------|
-| `StorageBackend` trait | 1-2 | Async CRUD, recall, search, FTS, transaction interfaces. Introduced with PostgreSQL in Phase 5. |
-| `ai-memory migrate` CLI | 1 | `--from sqlite --to <backend>` zero-downtime migration between any backends. |
-| Hybrid mode | 1 | Local SQLite cache + remote backend. Offline-first with sync. Agents always work locally, backends provide scale and sharing. |
-| Integration test matrix | 1 | CI pipeline testing all backends against full test suite. |
-
-**Contribution model:** Tier 2-4 backends can be community-contributed. AlphaOne builds and maintains SQLite + PostgreSQL. Community contributes backends against the `StorageBackend` trait and maintains them.
-
----
-
 ## Phase 6 — Production GA
 
 **Target: v1.0.0 | LOE: 6-8 sessions**
@@ -325,36 +260,17 @@ For enterprise environments with existing database infrastructure.
 
 ---
 
-## Phase 7 — Federation & Protocol Standard (Sync Layer L4)
-
-**Target: v1.x+ | LOE: 8-12 sessions | The 20-Year Play**
-
-ai-memory becomes a **standard**, not just a product.
-
-| Task | Sessions | Deliverable |
-|------|:--------:|-------------|
-| Federation protocol | 2-3 | Org-to-org memory sharing with consent, access control, and anonymization. Agent teams in Organization A share operational knowledge with Organization B's agents. |
-| Open Knowledge Commons | 2-3 | A public pool of anonymized operational knowledge. Like open-source code, but open-source agent knowledge. "This Kubernetes configuration causes OOM kills" — shared across the community. |
-| Protocol specification | 2 | Published RFC-style spec for ai-memory sync protocol, memory schema, TOON format, and recall scoring algorithm. Other projects implement it. |
-| Adversarial memory | 1-2 | Red team vs blue team agents building competing knowledge bases. Automated adversarial security testing that gets harder on both sides over time. |
-| Cross-domain synthesis | 1 | Agents from different domains (security, infrastructure, application) query collective memory to answer questions no single agent can. "What's our exposure to CVE-2026-4521?" synthesized from security + inventory + network + SLA knowledge. |
-
----
-
 ## Program Summary
 
-| Phase | Milestone | Sessions | What It Unlocks | Infra Scale |
-|:-----:|-----------|:--------:|-----------------|:-----------:|
-| 0 | Foundation (v0.5.4) | 5-7 | **COMPLETE** | Small |
-| 1 | Schema, Hierarchy & Governance (v0.6.0) | 8-10 | Flexible schema, org hierarchy, governance model | Small |
-| 2 | Knowledge Graph Engine (v0.7.0) | 5-7 | Connected knowledge, multi-hop reasoning | Small |
-| 3 | Memory Sharing & Sync (v0.8.0) | 8-10 | Collective intelligence across systems | Small-Mid |
-| 4 | Autonomous Curator (v0.9.0) | 4-6 | Self-improving memory | Small-Mid |
-| 5 | Team Hub — PostgreSQL (v0.9.5) | 4-6 | Organizational shared knowledge | Mid |
-| 5b | Data Tier Backends (v0.9.5+) | 15-19 | Enterprise-scale, specialized workloads | Mid-Big |
-| 6 | Production GA (v1.0.0) | 6-8 | Stability contract, SDKs, portability | All |
-| 7 | Federation & Protocol (v1.x+) | 8-12 | Open knowledge commons | All |
-| | **TOTAL** | **64-85** | | |
+| Phase | Milestone | Sessions | What It Unlocks |
+|:-----:|-----------|:--------:|-----------------|
+| 0 | Foundation (v0.5.4) | 5-7 | **COMPLETE** |
+| 1 | Schema, Hierarchy & Governance (v0.6.0) | 8-10 | Flexible schema, namespace hierarchy, governance model |
+| 2 | Knowledge Graph Engine (v0.7.0) | 5-7 | Connected knowledge, multi-hop reasoning |
+| 3 | Memory Sharing & Sync (v0.8.0) | 8-10 | Cooperating agents across systems |
+| 4 | Autonomous Curator (v0.9.0) | 4-6 | Self-improving memory |
+| 5 | Team Hub — PostgreSQL (v0.9.5) | 4-6 | Shared team knowledge |
+| 6 | Production GA (v1.0.0) | 6-8 | Stability contract, SDKs, portability |
 
 ---
 
@@ -362,7 +278,7 @@ ai-memory becomes a **standard**, not just a product.
 
 Decisions made, not deferred. These are intentional exclusions:
 
-- **Backends as default** — SQLite is always the default. PostgreSQL is the mid-tier hub. Tier 2-4 backends (Qdrant, Pinecone, Weaviate, Milvus, Neo4j, SurrealDB, TiDB, Redis, MongoDB) are opt-in for big infrastructure and primarily community-contributed.
+- **Backends beyond SQLite + PostgreSQL** — SQLite is always the default. PostgreSQL is the team-hub coordination backend. No other backends are in scope.
 - **CRDT full implementation** — CRDT-lite merge rules for metadata fields. Not a full CRDT library. Pragmatic conflict resolution, not theoretical purity.
 - **Mobile SDKs** — Not until post-GA. The agents are the users, not mobile apps.
 - **Cloud-hosted service** — ai-memory is infrastructure, not SaaS. Self-hosted always. No vendor lock-in.

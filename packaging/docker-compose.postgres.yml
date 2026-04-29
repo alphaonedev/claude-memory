@@ -1,0 +1,54 @@
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# Postgres + pgvector fixture for the SAL integration test suite (v0.7).
+#
+# Usage (from the repo root):
+#
+#   docker compose -f packaging/docker-compose.postgres.yml up -d
+#   export AI_MEMORY_TEST_POSTGRES_URL=postgres://ai_memory:ai_memory_test@localhost:5433/ai_memory_test
+#   cargo test --features sal-postgres --test sal_postgres -- --nocapture
+#   docker compose -f packaging/docker-compose.postgres.yml down -v
+#
+# Port 5433 is used instead of the default 5432 to avoid colliding with
+# a host Postgres. Override via the `POSTGRES_HOST_PORT` env var.
+
+services:
+  postgres:
+    # pgvector/pgvector bundles the vector extension with a recent
+    # Postgres 16 base image. Pinned by major version — pgvector semver
+    # has been stable on the 0.7+ release line so this image is safe to
+    # re-pull.
+    image: pgvector/pgvector:pg16
+    container_name: ai_memory_sal_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ai_memory
+      POSTGRES_PASSWORD: ai_memory_test
+      POSTGRES_DB: ai_memory_test
+      # Speeds up test setup on the fixture only — NEVER flip these on
+      # for a production Postgres.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ai_memory -d ai_memory_test"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+    # Hardening for the fixture — even a local test DB shouldn't ship
+    # with unnecessary caps or write access to the host.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt:
+      - no-new-privileges:true
+    read_only: false
+    tmpfs:
+      - /tmp
+      - /var/run/postgresql
+
+volumes:
+  pg_data:
+    driver: local

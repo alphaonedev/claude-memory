@@ -6,4 +6,15 @@
 # Affects rand 0.8.5 (via instant-distance, hf-hub) and 0.9.2 (via tokenizers, candle-core).
 # Not applicable: we do not use a custom global logger that calls rand::rng().
 # No upstream fix available — blocked on rand crate patch.
-ignore = ["RUSTSEC-2026-0097"]
+#
+# RUSTSEC-2023-0071: Marvin Attack on rsa crate via timing side-channels.
+# Reached transitively only when `--features sal-postgres` is built
+# (sqlx-macros-core unconditionally pulls sqlx-mysql → rsa). Default
+# builds of ai-memory are unaffected. We never enable the MySQL
+# backend and never expose sqlx' MySQL client surface. No fixed
+# upgrade is available on the rsa crate (per the advisory body).
+# Tracked for removal when sqlx-macros stops pulling sibling drivers.
+ignore = [
+    "RUSTSEC-2026-0097",
+    "RUSTSEC-2023-0071",
+]

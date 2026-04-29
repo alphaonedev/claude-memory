@@ -1,0 +1,655 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Types atlas — every public Rust struct and enum in src/models.rs.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Types — every public struct and enum</title>
+<meta name="description" content="ai-memory v0.6.3 type reference. Every public Rust struct and enum exposed at the API/MCP/CLI boundaries. Tier, Memory, MemoryLink, GovernancePolicy, ApproverType, VectorClock, and 21 more.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/types.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:780px;margin-bottom:2rem}
+
+.grp-head{font-family:var(--font-mono);font-size:1rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin:2rem 0 1rem;padding-bottom:.4rem;border-bottom:1px solid var(--border)}
+
+.ty{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem;position:relative;overflow:hidden}
+.ty::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.ty.k-struct::before{background:var(--p1)}
+.ty.k-enum::before{background:var(--p3)}
+.ty.k-const::before{background:var(--p2)}
+.ty-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.ty-name{font-family:var(--font-mono);font-size:1.15rem;font-weight:700;color:var(--text)}
+.ty-kind{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);padding:.15em .55em;border:1px solid var(--border-hl);border-radius:4px}
+.ty-kind.struct{color:var(--p1);border-color:rgba(110,231,255,0.4)}
+.ty-kind.enum{color:var(--p3);border-color:rgba(200,162,255,0.4)}
+.ty-kind.const{color:var(--p2);border-color:rgba(255,184,107,0.4)}
+.ty-since{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim)}
+.ty-derive{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);margin-bottom:.65rem}
+.ty-derive code{background:transparent;color:var(--text-muted);padding:0}
+.ty-desc{color:var(--text-muted);font-size:.92rem;margin-bottom:1rem}
+.fld{width:100%;border-collapse:collapse;font-size:.85rem}
+.fld th{text-align:left;padding:.5rem .65rem;font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--border-hl)}
+.fld td{padding:.55rem .65rem;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:.78rem;vertical-align:top}
+.fld td.fname{color:var(--text);font-weight:600;white-space:nowrap}
+.fld td.ftype{color:var(--p1);white-space:nowrap}
+.fld td.fnote{color:var(--text-muted);font-family:var(--font-sans);font-size:.85rem;line-height:1.5}
+.flag{display:inline-block;font-family:var(--font-mono);font-size:.65rem;padding:.1em .45em;border-radius:3px;letter-spacing:.05em;margin-right:.25em;vertical-align:middle}
+.flag.opt{background:rgba(102,102,102,0.15);color:var(--text-dim);border:1px solid rgba(102,102,102,0.4)}
+.flag.req{background:rgba(110,231,255,0.12);color:var(--p1);border:1px solid rgba(110,231,255,0.4)}
+.flag.def{background:rgba(255,184,107,0.12);color:var(--p2);border:1px solid rgba(255,184,107,0.4)}
+.flag.serde{background:rgba(200,162,255,0.12);color:var(--p3);border:1px solid rgba(200,162,255,0.4)}
+.flag.skip{background:rgba(102,102,102,0.15);color:var(--text-dim);border:1px solid rgba(102,102,102,0.4)}
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.variants{margin-top:.5rem}
+.variants .v{padding:.55rem .85rem;background:var(--bg-elev);border-radius:6px;margin-bottom:.4rem;font-family:var(--font-mono);font-size:.82rem}
+.variants .v .vn{color:var(--p3);font-weight:700}
+.variants .v .vd{color:var(--text-muted);font-family:var(--font-sans);font-size:.85rem;margin-left:.5rem}
+
+.toc{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.5rem;margin-bottom:1.5rem}
+.toc a{display:block;padding:.45rem .7rem;background:var(--bg-elev);border:1px solid var(--border);border-radius:6px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+.toc a:hover{color:var(--p1);border-color:var(--p1)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Types</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html" class="current">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The types, end to end.</h1>
+  <p class="tagline">Every public Rust struct and enum that crosses the HTTP/MCP/CLI boundary. Field-level types, defaults, serde tags, since-when annotations. The contract a client implements when it wires up to ai-memory.</p>
+  <div class="pills">
+    <span class="pill">5 enums</span>
+    <span class="pill">22 structs</span>
+    <span class="pill">5 consts</span>
+    <span class="pill">v0.6.3 schema</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Quick jump</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">All 27 types, indexed.</h2>
+    <p class="lede">Grouped by responsibility: core domain (Tier, Memory, MemoryLink), request/response shapes (Create/Update/Search/List/Recall), governance (GovernanceLevel, ApproverType, GovernancePolicy, GovernedAction, GovernanceDecision), federation (VectorClock, SyncStateEntry, AgentRegistration, NamespaceMetaEntry), pending-action queue (PendingAction, PendingDecision, Approval).</p>
+    <div class="toc">
+      <a href="#tier">Tier</a>
+      <a href="#memory">Memory</a>
+      <a href="#memorylink">MemoryLink</a>
+      <a href="#creatememory">CreateMemory</a>
+      <a href="#updatememory">UpdateMemory</a>
+      <a href="#searchquery">SearchQuery</a>
+      <a href="#listquery">ListQuery</a>
+      <a href="#recallquery">RecallQuery</a>
+      <a href="#recallbody">RecallBody</a>
+      <a href="#linkbody">LinkBody</a>
+      <a href="#forgetquery">ForgetQuery</a>
+      <a href="#stats">Stats</a>
+      <a href="#tiercount">TierCount</a>
+      <a href="#namespacecount">NamespaceCount</a>
+      <a href="#governancedecision">GovernanceDecision</a>
+      <a href="#governedaction">GovernedAction</a>
+      <a href="#approval">Approval</a>
+      <a href="#pendingaction">PendingAction</a>
+      <a href="#pendingdecision">PendingDecision</a>
+      <a href="#namespacemetaentry">NamespaceMetaEntry</a>
+      <a href="#governancelevel">GovernanceLevel</a>
+      <a href="#approvertype">ApproverType</a>
+      <a href="#governancepolicy">GovernancePolicy</a>
+      <a href="#registeragentbody">RegisterAgentBody</a>
+      <a href="#agentregistration">AgentRegistration</a>
+      <a href="#vectorclock">VectorClock</a>
+      <a href="#syncstateentry">SyncStateEntry</a>
+      <a href="#consts">Constants</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Core domain</h3>
+
+    <div class="ty k-enum" id="tier">
+      <div class="ty-head"><span class="ty-name">Tier</span><span class="ty-kind enum">enum</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]</code> · <code>#[serde(rename_all = "snake_case")]</code></div>
+      <div class="ty-desc">Memory tier — mirrors human memory systems. Default TTL: Short = 6h, Mid = 7d, Long = none.</div>
+      <div class="variants">
+        <div class="v"><span class="vn">Short</span><span class="vd">working memory; short-lived contexts; default TTL 6h.</span></div>
+        <div class="v"><span class="vn">Mid</span><span class="vd">session-spanning facts; default TTL 7d. <strong>Default tier</strong> for new memories.</span></div>
+        <div class="v"><span class="vn">Long</span><span class="vd">durable knowledge; no TTL; subject to governance gates on promote.</span></div>
+      </div>
+      <div class="snip">// helper API
+Tier::default_ttl_secs(self) -&gt; Option&lt;i64&gt;
+Tier::as_str(&amp;self) -&gt; &amp;'static str
+Tier::from_str(&amp;str) -&gt; Option&lt;Tier&gt;</div>
+    </div>
+
+    <div class="ty k-struct" id="memory">
+      <div class="ty-head"><span class="ty-name">Memory</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">The stored record returned by HTTP <code>GET /memories/:id</code> and MCP <code>memory_get</code>. Persisted into the <code>memories</code> table; mirrored to FTS5 + HNSW vector index.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>UUIDv4 primary key.</td></tr>
+        <tr><td class="fname">tier</td><td class="ftype">Tier</td><td class="fnote"><span class="flag req">REQ</span>One of <code>short</code> · <code>mid</code> · <code>long</code>.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>Hierarchical path; up to 8 segments; default <code>"global"</code>.</td></tr>
+        <tr><td class="fname">title</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>1–500 chars; required.</td></tr>
+        <tr><td class="fname">content</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>1–65 536 bytes (<code>MAX_CONTENT_SIZE</code>).</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Vec&lt;String&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default <code>[]</code>; max 32 tags, 64 chars each.</td></tr>
+        <tr><td class="fname">priority</td><td class="ftype">i32</td><td class="fnote"><span class="flag def">DEF</span>Default 5; range 1-10.</td></tr>
+        <tr><td class="fname">confidence</td><td class="ftype">f64</td><td class="fnote"><span class="flag def">DEF</span>Default 1.0; range 0.0-1.0.</td></tr>
+        <tr><td class="fname">source</td><td class="ftype">String</td><td class="fnote"><span class="flag def">DEF</span>Default <code>"api"</code>; closed set: user · claude · hook · api · import.</td></tr>
+        <tr><td class="fname">access_count</td><td class="ftype">i64</td><td class="fnote">Server-tracked; bumps on each <code>memory_get</code>/<code>memory_recall</code> hit.</td></tr>
+        <tr><td class="fname">created_at</td><td class="ftype">String</td><td class="fnote">RFC3339; server-stamped.</td></tr>
+        <tr><td class="fname">updated_at</td><td class="ftype">String</td><td class="fnote">RFC3339; updated on each <code>memory_update</code>.</td></tr>
+        <tr><td class="fname">last_accessed_at</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339; <code>skip_serializing_if = None</code>.</td></tr>
+        <tr><td class="fname">expires_at</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339; computed from <code>ttl_secs</code> or tier default.</td></tr>
+        <tr><td class="fname">metadata</td><td class="ftype">serde_json::Value</td><td class="fnote"><span class="flag def">DEF</span>Default <code>{}</code>; carries <code>governance</code>, <code>scope</code>, <code>agent_id</code>, taxonomy fields.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="memorylink">
+      <div class="ty-head"><span class="ty-name">MemoryLink</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">A directed edge between two memories. The KG primitive — every typed-cognition / supersession relationship is one row in <code>memory_links</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">source_id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>FK to <code>memories.id</code>.</td></tr>
+        <tr><td class="fname">target_id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>FK to <code>memories.id</code>.</td></tr>
+        <tr><td class="fname">relation</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>One of: <code>related_to</code> · <code>supersedes</code> · <code>contradicts</code> · <code>derived_from</code>.</td></tr>
+        <tr><td class="fname">created_at</td><td class="ftype">String</td><td class="fnote">RFC3339; server-stamped.</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Request shapes — write path</h3>
+
+    <div class="ty k-struct" id="creatememory">
+      <div class="ty-head"><span class="ty-name">CreateMemory</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Body of <code>POST /memories</code> and <code>memory_store</code>. Every field has a server-side default except <code>title</code> + <code>content</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">tier</td><td class="ftype">Tier</td><td class="fnote"><span class="flag def">DEF</span>Default <code>Mid</code>.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">String</td><td class="fnote"><span class="flag def">DEF</span>Default <code>"global"</code>.</td></tr>
+        <tr><td class="fname">title</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>1–500 chars.</td></tr>
+        <tr><td class="fname">content</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>1–65 536 bytes.</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Vec&lt;String&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default <code>[]</code>.</td></tr>
+        <tr><td class="fname">priority</td><td class="ftype">i32</td><td class="fnote"><span class="flag def">DEF</span>Default 5.</td></tr>
+        <tr><td class="fname">confidence</td><td class="ftype">f64</td><td class="fnote"><span class="flag def">DEF</span>Default 1.0.</td></tr>
+        <tr><td class="fname">source</td><td class="ftype">String</td><td class="fnote"><span class="flag def">DEF</span>Default <code>"api"</code>.</td></tr>
+        <tr><td class="fname">expires_at</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339; explicit override.</td></tr>
+        <tr><td class="fname">ttl_secs</td><td class="ftype">Option&lt;i64&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Convenience: <code>expires_at = now + ttl_secs</code>.</td></tr>
+        <tr><td class="fname">metadata</td><td class="ftype">Value</td><td class="fnote"><span class="flag def">DEF</span>Default <code>{}</code>.</td></tr>
+        <tr><td class="fname">agent_id</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Auto-resolved by <code>identity</code> when omitted.</td></tr>
+        <tr><td class="fname">scope</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>One of <code>VALID_SCOPES</code>; default <code>"private"</code>.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="updatememory">
+      <div class="ty-head"><span class="ty-name">UpdateMemory</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Body of <code>PUT /memories/:id</code> and <code>memory_update</code>. Every field is optional — only the present fields are mutated; the rest are preserved.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">title</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>1–500 chars when set.</td></tr>
+        <tr><td class="fname">content</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>1–65 536 bytes when set.</td></tr>
+        <tr><td class="fname">tier</td><td class="ftype">Option&lt;Tier&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Promoting Mid→Long passes through governance.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Re-namespacing; depth ≤ 8.</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Option&lt;Vec&lt;String&gt;&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Replaces tag set entirely (not merged).</td></tr>
+        <tr><td class="fname">priority</td><td class="ftype">Option&lt;i32&gt;</td><td class="fnote"><span class="flag opt">OPT</span>1-10 range.</td></tr>
+        <tr><td class="fname">confidence</td><td class="ftype">Option&lt;f64&gt;</td><td class="fnote"><span class="flag opt">OPT</span>0.0-1.0 range.</td></tr>
+        <tr><td class="fname">expires_at</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339.</td></tr>
+        <tr><td class="fname">metadata</td><td class="ftype">Option&lt;Value&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Replaces metadata wholesale (not merged).</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="linkbody">
+      <div class="ty-head"><span class="ty-name">LinkBody</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Body of <code>POST /links</code> and <code>memory_link</code>. Creates a directed edge in the KG.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">source_id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>UUID; must exist in <code>memories</code>.</td></tr>
+        <tr><td class="fname">target_id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>UUID; must exist in <code>memories</code>.</td></tr>
+        <tr><td class="fname">relation</td><td class="ftype">String</td><td class="fnote"><span class="flag def">DEF</span>Default <code>"related_to"</code>.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="forgetquery">
+      <div class="ty-head"><span class="ty-name">ForgetQuery</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Body of <code>POST /memories/forget</code> and <code>memory_forget</code>. Pattern-based delete; archives matched memories rather than hard-deleting.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Restricts the sweep to a namespace.</td></tr>
+        <tr><td class="fname">pattern</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>FTS5 pattern; matches title+content.</td></tr>
+        <tr><td class="fname">tier</td><td class="ftype">Option&lt;Tier&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Restricts to one tier.</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Request shapes — read path</h3>
+
+    <div class="ty k-struct" id="searchquery">
+      <div class="ty-head"><span class="ty-name">SearchQuery</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1 · agent fields v0.6</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Query string for <code>GET /search</code> and body for <code>memory_search</code>. FTS5-backed.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">q</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>FTS5 expression; supports <code>AND</code>/<code>OR</code>/<code>NEAR</code>/<code>"phrase"</code>.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Restricts to one namespace prefix.</td></tr>
+        <tr><td class="fname">tier</td><td class="ftype">Option&lt;Tier&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">limit</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default 20.</td></tr>
+        <tr><td class="fname">min_priority</td><td class="ftype">Option&lt;i32&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">since / until</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339 created_at window.</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Comma-separated; AND semantics.</td></tr>
+        <tr><td class="fname">agent_id</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Filters by <code>metadata.agent_id</code> exact.</td></tr>
+        <tr><td class="fname">as_agent</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Querying agent's namespace position; drives scope filtering.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="listquery">
+      <div class="ty-head"><span class="ty-name">ListQuery</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Query string for <code>GET /memories</code> and <code>memory_list</code>. Pagination + filter by namespace/tier/tags.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">tier</td><td class="ftype">Option&lt;Tier&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">limit</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default 20.</td></tr>
+        <tr><td class="fname">offset</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">min_priority</td><td class="ftype">Option&lt;i32&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">since / until</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>RFC3339 window.</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Comma-separated.</td></tr>
+        <tr><td class="fname">agent_id</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="recallquery">
+      <div class="ty-head"><span class="ty-name">RecallQuery</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1 · budget_tokens Task 1.11</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Query string for <code>GET /recall</code>. Hybrid 70/30 fusion (FTS5 + HNSW); optional context-budget pruning.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">context</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Free-form context to retrieve against.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">limit</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default 10.</td></tr>
+        <tr><td class="fname">tags</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">since / until</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">as_agent</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Visibility filter (Task 1.5).</td></tr>
+        <tr><td class="fname">budget_tokens</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Cap on cumulative tokens; top-N items that fit (Task 1.11).</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="recallbody">
+      <div class="ty-head"><span class="ty-name">RecallBody</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">JSON body of <code>POST /recall</code> and <code>memory_recall</code>. Same shape as <code>RecallQuery</code> but <code>context</code> is required.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">context</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span></td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">limit</td><td class="ftype">Option&lt;usize&gt;</td><td class="fnote"><span class="flag def">DEF</span>Default 10.</td></tr>
+        <tr><td class="fname">tags / since / until / as_agent / budget_tokens</td><td class="ftype">…</td><td class="fnote">Same as <a href="#recallquery">RecallQuery</a>.</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Response shapes — telemetry</h3>
+
+    <div class="ty k-struct" id="stats">
+      <div class="ty-head"><span class="ty-name">Stats</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Serialize)]</code></div>
+      <div class="ty-desc">Response of <code>GET /stats</code> and <code>memory_stats</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">total</td><td class="ftype">usize</td><td class="fnote">Count of non-archived memories.</td></tr>
+        <tr><td class="fname">by_tier</td><td class="ftype">Vec&lt;TierCount&gt;</td><td class="fnote">3 rows: short / mid / long.</td></tr>
+        <tr><td class="fname">by_namespace</td><td class="ftype">Vec&lt;NamespaceCount&gt;</td><td class="fnote">One row per distinct namespace.</td></tr>
+        <tr><td class="fname">expiring_soon</td><td class="ftype">usize</td><td class="fnote">Count expiring within 24h.</td></tr>
+        <tr><td class="fname">links_count</td><td class="ftype">usize</td><td class="fnote">Total <code>memory_links</code> rows.</td></tr>
+        <tr><td class="fname">db_size_bytes</td><td class="ftype">u64</td><td class="fnote">SQLite file size.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="tiercount">
+      <div class="ty-head"><span class="ty-name">TierCount</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Serialize)]</code></div>
+      <div class="ty-desc">Embedded in <code>Stats.by_tier</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">tier</td><td class="ftype">String</td><td class="fnote"><code>"short"</code> · <code>"mid"</code> · <code>"long"</code></td></tr>
+        <tr><td class="fname">count</td><td class="ftype">usize</td><td class="fnote"></td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="namespacecount">
+      <div class="ty-head"><span class="ty-name">NamespaceCount</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.1</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Serialize)]</code></div>
+      <div class="ty-desc">Embedded in <code>Stats.by_namespace</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">namespace</td><td class="ftype">String</td><td class="fnote"></td></tr>
+        <tr><td class="fname">count</td><td class="ftype">usize</td><td class="fnote"></td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Governance — Task 1.8 / 1.9 / 1.10</h3>
+
+    <div class="ty k-enum" id="governancedecision">
+      <div class="ty-head"><span class="ty-name">GovernanceDecision</span><span class="ty-kind enum">enum</span><span class="ty-since">since Task 1.9 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, PartialEq, Eq)]</code></div>
+      <div class="ty-desc">The outcome of a governance check. Callers <strong>MAY</strong> execute on <code>Allow</code>, <strong>MUST</strong> reject on <code>Deny</code>, and <strong>SHOULD</strong> queue + return the <code>pending_id</code> on <code>Pending</code>.</div>
+      <div class="variants">
+        <div class="v"><span class="vn">Allow</span><span class="vd">proceed with the action.</span></div>
+        <div class="v"><span class="vn">Deny(String)</span><span class="vd">reject; the wrapped string surfaces the reason to the caller.</span></div>
+        <div class="v"><span class="vn">Pending(String)</span><span class="vd">queued for approval; the caller receives the new <code>pending_id</code>.</span></div>
+      </div>
+    </div>
+
+    <div class="ty k-enum" id="governedaction">
+      <div class="ty-head"><span class="ty-name">GovernedAction</span><span class="ty-kind enum">enum</span><span class="ty-since">since Task 1.9 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Copy, PartialEq, Eq)]</code></div>
+      <div class="ty-desc">Actions that governance gates. Stored as the <code>action_type</code> column in <code>pending_actions</code>; discriminator for enforcement calls.</div>
+      <div class="variants">
+        <div class="v"><span class="vn">Store</span><span class="vd">creating a new memory in a governed namespace.</span></div>
+        <div class="v"><span class="vn">Delete</span><span class="vd">deleting an existing memory.</span></div>
+        <div class="v"><span class="vn">Promote</span><span class="vd">tier promotion (Mid → Long).</span></div>
+      </div>
+    </div>
+
+    <div class="ty k-enum" id="governancelevel">
+      <div class="ty-head"><span class="ty-name">GovernanceLevel</span><span class="ty-kind enum">enum</span><span class="ty-since">since Task 1.8 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]</code> · <code>#[serde(rename_all = "snake_case")]</code></div>
+      <div class="ty-desc">Who is permitted to perform a governed action. Stored in a namespace standard's <code>metadata.governance</code>.</div>
+      <div class="variants">
+        <div class="v"><span class="vn">Any</span><span class="vd">no gate; any caller succeeds.</span></div>
+        <div class="v"><span class="vn">Registered</span><span class="vd">caller must be a registered agent (<code>_agents</code> namespace).</span></div>
+        <div class="v"><span class="vn">Owner</span><span class="vd">only the memory's <code>metadata.agent_id</code> owner may perform the action.</span></div>
+        <div class="v"><span class="vn">Approve</span><span class="vd">requires explicit approval by an <code>ApproverType</code>.</span></div>
+      </div>
+    </div>
+
+    <div class="ty k-enum" id="approvertype">
+      <div class="ty-head"><span class="ty-name">ApproverType</span><span class="ty-kind enum">enum</span><span class="ty-since">since Task 1.10 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]</code> · <code>#[serde(rename_all = "snake_case")]</code></div>
+      <div class="ty-desc">Who approves actions gated by <code>GovernanceLevel::Approve</code>. Externally-tagged.</div>
+      <div class="variants">
+        <div class="v"><span class="vn">Human</span><span class="vd">serialized as <code>"human"</code>; interactive or out-of-band approval.</span></div>
+        <div class="v"><span class="vn">Agent(String)</span><span class="vd">serialized as <code>{"agent": "alice"}</code>; specific registered agent must approve.</span></div>
+        <div class="v"><span class="vn">Consensus(u32)</span><span class="vd">serialized as <code>{"consensus": 3}</code>; consensus of N approvers required.</span></div>
+      </div>
+    </div>
+
+    <div class="ty k-struct" id="governancepolicy">
+      <div class="ty-head"><span class="ty-name">GovernancePolicy</span><span class="ty-kind struct">struct</span><span class="ty-since">since Task 1.8 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]</code></div>
+      <div class="ty-desc">Attached to a namespace's standard memory at <code>metadata.governance</code>. Default policy: <code>{ write: Any, promote: Any, delete: Owner, approver: Human }</code>. v0.6.2 (S34) made promote/delete/approver tolerant of missing fields for partial-policy payloads.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">write</td><td class="ftype">GovernanceLevel</td><td class="fnote"><span class="flag req">REQ</span>Required — core knob a policy is setting.</td></tr>
+        <tr><td class="fname">promote</td><td class="ftype">GovernanceLevel</td><td class="fnote"><span class="flag def">DEF</span>Default <code>Any</code>.</td></tr>
+        <tr><td class="fname">delete</td><td class="ftype">GovernanceLevel</td><td class="fnote"><span class="flag def">DEF</span>Default <code>Owner</code>.</td></tr>
+        <tr><td class="fname">approver</td><td class="ftype">ApproverType</td><td class="fnote"><span class="flag def">DEF</span>Default <code>Human</code>.</td></tr>
+      </tbody></table>
+      <div class="snip">// helper API
+GovernancePolicy::from_metadata(&amp;Value) -&gt; Option&lt;Result&lt;Self, _&gt;&gt;
+GovernancePolicy::default() // { write: Any, promote: Any, delete: Owner, approver: Human }</div>
+    </div>
+
+    <div class="ty k-struct" id="approval">
+      <div class="ty-head"><span class="ty-name">Approval</span><span class="ty-kind struct">struct</span><span class="ty-since">since Task 1.10 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]</code></div>
+      <div class="ty-desc">A single approval vote on a consensus-gated pending action.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">agent_id</td><td class="ftype">String</td><td class="fnote">Approving agent's id.</td></tr>
+        <tr><td class="fname">approved_at</td><td class="ftype">String</td><td class="fnote">RFC3339.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="pendingaction">
+      <div class="ty-head"><span class="ty-name">PendingAction</span><span class="ty-kind struct">struct</span><span class="ty-since">since Task 1.9 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">Row returned by <code>db::list_pending_actions</code>. Mirrors the <code>pending_actions</code> table.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">id</td><td class="ftype">String</td><td class="fnote">UUID.</td></tr>
+        <tr><td class="fname">action_type</td><td class="ftype">String</td><td class="fnote"><code>store</code> · <code>delete</code> · <code>promote</code>.</td></tr>
+        <tr><td class="fname">memory_id</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote">Set for delete/promote; null for pending stores.</td></tr>
+        <tr><td class="fname">namespace</td><td class="ftype">String</td><td class="fnote"></td></tr>
+        <tr><td class="fname">payload</td><td class="ftype">Value</td><td class="fnote">Action-shaped JSON for replay.</td></tr>
+        <tr><td class="fname">requested_by</td><td class="ftype">String</td><td class="fnote">agent_id of requester.</td></tr>
+        <tr><td class="fname">requested_at</td><td class="ftype">String</td><td class="fnote">RFC3339.</td></tr>
+        <tr><td class="fname">status</td><td class="ftype">String</td><td class="fnote"><code>pending</code> · <code>approved</code> · <code>rejected</code>.</td></tr>
+        <tr><td class="fname">decided_by</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">decided_at</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">approvals</td><td class="ftype">Vec&lt;Approval&gt;</td><td class="fnote">Consensus vote log (Task 1.10); empty for Human/Agent paths.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="pendingdecision">
+      <div class="ty-head"><span class="ty-name">PendingDecision</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.6.2 S34</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">A pending-action decision (approve/reject) propagated to peers so callers on any peer see consistent state. Shipped as additive <code>sync_push.pending_decisions</code> field; peers apply via <code>db::decide_pending_action</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">id</td><td class="ftype">String</td><td class="fnote">pending_action UUID.</td></tr>
+        <tr><td class="fname">approved</td><td class="ftype">bool</td><td class="fnote">true → approve; false → reject.</td></tr>
+        <tr><td class="fname">decider</td><td class="ftype">String</td><td class="fnote">agent_id of decider.</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head">Federation — issue #224 / agent registry</h3>
+
+    <div class="ty k-struct" id="namespacemetaentry">
+      <div class="ty-head"><span class="ty-name">NamespaceMetaEntry</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.6.2 S35</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">A namespace-standard metadata row propagated to peers. Without this, a peer sees the standard memory (fanned via <code>broadcast_store_quorum</code>) but not the <code>(namespace, standard_id, parent_namespace)</code> tuple, so inheritance-chain walks fall back to <code>auto_detect_parent</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">namespace</td><td class="ftype">String</td><td class="fnote"></td></tr>
+        <tr><td class="fname">standard_id</td><td class="ftype">String</td><td class="fnote">UUID of the standard memory.</td></tr>
+        <tr><td class="fname">parent_namespace</td><td class="ftype">Option&lt;String&gt;</td><td class="fnote"><span class="flag opt">OPT</span></td></tr>
+        <tr><td class="fname">updated_at</td><td class="ftype">String</td><td class="fnote">RFC3339.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="registeragentbody">
+      <div class="ty-head"><span class="ty-name">RegisterAgentBody</span><span class="ty-kind struct">struct</span><span class="ty-since">since Task 1.3 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Deserialize)]</code></div>
+      <div class="ty-desc">Body of <code>POST /agents/register</code>. Persists into the <code>_agents</code> namespace.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">agent_id</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>Stable identifier; max 64 chars.</td></tr>
+        <tr><td class="fname">agent_type</td><td class="ftype">String</td><td class="fnote"><span class="flag req">REQ</span>One of <code>VALID_AGENT_TYPES</code>.</td></tr>
+        <tr><td class="fname">capabilities</td><td class="ftype">Option&lt;Vec&lt;String&gt;&gt;</td><td class="fnote"><span class="flag opt">OPT</span>Free-form capability tags.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="agentregistration">
+      <div class="ty-head"><span class="ty-name">AgentRegistration</span><span class="ty-kind struct">struct</span><span class="ty-since">since Task 1.3 (v0.6)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Serialize)]</code></div>
+      <div class="ty-desc">Response to <code>POST /agents/register</code> and rows in <code>GET /agents</code>.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">agent_id</td><td class="ftype">String</td><td class="fnote"></td></tr>
+        <tr><td class="fname">agent_type</td><td class="ftype">String</td><td class="fnote"></td></tr>
+        <tr><td class="fname">capabilities</td><td class="ftype">Vec&lt;String&gt;</td><td class="fnote">Empty when none registered.</td></tr>
+        <tr><td class="fname">registered_at</td><td class="ftype">String</td><td class="fnote">RFC3339.</td></tr>
+        <tr><td class="fname">last_seen_at</td><td class="ftype">String</td><td class="fnote">RFC3339; bumps on agent activity.</td></tr>
+      </tbody></table>
+    </div>
+
+    <div class="ty k-struct" id="vectorclock">
+      <div class="ty-head"><span class="ty-name">VectorClock</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.6.0 — Phase 3 foundation (#224)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]</code></div>
+      <div class="ty-desc">Tracks the latest <code>updated_at</code> this peer has seen from each known remote. Populated lazily on <code>/sync/push</code> and <code>/sync/since</code>. CRDT-lite merge semantics arrive in Task 3a.1; the foundation ships the wire format so adding semantics later does not force a schema migration.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">entries</td><td class="ftype">BTreeMap&lt;String, String&gt;</td><td class="fnote"><span class="flag def">DEF</span>peer agent_id → latest RFC3339 updated_at.</td></tr>
+      </tbody></table>
+      <div class="snip">// helper API
+VectorClock::observe(&amp;mut self, peer_id: &amp;str, at: &amp;str)  // monotonic: never overwrite newer
+VectorClock::latest_from(&amp;self, peer_id: &amp;str) -&gt; Option&lt;&amp;str&gt;</div>
+    </div>
+
+    <div class="ty k-struct" id="syncstateentry">
+      <div class="ty-head"><span class="ty-name">SyncStateEntry</span><span class="ty-kind struct">struct</span><span class="ty-since">since v0.6.0 — Phase 3 foundation (#224)</span></div>
+      <div class="ty-derive"><code>#[derive(Debug, Clone, Serialize, Deserialize)]</code></div>
+      <div class="ty-desc">One row of the <code>sync_state</code> table serialized for diagnostic / API responses. Consumed by Task 3b.2 sync diagnostics.</div>
+      <table class="fld"><thead><tr><th>field</th><th>type</th><th>notes</th></tr></thead><tbody>
+        <tr><td class="fname">agent_id</td><td class="ftype">String</td><td class="fnote">Local agent's id.</td></tr>
+        <tr><td class="fname">peer_id</td><td class="ftype">String</td><td class="fnote">Remote peer's id.</td></tr>
+        <tr><td class="fname">last_seen_at</td><td class="ftype">String</td><td class="fnote">RFC3339; latest <code>updated_at</code> seen on receive.</td></tr>
+        <tr><td class="fname">last_pulled_at</td><td class="ftype">String</td><td class="fnote">RFC3339; cursor advanced on send.</td></tr>
+      </tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <h3 class="grp-head" id="consts">Constants — wire-format closed sets</h3>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">MAX_CONTENT_SIZE</span><span class="ty-kind const">const</span></div>
+      <div class="ty-desc"><code>usize = 65_536</code> — hard cap on memory <code>content</code> bytes. Validated at write time.</div>
+    </div>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">MAX_NAMESPACE_DEPTH</span><span class="ty-kind const">const</span></div>
+      <div class="ty-desc"><code>usize = 8</code> — maximum number of <code>/</code>-delimited segments in a namespace path. Sample: <code>alphaone/engineering/platform/team/squad/pod/role/agent</code>.</div>
+    </div>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">VALID_SCOPES</span><span class="ty-kind const">const</span></div>
+      <div class="ty-desc"><code>&amp;[&amp;str] = &amp;["private", "team", "unit", "org", "collective"]</code> — closed set stamped into <code>metadata.scope</code> (Task 1.5). Drives hierarchical visibility matching.</div>
+    </div>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">VALID_AGENT_TYPES</span><span class="ty-kind const">const</span></div>
+      <div class="ty-desc">Closed set of agent types accepted by <code>POST /agents/register</code>. Persisted; extend carefully.</div>
+      <div class="snip">&amp;[
+  "ai:claude-opus-4.6",
+  "ai:claude-opus-4.7",
+  "ai:codex-5.4",
+  "ai:grok-4.2",
+  "human",
+  "system",
+]</div>
+    </div>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">AGENTS_NAMESPACE</span><span class="ty-kind const">const</span></div>
+      <div class="ty-desc"><code>&amp;str = "_agents"</code> — namespace reserved for agent registrations (Task 1.3). Listed via <code>memory_agent_list</code>.</div>
+    </div>
+
+    <div class="ty k-const">
+      <div class="ty-head"><span class="ty-name">namespace_depth(ns: &amp;str) → usize</span><span class="ty-kind const">fn</span></div>
+      <div class="ty-desc">Free function. Returns the count of <code>/</code>-delimited segments. Flat namespaces return 1; empty returns 0.</div>
+      <div class="snip">namespace_depth("global")                           // 1
+namespace_depth("alphaone/engineering")             // 2
+namespace_depth("alphaone/engineering/platform")    // 3</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3 · Apache 2.0 · src/<a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/models.rs">models.rs</a> is the source of truth · this page is a generated reference for AI clients integrating against the type contract</p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="schema.html">Schema</a> · <a href="validators.html">Validators</a></p>
+</footer>
+
+</body>
+</html>

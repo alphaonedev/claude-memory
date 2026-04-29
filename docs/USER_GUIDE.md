@@ -967,6 +967,353 @@ Show archive statistics: total count and breakdown by namespace.
 
 ---
 
+## Knowledge Graph & Hierarchy (v0.6.3)
+
+The v0.6.3 release introduces hierarchical namespace taxonomy
+(Pillar 1 / Stream A) and a temporal-validity knowledge graph
+(Pillar 2 / Streams B–D). The tools below operate on `memory_links`
+and the `entity_aliases` side table; existing memory CRUD is
+unaffected.
+
+### memory_get_taxonomy
+
+Walk live (non-expired) memories grouped by namespace and fold them
+into a `TaxonomyNode` tree. Splits on `/` so a namespace like
+`alphaone/engineering/platform` becomes a 3-level subtree. Each node
+carries `count` (memories at exactly this namespace) and
+`subtree_count` (count plus every descendant within the depth limit).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `prefix` | string | No | -- | Restrict the walk to namespaces under this prefix (e.g. `"alphaone/engineering"`) |
+| `depth` | integer (1-10) | No | `5` | Maximum tree depth from the root or prefix |
+| `limit` | integer (1-10000) | No | `1000` | Maximum nodes to return (response includes `truncated: true` if exceeded) |
+
+**Example response envelope:**
+
+```json
+{
+  "tree": [
+    {
+      "namespace": "alphaone",
+      "count": 0,
+      "subtree_count": 47,
+      "children": [
+        { "namespace": "alphaone/engineering", "count": 3, "subtree_count": 47, "children": [ ... ] }
+      ]
+    }
+  ],
+  "total_count": 47,
+  "truncated": false
+}
+```
+
+`total_count` is computed as an independent aggregation that stays
+honest even when `limit` drops rows from the walk.
+
+---
+
+### memory_check_duplicate
+
+Embedding cosine-similarity duplicate detection. Embeds `title +
+content`, scans live memories with non-NULL embeddings, and returns
+the nearest match with an `is_duplicate` flag.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `title` | string | Yes | -- | Candidate title |
+| `content` | string | Yes | -- | Candidate content |
+| `namespace` | string | No | -- | Restrict scan to a single namespace |
+| `threshold` | number (0.5-1.0) | No | `0.85` | Cosine similarity at or above this is `is_duplicate: true` (clamped to 0.5 floor) |
+
+**Example response:**
+
+```json
+{
+  "is_duplicate": true,
+  "threshold": 0.85,
+  "nearest": {
+    "id": "a1b2c3d4-...",
+    "title": "Project uses PostgreSQL 15",
+    "namespace": "my-app",
+    "similarity": 0.92
+  },
+  "suggested_merge": "a1b2c3d4-...",
+  "candidates_scanned": 412
+}
+```
+
+`suggested_merge` is non-null when `is_duplicate == true`. Requires
+the `semantic` feature tier or higher (embeddings must be available).
+
+---
+
+### memory_entity_register
+
+Register an entity as a typed memory (no separate entities table —
+entities live in `memories` with `metadata.kind = "entity"`). Idempotent:
+calling twice with the same `canonical_name + namespace` returns the
+same entity ID and merges any new aliases via `INSERT OR IGNORE`.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `canonical_name` | string | Yes | -- | Primary name for the entity |
+| `namespace` | string | Yes | -- | Namespace to scope the entity to |
+| `aliases` | array of strings | No | `[]` | Alternate names; blanks skipped, dupes deduped |
+| `metadata` | object | No | `{}` | Additional metadata (`kind` is forced to `"entity"`) |
+| `agent_id` | string | No | (caller NHI) | Override the recorded agent_id |
+
+**Example response (newly created):**
+
+```json
+{
+  "entity_id": "ent-9876...",
+  "canonical_name": "PostgreSQL",
+  "namespace": "my-app",
+  "aliases": ["pg", "postgres", "PostgreSQL"],
+  "created": true
+}
+```
+
+If a non-entity memory already exists with the same `(title,
+namespace)`, the call returns an error rather than overwriting it.
+
+---
+
+### memory_entity_get_by_alias
+
+Resolve an alias to its canonical entity. Trims whitespace, matches
+case-sensitively, and discriminates against non-entity memories that
+happen to share the alias.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `alias` | string | Yes | -- | Alias to look up |
+| `namespace` | string | No | -- | Restrict lookup to this namespace; if omitted, picks the most-recently-created match across namespaces |
+
+**Example response:**
+
+```json
+{
+  "found": true,
+  "entity_id": "ent-9876...",
+  "canonical_name": "PostgreSQL",
+  "namespace": "my-app",
+  "aliases": ["pg", "postgres", "PostgreSQL"]
+}
+```
+
+Returns `{"found": false, ...}` (with null fields) if no entity
+matches the alias.
+
+---
+
+### memory_kg_query
+
+Recursive-CTE traversal of the temporal knowledge graph rooted at a
+source memory. Walks outbound links up to `max_depth` hops, applies
+per-hop temporal and agent filters, and prunes cycles via
+accumulated path matching.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Memory ID to start the walk from |
+| `max_depth` | integer (1-5) | No | `1` | Maximum hops; ceiling enforced (depth=0 errors, depth>5 errors) |
+| `valid_at` | string (RFC 3339) | No | -- | Apply per-hop: `valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)`; rows with NULL `valid_from` are excluded when set |
+| `allowed_agents` | array of strings | No | -- | Apply per-hop: `observed_by IN (...)`; an empty array (`[]`) returns zero rows (vs. omitting which skips the filter) |
+| `limit` | integer (1-1000) | No | `200` | Maximum rows returned |
+
+**Example response:**
+
+```json
+{
+  "source_id": "a1b2c3d4-...",
+  "max_depth": 3,
+  "memories": [
+    {
+      "target_id": "e5f6g7h8-...",
+      "title": "API uses Axum 0.8",
+      "target_namespace": "my-app",
+      "relation": "depends_on",
+      "valid_from": "2026-04-25T19:25:00Z",
+      "valid_until": null,
+      "observed_by": "ai:claude-code@host:pid-12345",
+      "depth": 1,
+      "path": "a1b2c3d4->e5f6g7h8"
+    }
+  ],
+  "paths": ["a1b2c3d4->e5f6g7h8->..."],
+  "count": 1
+}
+```
+
+Ordering: `depth ASC, COALESCE(valid_from, link_created_at) ASC,
+link_created_at ASC`.
+
+---
+
+### memory_kg_timeline
+
+Ordered fact timeline for an entity. Returns every link with the
+given `source_id`, ordered by `valid_from` ascending. Skips links
+with NULL `valid_from` (legacy un-anchored links from before the v15
+migration backfill).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Entity / memory ID anchoring the timeline |
+| `since` | string (RFC 3339) | No | -- | Only events with `valid_from >= since` |
+| `until` | string (RFC 3339) | No | -- | Only events with `valid_from <= until` |
+| `limit` | integer (1-1000) | No | `200` | Maximum events |
+
+**Example response:**
+
+```json
+{
+  "source_id": "a1b2c3d4-...",
+  "events": [
+    {
+      "target_id": "e5f6g7h8-...",
+      "relation": "depends_on",
+      "valid_from": "2026-04-25T19:25:00Z",
+      "valid_until": null,
+      "observed_by": "ai:claude-code@host:pid-12345"
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
+### memory_kg_invalidate
+
+Mark a knowledge-graph link as superseded by setting its `valid_until`
+column. **The link is NOT deleted** — historical queries that pin
+`valid_at` to a time before the invalidation still see it. Idempotent:
+repeated calls overwrite `valid_until`; the prior value is returned
+so callers can detect overwrites.
+
+> **Federation note:** invalidations are NOT quorum-broadcast. They
+> apply locally and propagate to peers asynchronously via the
+> sync-daemon. See `docs/MIGRATION-v0.6.2-to-v0.6.3.md` for details.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Source memory ID of the link |
+| `target_id` | string | Yes | -- | Target memory ID of the link |
+| `relation` | string | Yes | -- | Relation type (the third part of the link triple) |
+| `valid_until` | string (RFC 3339) | No | (now) | When to mark the link superseded |
+
+**Example response:**
+
+```json
+{
+  "found": true,
+  "valid_until": "2026-04-26T03:00:00Z",
+  "previous_valid_until": null
+}
+```
+
+Returns `{"found": false, ...}` if no link matches the
+`(source_id, target_id, relation)` triple.
+
+---
+
+## Agent Identity (NHI) — `metadata.agent_id`
+
+Every stored memory carries a `metadata.agent_id` tag that records **who (or what) stored it**. You'll see it in `recall`, `list`, `search`, and `get` responses. You can filter by it too.
+
+### Quick examples
+
+```bash
+# Default: a host-qualified id is auto-generated
+ai-memory store -T "note" -c "content"
+# stored memory's metadata.agent_id = "host:your-hostname:pid-12345-abcdef01"
+
+# Use an explicit identity
+ai-memory --agent-id alice store -T "note" -c "content"
+
+# Or via environment variable
+AI_MEMORY_AGENT_ID=alice ai-memory store -T "note" -c "content"
+
+# Filter by agent
+ai-memory list --agent-id alice
+ai-memory search "some query" --agent-id alice
+```
+
+### Resolution precedence
+
+The identity that ends up in `metadata.agent_id` is resolved in order:
+
+1. The explicit value you passed (flag, env var, MCP param, or HTTP body field)
+2. `AI_MEMORY_AGENT_ID` environment variable
+3. (MCP server only) the MCP client's `initialize.clientInfo.name` →
+   `ai:<client>@<hostname>:pid-<pid>`
+4. `host:<hostname>:pid-<pid>-<uuid8>` — a collision-free host-qualified default
+5. `anonymous:pid-<pid>-<uuid8>` — last-resort fallback if hostname lookup fails
+
+For the **HTTP API**, the precedence within a single request is:
+
+1. `agent_id` field in the POST/PUT JSON body
+2. `X-Agent-Id` request header
+3. Per-request synthesized `anonymous:req-<uuid8>` (logged at WARN)
+
+### Format rules
+
+Valid `agent_id` values match `^[A-Za-z0-9_\-:@./]{1,128}$`. Prefixed forms
+(`ai:`, `host:`, `anonymous:`, and future `human:` / `system:`) are reserved for
+specific roles but not enforced. Whitespace, null bytes, control chars, and shell
+metacharacters are rejected at validation time.
+
+### Immutability
+
+Once a memory carries an `agent_id`, that value is preserved across `update`,
+`consolidate`, `import`, `sync`, and upsert dedup. You can update a memory's
+content as a different agent, but the original author's `agent_id` stays
+recorded. `import` restamps with the current caller's id by default — pass
+`--trust-source` to import the embedded ids as-is (use only for legitimate
+backup restoration).
+
+### Special metadata fields produced by the system
+
+These extra keys may appear alongside `agent_id` — they're informational:
+
+- `imported_from_agent_id` — the original claimed agent_id from JSON when
+  `import` restamped with your caller id (absent with `--trust-source`)
+- `consolidated_from_agents` — array of source authors when a memory was produced
+  by `consolidate`
+- `mined_from` — source format tag (`claude` / `chatgpt` / `slack`) when the
+  memory came from `ai-memory mine`
+
+### Trust model
+
+`agent_id` is a **claimed** identity, not an **attested** one. Anyone who can
+invoke `ai-memory` can set any `agent_id` they want (subject to the format
+regex). Use it for provenance and filtering, not for security decisions. True
+attestation via agent registration arrives with Task 1.3.
+
+### Default leaks hostname + PID
+
+The auto-generated `host:<hostname>:pid-<pid>-<uuid8>` default exposes your
+hostname and process id. When exporting / syncing / sharing a DB externally,
+pass `--agent-id` or `AI_MEMORY_AGENT_ID` to scrub that leakage. Tracking issue
+#198 covers an opt-out config flag.
+
 ## Zero Token Cost
 
 Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation, ai-memory uses **zero context tokens until recalled**. Only relevant memories come back, ranked by a 6-factor scoring algorithm. For Claude Code users: disable auto-memory (`"autoMemoryEnabled": false` in settings.json) to stop paying for 200+ lines of idle context.

@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, "release/**"]
     tags: ["v*"]
   pull_request:
-    branches: [main, develop]
+    branches: [main, develop, "release/**"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -15,8 +15,9 @@ jobs:
     name: Check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
 
@@ -137,7 +138,9 @@ jobs:
   crates-io:
     name: Publish to crates.io
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags (SemVer `-` suffix, e.g. v0.6.2-rc.0) — only
+    # real releases (v0.6.2 without suffix) publish to crates.io.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -145,15 +148,41 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish to crates.io
+      - name: Publish to crates.io (with retry)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty || echo "::warning::crates.io publish skipped (version may already exist)"
+        # v0.6.5 — replace silent-failure `|| echo "warning"` with proper retry.
+        # crates.io's Fastly cache returns 503 + sigsci WAF rejection under
+        # transient load (v0.6.3 + v0.6.4 both hit this — silently). The
+        # `version may already exist` swallow is detected explicitly so a
+        # genuine "already published" doesn't fail the job, but everything
+        # else (5xx, network errors, oversized package) fails loudly.
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if output=$(cargo publish --allow-dirty 2>&1); then
+              echo "::notice::crates.io publish succeeded on attempt $attempt"
+              echo "$output" | tail -10
+              exit 0
+            fi
+            echo "$output" | tail -20
+            if echo "$output" | grep -q "already exists\|crate version .* is already uploaded"; then
+              echo "::notice::crates.io: version already published (idempotent no-op)"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::crates.io publish failed on attempt $attempt — retrying after 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::crates.io publish failed on all 3 attempts"
+          exit 1
 
   homebrew:
     name: Update Homebrew formula
     needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Homebrew users get the latest stable only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - name: Extract version from tag
@@ -255,10 +284,49 @@ jobs:
           git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
           git push
 
+  # v0.6.5 — Dockerfile-build smoke. Runs on EVERY push to main / develop /
+  # release/** AND on EVERY PR. Builds the Docker image; does NOT push to
+  # GHCR. Catches Dockerfile drift (missing COPY of new files referenced
+  # by include_str!, glibc mismatch from build/runtime base drift, etc.)
+  # BEFORE we cut a release tag.
+  #
+  # Retrospective: v0.6.3 added include_str! refs to migrations/sqlite/
+  # but the Dockerfile didn't COPY migrations/. v0.6.4's image built
+  # but used rust:1.94-slim (trixie, glibc 2.41) on top of bookworm
+  # runtime (glibc 2.36) — built but failed at runtime with
+  # "version GLIBC_2.39 not found". Both bugs were caught at release
+  # time, not PR time. This job closes that gap.
+  dockerfile-validate:
+    name: Dockerfile build (no push)
+    runs-on: ubuntu-latest
+    # Skip on tag pushes — the docker job below handles those (with push).
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ai-memory:ci-validate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        run: |
+          docker run --rm ai-memory:ci-validate --version
+          docker run --rm ai-memory:ci-validate --help | head -20
+
   docker:
     name: Docker (GHCR)
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — GHCR image tags reflect stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     permissions:
       contents: read
       packages: write
@@ -297,7 +365,8 @@ jobs:
   ppa:
     name: Ubuntu PPA
     needs: check
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Launchpad PPA users get stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -358,7 +427,8 @@ jobs:
   copr:
     name: Fedora COPR
     needs: release
-    if: startsWith(github.ref, 'refs/tags/v')
+    # Skip pre-release tags — Fedora COPR users get stable releases only.
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -368,7 +438,21 @@ jobs:
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install copr-cli
-        run: sudo dnf install -y copr-cli || sudo apt-get install -y python3-copr-cli || pip install copr-cli
+        # `dnf` is not available on ubuntu-latest (runner is Debian-family);
+        # `python3-copr-cli` package name is unreliable across Ubuntu releases;
+        # `pip install` without --break-system-packages fails on Ubuntu 24.04
+        # (PEP 668). `pipx install` is the reliable, isolated, distro-agnostic
+        # path. v0.6.0 red-team finding.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx
+          pipx ensurepath
+          pipx install copr-cli
+          # copr-cli 2.5 ships without `rich` in its pipx venv and
+          # fails at import (ModuleNotFoundError: No module named 'rich').
+          # Inject it manually so the CLI starts.
+          pipx inject copr-cli rich
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure copr-cli
         run: |
@@ -383,14 +467,33 @@ jobs:
           VERSION=${{ steps.version.outputs.version }}
           mkdir -p ~/rpmbuild/{SOURCES,SPECS,SRPMS}
 
-          # Download both architecture tarballs
+          # Download both architecture tarballs (filename uses the full SemVer tag)
           curl -sL -o ~/rpmbuild/SOURCES/ai-memory-x86_64-unknown-linux-gnu.tar.gz \
             "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
           curl -sL -o ~/rpmbuild/SOURCES/ai-memory-aarch64-unknown-linux-gnu.tar.gz \
             "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
 
-          # Update spec version and copy
-          sed "s/^Version:.*/Version:        ${VERSION}/" ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
+          # RPM Version: field forbids '-'. For SemVer pre-release tags
+          # (e.g. 0.6.0-alpha.1), split into Version: <core> + Release: 0.<n>.<pre>%{?dist}
+          # per Fedora packaging guidelines for pre-release versions.
+          if [[ "$VERSION" == *-* ]]; then
+            RPM_VERSION="${VERSION%%-*}"
+            PRE="${VERSION#*-}"
+            # Replace dots in the pre-release identifier so rpm sees a clean token
+            # (e.g. "alpha.1" -> "0.1.alpha1")
+            PRE_TAG="${PRE//./}"
+            RPM_RELEASE="0.1.${PRE_TAG}%{?dist}"
+          else
+            RPM_VERSION="$VERSION"
+            RPM_RELEASE="1%{?dist}"
+          fi
+          echo "RPM Version: $RPM_VERSION"
+          echo "RPM Release: $RPM_RELEASE"
+
+          # Rewrite spec with the computed Version:/Release: pair
+          sed -e "s/^Version:.*/Version:        ${RPM_VERSION}/" \
+              -e "s/^Release:.*/Release:        ${RPM_RELEASE}/" \
+              ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
 
           # Build source RPM
           rpmbuild -bs ~/rpmbuild/SPECS/ai-memory.spec \
@@ -402,3 +505,54 @@ jobs:
       - name: Upload to COPR
         run: |
           copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
+
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      # v0.6.3 W12-CI-fix: switched from cargo-tarpaulin to cargo-llvm-cov.
+      # tarpaulin 0.32.x trips a `pulp` 0.22.2 const-eval panic
+      # (`CheckSameSize::<i8, u16>::VALID`) under its source-based
+      # instrumentation. llvm-cov uses LLVM-native source-based instrumentation
+      # which doesn't hit the bug, and matches the canonical local measurement
+      # command the coverage campaign used (93.05% headline number).
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo llvm-cov --features sal --no-fail-fast --html --output-dir coverage -- --test-threads=2
+          # `cargo llvm-cov report` reads the saved profile data and does
+          # not accept `--features` (would error: "invalid option
+          # '--features' for subcommand 'report'"). The earlier pipe-to-
+          # `tee` form masked that failure since `tee` always exits 0.
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
+
+      # v0.6.3 coverage gate — fail-under 92% lines.
+      # Locks in the v0.6.3 baseline of 93.05% with a 1% absorb buffer so
+      # routine churn doesn't trip the gate but a regression of >1% does.
+      # Per-module floors for hot modules (handlers, db, federation, mcp,
+      # governance) are tracked in the v0.7 assertion table; this is the
+      # total-line floor.
+      - name: Enforce coverage floor (≥92% lines)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo llvm-cov report --fail-under-lines 92
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-report
+          path: coverage/

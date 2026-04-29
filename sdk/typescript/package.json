@@ -1,0 +1,64 @@
+{
+  "name": "@alphaone/ai-memory",
+  "version": "0.6.0-alpha.0",
+  "description": "TypeScript SDK for the ai-memory HTTP API — persistent, tier-aware memory for AI agents.",
+  "license": "Apache-2.0",
+  "author": "AlphaOne LLC",
+  "homepage": "https://github.com/alphaone/ai-memory",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/alphaone/ai-memory.git",
+    "directory": "sdk/typescript"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./webhooks": {
+      "types": "./dist/webhooks.d.ts",
+      "import": "./dist/webhooks.js"
+    },
+    "./errors": {
+      "types": "./dist/errors.d.ts",
+      "import": "./dist/errors.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "private": true,
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "undici": "^6.21.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.14.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "ai-memory",
+    "mcp",
+    "memory",
+    "claude",
+    "alphaone",
+    "sdk"
+  ]
+}

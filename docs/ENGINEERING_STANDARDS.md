@@ -3,6 +3,12 @@
 > Authoritative reference for all development, testing, security, and release processes.
 > Maintained by AlphaOne LLC. All contributors and AI agents must follow these standards.
 > In case of conflict with CONTRIBUTING.md, this document takes precedence.
+>
+> **AI agents** must additionally follow [`AI_DEVELOPER_WORKFLOW.md`](AI_DEVELOPER_WORKFLOW.md)
+> (operational steps) and [`AI_DEVELOPER_GOVERNANCE.md`](AI_DEVELOPER_GOVERNANCE.md)
+> (policy boundaries). The Governance standard takes precedence over this document
+> only on matters of AI participation; this document remains authoritative for
+> code, test, security, and release.
 
 ---
 
@@ -285,6 +291,8 @@ Before tagging a release:
 | CI/CD workflow | `.github/workflows/ci.yml` |
 | Branch protection | GitHub repo settings + `.github/CODEOWNERS` |
 | Contributing guide | `CONTRIBUTING.md` |
+| AI Developer Workflow | `docs/AI_DEVELOPER_WORKFLOW.md` |
+| AI Developer Governance Standard | `docs/AI_DEVELOPER_GOVERNANCE.md` |
 | CLA | `CLA.md` |
 | LICENSE | `LICENSE` |
 | NOTICE | `NOTICE` |
@@ -296,3 +304,140 @@ Before tagging a release:
 | Admin guide | `docs/ADMIN_GUIDE.md` |
 | OIN agreement | `OIN_LICENSE_AGREEMENT.pdf` |
 | Homebrew tap | `alphaonedev/homebrew-tap` (separate repo) |
+
+---
+
+## 7. Autonomous Campaign Workflow
+
+When development is driven by an autonomous Claude Code campaign (the
+`campaign` Python harness at
+`alphaonedev/agentic-mem-labs/tools/campaign/`, Apache 2.0 © AlphaOne
+LLC), every standard in §1–§6 still applies. The campaign agent runs
+with `--dangerously-skip-permissions` and merge authority on a single
+release branch only; the constraints below are baked into every
+iteration's prompt and survive `bypassPermissions`.
+
+### 7.1 Hard rules under campaign
+
+| Rule | Enforcement |
+|------|-------------|
+| Push/merge into `main` or `develop` | Forbidden — agent uses a designated `release/vX.Y.Z` branch only |
+| Push/merge into any other `release/*` branch | Forbidden |
+| `git push --force` / `--force-with-lease` | Forbidden |
+| `v*` tags | Forbidden — releases are the human's job |
+| `gh release create/edit` | Forbidden |
+| `gh workflow run` | Forbidden — no manual CI triggers from the agent |
+| Edits to `.github/workflows/release*.yml` | Forbidden |
+| `cargo publish` / `npm publish` | Forbidden |
+| Edits to charter doc or any `strategy/`, `the-standard/`, `relocated-from-public*/` paths | Forbidden |
+| `git config --global` / `~/.gitconfig` mutation | Forbidden |
+| `gh auth` reconfigure / token rotation | Forbidden |
+| Writes to `/etc`, `/usr`, `/System`, `/Library`, `~/.aws`, `~/.ssh`, `~/.config/gh`, `.credentials.json` | Forbidden |
+| Rewriting or deleting past iteration audit reports on the `campaign-log` branch | Forbidden — append-only |
+
+### 7.2 Per-iteration loop (8 steps)
+
+The agent's prompt requires every iteration to execute, in order:
+
+1. **Load memories** — recall 3 targeted queries + list recent in the
+   campaign's namespace (see §7.4)
+2. **Read** charter + last iteration report
+3. **Inspect** repo state (`git fetch` / `status` / `log`)
+4. **Pick** exactly one unblocked charter item
+5. **Implement** on `campaign/<slug>` feature branch → cargo fmt →
+   `cargo clippy --all-targets -- -D warnings` → `cargo test --all` →
+   signed commit → push → `gh pr create` → `gh pr merge --squash --delete-branch`
+6. **Record** decisions to memory throughout (not only at the end)
+7. **Write** iteration report markdown using the fixed template
+8. **Commit + push** the report on the dedicated `campaign-log/vX.Y.Z`
+   branch of the charter repo (append-only audit)
+
+### 7.3 Quality gates (identical to non-campaign work)
+
+- Tests must pass before push (`AI_MEMORY_NO_CONFIG=1 cargo test --all`)
+- `cargo fmt --check` clean
+- `cargo clippy --all-targets -- -D warnings -D clippy::all -D clippy::pedantic` clean
+- No `unwrap()` in non-test code without an explicit invariant comment
+- Conventional commit messages
+- One logical change per dev-repo commit
+- All commits SSH-signed (`commit.gpgsign=true`, ed25519)
+- SPDX headers on new source files
+
+### 7.4 Memory namespace convention (load-bearing)
+
+**Each campaign owns one ai-memory namespace named after the campaign**
+(e.g. `campaign-v063` for the v0.6.3 grand-slam campaign). The
+namespace is the campaign's **complete operating context** AND its
+**historical audit artifact**:
+
+| Memory category | Tier | Tags | Lifetime |
+|---|---|---|---|
+| Campaign overview / scope / hard rules | `long` | `campaign,scope,charter` | Permanent |
+| Approvals — what is allowed/forbidden | `long` | `campaign,approvals` | Permanent |
+| Code quality standards | `long` | `campaign,quality,standards` | Permanent |
+| Engineering Standards alignment | `long` | `campaign,standards,alignment` | Permanent |
+| Open-issues snapshot at campaign start | `long` | `campaign,issues,snapshot` | Permanent (historical) |
+| Per-iteration summary (one entry per iter) | `long` | `campaign,iteration` | Permanent (audit) |
+| Decisions / rationale | `long` | `campaign,decision` | Permanent |
+| Blockers + how resolved | `long` | `campaign,blocker` | Permanent |
+| Out-of-charter ideas (deferred) | `mid` | `future,deferred` | 7 days unless promoted |
+
+**Rule:** every campaign memory is namespace-scoped to that campaign's
+name. After the campaign ends, the namespace is the canonical historical
+reference for "what got built, why, and in what order." Future campaigns
+do not share namespaces.
+
+Discoverable via:
+
+```bash
+ai-memory --db ~/.claude/ai-memory.db list   --namespace campaign-v063
+ai-memory --db ~/.claude/ai-memory.db recall --namespace campaign-v063 "what task was last shipped"
+```
+
+### 7.5 Living snapshot — open issues & PRs (charter context)
+
+The campaign agent reads this section at iter 1 of every new campaign
+to seed scope. Maintainers refresh it when a campaign is created or
+when issue/PR triage is done. **Most recent snapshot — 2026-04-25:**
+
+```
+Open issues (alphaonedev/ai-memory-mcp)
+  #355  chore(deps): rustls-pemfile 2.2.0 unmaintained (RUSTSEC-2025-0134) — transitive via axum-server [low]
+  #331  v0.7 red-team P3 polish punchlist (rollup) [enhancement,low]
+  #318  MCP stdio tool dispatch writes bypass federation fanout coordinator [bug,high]
+  #311  feat(v0.6.0.1): targeted memory share — CLI + MCP tool for point-to-point sync by ID/namespace/last-N [enhancement]
+  #239  [P2] /sync/since allows full DB dump for any valid mTLS peer (red-team #230) [docs,med,security]
+  #238  [P2] Body-claimed sender_agent_id not attested to mTLS cert (red-team #230) [enh,med,security]
+  #228  v0.8: end-to-end memory encryption (X25519 + ChaCha20-Poly1305) — Layer 3 peer-mesh crypto [enhancement]
+  #224  Phase 3: Memory Sharing & Sync — design + decomposition (v0.8.0; foundation lands v0.6.0 GA) [enhancement]
+
+Open PRs (against develop)
+  #330  feat(msrv,ppa): Ubuntu 26.04 Resolute Raccoon as sole PPA target; rustc 1.91 MSRV
+  #285  feat: Layer 2b attested sender_agent_id primitives (v0.7)
+  #253  docs: scaffold Docusaurus documentation site (#252)
+```
+
+The campaign's mandate is the charter, not the open-issues backlog —
+but the agent must consult this list when picking tasks to avoid
+duplicating in-flight work.
+
+### 7.6 Operator surface (campaign harness CLI)
+
+```
+campaign preflight        # 8 health checks
+campaign install          # 24x7 launchd daemon (renders plist from live Config)
+campaign install --force  # bootout existing + re-install (use after env changes)
+campaign service-status   # human-readable status with drift detection
+campaign watch            # live TUI of newest iter log (auto-rotates)
+campaign status           # pid / branch / iter count
+campaign stop             # kill-switch + drain + SIGTERM/SIGKILL
+campaign uninstall        # bootout (optionally --remove-plist)
+```
+
+Pause without uninstalling: `touch <state-dir>/kill-switch`. Resume:
+`rm <state-dir>/kill-switch`. The `KeepAlive PathState` watcher in the
+LaunchAgent plist toggles the daemon's run-state automatically.
+
+Full operator guide:
+[`alphaonedev/agentic-mem-labs/tools/campaign/README.md`](https://github.com/alphaonedev/agentic-mem-labs/blob/main/tools/campaign/README.md)
+(Apache 2.0 © AlphaOne LLC).

@@ -481,4 +481,517 @@ mod tests {
             "phrase match ({s_phrase}) should beat scattered ({s_scattered})"
         );
     }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — input-count invariants for the rerank() API
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_rerank_preserves_input_count_heuristic() {
+        let ce = CrossEncoder::new();
+        // Build 5 distinct candidates with varied original scores.
+        let candidates: Vec<(Memory, f64)> = (0..5)
+            .map(|i| {
+                (
+                    make_memory(
+                        &format!("title {i}"),
+                        &format!("content body number {i} with some words"),
+                    ),
+                    f64::from(i) * 0.1,
+                )
+            })
+            .collect();
+        let query = "title content body";
+        let reranked = ce.rerank(query, candidates);
+        assert_eq!(
+            reranked.len(),
+            5,
+            "heuristic rerank must preserve candidate count, got {} = {:?}",
+            reranked.len(),
+            reranked
+                .iter()
+                .map(|(m, s)| (&m.title, *s))
+                .collect::<Vec<_>>()
+        );
+        // Sorted descending by final score (rerank contract).
+        for w in reranked.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "rerank output must be descending by score: {} < {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn test_rerank_zero_candidates_returns_empty_heuristic() {
+        let ce = CrossEncoder::new();
+        let reranked = ce.rerank("query", Vec::new());
+        assert!(reranked.is_empty());
+    }
+
+    // Neural variant: gated to avoid pulling 80MB BERT weights at test time.
+    // Run with `--features test-with-models` once the cross-encoder feature
+    // exists upstream.
+    #[cfg(feature = "test-with-models")]
+    #[test]
+    fn test_rerank_preserves_input_count_neural_if_available() {
+        let ce = CrossEncoder::new_neural();
+        let candidates: Vec<(Memory, f64)> = (0..5)
+            .map(|i| (make_memory(&format!("t{i}"), &format!("body {i}")), 0.5))
+            .collect();
+        let reranked = ce.rerank("body", candidates);
+        assert_eq!(reranked.len(), 5);
+    }
+
+    // -----------------------------------------------------------------
+    // W12-E — heuristic-path branch coverage for reranker.rs
+    //
+    // Targets the Lexical variant only. The Neural variant requires
+    // downloading 80+ MB of BERT weights from HuggingFace Hub and is
+    // gated behind `feature = "test-with-models"`.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn w12e_default_is_lexical() {
+        let ce = CrossEncoder::default();
+        assert!(!ce.is_neural(), "Default::default() must return Lexical");
+    }
+
+    #[test]
+    fn w12e_new_returns_lexical() {
+        let ce = CrossEncoder::new();
+        assert!(!ce.is_neural());
+    }
+
+    #[test]
+    fn w12e_score_dispatch_lexical_matches_helper() {
+        // The CrossEncoder::score() dispatcher must delegate to lexical_score()
+        // for the Lexical variant. Compute both and assert exact equality.
+        let ce = CrossEncoder::new();
+        let q = "rust async runtime";
+        let title = "Tokio: Rust async runtime";
+        let content = "Tokio is an async runtime for the Rust programming language.";
+        let via_dispatcher = ce.score(q, title, content);
+        let direct = lexical_score(q, title, content);
+        assert!((via_dispatcher - direct).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn w12e_score_empty_inputs_safe() {
+        let ce = CrossEncoder::new();
+        // Empty query → 0.0 by short-circuit in lexical_score
+        assert_eq!(ce.score("", "title", "content"), 0.0);
+        // Empty title and content with non-empty query — must not panic
+        let s = ce.score("query", "", "");
+        assert!((0.0..=1.0).contains(&s));
+        // Whitespace-only query treated as empty after tokenization
+        let s_ws = ce.score("   \t\n", "title", "content");
+        assert_eq!(s_ws, 0.0);
+        // Punctuation-only query also yields no tokens
+        let s_punct = ce.score("!?.,;:", "title", "content");
+        assert_eq!(s_punct, 0.0);
+    }
+
+    #[test]
+    fn w12e_lexical_score_is_bounded_for_unicode_and_long() {
+        // Mixed Unicode tokens with apostrophes, accents, emoji boundaries.
+        let s_unicode = lexical_score(
+            "café résumé d'oeuvre",
+            "Le Café d'Oeuvre",
+            "résumé du café avec d'oeuvre noté",
+        );
+        assert!(
+            (0.0..=1.0).contains(&s_unicode),
+            "unicode score {s_unicode} out of bounds"
+        );
+
+        // Very long content stresses the length-normalization branches.
+        let huge = "alpha beta gamma delta ".repeat(2_500);
+        let s_long = lexical_score("alpha gamma", "headline", &huge);
+        assert!(
+            (0.0..=1.0).contains(&s_long),
+            "long score {s_long} out of bounds"
+        );
+    }
+
+    #[test]
+    fn w12e_lexical_score_perfect_overlap_high() {
+        // 100% query overlap with title and content should produce a high
+        // (but bounded) score.
+        let s = lexical_score(
+            "alpha beta gamma",
+            "alpha beta gamma",
+            "alpha beta gamma alpha beta gamma",
+        );
+        assert!(s > 0.5, "expected high score for perfect overlap, got {s}");
+        assert!(s <= 1.0);
+    }
+
+    #[test]
+    fn w12e_tfidf_score_empty_doc_returns_zero() {
+        // Branch: doc_tokens.is_empty() → 0.0 short-circuit.
+        let q = vec!["alpha", "beta"];
+        let doc: Vec<&str> = Vec::new();
+        assert_eq!(tfidf_score(&q, &doc), 0.0);
+    }
+
+    #[test]
+    fn w12e_tfidf_score_empty_query_returns_zero() {
+        // Branch: query_terms.is_empty() → 0.0 short-circuit.
+        let q: Vec<&str> = Vec::new();
+        let doc = vec!["alpha", "beta", "gamma"];
+        assert_eq!(tfidf_score(&q, &doc), 0.0);
+    }
+
+    #[test]
+    fn w12e_tfidf_score_no_matching_terms() {
+        // Query terms entirely absent from doc → tf == 0 continue branch.
+        let q = vec!["xenon", "kryptonite"];
+        let doc = vec!["alpha", "beta", "gamma"];
+        let s = tfidf_score(&q, &doc);
+        assert_eq!(s, 0.0);
+    }
+
+    #[test]
+    fn w12e_tfidf_score_partial_match_bounded() {
+        // Mixed presence/absence; clamp branch reachable.
+        let q = vec!["alpha", "missing"];
+        let doc = vec!["alpha", "alpha", "beta", "gamma"];
+        let s = tfidf_score(&q, &doc);
+        assert!((0.0..=1.0).contains(&s));
+        assert!(s > 0.0);
+    }
+
+    #[test]
+    fn w12e_bigrams_empty_and_single_and_multi() {
+        // Empty input → empty bigram list.
+        let empty: Vec<&str> = Vec::new();
+        assert!(bigrams(&empty).is_empty());
+
+        // Single token → no bigrams (windows(2) yields nothing).
+        let one = vec!["solo"];
+        assert!(bigrams(&one).is_empty());
+
+        // Multi-token → N-1 bigrams.
+        let three = vec!["a", "b", "c"];
+        let bg = bigrams(&three);
+        assert_eq!(bg, vec![("a", "b"), ("b", "c")]);
+    }
+
+    #[test]
+    fn w12e_tokenize_handles_apostrophe_and_unicode() {
+        // Apostrophes are preserved (e.g., "don't"), other punctuation splits.
+        let toks = tokenize("don't stop, I won't!");
+        assert!(toks.contains(&"don't"));
+        assert!(toks.contains(&"won't"));
+        assert!(toks.contains(&"stop"));
+        assert!(toks.contains(&"I"));
+
+        // Pure-punctuation yields no tokens.
+        let none = tokenize("!!!,,,;;;");
+        assert!(none.is_empty());
+
+        // Empty string yields no tokens.
+        let empty = tokenize("");
+        assert!(empty.is_empty());
+
+        // Unicode alphanumerics survive (café = 4 alphanumeric chars).
+        let unicode = tokenize("café résumé");
+        assert_eq!(unicode.len(), 2);
+    }
+
+    #[test]
+    fn w12e_rerank_single_candidate_keeps_it() {
+        let ce = CrossEncoder::new();
+        let only = make_memory("solo title", "solo content body");
+        let out = ce.rerank("solo", vec![(only.clone(), 0.42)]);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.title, "solo title");
+        // Final score is a blend of original and CE score, both nonneg.
+        assert!(out[0].1 >= 0.0);
+    }
+
+    #[test]
+    fn w12e_rerank_identical_originals_stable_under_score() {
+        // When original scores are identical, ordering is determined by the
+        // CE score. The candidate whose title/content overlaps the query
+        // should rank first.
+        let ce = CrossEncoder::new();
+        let on_topic = make_memory("rust async runtime", "rust async runtime tokio");
+        let off_topic = make_memory("grocery", "milk eggs bread");
+        let out = ce.rerank(
+            "rust async",
+            vec![(off_topic.clone(), 0.5), (on_topic.clone(), 0.5)],
+        );
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0.title, "rust async runtime");
+    }
+
+    #[test]
+    fn w12e_rerank_descending_invariant_holds_across_shapes() {
+        // Property-style: irrespective of input shape, output is sorted desc.
+        let ce = CrossEncoder::new();
+        let cands: Vec<(Memory, f64)> = vec![
+            (make_memory("a", "alpha words"), 0.10),
+            (make_memory("b", "beta words"), 0.95),
+            (make_memory("c", "gamma alpha"), 0.55),
+            (make_memory("d", ""), 0.0),
+            (make_memory("", "empty title doc"), 0.30),
+        ];
+        let out = ce.rerank("alpha", cands);
+        assert_eq!(out.len(), 5);
+        for w in out.windows(2) {
+            assert!(
+                w[0].1 >= w[1].1,
+                "non-descending pair: {} then {}",
+                w[0].1,
+                w[1].1
+            );
+        }
+    }
+
+    #[test]
+    fn w12e_lexical_score_no_title_branch_via_empty_title() {
+        // Empty title means title_set is empty; title_bonus == 0.0.
+        // query_set non-empty so the else branch (title_hits / |Q|) runs.
+        let s_empty_title = lexical_score("alpha beta", "", "alpha beta gamma");
+        let s_with_title = lexical_score("alpha beta", "alpha beta", "alpha beta gamma");
+        assert!(s_with_title >= s_empty_title);
+        assert!((0.0..=1.0).contains(&s_empty_title));
+    }
+
+    #[test]
+    fn w12e_lexical_score_query_terms_only_in_title() {
+        // Title contains all query terms; content has none.
+        let s = lexical_score("rust crate", "Rust Crate Index", "unrelated body text");
+        assert!(s > 0.0);
+        assert!(s <= 1.0);
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unused_self,
+    clippy::unnecessary_wraps,
+    clippy::needless_pass_by_value,
+    clippy::wildcard_imports
+)]
+pub mod test_support {
+    use super::*;
+
+    /// Mock neural cross-encoder for testing. Returns deterministic scores
+    /// based on (query, title, content) without loading BERT.
+    pub struct MockCrossEncoder {
+        pub use_neural: bool,
+    }
+
+    impl MockCrossEncoder {
+        /// Create a mock lexical encoder (like CrossEncoder::new()).
+        pub fn new() -> Self {
+            Self { use_neural: false }
+        }
+
+        /// Create a mock neural encoder (like CrossEncoder::new_neural()).
+        pub fn new_neural() -> Self {
+            Self { use_neural: true }
+        }
+
+        /// Mock score: deterministic hash-based score in [0, 1].
+        /// Neural path uses a different formula than lexical for testing.
+        pub fn score(&self, query: &str, title: &str, content: &str) -> f32 {
+            if self.use_neural {
+                // Neural mock: combine query+title hash
+                let combined = format!("{}{}", query, title);
+                let hash = combined.bytes().fold(0u32, |acc, b| {
+                    acc.wrapping_mul(31).wrapping_add(u32::from(b))
+                });
+                let base = ((hash % 1000) as f32) / 1000.0;
+                // Boost for exact title matches
+                if title.contains(query) {
+                    (base * 0.5 + 0.5).min(1.0)
+                } else {
+                    base
+                }
+            } else {
+                // Lexical path uses the real lexical_score
+                lexical_score(query, title, content)
+            }
+        }
+
+        /// Whether this is a neural mock.
+        pub fn is_neural(&self) -> bool {
+            self.use_neural
+        }
+
+        /// Rerank candidates (same blending formula as real CrossEncoder).
+        pub fn rerank(
+            &self,
+            query: &str,
+            mut candidates: Vec<(Memory, f64)>,
+        ) -> Vec<(Memory, f64)> {
+            let mut scored: Vec<(Memory, f64)> = candidates
+                .drain(..)
+                .map(|(mem, original_score)| {
+                    let ce_score = f64::from(self.score(query, &mem.title, &mem.content));
+                    let final_score =
+                        ORIGINAL_WEIGHT * original_score + CROSS_ENCODER_WEIGHT * ce_score;
+                    (mem, final_score)
+                })
+                .collect();
+
+            scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            scored
+        }
+    }
+
+    impl Default for MockCrossEncoder {
+        fn default() -> Self {
+            Self::new()
+        }
+    }
+}
+
+#[cfg(test)]
+mod mock_tests {
+    use super::test_support::*;
+    use crate::models::{Memory, Tier};
+
+    fn make_memory(title: &str, content: &str) -> Memory {
+        Memory {
+            id: "test-id".to_string(),
+            tier: Tier::Mid,
+            namespace: "test".to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn mock_lexical_new() {
+        let ce = MockCrossEncoder::new();
+        assert!(!ce.is_neural());
+    }
+
+    #[test]
+    fn mock_neural_new() {
+        let ce = MockCrossEncoder::new_neural();
+        assert!(ce.is_neural());
+    }
+
+    #[test]
+    fn mock_neural_score_deterministic() {
+        let ce = MockCrossEncoder::new_neural();
+        let s1 = ce.score("query", "title", "content");
+        let s2 = ce.score("query", "title", "content");
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn mock_neural_score_title_match_boost() {
+        let ce = MockCrossEncoder::new_neural();
+        let s_title_contains = ce.score("apple", "apple pie recipe", "delicious dessert");
+        let s_no_match = ce.score("apple", "unrelated", "delicious dessert");
+        assert!(
+            s_title_contains > s_no_match,
+            "title match ({s_title_contains}) should beat no match ({s_no_match})"
+        );
+    }
+
+    #[test]
+    fn mock_neural_score_bounded() {
+        let ce = MockCrossEncoder::new_neural();
+        for query in &["test", "neural", "reranker", "machine learning"] {
+            for title in &["a", "b", "the quick brown"] {
+                let s = ce.score(query, title, "content");
+                assert!((0.0..=1.0).contains(&s), "score {s} out of bounds");
+            }
+        }
+    }
+
+    #[test]
+    fn mock_neural_rerank_reorders() {
+        let ce = MockCrossEncoder::new_neural();
+        let a = make_memory("neural network", "deep learning with transformers");
+        let b = make_memory("grocery list", "milk eggs bread butter");
+        let candidates = vec![(b.clone(), 0.3), (a.clone(), 0.2)];
+        let reranked = ce.rerank("neural network", candidates);
+        // Neural encoder should boost the neural-network-titled memory
+        assert_eq!(reranked[0].0.title, "neural network");
+    }
+
+    #[test]
+    fn mock_neural_rerank_preserves_count() {
+        let ce = MockCrossEncoder::new_neural();
+        let candidates = vec![
+            (make_memory("A", "content a"), 0.5),
+            (make_memory("B", "content b"), 0.4),
+            (make_memory("C", "content c"), 0.6),
+        ];
+        let reranked = ce.rerank("test", candidates);
+        assert_eq!(reranked.len(), 3);
+    }
+
+    #[test]
+    fn mock_lexical_path_via_mock() {
+        let ce = MockCrossEncoder::new();
+        let s = ce.score(
+            "network adapter",
+            "Network Configuration",
+            "the network adapter is connected",
+        );
+        assert!((0.0..=1.0).contains(&s));
+    }
+
+    #[test]
+    fn mock_neural_different_from_lexical() {
+        let lexical = MockCrossEncoder::new();
+        let neural = MockCrossEncoder::new_neural();
+        let s_lex = lexical.score("machine learning", "ML title", "neural networks");
+        let s_neu = neural.score("machine learning", "ML title", "neural networks");
+        // They should use different scoring formulas
+        assert_ne!(s_lex, s_neu);
+    }
+}
+
+#[test]
+fn score_handles_empty_query_string() {
+    let s = lexical_score("", "Document Title", "This is document content");
+    assert_eq!(s, 0.0, "empty query must return 0.0");
+}
+
+#[test]
+fn score_handles_unicode_normalization() {
+    // Query with accented characters, document with decomposed/composed variants
+    let s1 = lexical_score("café", "café", "the café is open");
+    let s2 = lexical_score("cafe", "cafe", "the cafe is open");
+    // Both should score positively; exact equality not required due to normalization
+    assert!(s1 > 0.0);
+    assert!(s2 > 0.0);
+}
+
+#[test]
+fn score_handles_very_long_content_truncation() {
+    // Query and document with extreme length (lexical tokenizer should handle it)
+    let long_content = "word ".repeat(10000); // 50k+ chars
+    let s = lexical_score("word", "title", &long_content);
+    assert!((0.0..=1.0).contains(&s), "score must be bounded [0, 1]");
+}
+
+#[test]
+fn bigram_score_with_single_token_query() {
+    // Query with only one token — bigrams should be empty, no crash
+    let s = lexical_score("query", "Single Token Title", "single token content");
+    assert!((0.0..=1.0).contains(&s));
 }

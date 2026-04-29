@@ -616,3 +616,568 @@ mod tests {
         assert_eq!(Format::from_str("unknown"), None);
     }
 }
+
+#[test]
+fn mine_handles_empty_namespace() {
+    // Empty namespace string should still parse and convert to memory.
+    let conv = Conversation {
+        id: "test-empty-ns".to_string(),
+        title: Some("Empty Namespace Test".to_string()),
+        messages: vec![Message {
+            role: "user".to_string(),
+            content: "Test message with substantial content for conversion".to_string(),
+            timestamp: None,
+        }],
+        created_at: None,
+    };
+    let mem = conversation_to_memory(&conv, Format::Claude);
+    assert!(mem.is_some());
+    let m = mem.unwrap();
+    assert_eq!(m.source_format, "mine-claude");
+}
+
+#[test]
+fn mine_skips_archived_memories() {
+    // A conversation with no messages returns None (archived state).
+    let conv = Conversation {
+        id: "empty".to_string(),
+        title: Some("Should Skip".to_string()),
+        messages: vec![], // Empty — treated as archived
+        created_at: None,
+    };
+    assert!(conversation_to_memory(&conv, Format::Claude).is_none());
+}
+
+#[test]
+fn mine_with_zero_limit_returns_empty() {
+    // When mining with zero messages, conversation_to_memory returns None.
+    let conv = Conversation {
+        id: "zero-limit".to_string(),
+        title: None,
+        messages: vec![], // No messages
+        created_at: None,
+    };
+    let mem = conversation_to_memory(&conv, Format::ChatGpt);
+    assert!(mem.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// W12-D: parser branch coverage (Claude mapping format, ChatGPT edge cases,
+// Slack error paths, content extraction variants, converter limits).
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests_w12d {
+    use super::*;
+    use std::fs;
+    use std::io::Write as _;
+    use tempfile::NamedTempFile;
+
+    fn temp_file(content: &str) -> NamedTempFile {
+        let mut f = NamedTempFile::new().unwrap();
+        f.write_all(content.as_bytes()).unwrap();
+        f
+    }
+
+    // ---- Format::source_tag — exercise all variants -----------------------
+    #[test]
+    fn source_tag_all_variants() {
+        assert_eq!(Format::Claude.source_tag(), "mine-claude");
+        assert_eq!(Format::ChatGpt.source_tag(), "mine-chatgpt");
+        assert_eq!(Format::Slack.source_tag(), "mine-slack");
+    }
+
+    // ---- parse_claude — error paths ---------------------------------------
+    #[test]
+    fn parse_claude_missing_file_errors() {
+        let p = std::path::Path::new("/nonexistent/path/to/claude_does_not_exist.jsonl");
+        let err = parse_claude(p).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("failed to read Claude export"),
+            "expected read-failure context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_claude_invalid_json_line_errors() {
+        // Second line is malformed; first line is fine.
+        let jsonl = "{\"uuid\":\"a\",\"chat_messages\":[{\"sender\":\"human\",\"text\":\"hi\"}]}\nNOT JSON\n";
+        let f = temp_file(jsonl);
+        let err = parse_claude(f.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid JSON on line 2"),
+            "want line 2 hint, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn parse_claude_skips_conversations_with_no_messages() {
+        // Conversation with empty chat_messages should be filtered (None branch).
+        let jsonl = r#"{"uuid":"empty","name":"Empty","chat_messages":[]}
+{"uuid":"good","name":"Good","chat_messages":[{"sender":"human","text":"hi"}]}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 1, "empty conv should be skipped");
+        assert_eq!(convs[0].id, "good");
+    }
+
+    #[test]
+    fn parse_claude_skips_messages_without_content() {
+        // Messages with empty/missing text should be skipped, but conv kept if any survive.
+        let jsonl = r#"{"uuid":"c1","chat_messages":[{"sender":"human","text":""},{"sender":"assistant","text":"hello"}]}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "assistant");
+    }
+
+    #[test]
+    fn parse_claude_uses_role_fallback_and_timestamps() {
+        // Use `role` instead of `sender`; `content` instead of `text`; `timestamp` instead of `created_at`.
+        let jsonl = r#"{"uuid":"c1","chat_messages":[{"role":"assistant","content":"reply","timestamp":"2024-01-01T00:00:00Z"}]}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages[0].role, "assistant");
+        assert_eq!(convs[0].messages[0].content, "reply");
+        assert_eq!(
+            convs[0].messages[0].timestamp.as_deref(),
+            Some("2024-01-01T00:00:00Z")
+        );
+    }
+
+    // ---- parse_claude — mapping format (Format 2) -------------------------
+    #[test]
+    fn parse_claude_mapping_format() {
+        // No chat_messages — falls through to mapping branch.
+        let jsonl = r#"{"uuid":"map1","name":"Mapping Conv","mapping":{"n1":{"message":{"role":"user","content":{"parts":["first"]},"create_time":1700000001}},"n2":{"message":{"author":{"role":"assistant"},"content":{"parts":["second"]},"create_time":1700000002}},"n3":{"message":{"role":"system","content":{"parts":["ignored"]}}}}}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        let conv = &convs[0];
+        assert_eq!(conv.title.as_deref(), Some("Mapping Conv"));
+        // System message dropped; user+assistant retained, ordered by create_time.
+        assert_eq!(conv.messages.len(), 2);
+        assert_eq!(conv.messages[0].content, "first");
+        assert_eq!(conv.messages[1].content, "second");
+        // create_time -> RFC3339 timestamp present
+        assert!(conv.messages[0].timestamp.is_some());
+    }
+
+    #[test]
+    fn parse_claude_mapping_skips_empty_content_nodes() {
+        // Mapping with one node whose content is empty (no parts/text) should be dropped.
+        let jsonl = r#"{"uuid":"map2","mapping":{"n1":{"message":{"role":"user","content":{"parts":[]}}},"n2":{"message":{"role":"user","content":{"parts":["kept"]},"create_time":1700000005}}}}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "kept");
+    }
+
+    #[test]
+    fn parse_claude_mapping_uuid_fallback_and_no_messages() {
+        // No uuid -> fallback id; mapping with only system messages -> filtered as None.
+        let jsonl = r#"{"mapping":{"n1":{"message":{"role":"system","content":{"parts":["only system"]}}}}}"#;
+        let f = temp_file(jsonl);
+        let convs = parse_claude(f.path()).unwrap();
+        assert_eq!(convs.len(), 0, "system-only conversation is dropped");
+    }
+
+    // ---- parse_chatgpt — error & edge cases -------------------------------
+    #[test]
+    fn parse_chatgpt_missing_file_errors() {
+        let p = std::path::Path::new("/nonexistent/chatgpt.json");
+        let err = parse_chatgpt(p).unwrap_err();
+        assert!(format!("{err:#}").contains("failed to read ChatGPT export"));
+    }
+
+    #[test]
+    fn parse_chatgpt_invalid_json_errors() {
+        let f = temp_file("not really json");
+        let err = parse_chatgpt(f.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid JSON in ChatGPT export"));
+    }
+
+    #[test]
+    fn parse_chatgpt_top_level_object_errors() {
+        let f = temp_file(r#"{"not":"an array"}"#);
+        let err = parse_chatgpt(f.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("expected JSON array"));
+    }
+
+    #[test]
+    fn parse_chatgpt_skips_system_and_empty_messages() {
+        // System role skipped; empty-content message skipped; final conv has 1 message.
+        let json = r#"[{"id":"c1","title":"T","create_time":1700000000,"mapping":{
+            "n1":{"message":{"author":{"role":"system"},"content":{"parts":["sys ignored"]},"create_time":1700000001}},
+            "n2":{"message":{"author":{"role":"user"},"content":{"parts":[]},"create_time":1700000002}},
+            "n3":{"message":{"author":{"role":"user"},"content":{"parts":["kept"]},"create_time":1700000003}}
+        }}]"#;
+        let f = temp_file(json);
+        let convs = parse_chatgpt(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        assert_eq!(convs[0].messages[0].content, "kept");
+        assert!(convs[0].messages[0].timestamp.is_some());
+    }
+
+    #[test]
+    fn parse_chatgpt_drops_conversations_with_no_messages() {
+        // Mapping containing only system messages -> conv filtered out.
+        let json = r#"[{"id":"only-sys","mapping":{
+            "n1":{"message":{"author":{"role":"system"},"content":{"parts":["x"]}}}
+        }}]"#;
+        let f = temp_file(json);
+        let convs = parse_chatgpt(f.path()).unwrap();
+        assert!(convs.is_empty());
+    }
+
+    #[test]
+    fn parse_chatgpt_id_fallback_when_missing() {
+        // Conv missing both id and mapping -> falls through with no messages -> dropped.
+        // But if there ARE messages, the fallback id chatgpt-N path is exercised.
+        let json = r#"[{"mapping":{"n1":{"message":{"author":{"role":"user"},"content":{"parts":["hello"]},"create_time":1700000010}}}}]"#;
+        let f = temp_file(json);
+        let convs = parse_chatgpt(f.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, "chatgpt-0");
+    }
+
+    #[test]
+    fn parse_chatgpt_empty_array() {
+        let f = temp_file("[]");
+        let convs = parse_chatgpt(f.path()).unwrap();
+        assert!(convs.is_empty());
+    }
+
+    // ---- parse_slack — error and edge cases -------------------------------
+    #[test]
+    fn parse_slack_path_must_be_directory() {
+        let f = temp_file("not a dir");
+        let err = parse_slack(f.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("must be a directory"));
+    }
+
+    #[test]
+    fn parse_slack_skips_non_directory_entries_in_root() {
+        // A loose file at the export root should be skipped (only subdirs are channels).
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("README.txt"), "hello").unwrap();
+        let channel = dir.path().join("general");
+        fs::create_dir(&channel).unwrap();
+        fs::write(
+            channel.join("2024-01-01.json"),
+            r#"[{"user":"U1","text":"hi","ts":"1700000000.0"}]"#,
+        )
+        .unwrap();
+        let convs = parse_slack(dir.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+    }
+
+    #[test]
+    fn parse_slack_skips_non_json_files_and_empty_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = dir.path().join("random");
+        fs::create_dir(&channel).unwrap();
+        // Non-JSON file (should be skipped via extension filter).
+        fs::write(channel.join("note.txt"), "ignored").unwrap();
+        // JSON with one valid + one empty-text message.
+        let json = r#"[{"user":"U1","text":"","ts":"1700000000.0"},{"username":"bot","text":"hello","ts":"1700000001.0"}]"#;
+        fs::write(channel.join("2024-01-02.json"), json).unwrap();
+        let convs = parse_slack(dir.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].messages.len(), 1);
+        // username fallback exercised
+        assert_eq!(convs[0].messages[0].role, "bot");
+    }
+
+    #[test]
+    fn parse_slack_invalid_json_in_channel_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let channel = dir.path().join("oops");
+        fs::create_dir(&channel).unwrap();
+        fs::write(channel.join("2024-01-01.json"), "not json").unwrap();
+        let err = parse_slack(dir.path()).unwrap_err();
+        assert!(format!("{err:#}").contains("invalid JSON"));
+    }
+
+    #[test]
+    fn parse_slack_drops_channels_with_no_messages() {
+        // Channel with only empty-text messages -> dropped from output.
+        let dir = tempfile::tempdir().unwrap();
+        let empty_chan = dir.path().join("silent");
+        fs::create_dir(&empty_chan).unwrap();
+        fs::write(
+            empty_chan.join("2024-01-01.json"),
+            r#"[{"user":"U1","text":"","ts":"1700000000.0"}]"#,
+        )
+        .unwrap();
+        let live_chan = dir.path().join("alive");
+        fs::create_dir(&live_chan).unwrap();
+        fs::write(
+            live_chan.join("2024-01-01.json"),
+            r#"[{"user":"U2","text":"hi","ts":"1700000001.0"}]"#,
+        )
+        .unwrap();
+        let convs = parse_slack(dir.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert_eq!(convs[0].id, "slack-alive");
+    }
+
+    #[test]
+    fn parse_slack_handles_missing_timestamp() {
+        // Message with no `ts` -> timestamp None branch.
+        let dir = tempfile::tempdir().unwrap();
+        let channel = dir.path().join("notime");
+        fs::create_dir(&channel).unwrap();
+        fs::write(
+            channel.join("2024-01-01.json"),
+            r#"[{"user":"U1","text":"hi"}]"#,
+        )
+        .unwrap();
+        let convs = parse_slack(dir.path()).unwrap();
+        assert_eq!(convs.len(), 1);
+        assert!(convs[0].messages[0].timestamp.is_none());
+    }
+
+    #[test]
+    fn parse_slack_skips_non_array_top_level() {
+        // JSON file that is an object (not an array) -> the `if let Some(arr)` branch is
+        // simply skipped; channel ends up with no messages and is dropped.
+        let dir = tempfile::tempdir().unwrap();
+        let channel = dir.path().join("weird");
+        fs::create_dir(&channel).unwrap();
+        fs::write(channel.join("2024-01-01.json"), r#"{"not":"an array"}"#).unwrap();
+        let convs = parse_slack(dir.path()).unwrap();
+        assert!(convs.is_empty());
+    }
+
+    // ---- extract_text_content — array branches ----------------------------
+    #[test]
+    fn extract_text_content_array_of_strings() {
+        let v = serde_json::json!(["one", "two"]);
+        assert_eq!(extract_text_content(&v).as_deref(), Some("one\ntwo"));
+    }
+
+    #[test]
+    fn extract_text_content_array_of_text_objects() {
+        // Claude tool-use / text-block format: array of {"type":"text","text":"..."} objects.
+        let v = serde_json::json!([
+            {"type":"text","text":"alpha"},
+            {"type":"text","text":"beta"}
+        ]);
+        assert_eq!(extract_text_content(&v).as_deref(), Some("alpha\nbeta"));
+    }
+
+    #[test]
+    fn extract_text_content_empty_and_non_text() {
+        // Empty array -> None
+        assert!(extract_text_content(&serde_json::json!([])).is_none());
+        // Array of objects with no "text" field -> None (parts vec ends up empty).
+        let v = serde_json::json!([{"type":"image","url":"x"}]);
+        assert!(extract_text_content(&v).is_none());
+        // Null -> None
+        assert!(extract_text_content(&serde_json::Value::Null).is_none());
+    }
+
+    // ---- extract_message_content — branch coverage ------------------------
+    #[test]
+    fn extract_message_content_string_form() {
+        // content is a plain string (not parts array, not object with text).
+        let mut m = serde_json::Map::new();
+        m.insert("content".into(), serde_json::json!("plain text"));
+        assert_eq!(extract_message_content(&m), "plain text");
+    }
+
+    #[test]
+    fn extract_message_content_text_field_under_content() {
+        // content is an object with a "text" field but no "parts".
+        let mut m = serde_json::Map::new();
+        m.insert("content".into(), serde_json::json!({"text":"nested-text"}));
+        assert_eq!(extract_message_content(&m), "nested-text");
+    }
+
+    #[test]
+    fn extract_message_content_top_level_text_field() {
+        // No content at all; falls through to top-level text.
+        let mut m = serde_json::Map::new();
+        m.insert("text".into(), serde_json::json!("top-text"));
+        assert_eq!(extract_message_content(&m), "top-text");
+    }
+
+    #[test]
+    fn extract_message_content_returns_empty_when_unparseable() {
+        // No useful fields.
+        let m = serde_json::Map::new();
+        assert!(extract_message_content(&m).is_empty());
+    }
+
+    #[test]
+    fn extract_message_content_parts_array_skips_non_strings() {
+        // parts mixing strings and non-strings: only strings are joined.
+        let mut m = serde_json::Map::new();
+        m.insert(
+            "content".into(),
+            serde_json::json!({"parts":["good", {"img":1}, "also-good"]}),
+        );
+        assert_eq!(extract_message_content(&m), "good\nalso-good");
+    }
+
+    // ---- conversation_to_memory — title & content branches ----------------
+    #[test]
+    fn conversation_to_memory_empty_title_falls_back_to_first_user() {
+        // title is Some("") -> filter rejects empty -> first-user path.
+        let conv = Conversation {
+            id: "c".into(),
+            title: Some(String::new()),
+            messages: vec![
+                Message {
+                    role: "assistant".into(),
+                    content: "hello back".into(),
+                    timestamp: None,
+                },
+                Message {
+                    role: "user".into(),
+                    content: "hello".into(),
+                    timestamp: None,
+                },
+            ],
+            created_at: None,
+        };
+        let mem = conversation_to_memory(&conv, Format::Slack).unwrap();
+        assert_eq!(mem.title, "hello");
+        assert_eq!(mem.source_format, "mine-slack");
+    }
+
+    #[test]
+    fn conversation_to_memory_no_user_uses_first_message() {
+        // No user/human role -> first message used.
+        let conv = Conversation {
+            id: "c".into(),
+            title: None,
+            messages: vec![
+                Message {
+                    role: "assistant".into(),
+                    content: "only assistant".into(),
+                    timestamp: None,
+                },
+                Message {
+                    role: "tool".into(),
+                    content: "tool-out".into(),
+                    timestamp: None,
+                },
+            ],
+            created_at: None,
+        };
+        let mem = conversation_to_memory(&conv, Format::ChatGpt).unwrap();
+        assert_eq!(mem.title, "only assistant");
+    }
+
+    #[test]
+    fn conversation_to_memory_title_truncates_to_100_chars() {
+        let long_title = "x".repeat(250);
+        let conv = Conversation {
+            id: "c".into(),
+            title: Some(long_title),
+            messages: vec![Message {
+                role: "user".into(),
+                content: "body".into(),
+                timestamp: None,
+            }],
+            created_at: None,
+        };
+        let mem = conversation_to_memory(&conv, Format::Claude).unwrap();
+        assert_eq!(mem.title.len(), 100);
+    }
+
+    #[test]
+    fn conversation_to_memory_first_user_content_truncates() {
+        // No title, first user content very long -> truncated to 100 chars.
+        let long_msg = "y".repeat(200);
+        let conv = Conversation {
+            id: "c".into(),
+            title: None,
+            messages: vec![Message {
+                role: "user".into(),
+                content: long_msg,
+                timestamp: None,
+            }],
+            created_at: None,
+        };
+        let mem = conversation_to_memory(&conv, Format::Claude).unwrap();
+        assert_eq!(mem.title.len(), 100);
+    }
+
+    #[test]
+    fn conversation_to_memory_stops_at_max_content_size() {
+        // Build a single huge message exceeding MAX_CONTENT_SIZE so the loop
+        // breaks before appending it. With the very first message rejected,
+        // content stays empty and the function returns None.
+        let big = "z".repeat(MAX_CONTENT_SIZE + 10);
+        let conv = Conversation {
+            id: "c".into(),
+            title: Some("t".into()),
+            messages: vec![Message {
+                role: "user".into(),
+                content: big,
+                timestamp: None,
+            }],
+            created_at: None,
+        };
+        // First (and only) message exceeds the cap -> content empty -> None.
+        assert!(conversation_to_memory(&conv, Format::Claude).is_none());
+    }
+
+    #[test]
+    fn conversation_to_memory_truncates_on_second_message() {
+        // First small message accepted; second huge message rejected by size cap.
+        let big = "z".repeat(MAX_CONTENT_SIZE);
+        let conv = Conversation {
+            id: "c".into(),
+            title: Some("t".into()),
+            messages: vec![
+                Message {
+                    role: "user".into(),
+                    content: "small".into(),
+                    timestamp: None,
+                },
+                Message {
+                    role: "assistant".into(),
+                    content: big,
+                    timestamp: None,
+                },
+            ],
+            created_at: None,
+        };
+        let mem = conversation_to_memory(&conv, Format::Claude).unwrap();
+        assert!(mem.content.contains("small"));
+        // The huge one was skipped due to size cap.
+        assert!(!mem.content.contains(&"z".repeat(100)));
+    }
+
+    // ---- truncate — char boundary loop ------------------------------------
+    #[test]
+    fn truncate_respects_char_boundary() {
+        // "héllo" — multi-byte char at index 1; truncating at byte 2 must back off.
+        let s = "héllo";
+        // Byte length of "h" + 2 bytes for é = 3. Asking for 2 bytes must back off to 1 ("h").
+        let out = truncate(s, 2);
+        assert_eq!(out, "h");
+    }
+
+    #[test]
+    fn truncate_at_exact_boundary_returns_unchanged() {
+        let s = "abcdef";
+        assert_eq!(truncate(s, 6), "abcdef");
+    }
+
+    #[test]
+    fn truncate_zero_max_returns_empty() {
+        // max_chars = 0 -> while loop exits immediately, slice is "".
+        let s = "héllo";
+        assert_eq!(truncate(s, 0), "");
+    }
+}

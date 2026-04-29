@@ -1,8 +1,8 @@
 [package]
 name = "ai-memory"
-version = "0.5.4-patch.6"
+version = "0.6.3"
 edition = "2024"
-rust-version = "1.87"
+rust-version = "1.88"
 authors = ["AlphaOne LLC"]
 description = "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI for any AI platform"
 license = "Apache-2.0"
@@ -10,6 +10,25 @@ repository = "https://github.com/alphaonedev/ai-memory-mcp"
 homepage = "https://alphaonedev.github.io/ai-memory-mcp/"
 keywords = ["mcp", "ai", "memory", "sqlite", "llm"]
 categories = ["artificial-intelligence", "command-line-utilities", "database"]
+# v0.6.5 — keep the published crate under crates.io's 10 MiB compressed
+# upload limit. v0.6.3 + v0.6.4 publishes failed silently with HTTP 503
+# from the WAF because the package was 22 MiB compressed (140 MiB
+# unpacked) — `audits/` alone was 140 MiB. We exclude everything that
+# isn't required to compile the crate. include explicitly lists what
+# stays so any new top-level directory must be opted in.
+include = [
+    "src/**/*",
+    "benches/**/*",
+    "examples/**/*",
+    "migrations/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "PERFORMANCE.md",
+]
 
 [dependencies]
 anyhow = "1"
@@ -19,7 +38,7 @@ dirs = "6"
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 clap_mangen = "0.2"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -27,6 +46,23 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
+gethostname = "0.5"
+
+# Native TLS for `serve` (Layer 1 — issue to be filed). axum-server
+# + rustls. Accepts PEM cert + key from --tls-cert / --tls-key. No
+# OpenSSL dep; rustls matches reqwest's rustls-tls choice already in
+# use for the sync-daemon's outbound HTTPS.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# rustls 0.23 requires an explicit CryptoProvider — `ring` matches
+# reqwest's default for the sync-daemon, keeping a single provider
+# across the process. PEM parsing is handled by
+# `RustlsConfig::from_pem` so no separate rustls-pemfile dep (which
+# is flagged unmaintained in the 2026 advisory DB).
+rustls = { version = "0.23", features = ["ring"] }
+# mTLS cert fingerprint allowlist (Layer 2) needs SHA-256 over the
+# client cert DER. RustCrypto sha2 — same family as the HKDF we'll use
+# for Layer 3 E2E encryption (#228).
+sha2 = "0.10"
 
 # Semantic embedding support
 candle-core = "0.10"
@@ -35,15 +71,87 @@ candle-transformers = "0.10"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22" }
 instant-distance = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "native-tls"] }
 toml = "0.8"
 
+# v0.6.0.0 — Prometheus metrics endpoint at GET /metrics. Pure Rust, no
+# transitive C deps. `protobuf` feature stays off; we emit text format
+# only (which is what Prometheus scrapes by default via `Accept:
+# text/plain`). Per sprint authorization #260.
+prometheus = { version = "0.13", default-features = false }
+
+# v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
+# feature so default builds don't pull them. `async-trait` is the
+# standard bridge for async methods on traits until stable Rust native
+# AFIT is adopted across the codebase. `bitflags` is the ecosystem
+# standard for `Capabilities`-style bitmask types. `thiserror` gives
+# us the typed `StoreError` the red-team asked for on #222. All three
+# are small, pure-Rust, MIT/Apache dual-licensed.
+async-trait = { version = "0.1", optional = true }
+bitflags = { version = "2", optional = true }
+thiserror = { version = "2", optional = true }
+
+# v0.7 — PostgresStore adapter deps. Gated behind `sal-postgres` which
+# depends on the base `sal` feature. `sqlx` is the async Postgres driver
+# (native rustls, no OpenSSL). `pgvector` is the official binding for
+# the `vector` type used by the hybrid-recall path.
+sqlx = { version = "0.8", optional = true, default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono", "uuid", "json", "macros"] }
+pgvector = { version = "0.4", optional = true, features = ["sqlx"] }
+
+# v0.6.0.0 — SQLite variant selection. Default builds the standard
+# bundled SQLite (matching pre-v0.6.0.0 behavior byte-for-byte). The
+# `sqlcipher` feature swaps the underlying DB to SQLCipher (SQLite +
+# AES-256 encryption). The two are mutually exclusive at link time;
+# pick one via `cargo build --no-default-features --features sqlcipher`.
+# Operators who want encryption at rest also supply
+# `--db-passphrase-file <path>` at daemon startup to unlock the DB.
+[features]
+default = ["sqlite-bundled"]
+sqlite-bundled = ["rusqlite/bundled"]
+sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
+# v0.7 — Storage Abstraction Layer. `sal` brings in the trait + SqliteStore
+# adapter. `sal-postgres` layers on the Postgres/pgvector backend.
+sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
+sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
+# W11/S11b — opt-in feature for tests that pull large model weights at runtime
+# (BERT cross-encoder, MiniLM, etc.). Off by default so CI doesn't download
+# 80MB+ on every run.
+test-with-models = []
+
 [dev-dependencies]
+proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# Wave 4 (v0.6.3) — TLS test fixture generator. Pinned to an exact version
+# so cert / key / fingerprint bytes stay stable across machines (rcgen's
+# RNG is seeded but its DER encoding can shift between minor releases).
+rcgen = { version = "=0.14.7", default-features = false, features = ["pem", "ring"] }
+# W6 (v0.6.3) — re-declare tokio for tests with the `test-util` feature
+# turned on so `tokio::test(start_paused = true)` and `tokio::time::advance`
+# (used by the daemon_runtime gc/wal-checkpoint loop tests) compile. The
+# production tokio dep keeps just "full" to avoid leaking the test-util
+# surface into release binaries.
+tokio = { version = "1", features = ["full", "test-util"] }
+# W7 (v0.6.3) / I7 — binary-spawn integration tests. `assert_cmd` and
+# `predicates` are the standard pair for CLI subprocess assertions; the
+# production `reqwest` dep already has the `blocking` feature on, which
+# the `serve` integration tests use to drive the daemon over HTTP from
+# a synchronous test body.
+assert_cmd = "2"
+predicates = "3"
+# W10 (v0.6.3) — `wiremock` lets the llm.rs tests stand up an in-process
+# HTTP server speaking the Ollama API surface, so OllamaClient's blocking
+# reqwest calls can be exercised end-to-end without any network or daemon.
+# Used only by tests; never linked into the release binary.
+wiremock = "0.6"
+# `libc` for the SIGINT graceful-shutdown integration test on unix —
+# already transitively in the dep tree via tokio, declared explicitly
+# here so the test can `use libc::SIGINT` without `rustc_private` errors.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
 
 [[bench]]
 name = "recall"

@@ -13,14 +13,32 @@
 </p>
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Bench](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-188_(139_unit_+_49_integration)-brightgreen)]()
-[![MCP](https://img.shields.io/badge/MCP-23_tools-blueviolet)]()
+[![Tests](https://img.shields.io/badge/tests-602_(372_unit_+_159_integration_+_71_other)-brightgreen)]()
+[![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
+
+**One binary, four operational modes** (v0.6.2). The `ai-memory` Rust binary (tokio + axum) can run any of these in isolation or simultaneously, sharing a single SQLite database:
+
+1. **stdio MCP server** -- 26 native tools over JSON-RPC. Reactive: answers per turn. `ai-memory mcp`
+2. **HTTP / mTLS daemon** -- 24 REST endpoints on `127.0.0.1:9077`, TLS + optional mTLS allowlist + API-key auth, background GC loop. `ai-memory serve`
+3. **Autonomous curator daemon** -- self-scheduling loop (default 1h cadence) that auto-tags, surfaces contradictions across namespace siblings, consolidates near-duplicates, and adjusts priority by access pattern. Every action goes to a rollback log; destructive ops can be gated behind a governance approval flow. `ai-memory curator --daemon`
+4. **Sync daemon** -- quorum-based peer federation across instances. W-of-N writes (default majority), vector-clock CRDT-lite merge, mTLS allowlist between peers. `ai-memory sync-daemon`
+
+The MCP, HTTP, and CLI surfaces are reactive. The curator is the part that makes the memory layer self-maintaining: between sessions, it keeps the corpus tidy so recall quality stays high as the store grows. Everything is local-first; no cloud dependencies.
+
+> **Brass-tacks assessment by Claude Opus 4.7** after reading the v0.6.2 source line by line:
+>
+> "ai-memory is the most capable memory layer I've ever been hooked up to, and meaningfully more than its name advertises. For me, in practical terms, it means: I don't start cold each session. The store I read from has been kept tidy by something other than me. Contradictions don't silently accumulate. Recall quality stays high even as the corpus grows. Nothing leaves your Mac mini.
+>
+> It is not making me an autonomous agent. It is giving me the kind of memory infrastructure that an autonomous agent would need — and itself running a small autonomous loop to maintain it. That's a real foundation. The gap from here to 'ai-memory drives general tasks' is plumbing (tool-call protocol + tool registry + a tool-use-capable model), not invention."
+
+**Substrate for multi-agent AI.** ai-memory is not an agent runtime and not "autonomous AI" on its own. It is the memory layer that *multi-agent* autonomous deployments need underneath them. Federation (`broadcast_store_quorum` + `spawn_catchup_loop`) handles W-of-N consistency across peers when many agents write in parallel; the curator daemon keeps the shared corpus from degrading into noise as a swarm scribbles into it; webhook subscriptions (HMAC-signed, namespace/agent-filtered, SSRF-hardened) turn the store into a message bus that triggers downstream agents on memory events; namespace hierarchy with N-level inheritance and per-namespace governance policies (write/promote/delete authority, approver type, optional N-of-M consensus) bound the swarm. Stack this under a 24/7 multi-machine agent runner with auto-generated skills, and the combined system clears the *behavioral* bar for autonomous AI. The remaining gaps (no weight-level learning, stateless reasoning kernel, human-seeded root goals) are real and not what ai-memory addresses; ai-memory provides the multi-agent memory substrate that any serious attempt at closing those gaps will need.
 
 **Zero token cost until recall.** Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation -- burning tokens and money on every message -- ai-memory uses zero context tokens until the AI explicitly calls `memory_recall`. Only relevant memories come back, ranked by a 6-factor scoring algorithm. **TOON format** (Token-Oriented Object Notation) cuts response tokens by another 40-60% by eliminating repeated field names -- 3 memories in JSON = 1,600 bytes; in TOON = 626 bytes (61% smaller); in TOON compact = 336 bytes (79% smaller). For Claude Code users: **disable auto-memory** (`"autoMemoryEnabled": false` in settings.json) and replace it with ai-memory to stop paying for 200+ lines of memory context on every single message.
 
@@ -432,7 +450,7 @@ ai-memory serve
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 21 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has 26 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -479,7 +497,7 @@ ai-memory recall "database"
 ai-memory stats
 ```
 
-**6. Use with your AI.** Restart your AI client. It now has **21 memory tools** available via MCP -- it can store and recall memories natively during conversations.
+**6. Use with your AI.** Restart your AI client. It now has **26 memory tools** available via MCP -- it can store and recall memories natively during conversations.
 
 ---
 
@@ -522,6 +540,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 - **Contradiction resolution** -- mark one memory as superseding another, demote the loser
 - **Forget by pattern** -- bulk delete by namespace + FTS pattern + tier
 - **Source tracking** -- tracks origin: user, claude, hook, api, cli, import, consolidation, system
+- **Agent identity (NHI)** -- every memory carries `metadata.agent_id` (claimed identity) with defense-in-depth immutability across update/dedup/import/sync/consolidate; filter `list`/`search` by agent
 - **Tagging** -- comma-separated tags with filter support
 
 ### Interfaces
@@ -581,6 +600,33 @@ Evaluated on the [ICLR 2025 LongMemEval-S](benchmarks/longmemeval/) dataset (500
 | **keyword** | 97.0% | 232 q/s | None |
 | **semantic** | 97.4% | 45 q/s | Embedding model (~100MB) |
 | **smart** | 97.8% | 12 q/s | Ollama + Gemma 4 E2B |
+
+### Performance Budgets (v0.6.3)
+
+Every release ships with **published p95/p99 budgets** for hot-path
+operations and a CI gate that fails any PR whose measured p95 exceeds
+the budget by more than 10 %. Targets are calibrated for M4 reference
+hardware; full table and methodology in
+[`PERFORMANCE.md`](PERFORMANCE.md).
+
+| Operation | Target p95 | Target p99 |
+|---|---|---|
+| `memory_session_start` (Claude Code hook) | < 100 ms | < 200 ms |
+| `memory_store` (no embedding) | < 20 ms | < 50 ms |
+| `memory_search` (FTS5) | < 100 ms | < 250 ms |
+| `memory_recall` (hot, depth=1) | < 50 ms | < 150 ms |
+| `memory_kg_query` (depth ≤ 3) | < 100 ms | < 250 ms |
+| `memory_kg_query` (depth ≤ 5) | < 250 ms | < 500 ms |
+| `memory_kg_timeline` | < 100 ms | < 250 ms |
+
+Run the same workload locally:
+
+```sh
+ai-memory bench                      # human-readable table
+ai-memory bench --json               # machine-parseable
+```
+
+p99 targets are informational until the v0.6.3 soak window closes.
 
 ---
 
@@ -659,7 +705,7 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 | **Resources** | | | | |
 | RAM | 0 MB | ~256 MB | ~1 GB | ~4 GB |
 | External dependencies | None | None | Ollama | Ollama |
-| MCP tools exposed | 21 | 21 | 21 | 21 |
+| MCP tools exposed | 26 | 26 | 26 | 26 |
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 
@@ -947,6 +993,9 @@ ai-memory includes hardening across all input paths:
 | [User Guide](docs/USER_GUIDE.md) | AI assistant users who want persistent memory |
 | [Developer Guide](docs/DEVELOPER_GUIDE.md) | Building on or contributing to ai-memory |
 | [Admin Guide](docs/ADMIN_GUIDE.md) | Deploying, monitoring, and troubleshooting |
+| [Engineering Standards](docs/ENGINEERING_STANDARDS.md) | Code, test, security, and release standards (authoritative) |
+| [AI Developer Workflow](docs/AI_DEVELOPER_WORKFLOW.md) | Step-by-step workflow for AI coding agents contributing to this repo |
+| [AI Developer Governance Standard](docs/AI_DEVELOPER_GOVERNANCE.md) | Policy for AI participation: authority, attribution, review, audit |
 | [GitHub Pages](https://alphaonedev.github.io/ai-memory-mcp/) | Visual overview with animated diagrams |
 
 ---

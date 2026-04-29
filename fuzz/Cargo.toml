@@ -1,0 +1,22 @@
+[package]
+name = "ai-memory-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[dependencies]
+libfuzzer-sys = "0.4"
+ai-memory = { path = ".." }
+serde_json = "1"
+
+[[bin]]
+name = "fuzz_validate"
+path = "fuzz_targets/fuzz_validate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_namespace"
+path = "fuzz_targets/fuzz_namespace.rs"
+test = false
+doc = false

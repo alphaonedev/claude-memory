@@ -1,0 +1,750 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  Feature Matrix — every MCP tool, HTTP endpoint, CLI command in one visual grid.
+  Companion to at-a-glance.html for SMEs and procurement audiences who need
+  the literal surface-area enumeration.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Feature Matrix — every tool, endpoint, command</title>
+<meta name="description" content="Complete surface-area atlas: 26 MCP tools, 39 HTTP endpoints, 28 CLI commands. Every operation cross-referenced across the three protocol fronts.">
+<meta name="theme-color" content="#0d1117">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/feature-matrix.html">
+<style>
+:root {
+  --bg:#000; --bg-raised:#0a0a0a; --bg-card:#111; --bg-elev:#161616; --bg-code:#1a1a1a;
+  --border:#262626; --border-hl:#3d3d3d;
+  --text:#fff; --text-muted:#999; --text-dim:#666;
+  --pillar-1:#6ee7ff; --pillar-2:#ffb86b; --pillar-3:#c8a2ff; --good:#6ee7ff; --warn:#ffb86b; --bad:#ff6b9d;
+  --read:#6ee7ff;       /* cyan — reads */
+  --write:#ffb86b;      /* orange — writes */
+  --admin:#c8a2ff;      /* purple — admin/system */
+  --kg:#ff79c6;         /* pink — knowledge graph */
+  --fed:#a5d6a7;        /* green — federation */
+  --gov:#ffe066;        /* yellow — governance */
+  --font-mono:'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace;
+  --font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --max-w:1400px;
+}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}
+a:hover{color:var(--pillar-1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px;color:var(--text)}
+
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+
+h1,h2,h3,h4{font-weight:700;letter-spacing:-0.02em}
+h2{font-size:2rem;line-height:1.15;margin-bottom:.5rem}
+h3{font-size:1.2rem;margin-bottom:.5rem}
+p{color:var(--text-muted)}
+
+/* NAV */
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;align-items:center;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem;text-decoration:none}
+.topnav a:hover,.topnav a.active{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;align-items:center}
+@media(max-width:800px){.topnav .right{display:none}}
+
+/* HERO */
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.5rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:680px;margin:0 auto 1.5rem}
+.hero .pill-row{display:flex;justify-content:center;gap:1rem;flex-wrap:wrap;margin-top:1.5rem}
+.hero .pill{padding:.5rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.85rem;color:var(--text-muted)}
+.hero .pill strong{color:var(--text);margin-right:.4rem}
+
+/* SECTION SCAFFOLD */
+section{padding:4rem 0;border-bottom:1px solid var(--border)}
+section .eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+section .lede{color:var(--text-muted);font-size:1rem;max-width:780px;margin-bottom:2.5rem}
+
+/* CATEGORY LEGEND */
+.legend{display:flex;flex-wrap:wrap;gap:.85rem;margin-bottom:2rem}
+.legend-item{display:flex;align-items:center;gap:.5rem;padding:.45rem .85rem;border:1px solid var(--border);border-radius:999px;font-size:.75rem;color:var(--text-muted)}
+.legend-item .dot{width:8px;height:8px;border-radius:50%}
+
+/* TOOL GRID */
+.tool-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:1rem}
+.tool-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1.1rem 1.2rem;display:flex;flex-direction:column;gap:.5rem;transition:border-color .15s,transform .15s}
+.tool-card:hover{border-color:var(--border-hl);transform:translateY(-2px)}
+.tool-card.cat-read{border-left:3px solid var(--read)}
+.tool-card.cat-write{border-left:3px solid var(--write)}
+.tool-card.cat-admin{border-left:3px solid var(--admin)}
+.tool-card.cat-kg{border-left:3px solid var(--kg)}
+.tool-card.cat-fed{border-left:3px solid var(--fed)}
+.tool-card.cat-gov{border-left:3px solid var(--gov)}
+.tool-card .tname{font-family:var(--font-mono);font-size:.95rem;font-weight:700;color:var(--text);word-break:break-all}
+.tool-card .tdesc{font-size:.83rem;color:var(--text-muted);line-height:1.5}
+.tool-card .tparams{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);background:var(--bg-code);padding:.4rem .55rem;border-radius:6px;line-height:1.55;word-break:break-all}
+.tool-card .tcat{display:inline-block;font-family:var(--font-mono);font-size:.65rem;text-transform:uppercase;letter-spacing:.12em;color:var(--text-dim)}
+.tool-card .tcat.read{color:var(--read)}
+.tool-card .tcat.write{color:var(--write)}
+.tool-card .tcat.admin{color:var(--admin)}
+.tool-card .tcat.kg{color:var(--kg)}
+.tool-card .tcat.fed{color:var(--fed)}
+.tool-card .tcat.gov{color:var(--gov)}
+
+/* SURFACE TOGGLE */
+.surface-tabs{display:flex;gap:.5rem;flex-wrap:wrap;margin-bottom:1.5rem}
+.surface-tab{padding:.5rem 1rem;border:1px solid var(--border-hl);border-radius:8px;background:var(--bg-card);color:var(--text-muted);font-family:var(--font-mono);font-size:.85rem;cursor:pointer;transition:.15s}
+.surface-tab:hover{color:var(--text);border-color:var(--text)}
+.surface-tab.active{background:var(--text);color:var(--bg);border-color:var(--text)}
+
+/* HTTP ENDPOINT TABLE */
+.http-table{width:100%;border-collapse:collapse;font-size:.85rem;font-family:var(--font-mono)}
+.http-table th{background:var(--bg-card);padding:.65rem .85rem;text-align:left;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);border-bottom:1px solid var(--border-hl)}
+.http-table td{padding:.65rem .85rem;border-bottom:1px solid var(--border)}
+.http-table tr:hover td{background:var(--bg-raised)}
+.method{display:inline-block;padding:.15rem .55rem;border-radius:4px;font-size:.7rem;font-weight:700;letter-spacing:.04em;font-family:var(--font-mono);min-width:54px;text-align:center}
+.method.GET{background:rgba(110,231,255,0.15);color:var(--read);border:1px solid rgba(110,231,255,0.4)}
+.method.POST{background:rgba(255,184,107,0.15);color:var(--write);border:1px solid rgba(255,184,107,0.4)}
+.method.PUT{background:rgba(255,184,107,0.15);color:var(--write);border:1px solid rgba(255,184,107,0.4)}
+.method.DEL{background:rgba(255,107,157,0.15);color:var(--bad);border:1px solid rgba(255,107,157,0.4)}
+.method.OPT{background:rgba(150,150,150,0.15);color:var(--text-muted);border:1px solid var(--border-hl)}
+
+/* CLI GRID */
+.cli-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:.85rem}
+.cli-cmd{background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:.95rem 1.1rem;font-family:var(--font-mono);font-size:.85rem;color:var(--text);transition:.15s}
+.cli-cmd:hover{border-color:var(--border-hl)}
+.cli-cmd .prefix{color:var(--text-dim);user-select:none}
+.cli-cmd .verb{color:var(--write)}
+.cli-cmd .verb-r{color:var(--read)}
+.cli-cmd .verb-a{color:var(--admin)}
+.cli-cmd .verb-g{color:var(--kg)}
+.cli-cmd .verb-f{color:var(--fed)}
+.cli-cmd .desc{font-family:var(--font-sans);font-size:.78rem;color:var(--text-muted);margin-top:.35rem;font-weight:400}
+
+/* CROSS-REF MATRIX */
+.xref-table{width:100%;border-collapse:collapse;font-size:.85rem}
+.xref-table th{background:var(--bg-card);padding:.7rem .9rem;text-align:left;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text-muted);border-bottom:2px solid var(--border-hl)}
+.xref-table td{padding:.55rem .9rem;border-bottom:1px solid var(--border);font-family:var(--font-mono);font-size:.78rem}
+.xref-table tr:hover td{background:var(--bg-raised)}
+.xref-table td.op{color:var(--text);font-weight:700}
+.xref-table td.tool,.xref-table td.endpoint,.xref-table td.cli{color:var(--text-muted)}
+.xref-table td .none{color:var(--text-dim);font-style:italic}
+
+/* MODES DIAGRAM */
+.modes-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:1rem}
+@media(max-width:920px){.modes-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:540px){.modes-grid{grid-template-columns:1fr}}
+.mode-card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;display:flex;flex-direction:column;gap:.7rem;position:relative;overflow:hidden}
+.mode-card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--text)}
+.mode-card.m1::before{background:var(--read)}
+.mode-card.m2::before{background:var(--write)}
+.mode-card.m3::before{background:var(--admin)}
+.mode-card.m4::before{background:var(--kg)}
+.mode-icon{font-size:1.75rem}
+.mode-name{font-family:var(--font-mono);font-size:1.05rem;font-weight:700}
+.mode-cmd{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);background:var(--bg-code);padding:.5rem .65rem;border-radius:6px}
+.mode-desc{font-size:.85rem;color:var(--text-muted)}
+.mode-spec{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.08em}
+
+/* FOOTER */
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Feature Matrix</span></a>
+    <div class="right">
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="whats-new-v063.html">What's New in v0.6.3</a>
+          <a href="feature-matrix.html" class="current">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Testing<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The complete surface area.</h1>
+  <p class="tagline">
+    Every MCP tool, every HTTP endpoint, every CLI command — categorized, cross-referenced, signed off. <strong>26 + 39 + 28 = 93 operations</strong> exposed across three protocol fronts. One implementation underneath, three ways to call it.
+  </p>
+  <div class="pill-row">
+    <span class="pill"><strong>26</strong>MCP tools</span>
+    <span class="pill"><strong>39</strong>HTTP endpoints</span>
+    <span class="pill"><strong>28</strong>CLI commands</span>
+    <span class="pill"><strong>4</strong>operational modes</span>
+  </div>
+</section>
+
+<!-- =============== OPERATIONAL MODES =============== -->
+<section id="operational-modes">
+  <div class="container">
+    <span class="eyebrow">4 Operational Modes</span>
+    <h2>One binary. Four ways to run it.</h2>
+    <p class="lede">Same Rust binary, four startup mode flags. The mode determines which IPC surface is active and which background loops run. Switch by changing one CLI flag — no config file edits required.</p>
+
+    <div class="modes-grid">
+      <div class="mode-card m1">
+        <div class="mode-icon">📡</div>
+        <div class="mode-spec">MODE 1 · Foreground stdio</div>
+        <div class="mode-name">MCP server</div>
+        <div class="mode-cmd">ai-memory mcp --tier semantic</div>
+        <div class="mode-desc">JSON-RPC over stdio. Spawned by Claude Code, Cursor, Codex, etc. as a subprocess. Lives the lifetime of the host AI session.</div>
+      </div>
+      <div class="mode-card m2">
+        <div class="mode-icon">🌐</div>
+        <div class="mode-spec">MODE 2 · Background daemon</div>
+        <div class="mode-name">HTTP daemon</div>
+        <div class="mode-cmd">ai-memory serve --port 9077 --mtls-cert ...</div>
+        <div class="mode-desc">REST + SSE on TCP. mTLS-aware with fingerprint allowlist. Federation peers reach this surface. Shared multi-client server.</div>
+      </div>
+      <div class="mode-card m3">
+        <div class="mode-icon">🔁</div>
+        <div class="mode-spec">MODE 3 · Background daemon</div>
+        <div class="mode-name">Sync daemon</div>
+        <div class="mode-cmd">ai-memory sync-daemon --peers https://node-2,https://node-3</div>
+        <div class="mode-desc">Periodic pull-and-push against peers. W-of-N quorum. Each cycle exchanges memories observed since last cursor.</div>
+      </div>
+      <div class="mode-card m4">
+        <div class="mode-icon">🤖</div>
+        <div class="mode-spec">MODE 4 · Background daemon</div>
+        <div class="mode-name">Curator daemon</div>
+        <div class="mode-cmd">ai-memory curator --daemon --interval-secs 1800 --tier autonomous</div>
+        <div class="mode-desc">Auto-tag, contradiction detection, consolidation. Tier-gated: smart adds LLM tagging, autonomous adds rerank + auto-merge.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== MCP TOOLS =============== -->
+<section id="mcp-tools">
+  <div class="container">
+    <span class="eyebrow">26 MCP Tools</span>
+    <h2>Every tool a host AI can call.</h2>
+    <p class="lede">Auto-discovered by Claude Code, Cursor, Codex, Continue, Gemini CLI, Windsurf, and any MCP-compliant client. Tool names follow <code>memory_&lt;verb&gt;</code> convention.</p>
+
+    <div class="legend">
+      <div class="legend-item"><span class="dot" style="background:var(--read)"></span> READ — recall, search, list</div>
+      <div class="legend-item"><span class="dot" style="background:var(--write)"></span> WRITE — store, update, delete</div>
+      <div class="legend-item"><span class="dot" style="background:var(--admin)"></span> ADMIN — stats, capabilities, gc</div>
+      <div class="legend-item"><span class="dot" style="background:var(--kg)"></span> KG — knowledge graph</div>
+      <div class="legend-item"><span class="dot" style="background:var(--fed)"></span> FED — federation / subscriptions</div>
+      <div class="legend-item"><span class="dot" style="background:var(--gov)"></span> GOV — governance / pending</div>
+    </div>
+
+    <div class="tool-grid">
+      <!-- READ tools -->
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_recall</div>
+        <div class="tdesc">Hybrid recall: FTS5 + HNSW vector + cross-encoder rerank. The agent reasoning hot-path.</div>
+        <div class="tparams">context, namespace?, limit?, tags?, since?, until?, tier?, as_agent?, budget_tokens?, context_tokens?[]</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_search</div>
+        <div class="tdesc">Pure FTS5 keyword search with BM25 ranking. Faster than recall, no vector cost.</div>
+        <div class="tparams">query, namespace?, tier?, limit?, tags?, since?, until?, agent_id?</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_get</div>
+        <div class="tdesc">Fetch a single memory by ID (full or 8-char prefix). Includes outbound links.</div>
+        <div class="tparams">id</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_list</div>
+        <div class="tdesc">Paginated list with namespace / tier / tags filters. Backfills HNSW for unembedded memories on read.</div>
+        <div class="tparams">namespace?, tier?, limit?, offset?, since?, until?, tags?, agent_id?</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_get_taxonomy</div>
+        <div class="tdesc">Hierarchical namespace tree with per-node memory counts. Rooted at any prefix.</div>
+        <div class="tparams">namespace_prefix?, depth?, limit?</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_check_duplicate</div>
+        <div class="tdesc">Pre-write similarity check. Returns nearest-neighbor cosine + above-threshold flag.</div>
+        <div class="tparams">title, content, namespace, threshold?</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_get_links</div>
+        <div class="tdesc">All inbound and outbound typed links for a memory. Filters on relation type.</div>
+        <div class="tparams">memory_id, relation?, direction?</div>
+      </div>
+      <div class="tool-card cat-read">
+        <span class="tcat read">▸ READ</span>
+        <div class="tname">memory_inbox</div>
+        <div class="tdesc">Pending notifications addressed to this agent. Marks-as-read on read.</div>
+        <div class="tparams">since_cursor?, namespace?, limit?</div>
+      </div>
+
+      <!-- WRITE tools -->
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_store</div>
+        <div class="tdesc">Insert with tier (short/mid/long), tags, priority 1-10, confidence 0-1, scope, expires_at.</div>
+        <div class="tparams">title, content, namespace, tier?, tags?, priority?, confidence?, source?, scope?, expires_at?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_update</div>
+        <div class="tdesc">Patch existing memory. Same-source allowed; cross-source warns (governance gate).</div>
+        <div class="tparams">id, title?, content?, tags?, priority?, confidence?, expires_at?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_delete</div>
+        <div class="tdesc">Single-memory soft delete to archive tier. Recoverable via restore.</div>
+        <div class="tparams">id</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_promote</div>
+        <div class="tdesc">Tier promotion: short → mid → long, or hierarchical-vertical (clone into ancestor namespace).</div>
+        <div class="tparams">id, to_namespace?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_forget</div>
+        <div class="tdesc">Bulk delete by namespace / pattern / tier. Always governance-gated. Wide blast radius.</div>
+        <div class="tparams">namespace?, pattern?, tier?, dry_run?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_consolidate</div>
+        <div class="tdesc">Merge N memories into 1. Creates derived_from links. Sources soft-archived.</div>
+        <div class="tparams">ids[], title, summary, namespace?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_link</div>
+        <div class="tdesc">Create typed link. Relation: related_to / supersedes / refines / contradicts / derived_from / etc.</div>
+        <div class="tparams">source_id, target_id, relation?</div>
+      </div>
+      <div class="tool-card cat-write">
+        <span class="tcat write">▸ WRITE</span>
+        <div class="tname">memory_notify</div>
+        <div class="tdesc">Send a notification message to another agent's inbox. A2A primitive.</div>
+        <div class="tparams">target_agent_id, title, payload</div>
+      </div>
+
+      <!-- KG tools -->
+      <div class="tool-card cat-kg">
+        <span class="tcat kg">▸ KG</span>
+        <div class="tname">memory_kg_query</div>
+        <div class="tdesc">Recursive CTE traverse. Time / scope / observed-by filters. Cycle detection. Up to depth 5.</div>
+        <div class="tparams">source_id, max_depth?, valid_at?, allowed_agents?[]</div>
+      </div>
+      <div class="tool-card cat-kg">
+        <span class="tcat kg">▸ KG</span>
+        <div class="tname">memory_kg_timeline</div>
+        <div class="tdesc">Ordered fact timeline for an entity. Each event has valid_from / observed_by metadata.</div>
+        <div class="tparams">entity_id, since?, until?, limit?</div>
+      </div>
+      <div class="tool-card cat-kg">
+        <span class="tcat kg">▸ KG</span>
+        <div class="tname">memory_kg_invalidate</div>
+        <div class="tdesc">Mark a link superseded by setting valid_until. Original link history preserved.</div>
+        <div class="tparams">link_id, valid_until, reason?</div>
+      </div>
+      <div class="tool-card cat-kg">
+        <span class="tcat kg">▸ KG</span>
+        <div class="tname">memory_entity_register</div>
+        <div class="tdesc">Register a typed entity with canonical name + alias side-table. Becomes node in KG.</div>
+        <div class="tparams">canonical_name, namespace, aliases?[], metadata?</div>
+      </div>
+      <div class="tool-card cat-kg">
+        <span class="tcat kg">▸ KG</span>
+        <div class="tname">memory_entity_get_by_alias</div>
+        <div class="tdesc">Resolve any alias back to canonical entity. Powers fuzzy-match lookups.</div>
+        <div class="tparams">alias, namespace?</div>
+      </div>
+
+      <!-- ADMIN tools -->
+      <div class="tool-card cat-admin">
+        <span class="tcat admin">▸ ADMIN</span>
+        <div class="tname">memory_capabilities</div>
+        <div class="tdesc">Self-describing introspection. Schema v2 reports tier, models, tools, hooks (planned), permissions.</div>
+        <div class="tparams">— (no parameters)</div>
+      </div>
+      <div class="tool-card cat-admin">
+        <span class="tcat admin">▸ ADMIN</span>
+        <div class="tname">memory_stats</div>
+        <div class="tdesc">Per-namespace counts, tier breakdown, total bytes, oldest/newest timestamps.</div>
+        <div class="tparams">namespace?</div>
+      </div>
+      <div class="tool-card cat-admin">
+        <span class="tcat admin">▸ ADMIN</span>
+        <div class="tname">memory_session_start</div>
+        <div class="tdesc">Returns recent context + session_id. The Claude Code hook critical path. Sub-100ms p95.</div>
+        <div class="tparams">agent_id?, namespace?, limit?</div>
+      </div>
+      <div class="tool-card cat-admin">
+        <span class="tcat admin">▸ ADMIN</span>
+        <div class="tname">memory_gc</div>
+        <div class="tdesc">Manual GC trigger. Sweeps expired short-tier memories per archive_on_gc policy.</div>
+        <div class="tparams">— (no parameters)</div>
+      </div>
+      <div class="tool-card cat-admin">
+        <span class="tcat admin">▸ ADMIN</span>
+        <div class="tname">memory_namespace_*</div>
+        <div class="tdesc">3 tools: get_standard / set_standard / clear_standard. Per-namespace policy + governance hooks.</div>
+        <div class="tparams">namespace, standard?</div>
+      </div>
+
+      <!-- FED tools -->
+      <div class="tool-card cat-fed">
+        <span class="tcat fed">▸ FED</span>
+        <div class="tname">memory_subscribe</div>
+        <div class="tdesc">Register webhook for events. HMAC-signed bodies. Glob-pattern namespace filter.</div>
+        <div class="tparams">url, events?[], namespace_filter?, secret?</div>
+      </div>
+      <div class="tool-card cat-fed">
+        <span class="tcat fed">▸ FED</span>
+        <div class="tname">memory_unsubscribe</div>
+        <div class="tdesc">Remove a webhook subscription by ID.</div>
+        <div class="tparams">subscription_id</div>
+      </div>
+      <div class="tool-card cat-fed">
+        <span class="tcat fed">▸ FED</span>
+        <div class="tname">memory_list_subscriptions</div>
+        <div class="tdesc">Active subscriptions with dispatch_count and failure_count counters.</div>
+        <div class="tparams">— (no parameters)</div>
+      </div>
+
+      <!-- GOV tools -->
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_pending_list</div>
+        <div class="tdesc">List pending governance-gated actions awaiting human approval. Filter by status.</div>
+        <div class="tparams">status?, namespace?</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_pending_approve</div>
+        <div class="tdesc">Approve a pending action. Executes the deferred operation.</div>
+        <div class="tparams">pending_id</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_pending_reject</div>
+        <div class="tdesc">Reject a pending action with reason. Operation discarded.</div>
+        <div class="tparams">pending_id, reason?</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_agent_register</div>
+        <div class="tdesc">Register agent in reserved _agents namespace. Stores type + capabilities.</div>
+        <div class="tparams">agent_id, agent_type, capabilities?[]</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_agent_list</div>
+        <div class="tdesc">List registered agents with last_seen_at timestamps.</div>
+        <div class="tparams">— (no parameters)</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_detect_contradiction</div>
+        <div class="tdesc">LLM-powered contradiction detection across recent memories. Smart+ tier only.</div>
+        <div class="tparams">topic?, namespace?, limit?</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_auto_tag</div>
+        <div class="tdesc">Suggest tags for a memory via local LLM. Smart+ tier only. Returns tag list.</div>
+        <div class="tparams">memory_id</div>
+      </div>
+      <div class="tool-card cat-gov">
+        <span class="tcat gov">▸ GOV</span>
+        <div class="tname">memory_expand_query</div>
+        <div class="tdesc">LLM-rewrite a query into related terms. Smart+ tier only. Powers query-time expansion.</div>
+        <div class="tparams">query</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== HTTP ENDPOINTS =============== -->
+<section id="http-endpoints">
+  <div class="container">
+    <span class="eyebrow">39 HTTP Endpoints</span>
+    <h2>REST surface for services + federation peers.</h2>
+    <p class="lede">Axum-served. mTLS-aware. CORS layer. Prometheus metrics at <code>/metrics</code>. Body limit 2 MiB. Trace spans on every request. The same operations as MCP, plus federation-private peer endpoints.</p>
+
+    <div style="overflow-x:auto;">
+      <table class="http-table">
+        <thead>
+          <tr><th style="width:80px">Method</th><th>Path</th><th>Purpose</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/health</td><td>Liveness check. Always returns 200.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/metrics</td><td>Prometheus scrape (community convention path).</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/metrics</td><td>Prometheus scrape (REST-consistent path).</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/capabilities</td><td>Self-describing introspection.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/stats</td><td>Per-namespace counts + tier breakdown.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Memory CRUD —</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/memories</td><td>List memories, paginated, filter.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/memories</td><td>Create new memory.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/memories/bulk</td><td>Bulk insert with partial-success semantics.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/memories/{id}</td><td>Fetch one memory by ID.</td></tr>
+          <tr><td><span class="method PUT">PUT</span></td><td>/api/v1/memories/{id}</td><td>Update existing memory.</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/memories/{id}</td><td>Soft-delete to archive tier.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/memories/{id}/promote</td><td>Tier promotion or vertical hierarchy clone.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Search & recall —</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/search</td><td>FTS5 keyword search.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/recall</td><td>Hybrid recall (GET form for cacheability).</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/recall</td><td>Hybrid recall (POST form for large payloads).</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/forget</td><td>Bulk delete by query.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/consolidate</td><td>Merge N memories into 1.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/contradictions</td><td>List detected contradiction pairs.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/check_duplicate</td><td>Pre-write similarity check.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Knowledge graph —</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/links</td><td>Create typed link.</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/links</td><td>Delete a link.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/links/{id}</td><td>Fetch one link.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/taxonomy</td><td>Hierarchical namespace tree.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/kg/timeline</td><td>Ordered fact timeline for an entity.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/kg/invalidate</td><td>Set valid_until on a link.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/kg/query</td><td>Recursive-CTE outbound traversal.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Entities (Stream B) —</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/entities</td><td>Register entity with aliases.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/entities/by_alias</td><td>Resolve alias → canonical entity.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Namespace policy —</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/namespaces</td><td>List namespaces (or get standard via ?namespace=).</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/namespaces</td><td>Set namespace standard (query-string form).</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/namespaces</td><td>Clear namespace standard (query-string form).</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/namespaces/{ns}/standard</td><td>Get standard (path form, MCP parity).</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/namespaces/{ns}/standard</td><td>Set standard (path form).</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/namespaces/{ns}/standard</td><td>Clear standard (path form).</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Archive & GC —</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/archive</td><td>List archived memories.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/archive</td><td>Bulk archive by IDs.</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/archive</td><td>Hard purge archived &gt; N days old.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/archive/{id}/restore</td><td>Restore archived to original tier.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/archive/stats</td><td>Archive size + age histogram.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/gc</td><td>Manual GC trigger.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/export</td><td>JSON dump of all memories + links.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/import</td><td>Bulk JSON import.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Federation peer-private —</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/sync/push</td><td>Peer pushes a batch.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/sync/since</td><td>Peer pulls since cursor.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Subscriptions & A2A —</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/notify</td><td>Send notification to agent inbox.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/inbox</td><td>Read pending notifications.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/subscriptions</td><td>Register webhook.</td></tr>
+          <tr><td><span class="method DEL">DELETE</span></td><td>/api/v1/subscriptions</td><td>Unsubscribe.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/subscriptions</td><td>List active subscriptions.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/session/start</td><td>Initialize agent session.</td></tr>
+
+          <tr><td colspan="3" style="background:var(--bg-raised);font-size:.75rem;letter-spacing:.1em;color:var(--text-muted);text-transform:uppercase;text-align:center;padding:.5rem">— Agents & pending —</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/agents</td><td>List registered agents.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/agents</td><td>Register agent.</td></tr>
+          <tr><td><span class="method GET">GET</span></td><td>/api/v1/pending</td><td>List pending governance actions.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/pending/{id}/approve</td><td>Approve pending action.</td></tr>
+          <tr><td><span class="method POST">POST</span></td><td>/api/v1/pending/{id}/reject</td><td>Reject pending action.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- =============== CLI =============== -->
+<section id="cli-commands">
+  <div class="container">
+    <span class="eyebrow">28 CLI Commands</span>
+    <h2>For humans, scripts, and CI.</h2>
+    <p class="lede">Direct subcommands of the <code>ai-memory</code> binary. No daemon required for read/write commands. Run against any database file via <code>--db &lt;path&gt;</code>.</p>
+
+    <div class="cli-grid">
+      <!-- Read commands -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">recall</span> "<em>context</em>" <span style="color:var(--text-dim)">[--namespace ns --limit N --tier ...]</span><div class="desc">Hybrid recall from a namespace.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">search</span> "<em>query</em>" <span style="color:var(--text-dim)">[--namespace ns --tier ...]</span><div class="desc">FTS5 keyword search.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">get</span> <em>id-or-prefix</em><div class="desc">Fetch one memory.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">list</span> <span style="color:var(--text-dim)">[--namespace ns --tier ... --limit N --offset M]</span><div class="desc">Paginated listing.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">stats</span> <span style="color:var(--text-dim)">[--namespace ns]</span><div class="desc">DB summary or per-namespace.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-r">namespaces</span><div class="desc">All namespaces with counts.</div></div>
+
+      <!-- Write commands -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">store</span> <span style="color:var(--text-dim)">--title "..." --content "..." [--namespace ns --tier long --priority 8]</span><div class="desc">Create memory. <code>--content -</code> reads stdin.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">update</span> <em>id-or-prefix</em> <span style="color:var(--text-dim)">[--title --content --priority ...]</span><div class="desc">Patch existing memory.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">delete</span> <em>id-or-prefix</em><div class="desc">Soft-delete to archive.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">forget</span> <span style="color:var(--text-dim)">[--namespace ns --pattern "*" --tier ...]</span><div class="desc">Bulk delete by filter.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">promote</span> <em>id</em> <span style="color:var(--text-dim)">[--to-namespace path]</span><div class="desc">Tier promotion or hierarchical clone.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">link</span> <em>src tgt</em> <span style="color:var(--text-dim)">[--relation related_to]</span><div class="desc">Create typed link.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">resolve</span> <em>winner_id loser_id</em><div class="desc">Mark one memory as superseding another.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">consolidate</span> <span style="color:var(--text-dim)">--ids id1,id2,id3 --title "..." --summary "..."</span><div class="desc">Merge memories.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb">auto-consolidate</span> <span style="color:var(--text-dim)">--namespace ns --min-count 5</span><div class="desc">Threshold-based group-and-merge.</div></div>
+
+      <!-- Admin -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">gc</span><div class="desc">Manual GC sweep.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">archive</span> <span style="color:var(--text-dim)">[list --restore id --purge --older-than 90]</span><div class="desc">Manage archived memories.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">backup</span> <span style="color:var(--text-dim)">[--out path/]</span><div class="desc">SQLite VACUUM INTO + manifest.json.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">restore</span> <span style="color:var(--text-dim)">--from path/file.db [--skip-verify]</span><div class="desc">Restore from backup with sha256 verify.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">export</span><div class="desc">JSON dump to stdout (memories + links).</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">import</span> <span style="color:var(--text-dim)">[--trust-source]</span><div class="desc">JSON import from stdin.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">mine</span> <span style="color:var(--text-dim)">--input claude-export.zip [--dry-run]</span><div class="desc">Import from Claude/ChatGPT/Slack export.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">bench</span> <span style="color:var(--text-dim)">[--baseline path.json]</span><div class="desc">Canonical workload + p50/p95/p99 vs PERFORMANCE.md.</div></div>
+
+      <!-- Daemon modes -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-f">mcp</span> <span style="color:var(--text-dim)">--tier semantic</span><div class="desc">Start MCP stdio server.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-f">serve</span> <span style="color:var(--text-dim)">--port 9077 [--tls-cert ... --quorum-w 2]</span><div class="desc">Start HTTP daemon.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-f">sync</span> <span style="color:var(--text-dim)">--peers https://... [--dry-run]</span><div class="desc">One-shot sync against peers.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-f">sync-daemon</span> <span style="color:var(--text-dim)">--peers https://... --interval-secs 60</span><div class="desc">Continuous sync loop.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-f">curator</span> <span style="color:var(--text-dim)">[--once | --daemon] [--dry-run]</span><div class="desc">Curator pass: tag/contradict/consolidate.</div></div>
+
+      <!-- Governance -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-g">agents</span> <span style="color:var(--text-dim)">[register --type ai:claude | list]</span><div class="desc">Agent registry.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-g">pending</span> <span style="color:var(--text-dim)">[list | approve id | reject id]</span><div class="desc">Manage governance queue.</div></div>
+
+      <!-- Other -->
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">shell</span><div class="desc">Interactive REPL with all subcommands.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">completions</span> <em>shell</em><div class="desc">Generate bash/zsh/fish/pwsh completions.</div></div>
+      <div class="cli-cmd"><span class="prefix">$ ai-memory </span><span class="verb-a">man</span><div class="desc">Generate manpage.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- =============== CROSS-REFERENCE MATRIX =============== -->
+<section id="xref">
+  <div class="container">
+    <span class="eyebrow">Cross-reference</span>
+    <h2>One operation, three protocol fronts.</h2>
+    <p class="lede">For each logical operation, here's the MCP tool, the HTTP endpoint, and the CLI command. Every row maps to the same underlying handler in <code>src/db.rs</code> — three protocol fronts, one source of truth.</p>
+
+    <div style="overflow-x:auto;">
+      <table class="xref-table">
+        <thead>
+          <tr><th>Operation</th><th>MCP Tool</th><th>HTTP Endpoint</th><th>CLI Command</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="op">Hybrid recall</td><td class="tool">memory_recall</td><td class="endpoint">GET /api/v1/recall</td><td class="cli">recall &lt;ctx&gt;</td></tr>
+          <tr><td class="op">Keyword search</td><td class="tool">memory_search</td><td class="endpoint">GET /api/v1/search</td><td class="cli">search &lt;q&gt;</td></tr>
+          <tr><td class="op">Get one</td><td class="tool">memory_get</td><td class="endpoint">GET /api/v1/memories/{id}</td><td class="cli">get &lt;id&gt;</td></tr>
+          <tr><td class="op">List</td><td class="tool">memory_list</td><td class="endpoint">GET /api/v1/memories</td><td class="cli">list</td></tr>
+          <tr><td class="op">Store</td><td class="tool">memory_store</td><td class="endpoint">POST /api/v1/memories</td><td class="cli">store --title --content</td></tr>
+          <tr><td class="op">Bulk store</td><td class="tool"><span class="none">via multiple stores</span></td><td class="endpoint">POST /api/v1/memories/bulk</td><td class="cli">import (stdin JSON)</td></tr>
+          <tr><td class="op">Update</td><td class="tool">memory_update</td><td class="endpoint">PUT /api/v1/memories/{id}</td><td class="cli">update &lt;id&gt;</td></tr>
+          <tr><td class="op">Delete</td><td class="tool">memory_delete</td><td class="endpoint">DELETE /api/v1/memories/{id}</td><td class="cli">delete &lt;id&gt;</td></tr>
+          <tr><td class="op">Promote</td><td class="tool">memory_promote</td><td class="endpoint">POST /api/v1/memories/{id}/promote</td><td class="cli">promote &lt;id&gt;</td></tr>
+          <tr><td class="op">Bulk forget</td><td class="tool">memory_forget</td><td class="endpoint">POST /api/v1/forget</td><td class="cli">forget --pattern</td></tr>
+          <tr><td class="op">Consolidate</td><td class="tool">memory_consolidate</td><td class="endpoint">POST /api/v1/consolidate</td><td class="cli">consolidate --ids</td></tr>
+          <tr><td class="op">Detect contradiction</td><td class="tool">memory_detect_contradiction</td><td class="endpoint">GET /api/v1/contradictions</td><td class="cli"><span class="none">via curator</span></td></tr>
+          <tr><td class="op">Check duplicate</td><td class="tool">memory_check_duplicate</td><td class="endpoint">GET /api/v1/check_duplicate</td><td class="cli"><span class="none">via store --check</span></td></tr>
+          <tr><td class="op">Create link</td><td class="tool">memory_link</td><td class="endpoint">POST /api/v1/links</td><td class="cli">link &lt;src&gt; &lt;tgt&gt;</td></tr>
+          <tr><td class="op">Get links</td><td class="tool">memory_get_links</td><td class="endpoint">GET /api/v1/links/{id}</td><td class="cli"><span class="none">via get (auto-includes)</span></td></tr>
+          <tr><td class="op">Taxonomy</td><td class="tool">memory_get_taxonomy</td><td class="endpoint">GET /api/v1/taxonomy</td><td class="cli"><span class="none">via stats</span></td></tr>
+          <tr><td class="op">KG query</td><td class="tool">memory_kg_query</td><td class="endpoint">POST /api/v1/kg/query</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">KG timeline</td><td class="tool">memory_kg_timeline</td><td class="endpoint">GET /api/v1/kg/timeline</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">KG invalidate</td><td class="tool">memory_kg_invalidate</td><td class="endpoint">POST /api/v1/kg/invalidate</td><td class="cli">resolve &lt;winner&gt; &lt;loser&gt;</td></tr>
+          <tr><td class="op">Register entity</td><td class="tool">memory_entity_register</td><td class="endpoint">POST /api/v1/entities</td><td class="cli"><span class="none">via store + tag</span></td></tr>
+          <tr><td class="op">Resolve alias</td><td class="tool">memory_entity_get_by_alias</td><td class="endpoint">GET /api/v1/entities/by_alias</td><td class="cli"><span class="none">via search</span></td></tr>
+          <tr><td class="op">Stats</td><td class="tool">memory_stats</td><td class="endpoint">GET /api/v1/stats</td><td class="cli">stats</td></tr>
+          <tr><td class="op">Capabilities</td><td class="tool">memory_capabilities</td><td class="endpoint">GET /api/v1/capabilities</td><td class="cli"><span class="none">via stats --json</span></td></tr>
+          <tr><td class="op">Session start</td><td class="tool">memory_session_start</td><td class="endpoint">POST /api/v1/session/start</td><td class="cli"><span class="none">N/A</span></td></tr>
+          <tr><td class="op">GC</td><td class="tool">memory_gc</td><td class="endpoint">POST /api/v1/gc</td><td class="cli">gc</td></tr>
+          <tr><td class="op">Archive list</td><td class="tool"><span class="none">via list + filter</span></td><td class="endpoint">GET /api/v1/archive</td><td class="cli">archive list</td></tr>
+          <tr><td class="op">Archive restore</td><td class="tool"><span class="none">via promote</span></td><td class="endpoint">POST /api/v1/archive/{id}/restore</td><td class="cli">archive restore --id</td></tr>
+          <tr><td class="op">Archive purge</td><td class="tool"><span class="none">via forget</span></td><td class="endpoint">DELETE /api/v1/archive</td><td class="cli">archive purge --older-than</td></tr>
+          <tr><td class="op">Export</td><td class="tool"><span class="none">via list bulk</span></td><td class="endpoint">GET /api/v1/export</td><td class="cli">export</td></tr>
+          <tr><td class="op">Import</td><td class="tool"><span class="none">via store batch</span></td><td class="endpoint">POST /api/v1/import</td><td class="cli">import</td></tr>
+          <tr><td class="op">Subscribe</td><td class="tool">memory_subscribe</td><td class="endpoint">POST /api/v1/subscriptions</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">Unsubscribe</td><td class="tool">memory_unsubscribe</td><td class="endpoint">DELETE /api/v1/subscriptions</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">List subs</td><td class="tool">memory_list_subscriptions</td><td class="endpoint">GET /api/v1/subscriptions</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">Notify</td><td class="tool">memory_notify</td><td class="endpoint">POST /api/v1/notify</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">Inbox</td><td class="tool">memory_inbox</td><td class="endpoint">GET /api/v1/inbox</td><td class="cli"><span class="none">via shell</span></td></tr>
+          <tr><td class="op">Register agent</td><td class="tool">memory_agent_register</td><td class="endpoint">POST /api/v1/agents</td><td class="cli">agents register</td></tr>
+          <tr><td class="op">List agents</td><td class="tool">memory_agent_list</td><td class="endpoint">GET /api/v1/agents</td><td class="cli">agents list</td></tr>
+          <tr><td class="op">Pending list</td><td class="tool">memory_pending_list</td><td class="endpoint">GET /api/v1/pending</td><td class="cli">pending list</td></tr>
+          <tr><td class="op">Pending approve</td><td class="tool">memory_pending_approve</td><td class="endpoint">POST /api/v1/pending/{id}/approve</td><td class="cli">pending approve &lt;id&gt;</td></tr>
+          <tr><td class="op">Pending reject</td><td class="tool">memory_pending_reject</td><td class="endpoint">POST /api/v1/pending/{id}/reject</td><td class="cli">pending reject &lt;id&gt;</td></tr>
+          <tr><td class="op">Sync push (peer)</td><td class="tool"><span class="none">peer-private</span></td><td class="endpoint">POST /api/v1/sync/push</td><td class="cli"><span class="none">peer-private</span></td></tr>
+          <tr><td class="op">Sync since (peer)</td><td class="tool"><span class="none">peer-private</span></td><td class="endpoint">GET /api/v1/sync/since</td><td class="cli"><span class="none">peer-private</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p style="color:var(--text-dim)">ai-memory-mcp · Apache 2.0 · v0.6.3-rc1 · <a href="./" style="color:var(--text-muted)">main</a> · <a href="at-a-glance.html" style="color:var(--text-muted)">At a Glance</a> · <a href="data-flow.html" style="color:var(--text-muted)">Data Flow</a> · <a href="integrations.html" style="color:var(--text-muted)">Integrations</a></p>
+  </div>
+</footer>
+
+</body>
+</html>
