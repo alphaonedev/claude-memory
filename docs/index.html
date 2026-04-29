@@ -103,6 +103,26 @@
         .hero h1 span{color:var(--accent)}
         .hero .bluf{color:var(--text-muted);font-size:1.2rem;max-width:720px;margin:0 auto 2.5rem;line-height:1.6}
 
+        /* ==========================================================
+           BLUF CARD — top-shelf hero block, v0.6.3-reality framed
+           ========================================================== */
+        .bluf-card{max-width:860px;margin:0 auto 2.25rem;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,rgba(255,255,255,.015) 100%);border:1px solid var(--border-hl);border-radius:14px;padding:1.75rem 2rem;text-align:left;box-shadow:0 8px 32px rgba(0,0,0,.18)}
+        .bluf-eyebrow{display:inline-block;font-family:var(--font-mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.2em;color:var(--orange);font-weight:700;padding:.35em .85em;border:1px solid rgba(210,153,34,.45);background:rgba(255,184,107,.07);border-radius:4px;margin-bottom:1.15rem}
+        .bluf-lead{font-size:1.08rem;line-height:1.6;color:var(--text-muted);margin:0 0 .15rem 0}
+        .bluf-lead strong,.bluf-section strong{color:var(--text);font-weight:700}
+        .bluf-section{font-size:.98rem;line-height:1.7;color:var(--text-muted);margin:1rem 0 0 0;padding-top:1rem;border-top:1px solid var(--border)}
+        .bluf-section code{font-family:var(--font-mono);font-size:.85em;background:var(--bg-code);color:var(--cyan);padding:.12em .45em;border-radius:4px;border:1px solid var(--border)}
+        .bluf-lobster{height:1.15em;width:auto;vertical-align:-0.18em;margin:0 .12em}
+        .bluf-trademark{display:block;margin-top:.6rem;font-size:.78rem;color:var(--text-muted);font-family:var(--font-mono);letter-spacing:.02em}
+        .cap-pill{display:inline-block;font-family:var(--font-mono);font-size:.62em;padding:.18em .55em;border-radius:3px;margin:0 .2em 0 .35em;letter-spacing:.08em;text-transform:uppercase;font-weight:700;vertical-align:2px}
+        .cap-pill.cap-beta{color:var(--orange);background:rgba(255,184,107,.1);border:1px solid rgba(255,184,107,.45)}
+        .bluf-coming{color:var(--cyan);font-weight:700;font-family:var(--font-mono);font-size:.88em;text-transform:uppercase;letter-spacing:.06em;padding:.1em .5em;background:rgba(57,210,192,.08);border:1px solid rgba(57,210,192,.35);border-radius:3px;margin-right:.15em}
+        @media(max-width:720px){
+            .bluf-card{padding:1.35rem 1.35rem;border-radius:12px}
+            .bluf-lead{font-size:.98rem}
+            .bluf-section{font-size:.9rem;line-height:1.65}
+        }
+
         .stats-row{display:flex;justify-content:center;gap:2rem;flex-wrap:wrap;margin-bottom:2.5rem}
         .stat{text-align:center}
         .stat .num{font-size:2.2rem;font-weight:800;display:block;background:linear-gradient(135deg,var(--accent),var(--cyan));-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}
@@ -411,14 +431,24 @@
     <div class="container">
         <img src="ai-memory-logo.jpg" alt="ai-memory logo" style="width:160px;height:auto;margin-bottom:1.5rem;border-radius:16px;filter:drop-shadow(0 0 24px rgba(255,255,255,.25))">
         <h1>Persistent Memory for <span>Any AI</span></h1>
-        <div style="max-width:760px;margin:0 auto 1.5rem;background:linear-gradient(135deg,rgba(255,255,255,.08) 0%,rgba(255,255,255,.08) 100%);border:1px solid var(--border-hl);border-radius:10px;padding:1.25rem 1.5rem">
-            <p style="font-size:.7rem;text-transform:uppercase;letter-spacing:.15em;color:var(--orange);margin-bottom:.5rem;font-weight:700">BLUF &mdash; Bottom Line Up Front</p>
-            <p style="font-size:1rem;line-height:1.6;margin:0"><strong style="color:var(--text)">ai-memory replaces AI vendors' built-in memory features.</strong> Disable AI vendor memory to stop paying for idle context tokens wasted on every message. A moderate end user wastes <strong style="color:var(--red)">~11M input tokens per year</strong> on memory context loaded into every single message whether needed or not &mdash; via vendor AI auto memory or similar AI vendor memory facilities.</p>
+        <div class="bluf-card">
+            <span class="bluf-eyebrow">BLUF &mdash; Bottom Line Up Front</span>
+
+            <p class="bluf-lead">
+                <strong>ai-memory is persistent, portable memory for AI agents.</strong>
+                One SQLite file on your hardware. Works with any MCP-compatible AI &mdash; Claude, ChatGPT, Cursor, Grok, Llama, OpenClaw <img src="pixel-lobster.svg" alt="OpenClaw" class="bluf-lobster">, anything that speaks the Model Context Protocol. Apache 2.0; trademark-protected (USPTO Serial No.&nbsp;99761257).
+            </p>
+
+            <p class="bluf-section">
+                <strong>Replaces vendor auto-memory.</strong>
+                Vendor memory features (Claude auto-memory, ChatGPT memory) load your entire memory into every message &mdash; burning tokens on idle context whether the AI uses it or not. ai-memory uses <strong style="color:var(--green)">zero context tokens</strong> until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked, and compressed via TOON format (79% smaller than JSON).
+            </p>
+
+            <p class="bluf-section">
+                <strong>Substrate, not product.</strong>
+                Today: multi-agent federation with W-of-N quorum<span class="cap-pill cap-beta">beta</span>, autonomous curator that consolidates and detects contradictions, namespace-scoped governance, and a 43&#8202;tool / 42&#8202;endpoint / 26&#8202;command MCP &middot; HTTP &middot; CLI surface. Self-hosted, local-first, no cloud dependency, no vendor lock-in. <span class="bluf-coming">Coming in v0.7</span>: cryptographically-attested provenance (Ed25519), hash-chained audit logs, sidechain transcripts, and forensic export bundles &mdash; the regulated-industry primitives.
+            </p>
         </div>
-        <p class="bluf" style="max-width:680px;margin:0 auto 1.5rem">
-            <strong style="color:var(--green)">Zero token cost until recalled.</strong>
-            Built-in memory systems load your entire memory into every message. ai-memory uses zero context tokens until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked and compressed via TOON format (79% smaller than JSON).
-        </p>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
             Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw <img src="pixel-lobster.svg" alt="OpenClaw lobster" style="height:1.2em;vertical-align:middle"> &middot; Hermes Agent &middot; Llama &middot; any MCP client
         </p>
