@@ -7286,15 +7286,43 @@ fn test_budget_truncates_to_fit() {
 }
 
 #[test]
-fn test_budget_zero_returns_empty() {
+fn test_budget_one_returns_overflow_memory() {
+    // Phase P6 (R1): when the top-ranked memory exceeds the budget the
+    // R1 always-return-at-least-one guarantee returns it anyway with
+    // meta.budget_overflow=true. This supersedes the v0.6.3 behavior
+    // (which returned an empty list on the same input). The original
+    // "explicit zero returns zero" semantics now lives at budget=0 —
+    // see `test_budget_explicit_zero_returns_empty` below.
     let db = fresh_budget_db();
     let bin = env!("CARGO_BIN_EXE_ai-memory");
     store_sized(bin, &db, "x", "something to find", 5);
 
     let v = recall_with_budget(bin, &db, "something", Some(1));
-    assert_eq!(v["count"], 0);
-    assert_eq!(v["tokens_used"], 0);
+    assert_eq!(v["count"], 1, "R1: at least one memory always returned");
     assert_eq!(v["budget_tokens"], 1);
+    assert_eq!(v["meta"]["budget_overflow"], true);
+    assert!(
+        v["tokens_used"].as_u64().unwrap() >= 1,
+        "the overflowing memory's tokens get counted"
+    );
+    let _ = std::fs::remove_file(&db);
+}
+
+#[test]
+fn test_budget_explicit_zero_returns_empty() {
+    // Phase P6 (R1): budget_tokens=0 ("give me nothing") returns an
+    // empty memories array with meta.budget_overflow=false. Distinct
+    // from a tight-but-non-zero budget which returns at least one
+    // memory under the always-return-at-least-one guarantee.
+    let db = fresh_budget_db();
+    let bin = env!("CARGO_BIN_EXE_ai-memory");
+    store_sized(bin, &db, "x", "something to find", 5);
+
+    let v = recall_with_budget(bin, &db, "something", Some(0));
+    assert_eq!(v["count"], 0, "budget_tokens=0 returns zero memories");
+    assert_eq!(v["tokens_used"], 0);
+    assert_eq!(v["budget_tokens"], 0);
+    assert_eq!(v["meta"]["budget_overflow"], false);
     let _ = std::fs::remove_file(&db);
 }
 
