@@ -111,27 +111,37 @@ integrations.
 
 ## Per-agent recipes
 
-| File | Agent | Category | Status |
-|---|---|---|---|
-| [`claude-code.md`](claude-code.md) | Claude Code (CLI, Mac/Win desktop, IDE) | 1 (hook) | reference recipe |
-| [`cursor.md`](cursor.md) | Cursor | 2 (MCP + rules) | recipe |
-| [`cline.md`](cline.md) | Cline (VS Code extension) | 2 (MCP + custom instructions) | recipe |
-| [`roo-code.md`](roo-code.md) | Roo Code (Cline fork) | 2 (MCP + custom instructions) | recipe |
-| [`continue.md`](continue.md) | Continue (VS Code / JetBrains) | 2 (MCP + systemMessage) | recipe |
-| [`windsurf.md`](windsurf.md) | Windsurf (Codeium) | 2 (MCP + rules) | recipe |
-| [`zed.md`](zed.md) | Zed assistant | 2 (MCP + assistant directive) | recipe |
-| [`goose.md`](goose.md) | Block Goose | 2 (MCP + system instructions) | recipe |
-| [`openclaw.md`](openclaw.md) | OpenClaw CLI | 2 (MCP + system message) | recipe |
-| [`codex-cli.md`](codex-cli.md) | OpenAI Codex CLI | 3 (programmatic) | recipe |
-| [`gemini.md`](gemini.md) | Google Gemini CLI / Gemini Code Assist | 3 (programmatic) | recipe |
-| [`aider.md`](aider.md) | Aider | 3 (programmatic via `--message-file`) | recipe |
-| [`cody.md`](cody.md) | Sourcegraph Cody | 3 (programmatic) | recipe |
-| [`claude-agent-sdk.md`](claude-agent-sdk.md) | Claude Agent SDK | 3 (programmatic) | recipe (TS + Python) |
-| [`openai-apps-sdk.md`](openai-apps-sdk.md) | OpenAI Apps SDK / Assistants / Responses | 3 (programmatic) | recipe |
-| [`grok-and-xai.md`](grok-and-xai.md) | xAI Grok | 3 (programmatic) | recipe |
-| [`local-models.md`](local-models.md) | Hermes, Llama, Mistral, etc. via LM Studio / Ollama / vLLM | 3 (programmatic) | recipe |
-| [`platforms.md`](platforms.md) | macOS / Linux / Windows / WSL / Docker / Kubernetes / ARM Linux / commercial Unix / embedded Linux / BSD platform notes | n/a | reference |
-| [`global-claude-md-template.md`](global-claude-md-template.md) | `~/.claude/CLAUDE.md` belt-and-suspenders snippet | 1 fallback | reference |
+The **Installer** column tracks `ai-memory install <agent>` support
+(issue #487 PR-2). `yes` means a one-line `ai-memory install <agent>
+--apply` writes the recipe's MCP / hook config block directly. Where
+the column reads `yes (--config)`, the agent's canonical config path
+isn't auto-discoverable yet — pass `--config <path>` explicitly. `no`
+means the agent isn't yet a target for the installer (PR-2 follow-up
+will extend); use the manual recipe in the meantime. `n/a` is
+programmatic SDK / API code that the installer cannot wire — see the
+recipe's snippets and `ai-memory wrap <agent>` (PR-6).
+
+| File | Agent | Category | Installer | Status |
+|---|---|---|---|---|
+| [`claude-code.md`](claude-code.md) | Claude Code (CLI, Mac/Win desktop, IDE) | 1 (hook) | yes | reference recipe |
+| [`cursor.md`](cursor.md) | Cursor | 2 (MCP + rules) | yes | recipe |
+| [`cline.md`](cline.md) | Cline (VS Code extension) | 2 (MCP + custom instructions) | yes (--config) | recipe |
+| [`roo-code.md`](roo-code.md) | Roo Code (Cline fork) | 2 (MCP + custom instructions) | no (PR-2 follow-up) | recipe |
+| [`continue.md`](continue.md) | Continue (VS Code / JetBrains) | 2 (MCP + systemMessage) | yes | recipe |
+| [`windsurf.md`](windsurf.md) | Windsurf (Codeium) | 2 (MCP + rules) | yes | recipe |
+| [`zed.md`](zed.md) | Zed assistant | 2 (MCP + assistant directive) | no (PR-2 follow-up) | recipe |
+| [`goose.md`](goose.md) | Block Goose | 2 (MCP + system instructions) | no (PR-2 follow-up) | recipe |
+| [`openclaw.md`](openclaw.md) | OpenClaw CLI | 2 (MCP + system message) | yes (--config) | recipe |
+| [`codex-cli.md`](codex-cli.md) | OpenAI Codex CLI | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`gemini.md`](gemini.md) | Google Gemini CLI / Gemini Code Assist | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`aider.md`](aider.md) | Aider | 3 (programmatic via `--message-file`) | n/a (programmatic) | recipe |
+| [`cody.md`](cody.md) | Sourcegraph Cody | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`claude-agent-sdk.md`](claude-agent-sdk.md) | Claude Agent SDK | 3 (programmatic) | n/a (programmatic) | recipe (TS + Python) |
+| [`openai-apps-sdk.md`](openai-apps-sdk.md) | OpenAI Apps SDK / Assistants / Responses | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`grok-and-xai.md`](grok-and-xai.md) | xAI Grok | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`local-models.md`](local-models.md) | Hermes, Llama, Mistral, etc. via LM Studio / Ollama / vLLM | 3 (programmatic) | n/a (programmatic) | recipe |
+| [`platforms.md`](platforms.md) | macOS / Linux / Windows / WSL / Docker / Kubernetes / ARM Linux / commercial Unix / embedded Linux / BSD platform notes | n/a | n/a | reference |
+| [`global-claude-md-template.md`](global-claude-md-template.md) | `~/.claude/CLAUDE.md` belt-and-suspenders snippet | 1 fallback | n/a | reference |
 
 ## Failure modes (any recipe)
 

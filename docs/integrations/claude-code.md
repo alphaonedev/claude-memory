@@ -3,6 +3,25 @@
 **Category 1 (hook-capable). 100% reliable.** This is the load-bearing
 remediation for issue [#487](https://github.com/alphaonedev/ai-memory-mcp/issues/487).
 
+## Quick install
+
+```bash
+# Preview the change (dry-run is the default — writes nothing):
+ai-memory install claude-code
+
+# Commit the change:
+ai-memory install claude-code --apply
+
+# Remove later:
+ai-memory install claude-code --uninstall --apply
+```
+
+The installer writes the SessionStart hook block into `~/.claude/settings.json`
+inside a clearly-marked managed block, backs up the original to
+`<config>.bak.<timestamp>` first, and is idempotent — re-running `--apply`
+with no upstream changes is a no-op. Pass `--config <path>` to target a
+non-default settings file (project-scoped or test fixture).
+
 ## What it does
 
 Claude Code supports a `SessionStart` hook in `~/.claude/settings.json` (or

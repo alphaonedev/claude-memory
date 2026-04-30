@@ -3,6 +3,17 @@
 **Category 2.** Windsurf is MCP-capable; configure in Settings → Cascade →
 MCP Servers, or via `~/.codeium/windsurf/mcp_config.json`.
 
+## Quick install
+
+```bash
+ai-memory install windsurf              # dry-run (default)
+ai-memory install windsurf --apply      # write ~/.codeium/windsurf/mcp_config.json
+ai-memory install windsurf --uninstall --apply
+```
+
+Handles **Part 1** (MCP server registration). Part 2 (`.windsurfrules`)
+is project-scoped and still manual.
+
 ## Part 1 — MCP server
 
 ```json

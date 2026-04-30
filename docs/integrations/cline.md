@@ -3,6 +3,23 @@
 **Category 2.** Cline is MCP-capable; configure via Cline's Settings
 panel or `~/.cline/mcp_settings.json` (varies by version).
 
+## Quick install
+
+Cline's MCP config path varies between releases (the file has lived at
+`~/.cline/mcp_settings.json` and under the VS Code extension data dir),
+so the installer requires `--config <path>`:
+
+```bash
+# TODO(#487): once Cline pins a canonical path, --config will be optional.
+ai-memory install cline --config ~/.cline/mcp_settings.json
+ai-memory install cline --config ~/.cline/mcp_settings.json --apply
+ai-memory install cline --config ~/.cline/mcp_settings.json --uninstall --apply
+```
+
+Find your active config by opening Cline → Settings → MCP and noting the
+file path it reads from. This handles **Part 1** below; Part 2 (custom
+instructions) is still manual.
+
 ## Part 1 — MCP server
 
 ```json

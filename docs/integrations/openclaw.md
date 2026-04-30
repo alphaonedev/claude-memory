@@ -9,6 +9,23 @@ a session-start hook today. Until it does, the recipe is two-part: register
 time), and add a one-line system-message directive instructing the model to
 call `memory_session_start` before responding to the first user turn.
 
+## Quick install
+
+OpenClaw's canonical config path is documented at
+<https://docs.openclaw.ai/cli/mcp> but isn't auto-discoverable yet, so the
+installer requires `--config <path>` until upstream pins a stable location:
+
+```bash
+# TODO(#487): once OpenClaw publishes a stable canonical path,
+# --config will be optional.
+ai-memory install openclaw --config <your-openclaw-config.json>
+ai-memory install openclaw --config <your-openclaw-config.json> --apply
+ai-memory install openclaw --config <your-openclaw-config.json> --uninstall --apply
+```
+
+Handles **Part 1** below. Part 2 (system-message directive) is still
+manual and best-effort until OpenClaw lands a native session-start hook.
+
 ## Part 1 — register `ai-memory-mcp` as an MCP server
 
 Edit your OpenClaw config file (the canonical location is documented at
