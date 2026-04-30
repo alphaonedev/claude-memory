@@ -93,7 +93,7 @@ proper session-start hook (see issue #487 cross-files).
 | [`openai-apps-sdk.md`](openai-apps-sdk.md) | OpenAI Apps SDK / Assistants / Responses | 3 (programmatic) | recipe |
 | [`grok-and-xai.md`](grok-and-xai.md) | xAI Grok | 3 (programmatic) | recipe |
 | [`local-models.md`](local-models.md) | Hermes, Llama, Mistral, etc. via LM Studio / Ollama / vLLM | 3 (programmatic) | recipe |
-| [`platforms.md`](platforms.md) | macOS / Linux / Windows / WSL / Docker / BSD platform notes | n/a | reference |
+| [`platforms.md`](platforms.md) | macOS / Linux / Windows / WSL / Docker / Kubernetes / ARM Linux / commercial Unix / embedded Linux / BSD platform notes | n/a | reference |
 | [`global-claude-md-template.md`](global-claude-md-template.md) | `~/.claude/CLAUDE.md` belt-and-suspenders snippet | 1 fallback | reference |
 
 ## Failure modes (any recipe)
@@ -106,6 +106,18 @@ proper session-start hook (see issue #487 cross-files).
   context.
 - Hook output too large: `--budget-tokens` (default 4096) clamps the row
   count cheaply (cumulative chars / 4 ≈ tokens).
+- Platform mismatch: a recipe written for `bash` doesn't run on native
+  Windows, embedded BusyBox `ash`, or inside a Kubernetes sidecar with
+  no shell. See
+  [`platforms.md`](platforms.md) for per-platform notes —
+  including the [Kubernetes HTTP boot equivalent](platforms.md#boot-hook-in-kubernetes)
+  for clusters where stdio recipes don't apply, and
+  [ARM Linux / embedded](platforms.md#arm-linux-raspberry-pi-aws-graviton-others)
+  resource budgets for low-memory devices.
+- CI gap: not every supported platform is in the GitHub Actions matrix.
+  See the [Lifetime test matrix](platforms.md#lifetime-test-matrix-pr-3)
+  in `platforms.md` for what CI actually exercises vs. what's
+  documented best-effort.
 
 ## Verifying a recipe
 
