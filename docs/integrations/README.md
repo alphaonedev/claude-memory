@@ -79,10 +79,16 @@ proper session-start hook (see issue #487 cross-files).
 | [`claude-code.md`](claude-code.md) | Claude Code (CLI, Mac/Win desktop, IDE) | 1 (hook) | reference recipe |
 | [`cursor.md`](cursor.md) | Cursor | 2 (MCP + rules) | recipe |
 | [`cline.md`](cline.md) | Cline (VS Code extension) | 2 (MCP + custom instructions) | recipe |
+| [`roo-code.md`](roo-code.md) | Roo Code (Cline fork) | 2 (MCP + custom instructions) | recipe |
 | [`continue.md`](continue.md) | Continue (VS Code / JetBrains) | 2 (MCP + systemMessage) | recipe |
 | [`windsurf.md`](windsurf.md) | Windsurf (Codeium) | 2 (MCP + rules) | recipe |
+| [`zed.md`](zed.md) | Zed assistant | 2 (MCP + assistant directive) | recipe |
+| [`goose.md`](goose.md) | Block Goose | 2 (MCP + system instructions) | recipe |
 | [`openclaw.md`](openclaw.md) | OpenClaw CLI | 2 (MCP + system message) | recipe |
 | [`codex-cli.md`](codex-cli.md) | OpenAI Codex CLI | 3 (programmatic) | recipe |
+| [`gemini.md`](gemini.md) | Google Gemini CLI / Gemini Code Assist | 3 (programmatic) | recipe |
+| [`aider.md`](aider.md) | Aider | 3 (programmatic via `--message-file`) | recipe |
+| [`cody.md`](cody.md) | Sourcegraph Cody | 3 (programmatic) | recipe |
 | [`claude-agent-sdk.md`](claude-agent-sdk.md) | Claude Agent SDK | 3 (programmatic) | recipe (TS + Python) |
 | [`openai-apps-sdk.md`](openai-apps-sdk.md) | OpenAI Apps SDK / Assistants / Responses | 3 (programmatic) | recipe |
 | [`grok-and-xai.md`](grok-and-xai.md) | xAI Grok | 3 (programmatic) | recipe |
@@ -119,9 +125,10 @@ bug and the fix lands in this directory.
 
 ## Cross-org follow-ups
 
-Category 2 agents (Cursor, Cline, Continue, Windsurf, OpenClaw) all need
-native session-start hooks to reach 100% remediation. Cross-files tracking
-those upstream requests live in #487's comments.
+Category 2 agents (Cursor, Cline, Roo Code, Continue, Windsurf, Zed,
+Goose, OpenClaw) all need native session-start hooks to reach 100%
+remediation. Cross-files tracking those upstream requests live in
+#487's comments.
 
 The MCP spec proposal at
 `modelcontextprotocol/specification` for a `session/initialize` server
