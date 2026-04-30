@@ -52,6 +52,7 @@ use tracing_subscriber::EnvFilter;
 use crate::cli::agents::{AgentsArgs, PendingArgs};
 use crate::cli::archive::ArchiveArgs;
 use crate::cli::backup::{BackupArgs, RestoreArgs};
+use crate::cli::boot::BootArgs;
 use crate::cli::consolidate::{AutoConsolidateArgs, ConsolidateArgs};
 use crate::cli::crud::{DeleteArgs, GetArgs, ListArgs};
 use crate::cli::curator::CuratorArgs;
@@ -219,6 +220,14 @@ pub enum Command {
     /// healthy report, 2 on critical findings, and 1 on warnings when
     /// `--fail-on-warn` is passed.
     Doctor(DoctorCliArgs),
+    /// Issue #487: emit session-boot context. Universal primitive every
+    /// AI-agent integration recipe (Claude Code SessionStart hook, Cursor /
+    /// Cline / Continue / Windsurf system-message, Codex / Apps SDK /
+    /// Agent SDK programmatic prepend, OpenClaw built-in, local models
+    /// via LM Studio / Ollama / vLLM) calls before the agent's first turn.
+    /// Read-only, fast, never blocks. With `--quiet` (recommended for
+    /// hooks) a missing DB exits 0 with empty stdout.
+    Boot(BootArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -690,6 +699,20 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 Ok(Err(e)) => Err(e),
                 Err(e) => Err(anyhow::anyhow!("doctor task join failed: {e}")),
             }
+        }
+        Command::Boot(a) => {
+            // Issue #487. Read-only, fast, no embedder, no daemon. Suitable
+            // for invocation from any AI-agent integration (Claude Code
+            // SessionStart hook, Cursor / Cline / Continue / Windsurf
+            // system-message, programmatic prepend in Claude Agent SDK /
+            // OpenAI Apps SDK / Codex CLI, OpenClaw built-in, local models
+            // via LM Studio / Ollama / vLLM).
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::boot::run(&db_path, &a, &mut out)
         }
     };
 

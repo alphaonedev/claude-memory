@@ -18,6 +18,7 @@
 pub mod agents;
 pub mod archive;
 pub mod backup;
+pub mod boot;
 pub mod consolidate;
 pub mod crud;
 pub mod curator;

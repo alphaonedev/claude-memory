@@ -16,8 +16,22 @@ Before proposing any change to this repository, load the following into context:
   security, and release standards.
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — contributor procedures.
 
-Then run `memory_session_start` followed by `memory_recall <task topic>` to load
-project memory before responding. Default namespace for this repo is `ai-memory-mcp`.
+### Loading project memory at session start
+
+The mechanical guarantee is the SessionStart hook documented in
+[`docs/integrations/claude-code.md`](docs/integrations/claude-code.md).
+Install it once; every fresh Claude Code session boots with relevant
+memory context already in the system prompt — no model proactivity
+required. See the full agent matrix in
+[`docs/integrations/README.md`](docs/integrations/README.md).
+
+If the hook is not installed (cold-start fallback), call
+`memory_session_start` followed by `memory_recall <task topic>` before
+responding. Text directives are best-effort; the hook is the load-bearing
+mechanism. See [issue #487](https://github.com/alphaonedev/ai-memory-mcp/issues/487)
+for the RCA.
+
+Default namespace for this repo is `ai-memory-mcp`.
 
 Every commit you author must end with a `Co-Authored-By:` trailer naming the model.
 Every PR you open must include the **AI involvement** section described in
