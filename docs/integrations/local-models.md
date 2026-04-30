@@ -9,6 +9,25 @@ boundary. The pattern is the same regardless of runtime: the front-end app
 or wrapper script prepends `ai-memory boot` output to the system message
 before the first request.
 
+## Or for the simple wrapper case — `ai-memory wrap`
+
+PR-6 of issue #487 ships a built-in cross-platform Rust subcommand
+that wraps a CLI with `ai-memory boot` context — no shell, no
+PowerShell, no `chmod +x`. The lookup table includes Ollama (uses
+`OLLAMA_SYSTEM` env var) and falls through to `--system <msg>` for
+generic OpenAI-compatible CLIs.
+
+```bash
+# Ollama: env-var strategy auto-resolved.
+ai-memory wrap ollama -- run hermes3:8b "your prompt"
+
+# llama.cpp / lm-studio CLI / etc.: --system flag (the default).
+ai-memory wrap llama-cli -- chat --model hermes3-8b
+```
+
+For SDK code (the patterns below) `wrap` doesn't apply — that's for
+the launcher case.
+
 ## LM Studio (HTTP API, OpenAI-compatible)
 
 LM Studio exposes an OpenAI-compat server on port 1234 by default. Use the

@@ -6,6 +6,27 @@ The Claude Agent SDK is programmatic by design — the developer constructs
 the messages array. Prepend `ai-memory boot` output to the system message
 on session/conversation start.
 
+## Or for the simple wrapper case — `ai-memory wrap`
+
+If your integration is just "spawn a CLI that calls Claude", PR-6 of
+issue #487 ships a built-in cross-platform Rust subcommand:
+
+```bash
+ai-memory wrap claude-cli -- chat --model claude-opus-4-7
+```
+
+`ai-memory wrap` runs `ai-memory boot` in-process, builds a system
+message of the form `<preamble>\n\n<boot output>`, spawns the named
+agent CLI with that message delivered via the appropriate strategy
+(`--system <msg>` for most agents, env var for Ollama, message file
+for aider), and propagates the agent's exit code. Pure Rust — same
+binary works on macOS / Linux / Windows / Docker / Kubernetes with
+no shell wrapper.
+
+For SDK code that constructs requests directly, the patterns below
+are what you want — `wrap` is for the launcher case where the SDK
+isn't in your code path.
+
 ## TypeScript
 
 ```typescript

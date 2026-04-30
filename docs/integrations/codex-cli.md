@@ -3,48 +3,69 @@
 **Category 3 (programmatic).** 100% reliable when implemented.
 
 OpenAI's Codex CLI does not have an MCP host or a session-start hook
-mechanism. The integration is at the application boundary: shell out to
-`ai-memory boot` and prepend the result to the system message before each
-new conversation.
+mechanism. The integration is at the application boundary: prepend
+`ai-memory boot` output to the system message before each new
+conversation.
 
-## Wrapper script
+## Use `ai-memory wrap` (recommended — pure Rust, cross-platform)
 
-Save as `~/.local/bin/codex-with-memory` and make it executable:
+PR-6 of issue #487 ships a built-in subcommand that does the wrapping
+in Rust with no shell. Same code path on macOS / Linux / Windows /
+Docker / Kubernetes. No bash, no PowerShell, no `chmod +x`, no
+`%PATH%` quirks.
 
 ```bash
-#!/usr/bin/env bash
-# Wraps `codex` with ai-memory boot context on the system message.
-set -euo pipefail
-
-BOOT_CONTEXT=$(ai-memory boot --quiet --no-header --format text --limit 10 || true)
-
-# Append boot context to the system message via Codex's --system flag (or
-# OPENAI_CLI_SYSTEM env var, depending on which Codex CLI you're running).
-if [[ -n "$BOOT_CONTEXT" ]]; then
-  exec codex --system "$(cat <<EOF
-You have access to ai-memory. Recent context follows; reference it when
-relevant to the user's request.
-
-$BOOT_CONTEXT
-EOF
-)" "$@"
-else
-  exec codex "$@"
-fi
+ai-memory wrap codex -- chat --model gpt-5
 ```
 
-Then alias `codex` to this wrapper, or invoke `codex-with-memory` instead.
+What it does:
+
+1. Calls `ai-memory boot --quiet --format text --limit 10
+   --budget-tokens 4096` in-process (no subprocess).
+2. Builds a system message of the form
+   `<preamble>\n\n<boot output>` where the preamble tells the agent
+   it has ai-memory access.
+3. Spawns `codex --system "<system message>" chat --model gpt-5`
+   with stdin/stdout/stderr inherited unmodified.
+4. Exits with whatever code `codex` returned, so shell pipelines and
+   CI scripts that branch on `$?` still work.
+
+Use `--no-boot` to skip the in-process boot call (useful for testing
+or when the DB is known to be unavailable):
+
+```bash
+ai-memory wrap codex --no-boot -- chat --model gpt-5
+```
+
+The default lookup table maps `codex` and `codex-cli` to the
+`SystemFlag { flag: "--system" }` strategy. If your Codex variant
+exposes a different flag (`--system-prompt`, env-var-only, etc.),
+override:
+
+```bash
+# Different flag
+ai-memory wrap codex --system-flag --system-prompt -- chat
+
+# Env-var instead of flag
+ai-memory wrap codex --system-env OPENAI_CLI_SYSTEM -- chat
+
+# File-based delivery (for very long boot contexts)
+ai-memory wrap codex --message-file-flag --message-file -- chat
+```
 
 ## Caveats
 
-- The exact flag name (`--system`, `--system-prompt`, env var) depends on
-  which Codex CLI variant is installed. Check `codex --help`.
-- This recipe loads memory **once per CLI invocation**. Multi-turn
+- The exact flag name depends on which Codex CLI variant is installed.
+  Check `codex --help` and override with `--system-flag` or
+  `--system-env` if needed.
+- `ai-memory wrap` loads memory **once per CLI invocation**. Multi-turn
   conversations within one invocation share the boot context.
-- For richer memory access (mid-session), the developer would need to add
-  function-calling support pointing at `ai-memory`'s HTTP API. That's a
-  larger integration than the boot recipe and lives outside this doc.
+- For richer memory access (mid-session), the developer would need to
+  add function-calling support pointing at `ai-memory`'s HTTP API.
+  That's a larger integration than the boot recipe and lives outside
+  this doc.
 
 ## Related
 
 - [`README.md`](README.md), Issue #487
+- `ai-memory wrap --help` for the full flag surface.
