@@ -31,13 +31,6 @@
    cargo binstall ai-memory
    ```
 
-   **Ubuntu (PPA — recommended):**
-   ```bash
-   sudo add-apt-repository ppa:jbridger2021/ppa
-   sudo apt update
-   sudo apt install ai-memory
-   ```
-
    **Ubuntu/Debian (.deb manual install):**
    ```bash
    # Download from https://github.com/alphaonedev/ai-memory-mcp/releases/latest
