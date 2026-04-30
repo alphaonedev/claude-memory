@@ -8279,12 +8279,14 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn doctor_dim_violations_pre_p2_returns_none() {
-        // Fresh DB has no `embedding_dim` column (P2 hasn't merged) — the
-        // helper must report "not yet observed", not error.
+    fn doctor_dim_violations_post_p2_returns_zero_on_fresh_db() {
+        // Post-P2 (schema v18+), a fresh DB has the `embedding_dim` column
+        // but zero rows in violation. The helper must report Some(0), not
+        // None. (Pre-P2 it returned None to indicate "column not yet
+        // present"; that path is now obsolete.)
         let conn = test_db();
         let result = doctor_dim_violations(&conn).unwrap();
-        assert_eq!(result, None);
+        assert_eq!(result, Some(0));
     }
 
     #[test]

@@ -1337,8 +1337,19 @@ pub fn handle_recall(
             },
             blend_weight,
         };
-        if let Ok(v) = serde_json::to_value(&meta) {
-            resp["meta"] = v;
+        // Merge into existing meta object rather than replacing — P6's
+        // decorate_budget may have already populated budget_* keys here.
+        if let Ok(Value::Object(p3_fields)) = serde_json::to_value(&meta) {
+            let meta_obj = resp
+                .as_object_mut()
+                .expect("recall response is always a JSON object")
+                .entry("meta".to_string())
+                .or_insert_with(|| json!({}));
+            if let Some(existing) = meta_obj.as_object_mut() {
+                for (k, v) in p3_fields {
+                    existing.insert(k, v);
+                }
+            }
         }
     };
 
