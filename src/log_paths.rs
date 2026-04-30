@@ -643,4 +643,146 @@ mod tests {
             assert!(!s.as_str().is_empty());
         }
     }
+
+    // ------------------------------------------------------------------
+    // PR-9e coverage uplift (issue #487): close the security-guard and
+    // tilde-expansion gaps flagged in the audit report.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_expands_home_dir() {
+        let _g = env_lock();
+        let env = EnvGuard::capture("HOME");
+        env.set("/test-home");
+        assert_eq!(expand_tilde("~/state/log"), "/test-home/state/log");
+        // Bare `~` (no slash) is not expanded — matches the audit
+        // module's expand_tilde which strictly looks for the `~/` prefix.
+        assert_eq!(expand_tilde("~root"), "~root");
+    }
+
+    #[test]
+    fn expand_tilde_no_home_keeps_input_unchanged() {
+        let _g = env_lock();
+        let env = EnvGuard::capture("HOME");
+        env.unset();
+        // Without HOME set, expansion must be a no-op.
+        assert_eq!(expand_tilde("~/state"), "~/state");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_not_world_writable_passes_through_on_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Path under tempdir that does not exist — must succeed.
+        let r = ResolvedDir {
+            path: tmp.path().join("does-not-exist"),
+            source: PathSource::ConfigToml,
+        };
+        assert!(enforce_not_world_writable(&r).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_not_world_writable_passes_safe_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let safe = tmp.path().join("safe");
+        std::fs::create_dir(&safe).unwrap();
+        std::fs::set_permissions(&safe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let r = ResolvedDir {
+            path: safe,
+            source: PathSource::ConfigToml,
+        };
+        assert!(enforce_not_world_writable(&r).is_ok());
+    }
+
+    #[test]
+    fn is_writable_dir_returns_false_for_a_file_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("regular.txt");
+        std::fs::write(&f, b"hello").unwrap();
+        // A path that exists but is a file (not a dir) must fail
+        // is_writable_dir's "is_dir" guard.
+        assert!(!is_writable_dir(&f));
+    }
+
+    #[test]
+    fn is_writable_dir_returns_false_for_nonexistent_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(!is_writable_dir(&tmp.path().join("nope")));
+    }
+
+    #[test]
+    fn dirkind_suffix_returns_logs_or_audit() {
+        // Pure-logic helper exposed via DirKind — covers both arms of
+        // the suffix() match.
+        assert_eq!(DirKind::Log.suffix(), "logs");
+        assert_eq!(DirKind::Audit.suffix(), "audit");
+    }
+
+    #[test]
+    fn ensure_dir_secure_creates_nested_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("a").join("b").join("c");
+        ensure_dir_secure(&target).unwrap();
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn ensure_dir_secure_idempotent_on_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("present");
+        std::fs::create_dir(&target).unwrap();
+        // Second call must not error even though the dir already exists.
+        ensure_dir_secure(&target).unwrap();
+        ensure_dir_secure(&target).unwrap();
+    }
+
+    #[test]
+    fn fall_through_uses_config_when_set() {
+        // Indirect test: with no env override and a config path,
+        // resolve_log_dir must pick ConfigToml.
+        let _g = env_lock();
+        let env = EnvGuard::capture(LOG_DIR_ENV);
+        env.unset();
+        let r = resolve_log_dir(None, Some("/tmp/explicit-config")).unwrap();
+        assert_eq!(r.source, PathSource::ConfigToml);
+        assert_eq!(r.path, PathBuf::from("/tmp/explicit-config"));
+    }
+
+    #[test]
+    fn fall_through_expands_tilde_in_config_path() {
+        let _g = env_lock();
+        let env = EnvGuard::capture(LOG_DIR_ENV);
+        env.unset();
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-tilde-home");
+        let r = resolve_log_dir(None, Some("~/state/logs")).unwrap();
+        // The tilde must be expanded to the test HOME.
+        assert_eq!(r.path, PathBuf::from("/test-tilde-home/state/logs"));
+        assert_eq!(r.source, PathSource::ConfigToml);
+    }
+
+    #[test]
+    fn fall_through_empty_config_path_uses_platform_default() {
+        let _g = env_lock();
+        let env = EnvGuard::capture(LOG_DIR_ENV);
+        env.unset();
+        let _inv = EnvGuard::capture("INVOCATION_ID");
+        _inv.unset();
+        // Empty config string must NOT short-circuit ConfigToml — it
+        // falls through to platform default.
+        let r = resolve_log_dir(None, Some("")).unwrap();
+        assert_eq!(r.source, PathSource::PlatformDefault);
+    }
+
+    #[test]
+    fn empty_audit_env_var_falls_through_to_config() {
+        let _g = env_lock();
+        let env = EnvGuard::capture(AUDIT_DIR_ENV);
+        env.set("");
+        let r = resolve_audit_dir(None, Some("/cfg/audit")).unwrap();
+        assert_eq!(r.source, PathSource::ConfigToml);
+        assert_eq!(r.path, PathBuf::from("/cfg/audit"));
+    }
 }

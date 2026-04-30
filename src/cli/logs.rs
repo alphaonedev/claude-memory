@@ -645,4 +645,487 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
         assert_eq!(v["line"], "plain text line");
     }
+
+    // ------------------------------------------------------------------
+    // PR-9e coverage uplift (issue #487): exercise the top-level `run`
+    // dispatcher, `args_filters` / `parse_ts`, every `line_matches`
+    // filter combination, `extract_timestamp`, and `run_purge` paths.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parse_ts_accepts_rfc3339_form() {
+        let dt = parse_ts("2026-04-30T12:34:56+00:00").unwrap();
+        // Round-trip the parsed value through formatting rather than
+        // hardcoding a Unix epoch — keeps the test robust against
+        // chrono semantic changes.
+        assert_eq!(
+            dt.format("%Y-%m-%dT%H:%M:%S+00:00").to_string(),
+            "2026-04-30T12:34:56+00:00"
+        );
+    }
+
+    #[test]
+    fn parse_ts_accepts_yyyy_mm_dd_form() {
+        let dt = parse_ts("2026-04-30").unwrap();
+        // Midnight UTC of 2026-04-30.
+        assert_eq!(
+            dt.format("%Y-%m-%d %H:%M:%S").to_string(),
+            "2026-04-30 00:00:00"
+        );
+    }
+
+    #[test]
+    fn parse_ts_returns_none_for_garbage() {
+        assert!(parse_ts("not a date").is_none());
+        assert!(parse_ts("").is_none());
+        assert!(parse_ts("2026/04/30").is_none());
+    }
+
+    #[test]
+    fn args_filters_threads_every_field() {
+        let args = LogsArgs {
+            action: LogsAction::Cat,
+            since: Some("2026-04-30".to_string()),
+            until: Some("2026-05-01".to_string()),
+            level: Some("WARN".to_string()),
+            namespace: Some("ns".to_string()),
+            actor: Some("alice".to_string()),
+            action_filter: Some("recall".to_string()),
+            format: "json".to_string(),
+            log_dir: None,
+        };
+        let f = args_filters(&args);
+        assert!(f.since.is_some());
+        assert!(f.until.is_some());
+        assert_eq!(f.level.as_deref(), Some("WARN"));
+        assert_eq!(f.namespace.as_deref(), Some("ns"));
+        assert_eq!(f.actor.as_deref(), Some("alice"));
+        assert_eq!(f.action.as_deref(), Some("recall"));
+        assert!(f.format_json);
+    }
+
+    #[test]
+    fn args_filters_handles_garbage_since_as_none() {
+        let args = LogsArgs {
+            action: LogsAction::Cat,
+            since: Some("garbage".to_string()),
+            until: None,
+            level: None,
+            namespace: None,
+            actor: None,
+            action_filter: None,
+            format: "text".to_string(),
+            log_dir: None,
+        };
+        let f = args_filters(&args);
+        assert!(f.since.is_none(), "garbage should fall back to None");
+        assert!(!f.format_json);
+    }
+
+    #[test]
+    fn line_matches_filters_by_level_substring() {
+        let f = Filters {
+            level: Some("error".to_string()),
+            ..Default::default()
+        };
+        assert!(line_matches("ERROR something happened", &f));
+        assert!(line_matches("level=ERROR", &f));
+        assert!(!line_matches("INFO uneventful", &f));
+    }
+
+    #[test]
+    fn line_matches_filters_by_actor_case_insensitive() {
+        let f = Filters {
+            actor: Some("ALICE".to_string()),
+            ..Default::default()
+        };
+        assert!(line_matches("user=alice@example.com", &f));
+        assert!(!line_matches("user=bob@example.com", &f));
+    }
+
+    #[test]
+    fn line_matches_filters_by_action_substring() {
+        let f = Filters {
+            action: Some("recall".to_string()),
+            ..Default::default()
+        };
+        assert!(line_matches("action=recall ns=widgets", &f));
+        assert!(!line_matches("action=store ns=widgets", &f));
+    }
+
+    #[test]
+    fn line_matches_combined_filters_all_must_pass() {
+        let f = Filters {
+            level: Some("WARN".to_string()),
+            actor: Some("alice".to_string()),
+            namespace: Some("widgets".to_string()),
+            action: Some("store".to_string()),
+            ..Default::default()
+        };
+        // All four fields appear in the line.
+        assert!(line_matches("WARN action=store actor=alice ns=widgets", &f));
+        // Drop one of the four — must fail.
+        assert!(!line_matches(
+            "WARN action=store actor=alice ns=other-ns",
+            &f
+        ));
+        assert!(!line_matches(
+            "INFO action=store actor=alice ns=widgets",
+            &f
+        ));
+    }
+
+    #[test]
+    fn line_matches_drops_lines_outside_since_window() {
+        // Line is at 2026-01-01; since=2026-04-30 → drop.
+        let f = Filters {
+            since: parse_ts("2026-04-30"),
+            ..Default::default()
+        };
+        let line = "2026-01-01T00:00:00+00:00 INFO old line";
+        assert!(!line_matches(line, &f));
+        // Line at 2026-05-01 is after since=2026-04-30 → keep.
+        let line2 = "2026-05-01T00:00:00+00:00 INFO recent";
+        assert!(line_matches(line2, &f));
+    }
+
+    #[test]
+    fn line_matches_drops_lines_after_until_window() {
+        let f = Filters {
+            until: parse_ts("2026-04-30"),
+            ..Default::default()
+        };
+        // Line at 2026-05-01 is after until=2026-04-30 → drop.
+        let line = "2026-05-01T00:00:00+00:00 INFO too recent";
+        assert!(!line_matches(line, &f));
+        let line2 = "2026-04-29T00:00:00+00:00 INFO ok";
+        assert!(line_matches(line2, &f));
+    }
+
+    #[test]
+    fn line_matches_keeps_lines_with_no_extractable_timestamp_and_window_filter() {
+        // No leading RFC3339, no JSON timestamp; the filter falls
+        // through (best-effort) and the line is kept.
+        let f = Filters {
+            since: parse_ts("2026-04-30"),
+            ..Default::default()
+        };
+        assert!(line_matches("plain message no timestamp here", &f));
+    }
+
+    #[test]
+    fn extract_timestamp_recognises_leading_rfc3339() {
+        let line = "2026-04-30T12:00:00+00:00 INFO hi";
+        let ts = extract_timestamp(line).expect("rfc3339 token");
+        assert_eq!(ts.format("%Y-%m-%d").to_string(), "2026-04-30");
+    }
+
+    #[test]
+    fn extract_timestamp_recognises_json_timestamp_field() {
+        let line = r#"{"timestamp":"2026-04-30T12:00:00+00:00","msg":"hi"}"#;
+        let ts = extract_timestamp(line).expect("json timestamp");
+        assert_eq!(ts.format("%Y-%m-%d").to_string(), "2026-04-30");
+    }
+
+    #[test]
+    fn extract_timestamp_returns_none_when_absent() {
+        assert!(extract_timestamp("no timestamp").is_none());
+        assert!(extract_timestamp(r#"{"foo":"bar"}"#).is_none());
+        // JSON form with malformed timestamp must also fall through.
+        assert!(extract_timestamp(r#"{"timestamp":"garbage"}"#).is_none());
+    }
+
+    #[test]
+    fn logs_run_dispatches_to_cat_action() {
+        let dir = tempfile::tempdir().unwrap();
+        make_log(dir.path(), "ai-memory.log.2026-04-30", "hello world\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig {
+            logging: Some(LoggingConfig {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = LogsArgs {
+                action: LogsAction::Cat,
+                since: None,
+                until: None,
+                level: None,
+                namespace: None,
+                actor: None,
+                action_filter: None,
+                format: "text".to_string(),
+                log_dir: Some(dir.path().to_path_buf()),
+            };
+            run(args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("hello world"), "got: {s}");
+    }
+
+    #[test]
+    fn logs_run_dispatches_to_tail_action() {
+        let dir = tempfile::tempdir().unwrap();
+        make_log(
+            dir.path(),
+            "ai-memory.log.2026-04-30",
+            "line a\nline b\nline c\n",
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = LogsArgs {
+                action: LogsAction::Tail(TailArgs {
+                    lines: 2,
+                    follow: false,
+                    follow_interval_ms: 50,
+                    max_polls: 0,
+                }),
+                since: None,
+                until: None,
+                level: None,
+                namespace: None,
+                actor: None,
+                action_filter: None,
+                format: "text".to_string(),
+                log_dir: Some(dir.path().to_path_buf()),
+            };
+            run(args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let lines: Vec<&str> = s.lines().collect();
+        assert_eq!(lines.len(), 2, "tail --lines=2 must cap output: {s}");
+    }
+
+    #[test]
+    fn logs_run_dispatches_to_archive_action_no_op_on_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = LogsArgs {
+                action: LogsAction::Archive,
+                since: None,
+                until: None,
+                level: None,
+                namespace: None,
+                actor: None,
+                action_filter: None,
+                format: "text".to_string(),
+                log_dir: Some(dir.path().to_path_buf()),
+            };
+            run(args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("archived 0"), "expected zero count: {s}");
+    }
+
+    #[test]
+    fn logs_run_dispatches_to_purge_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = LogsArgs {
+                action: LogsAction::Purge(PurgeArgs {
+                    before: "2099-01-01".to_string(),
+                    no_warn: true,
+                    dry_run: true,
+                }),
+                since: None,
+                until: None,
+                level: None,
+                namespace: None,
+                actor: None,
+                action_filter: None,
+                format: "text".to_string(),
+                log_dir: Some(dir.path().to_path_buf()),
+            };
+            run(args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("purged 0"), "got: {s}");
+    }
+
+    /// Backdate a file's mtime to the Unix epoch so the purge logic
+    /// always finds it "older than" any reasonable cutoff. Uses
+    /// `File::set_modified` (stable since Rust 1.75) so we don't take
+    /// a `filetime` dev-dep for a one-off helper.
+    fn backdate_mtime_to_epoch(path: &Path) {
+        let f = fs::OpenOptions::new().write(true).open(path).unwrap();
+        // Set to one second past epoch so mtime is unambiguously
+        // before any "now" cutoff. The kernel may reject a literal
+        // UNIX_EPOCH on some filesystems.
+        let one_second_past_epoch = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        f.set_modified(one_second_past_epoch).unwrap();
+    }
+
+    #[test]
+    fn logs_purge_dry_run_prints_would_delete_without_removing() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("ai-memory.log.2010-01-01.zst");
+        fs::write(&archive, b"compressed").unwrap();
+        backdate_mtime_to_epoch(&archive);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = PurgeArgs {
+                // Far-future cutoff so the archive is in scope.
+                before: Utc::now().to_rfc3339(),
+                no_warn: true,
+                dry_run: true,
+            };
+            run_purge(dir.path(), &args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("would delete:"), "got: {s}");
+        assert!(s.contains("purged 1"), "must report count: {s}");
+        assert!(archive.exists(), "dry run must not remove the file");
+    }
+
+    #[test]
+    fn logs_purge_actually_deletes_when_not_dry_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let archive = dir.path().join("ai-memory.log.2010-01-01.zst");
+        fs::write(&archive, b"compressed").unwrap();
+        backdate_mtime_to_epoch(&archive);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = PurgeArgs {
+                before: Utc::now().to_rfc3339(),
+                no_warn: true,
+                dry_run: false,
+            };
+            run_purge(dir.path(), &args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("deleted:"), "got: {s}");
+        assert!(!archive.exists(), "non-dry-run must remove the file");
+    }
+
+    #[test]
+    fn logs_purge_skips_non_zst_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Plain log file (no .zst suffix) — must NOT be purged.
+        let plain = dir.path().join("ai-memory.log.2010-01-01");
+        fs::write(&plain, b"raw").unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = PurgeArgs {
+                before: Utc::now().to_rfc3339(),
+                no_warn: true,
+                dry_run: false,
+            };
+            run_purge(dir.path(), &args, &app_config, &mut out).unwrap();
+        }
+        assert!(plain.exists(), "non-.zst files must be left alone");
+    }
+
+    #[test]
+    fn logs_purge_returns_ok_when_dir_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bogus = tmp.path().join("does-not-exist");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        let mut out = output(&mut stdout, &mut stderr);
+        let args = PurgeArgs {
+            before: Utc::now().to_rfc3339(),
+            no_warn: true,
+            dry_run: true,
+        };
+        // Must succeed silently — fresh installs have no log dir yet.
+        run_purge(&bogus, &args, &app_config, &mut out).unwrap();
+    }
+
+    #[test]
+    fn logs_purge_rejects_garbage_before_date() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig::default();
+        let mut out = output(&mut stdout, &mut stderr);
+        let args = PurgeArgs {
+            before: "definitely-not-a-date".to_string(),
+            no_warn: true,
+            dry_run: true,
+        };
+        let err = run_purge(dir.path(), &args, &app_config, &mut out).unwrap_err();
+        assert!(
+            format!("{err}").contains("invalid --before date"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn logs_archive_skips_recent_files() {
+        let dir = tempfile::tempdir().unwrap();
+        // Recent file (mtime ~ now) — retention 90 days; must be kept.
+        make_log(dir.path(), "ai-memory.log.2026-04-30", "today");
+        let cfg = LoggingConfig {
+            retention_days: Some(90),
+            ..Default::default()
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            run_archive(dir.path(), &cfg, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("archived 0"), "got: {s}");
+    }
+
+    #[test]
+    fn logs_run_resolves_log_dir_from_config_when_no_override() {
+        // When `log_dir` flag is None, `run` falls through to
+        // `effective_logging` -> `path`. We point that at a tempdir
+        // populated with a valid log so `Cat` produces output.
+        let dir = tempfile::tempdir().unwrap();
+        make_log(dir.path(), "ai-memory.log.2026-04-30", "from-config\n");
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let app_config = AppConfig {
+            logging: Some(LoggingConfig {
+                path: Some(dir.path().to_string_lossy().into_owned()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        {
+            let mut out = output(&mut stdout, &mut stderr);
+            let args = LogsArgs {
+                action: LogsAction::Cat,
+                since: None,
+                until: None,
+                level: None,
+                namespace: None,
+                actor: None,
+                action_filter: None,
+                format: "text".to_string(),
+                log_dir: None,
+            };
+            run(args, &app_config, &mut out).unwrap();
+        }
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("from-config"), "expected config layer used: {s}");
+    }
 }

@@ -1168,4 +1168,354 @@ mod tests {
         let resolved = cfg.effective_retention_days();
         assert_eq!(resolved, 730, "SOC2 preset must override default retention");
     }
+
+    // ------------------------------------------------------------------
+    // PR-9e coverage uplift (issue #487): exercise `init`, `read_chain_tail`,
+    // builder method chains, `init_from_config` enabled+disabled paths,
+    // `finalize_audit_file`, and the verify Sequence/Parse failure modes.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn audit_init_creates_log_file_in_fresh_directory() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested").join("audit.log");
+        // Directory does not yet exist; init must create it.
+        super::init(&path, true, false).unwrap();
+        assert!(path.exists(), "init must create the log file");
+        assert!(super::is_enabled());
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_init_seeds_last_hash_from_existing_chain() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+
+        // Pre-populate with a 2-event chain. We specifically test the
+        // `read_chain_tail` linkage: the next emitted event's
+        // `prev_hash` must match the file's last self_hash.
+        // (The per-process SEQUENCE counter is independent of the
+        // chain — `init` resets it to 0, so a re-init on an existing
+        // file legitimately starts numbering at 1 again. Sequence
+        // continuity is only required *within a single process run*,
+        // so we verify only the hash linkage here.)
+        let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
+        let e2 = sample_event(2, &e1.self_hash);
+        let mut body = String::new();
+        body.push_str(&serde_json::to_string(&e1).unwrap());
+        body.push('\n');
+        body.push_str(&serde_json::to_string(&e2).unwrap());
+        body.push('\n');
+        std::fs::write(&path, body).unwrap();
+
+        // Init points at the existing file — `read_chain_tail` must
+        // seed `last_hash` from e2.
+        super::init(&path, true, false).unwrap();
+
+        // Emit a third event; its prev_hash should equal e2.self_hash.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("ai:t@h", "explicit", None),
+            target_memory("m3", "ns-x", Some("t".to_string()), None, None),
+        ));
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let third_line = body.lines().nth(2).expect("3rd line");
+        let parsed: AuditEvent = serde_json::from_str(third_line).unwrap();
+        assert_eq!(parsed.prev_hash, e2.self_hash, "chain must continue");
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_init_skips_chain_tail_when_log_corrupted() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        // File has a malformed trailing line; init must fall back to
+        // CHAIN_HEAD_PREV_HASH because no well-formed lines exist.
+        std::fs::write(&path, "{not valid json\n").unwrap();
+        super::init(&path, true, false).unwrap();
+        // Emitting a fresh event must seed prev_hash with the chain head.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        ));
+        let body = std::fs::read_to_string(&path).unwrap();
+        let last = body.lines().filter(|l| !l.is_empty()).last().unwrap();
+        let parsed: AuditEvent = serde_json::from_str(last).unwrap();
+        assert_eq!(parsed.prev_hash, CHAIN_HEAD_PREV_HASH);
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_event_builder_error_outcome() {
+        let b = EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        )
+        .error("boom");
+        assert_eq!(b.outcome, AuditOutcome::Error);
+        assert_eq!(b.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn audit_event_builder_error_caps_long_message() {
+        let long = "x".repeat(1000);
+        let b = EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        )
+        .error(long);
+        // sanitize_field caps at 256 chars.
+        assert_eq!(b.error.as_ref().unwrap().chars().count(), 256);
+    }
+
+    #[test]
+    fn audit_event_builder_outcome_chain() {
+        let b = EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        )
+        .outcome(AuditOutcome::Deny);
+        assert_eq!(b.outcome, AuditOutcome::Deny);
+    }
+
+    #[test]
+    fn audit_event_builder_auth_and_request_id() {
+        let auth = AuditAuth {
+            source_ip: Some("203.0.113.1".to_string()),
+            mtls_fp: None,
+            api_key_id_hash: Some("abc".to_string()),
+        };
+        let b = EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        )
+        .auth(auth.clone())
+        .request_id("req-123");
+        assert_eq!(b.auth, Some(auth));
+        assert_eq!(b.request_id.as_deref(), Some("req-123"));
+    }
+
+    #[test]
+    fn audit_init_from_config_disabled_clears_sink() {
+        let _g = sink_lock();
+        // Bring up an in-memory sink first.
+        let buf: std::sync::Arc<Mutex<Vec<u8>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        super::init_for_test(buf);
+        assert!(super::is_enabled());
+
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(false),
+            ..Default::default()
+        };
+        super::init_from_config(&cfg).unwrap();
+        // Disabled-branch must clear the global sink.
+        assert!(!super::is_enabled());
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_init_from_config_enabled_initialises_sink_at_resolved_path() {
+        let _g = sink_lock();
+        super::shutdown_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some(path.to_string_lossy().into_owned()),
+            redact_content: Some(true),
+            // Don't try to apply the OS append-only flag in tests —
+            // the calling user typically lacks CAP_LINUX_IMMUTABLE
+            // and we don't want a kernel-level side effect.
+            append_only: Some(false),
+            ..Default::default()
+        };
+        super::init_from_config(&cfg).unwrap();
+        assert!(super::is_enabled());
+        // The configured file must exist on disk after init.
+        assert!(path.exists(), "audit log file must be created");
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_finalize_audit_file_keeps_explicit_file_path() {
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some("/var/log/ai-memory/x.log".to_string()),
+            ..Default::default()
+        };
+        let p = resolve_audit_path(&cfg);
+        // Explicit file path must be preserved (not appended with audit.log).
+        assert_eq!(p, PathBuf::from("/var/log/ai-memory/x.log"));
+    }
+
+    #[test]
+    fn audit_finalize_audit_file_appends_audit_log_for_dir_path() {
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some("/var/log/ai-memory/".to_string()),
+            ..Default::default()
+        };
+        let p = resolve_audit_path(&cfg);
+        assert!(p.ends_with("audit.log"));
+    }
+
+    #[test]
+    fn audit_finalize_audit_file_appends_audit_log_for_extension_less_path() {
+        // No trailing slash and no extension: treat as dir, append audit.log.
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some("/var/log/aim_audit_dir".to_string()),
+            ..Default::default()
+        };
+        let p = resolve_audit_path(&cfg);
+        assert!(p.ends_with("audit.log"));
+    }
+
+    #[test]
+    fn audit_verify_detects_sequence_regression() {
+        // Build a chain with a non-monotonic sequence to hit the
+        // VerifyFailureKind::Sequence branch.
+        let e1 = sample_event(5, CHAIN_HEAD_PREV_HASH);
+        // e2 has sequence == e1's sequence (not strictly greater).
+        let e2 = sample_event(5, &e1.self_hash);
+        let mut buf = String::new();
+        for ev in [&e1, &e2] {
+            buf.push_str(&serde_json::to_string(ev).unwrap());
+            buf.push('\n');
+        }
+        let report = verify_chain_from_reader(buf.as_bytes()).unwrap();
+        let failure = report.first_failure.expect("sequence regression");
+        assert!(matches!(failure.kind, VerifyFailureKind::Sequence));
+    }
+
+    #[test]
+    fn audit_verify_detects_malformed_json_line() {
+        // Single garbage line — must surface VerifyFailureKind::Parse.
+        let buf = "this is not json\n";
+        let report = verify_chain_from_reader(buf.as_bytes()).unwrap();
+        let failure = report.first_failure.expect("parse failure");
+        assert!(matches!(failure.kind, VerifyFailureKind::Parse));
+        assert!(failure.detail.contains("malformed JSON"));
+    }
+
+    #[test]
+    fn audit_verify_skips_blank_lines() {
+        // Mix blank lines into a valid chain — must verify clean.
+        let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
+        let e2 = sample_event(2, &e1.self_hash);
+        let buf = format!(
+            "\n{}\n\n{}\n\n",
+            serde_json::to_string(&e1).unwrap(),
+            serde_json::to_string(&e2).unwrap()
+        );
+        let report = verify_chain_from_reader(buf.as_bytes()).unwrap();
+        assert!(report.first_failure.is_none());
+        assert_eq!(report.total_lines, 2);
+    }
+
+    #[test]
+    fn audit_verify_report_into_result_ok() {
+        let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
+        let report = verify_chain_from_reader(
+            format!("{}\n", serde_json::to_string(&e1).unwrap()).as_bytes(),
+        )
+        .unwrap();
+        let n = report.into_result().unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn audit_verify_report_into_result_err() {
+        let report = VerifyReport {
+            total_lines: 5,
+            first_failure: Some(VerifyFailure {
+                line_number: 3,
+                kind: VerifyFailureKind::ChainBreak,
+                detail: "x".to_string(),
+            }),
+        };
+        let err = report.into_result().unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("audit chain verification failed"));
+        assert!(msg.contains("line 3"));
+    }
+
+    #[test]
+    fn audit_emit_records_request_id_and_auth() {
+        let _g = sink_lock();
+        let buf: std::sync::Arc<Mutex<Vec<u8>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        super::init_for_test(buf.clone());
+        super::emit(
+            EventBuilder::new(
+                AuditAction::Store,
+                actor("a", "explicit", None),
+                target_memory("m", "ns", None, None, None),
+            )
+            .auth(AuditAuth {
+                source_ip: Some("198.51.100.7".to_string()),
+                mtls_fp: None,
+                api_key_id_hash: None,
+            })
+            .request_id("trace-abc"),
+        );
+        let body = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(body.contains("\"request_id\":\"trace-abc\""), "got: {body}");
+        assert!(body.contains("198.51.100.7"));
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_emit_records_error_outcome() {
+        let _g = sink_lock();
+        let buf: std::sync::Arc<Mutex<Vec<u8>>> = std::sync::Arc::new(Mutex::new(Vec::new()));
+        super::init_for_test(buf.clone());
+        super::emit(
+            EventBuilder::new(
+                AuditAction::Store,
+                actor("a", "explicit", None),
+                target_memory("m", "ns", None, None, None),
+            )
+            .error("disk full"),
+        );
+        let body = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(body.contains("\"outcome\":\"error\""), "got: {body}");
+        assert!(body.contains("\"error\":\"disk full\""), "got: {body}");
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_expand_tilde_passthrough_when_no_tilde() {
+        // Pure-string helper — should leave non-tilde paths intact.
+        assert_eq!(super::expand_tilde("/abs/path"), "/abs/path");
+        assert_eq!(super::expand_tilde("rel/path"), "rel/path");
+    }
+
+    #[test]
+    fn audit_target_sweep_uses_wildcard_id() {
+        let t = super::target_sweep("ns-y");
+        assert_eq!(t.memory_id, "*");
+        assert_eq!(t.namespace, "ns-y");
+    }
+
+    #[test]
+    fn audit_target_memory_round_trips_optional_fields() {
+        let t = super::target_memory(
+            "mem-1",
+            "ns-x",
+            Some("title".to_string()),
+            Some("long".to_string()),
+            Some("team".to_string()),
+        );
+        assert_eq!(t.tier.as_deref(), Some("long"));
+        assert_eq!(t.scope.as_deref(), Some("team"));
+    }
 }

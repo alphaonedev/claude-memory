@@ -454,4 +454,376 @@ mod tests {
             target_memory("m", "ns", None, None, None),
         );
     }
+
+    // ------------------------------------------------------------------
+    // PR-9e coverage uplift (issue #487): exercise the top-level `run`
+    // dispatcher and the `run_tail` body. Pre-existing tests jumped
+    // straight to `run_verify` / `run_path`; the audit dispatcher arm
+    // for `audit tail` had no coverage at all.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn audit_run_dispatches_to_verify_arm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = AuditArgs {
+            action: AuditAction::Verify(VerifyArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                json: true,
+            }),
+            audit_dir: None,
+        };
+        let exit = run(args, &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("\"status\":\"ok\""), "got: {s}");
+    }
+
+    #[test]
+    fn audit_run_dispatches_to_tail_arm() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = AuditArgs {
+            action: AuditAction::Tail(TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 10,
+                actor: None,
+                namespace: None,
+                action: None,
+                format: "json".to_string(),
+            }),
+            audit_dir: None,
+        };
+        let exit = run(args, &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let count = s.lines().filter(|l| !l.is_empty()).count();
+        assert_eq!(count, 3, "expected 3 events from chain, got {count}: {s}");
+    }
+
+    #[test]
+    fn audit_run_dispatches_to_path_arm() {
+        let cfg = AppConfig {
+            audit: Some(AuditConfig {
+                path: Some("/var/log/ai-memory/from-run.log".to_string()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = AuditArgs {
+            action: AuditAction::Path,
+            audit_dir: None,
+        };
+        let exit = run(args, &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("from-run.log"), "got: {s}");
+    }
+
+    #[test]
+    fn audit_tail_subcmd_returns_last_n_events_in_text_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 2,
+                actor: None,
+                namespace: None,
+                action: None,
+                format: "text".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        // Text format includes "seq=" prefix per line.
+        assert!(s.contains("seq="), "expected text format: {s}");
+        let count = s.lines().filter(|l| !l.is_empty()).count();
+        assert_eq!(count, 2, "lines arg must cap output at 2: {s}");
+    }
+
+    #[test]
+    fn audit_tail_subcmd_emits_json_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 50,
+                actor: None,
+                namespace: None,
+                action: None,
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        // First line must parse as JSON.
+        let first = s.lines().next().expect("at least one line");
+        let v: serde_json::Value = serde_json::from_str(first).expect("json");
+        assert_eq!(v["schema_version"], 1);
+        assert!(v.get("self_hash").is_some());
+    }
+
+    #[test]
+    fn audit_tail_subcmd_filters_by_actor() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 50,
+                // Filter that does not match (write_chained_log uses
+                // "ai:test@host:pid-1") — every event must be dropped.
+                actor: Some("nope-not-in-log".to_string()),
+                namespace: None,
+                action: None,
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.is_empty(), "actor filter must drop all events: {s}");
+    }
+
+    #[test]
+    fn audit_tail_subcmd_filters_by_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 50,
+                actor: None,
+                // Mismatched namespace — events use "ns-x" exactly.
+                namespace: Some("not-ns-x".to_string()),
+                action: None,
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        assert!(stdout.is_empty(), "namespace filter must drop everything");
+    }
+
+    #[test]
+    fn audit_tail_subcmd_filters_by_action_string() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        // The chained log uses Store actions. Filter on "delete" — drop them.
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 50,
+                actor: None,
+                namespace: None,
+                action: Some("delete".to_string()),
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        assert!(
+            stdout.is_empty(),
+            "action=delete must drop all store events"
+        );
+    }
+
+    #[test]
+    fn audit_tail_subcmd_returns_zero_when_log_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(
+                    tmp.path()
+                        .join("does-not-exist.log")
+                        .to_string_lossy()
+                        .into_owned(),
+                ),
+                lines: 50,
+                actor: None,
+                namespace: None,
+                action: None,
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        assert!(stdout.is_empty());
+    }
+
+    #[test]
+    fn audit_tail_subcmd_skips_malformed_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        // Append a malformed line; tail must skip it (continue) and
+        // still emit the valid 3 events.
+        let mut body = fs::read_to_string(&p).unwrap();
+        body.push_str("not-valid-json\n\n");
+        fs::write(&p, body).unwrap();
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_tail(
+            &TailArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                lines: 50,
+                actor: None,
+                namespace: None,
+                action: None,
+                format: "json".to_string(),
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let count = s.lines().filter(|l| !l.is_empty()).count();
+        assert_eq!(
+            count, 3,
+            "must skip malformed line and keep the 3 good events"
+        );
+    }
+
+    #[test]
+    fn audit_verify_subcmd_missing_log_emits_json_when_flag_set() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_verify(
+            &VerifyArgs {
+                path: Some(tmp.path().join("nope.log").to_string_lossy().into_owned()),
+                // JSON-format the missing-log response: exercises the
+                // `args.json` branch of the missing-log early return.
+                json: true,
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["status"], "ok");
+        assert_eq!(v["total_lines"], 0);
+        assert!(v["note"].as_str().unwrap().contains("does not exist"));
+    }
+
+    #[test]
+    fn audit_verify_subcmd_text_failure_writes_to_stderr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        // Tamper to force a verify failure.
+        let mut body = fs::read_to_string(&p).unwrap();
+        body = body.replacen("\"sequence\":2", "\"sequence\":99", 1);
+        fs::write(&p, body).unwrap();
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_verify(
+            &VerifyArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                // text path: writes failure to stderr instead of stdout
+                json: false,
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 2);
+        let serr = std::str::from_utf8(&stderr).unwrap();
+        assert!(
+            serr.contains("audit verify FAIL"),
+            "expected text-format failure on stderr: {serr}"
+        );
+    }
+
+    #[test]
+    fn audit_verify_subcmd_text_success_writes_to_stdout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_chained_log(tmp.path());
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_verify(
+            &VerifyArgs {
+                path: Some(p.to_string_lossy().into_owned()),
+                // text-format success path
+                json: false,
+            },
+            None,
+            &cfg,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("audit verify OK"), "got: {s}");
+        assert!(s.contains("3 line(s) verified"));
+    }
 }

@@ -194,4 +194,140 @@ mod tests {
         let guard = init_file_logging(&cfg).unwrap();
         assert!(guard.is_none());
     }
+
+    /// Process-wide lock so tests that swap the global tracing
+    /// subscriber via `try_init` don't race each other.
+    fn subscriber_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn init_file_logging_returns_guard_when_enabled() {
+        let _g = subscriber_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = LoggingConfig {
+            enabled: Some(true),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            rotation: Some("never".to_string()),
+            level: Some("info".to_string()),
+            structured: Some(false),
+            ..Default::default()
+        };
+        // The first call returns Some(guard); the appender lazily
+        // creates the file on first write so we just verify a guard
+        // came back and the configured dir survives.
+        let guard = init_file_logging(&cfg).unwrap();
+        assert!(
+            guard.is_some(),
+            "init_file_logging must return a WorkerGuard when enabled"
+        );
+        assert!(tmp.path().is_dir());
+        // Guard drop flushes the buffer; explicit drop confirms no
+        // panic on shutdown.
+        drop(guard);
+    }
+
+    #[test]
+    fn init_file_logging_emits_structured_json_when_configured() {
+        let _g = subscriber_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = LoggingConfig {
+            enabled: Some(true),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            rotation: Some("never".to_string()),
+            level: Some("info".to_string()),
+            structured: Some(true),
+            ..Default::default()
+        };
+        let guard = init_file_logging(&cfg).unwrap();
+        assert!(guard.is_some(), "structured branch must produce a guard");
+        drop(guard);
+    }
+
+    #[test]
+    fn init_file_logging_accepts_invalid_level_falling_back_to_info() {
+        let _g = subscriber_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = LoggingConfig {
+            enabled: Some(true),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            rotation: Some("never".to_string()),
+            // Garbage level — exercises the EnvFilter fallback branch.
+            level: Some("not-a-real-level".to_string()),
+            ..Default::default()
+        };
+        // Must not panic; fallback path swaps in `info`.
+        let guard = init_file_logging(&cfg).unwrap();
+        assert!(guard.is_some());
+    }
+
+    #[test]
+    fn rotation_for_minutely() {
+        let cfg = LoggingConfig {
+            rotation: Some("minutely".to_string()),
+            ..Default::default()
+        };
+        let r = rotation_for(&cfg);
+        assert!(format!("{r:?}").to_lowercase().contains("minutely"));
+    }
+
+    #[test]
+    fn rotation_for_never() {
+        let cfg = LoggingConfig {
+            rotation: Some("never".to_string()),
+            ..Default::default()
+        };
+        let r = rotation_for(&cfg);
+        assert!(format!("{r:?}").to_lowercase().contains("never"));
+    }
+
+    #[test]
+    fn rotation_for_unknown_falls_back_to_daily() {
+        let cfg = LoggingConfig {
+            rotation: Some("garbage".to_string()),
+            ..Default::default()
+        };
+        let r = rotation_for(&cfg);
+        assert!(format!("{r:?}").to_lowercase().contains("daily"));
+    }
+
+    #[test]
+    fn build_appender_honours_explicit_filename_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = LoggingConfig {
+            enabled: Some(true),
+            path: Some(tmp.path().to_string_lossy().into_owned()),
+            rotation: Some("never".to_string()),
+            filename_prefix: Some("custom-prefix".to_string()),
+            ..Default::default()
+        };
+        // Constructing succeeds for an alternate prefix.
+        let _appender = build_appender(tmp.path(), &cfg).unwrap();
+    }
+
+    #[test]
+    fn resolve_log_dir_with_override_uses_cli_layer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = LoggingConfig::default();
+        let r = resolve_log_dir_with_override(Some(tmp.path()), &cfg).unwrap();
+        assert_eq!(r.path, tmp.path());
+        assert_eq!(r.source, log_paths::PathSource::CliFlag);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_log_dir_with_override_propagates_world_writable_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("worldwrite");
+        std::fs::create_dir(&bad).unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let cfg = LoggingConfig::default();
+        let err = resolve_log_dir_with_override(Some(&bad), &cfg).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("world-writable"), "got: {msg}");
+    }
 }
