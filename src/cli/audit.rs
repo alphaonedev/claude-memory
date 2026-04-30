@@ -20,7 +20,9 @@ use std::path::Path;
 use anyhow::Result;
 use clap::{Args, Subcommand};
 
-use crate::audit::{AuditEvent, resolve_audit_path, verify_chain};
+use crate::audit::{
+    AuditEvent, resolve_audit_path, resolve_audit_path_with_override, verify_chain,
+};
 use crate::cli::CliOutput;
 use crate::config::AppConfig;
 
@@ -28,6 +30,12 @@ use crate::config::AppConfig;
 pub struct AuditArgs {
     #[command(subcommand)]
     pub action: AuditAction,
+    /// Override the audit log directory. Highest-priority layer in the
+    /// resolution ladder (CLI > `AI_MEMORY_AUDIT_DIR` > `[audit] path`
+    /// in config.toml > platform default). Refuses world-writable
+    /// directories — see `docs/security/audit-trail.md`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub audit_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -76,23 +84,43 @@ pub struct TailArgs {
 /// code so the caller can surface a non-zero status from the top-level
 /// dispatch without panicking.
 pub fn run(args: AuditArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<i32> {
+    let audit_dir = args.audit_dir.clone();
     match args.action {
-        AuditAction::Verify(v) => run_verify(&v, app_config, out),
-        AuditAction::Tail(t) => run_tail(&t, app_config, out),
-        AuditAction::Path => run_path(app_config, out),
+        AuditAction::Verify(v) => run_verify(&v, audit_dir.as_deref(), app_config, out),
+        AuditAction::Tail(t) => run_tail(&t, audit_dir.as_deref(), app_config, out),
+        AuditAction::Path => run_path(audit_dir.as_deref(), app_config, out),
     }
 }
 
-fn resolve_path(app_config: &AppConfig, override_path: Option<&str>) -> std::path::PathBuf {
-    if let Some(p) = override_path {
+/// Resolve the audit log path honouring (in order): explicit per-subcommand
+/// `--path` (legacy `VerifyArgs.path` / `TailArgs.path`), the global
+/// `--audit-dir` flag, `AI_MEMORY_AUDIT_DIR`, `[audit] path` in
+/// config.toml, and the platform default. Falls back to the loose
+/// `resolve_audit_path` if any layer above produces an error so the
+/// `audit path` subcommand can still print a useful answer when
+/// `--audit-dir` is mistyped.
+fn resolve_path(
+    app_config: &AppConfig,
+    cli_audit_dir: Option<&std::path::Path>,
+    explicit_per_cmd: Option<&str>,
+) -> std::path::PathBuf {
+    if let Some(p) = explicit_per_cmd {
         return std::path::PathBuf::from(crate::audit::expand_tilde(p));
     }
     let cfg = app_config.effective_audit();
+    if let Ok((p, _src)) = resolve_audit_path_with_override(cli_audit_dir, &cfg) {
+        return p;
+    }
     resolve_audit_path(&cfg)
 }
 
-fn run_verify(args: &VerifyArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<i32> {
-    let path = resolve_path(app_config, args.path.as_deref());
+fn run_verify(
+    args: &VerifyArgs,
+    cli_audit_dir: Option<&std::path::Path>,
+    app_config: &AppConfig,
+    out: &mut CliOutput<'_>,
+) -> Result<i32> {
+    let path = resolve_path(app_config, cli_audit_dir, args.path.as_deref());
     if !path.exists() {
         if args.json {
             writeln!(
@@ -161,8 +189,13 @@ fn run_verify(args: &VerifyArgs, app_config: &AppConfig, out: &mut CliOutput<'_>
     Ok(0)
 }
 
-fn run_tail(args: &TailArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<i32> {
-    let path = resolve_path(app_config, args.path.as_deref());
+fn run_tail(
+    args: &TailArgs,
+    cli_audit_dir: Option<&std::path::Path>,
+    app_config: &AppConfig,
+    out: &mut CliOutput<'_>,
+) -> Result<i32> {
+    let path = resolve_path(app_config, cli_audit_dir, args.path.as_deref());
     if !path.exists() {
         return Ok(0);
     }
@@ -218,8 +251,12 @@ fn run_tail(args: &TailArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) ->
     Ok(0)
 }
 
-fn run_path(app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<i32> {
-    let p = resolve_path(app_config, None);
+fn run_path(
+    cli_audit_dir: Option<&std::path::Path>,
+    app_config: &AppConfig,
+    out: &mut CliOutput<'_>,
+) -> Result<i32> {
+    let p = resolve_path(app_config, cli_audit_dir, None);
     writeln!(out.stdout, "{}", p.display())?;
     Ok(0)
 }
@@ -312,6 +349,7 @@ mod tests {
                 path: Some(p.to_string_lossy().into_owned()),
                 json: true,
             },
+            None,
             &cfg,
             &mut out,
         )
@@ -340,6 +378,7 @@ mod tests {
                 path: Some(p.to_string_lossy().into_owned()),
                 json: true,
             },
+            None,
             &cfg,
             &mut out,
         )
@@ -362,6 +401,7 @@ mod tests {
                 path: Some(tmp.path().join("nope.log").to_string_lossy().into_owned()),
                 json: false,
             },
+            None,
             &cfg,
             &mut out,
         )
@@ -383,9 +423,25 @@ mod tests {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
-        run_path(&cfg, &mut out).unwrap();
+        run_path(None, &cfg, &mut out).unwrap();
         let s = std::str::from_utf8(&stdout).unwrap();
         assert!(s.contains("/var/log/ai-memory/custom.log"));
+    }
+
+    #[test]
+    fn audit_path_subcmd_honours_audit_dir_flag() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = AppConfig::default();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        run_path(Some(tmp.path()), &cfg, &mut out).unwrap();
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(
+            s.contains(tmp.path().to_string_lossy().as_ref()),
+            "expected audit-dir override to surface in `audit path` output: {s}"
+        );
+        assert!(s.contains("audit.log"));
     }
 
     // Compile-time guardrail — make sure EventBuilder is visible from

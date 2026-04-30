@@ -32,8 +32,8 @@ use anyhow::{Context, Result};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
-use crate::audit::expand_tilde;
 use crate::config::LoggingConfig;
+use crate::log_paths;
 
 /// Default file prefix written by the rolling appender. Concrete
 /// rotated filenames look like `ai-memory.log.2026-04-30`.
@@ -52,7 +52,8 @@ pub fn init_file_logging(cfg: &LoggingConfig) -> Result<Option<WorkerGuard>> {
         return Ok(None);
     }
     let dir = resolve_log_dir(cfg);
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
+    log_paths::ensure_dir_secure(&dir)
+        .with_context(|| format!("creating log dir {}", dir.display()))?;
     let appender = build_appender(&dir, cfg)?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
     // Capture the writer in the static slot so the daemon's tracing
@@ -81,14 +82,33 @@ pub fn init_file_logging(cfg: &LoggingConfig) -> Result<Option<WorkerGuard>> {
     Ok(Some(guard))
 }
 
-/// Resolve the configured directory, expanding `~/`.
+/// Resolve the configured log directory honouring the user-mandated
+/// precedence ladder: CLI > env (`AI_MEMORY_LOG_DIR`) > `[logging]
+/// path` in config > platform default. The `cfg`-only entry point is
+/// kept for callers that don't have a CLI override; subcommand wiring
+/// uses [`resolve_log_dir_with_override`] directly.
+///
+/// Falls back to a best-effort default if the security guard rejects
+/// the configured path — the `init_file_logging` path will then re-run
+/// the strict resolver and surface the error to the operator.
 #[must_use]
 pub fn resolve_log_dir(cfg: &LoggingConfig) -> PathBuf {
-    let raw = cfg
-        .path
-        .clone()
-        .unwrap_or_else(|| "~/.local/state/ai-memory/logs/".to_string());
-    PathBuf::from(expand_tilde(&raw))
+    log_paths::resolve_log_dir(None, cfg.path.as_deref())
+        .map(|r| r.path)
+        .unwrap_or_else(|_| log_paths::platform_default(log_paths::DirKind::Log).path)
+}
+
+/// Strict version: returns the [`log_paths::ResolvedDir`] so callers
+/// can surface the resolution layer in error messages, and propagates
+/// the world-writable-refusal error.
+///
+/// # Errors
+/// - Resolved path is world-writable.
+pub fn resolve_log_dir_with_override(
+    cli_override: Option<&Path>,
+    cfg: &LoggingConfig,
+) -> Result<log_paths::ResolvedDir> {
+    log_paths::resolve_log_dir(cli_override, cfg.path.as_deref())
 }
 
 /// Build the rolling file appender with the rotation policy from

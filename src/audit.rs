@@ -747,16 +747,50 @@ pub fn init_from_config(cfg: &crate::config::AuditConfig) -> Result<()> {
     )
 }
 
-/// Resolve the audit log file path from the config. Expands `~/` and
-/// appends `audit.log` when the configured path is a directory.
+/// Resolve the audit log file path from the config, honouring the
+/// user-mandated precedence ladder: CLI > env (`AI_MEMORY_AUDIT_DIR`)
+/// > `[audit] path` in config > platform default. Appends `audit.log`
+/// when the resolved path looks like a directory.
+///
+/// Backwards-compatible wrapper that doesn't take a CLI override —
+/// subcommand wiring uses [`resolve_audit_path_with_override`].
 #[must_use]
 pub fn resolve_audit_path(cfg: &crate::config::AuditConfig) -> PathBuf {
-    let raw = cfg
-        .path
-        .clone()
-        .unwrap_or_else(|| "~/.local/state/ai-memory/audit/".to_string());
-    let expanded = expand_tilde(&raw);
-    let p = PathBuf::from(expanded);
+    let resolved = crate::log_paths::resolve_audit_dir(None, cfg.path.as_deref())
+        .map(|r| r.path)
+        .unwrap_or_else(|_| {
+            crate::log_paths::platform_default(crate::log_paths::DirKind::Audit).path
+        });
+    finalize_audit_file(resolved, cfg.path.as_deref())
+}
+
+/// Strict variant: takes an optional `--audit-dir` override, returns
+/// the resolved file path (with `audit.log` appended when the input
+/// resolves to a directory) plus the [`crate::log_paths::PathSource`]
+/// used.
+///
+/// # Errors
+/// - Resolved directory is world-writable.
+pub fn resolve_audit_path_with_override(
+    cli_override: Option<&Path>,
+    cfg: &crate::config::AuditConfig,
+) -> Result<(PathBuf, crate::log_paths::PathSource)> {
+    let r = crate::log_paths::resolve_audit_dir(cli_override, cfg.path.as_deref())?;
+    let final_path = finalize_audit_file(r.path, cfg.path.as_deref());
+    Ok((final_path, r.source))
+}
+
+/// Append `audit.log` when the resolved path is a directory; respect
+/// an explicit file-path the user wrote in config.
+fn finalize_audit_file(p: PathBuf, raw_config: Option<&str>) -> PathBuf {
+    // If the user configured an explicit file path (has a non-empty
+    // extension that isn't a trailing slash), keep it as-is.
+    if let Some(raw) = raw_config
+        && !raw.ends_with('/')
+        && std::path::Path::new(raw).extension().is_some()
+    {
+        return p;
+    }
     if p.extension().is_none() || p.to_string_lossy().ends_with('/') {
         p.join("audit.log")
     } else {

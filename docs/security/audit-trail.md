@@ -112,6 +112,139 @@ depth**. The hash chain is the load-bearing tamper-evidence.
 
 ---
 
+## Log directory resolution
+
+End users can set the operational-log directory **and** the audit-log
+directory at every layer of the configuration stack. This is a
+**user-mandated** addendum to PR-5 — operators always retain control
+over where logs land regardless of how `ai-memory` was installed or
+launched.
+
+### Precedence (highest wins)
+
+| Priority | Layer | Operational logs | Audit log |
+|---:|---|---|---|
+| 1 | **CLI flag** | `ai-memory logs --log-dir <PATH> …` | `ai-memory audit --audit-dir <PATH> …` |
+| 2 | **Environment variable** | `AI_MEMORY_LOG_DIR` | `AI_MEMORY_AUDIT_DIR` |
+| 3 | **`config.toml`** | `[logging] path = "…"` | `[audit] path = "…"` |
+| 4 | **Platform default** | per-OS table below | per-OS table below |
+
+The resolver also recognises an `INVOCATION_ID` environment variable
+(set by `systemd` for unit-managed processes). When present *and*
+`/var/log/ai-memory/` is writable, the platform-default branch picks
+`/var/log/ai-memory/` instead of the per-user XDG path. This lets a
+`systemd` service with `LogsDirectory=ai-memory` write logs to the
+canonical system path without any extra configuration.
+
+`AI_MEMORY_LOG_DIR` and `AI_MEMORY_AUDIT_DIR` are read with
+`std::env::var_os`, so non-UTF-8 paths on Windows pass through to
+`PathBuf` unchanged.
+
+### Platform defaults
+
+| OS | Operational logs | Audit log |
+|---|---|---|
+| **Linux** (and BSD / illumos / other Unix) | `${XDG_STATE_HOME:-$HOME/.local/state}/ai-memory/logs/` | `${XDG_STATE_HOME:-$HOME/.local/state}/ai-memory/audit/` |
+| **macOS** | `~/Library/Logs/ai-memory/` | `~/Library/Logs/ai-memory/audit/` |
+| **Windows** | `%LOCALAPPDATA%\ai-memory\logs\` | `%LOCALAPPDATA%\ai-memory\audit\` |
+| **systemd-managed daemon** (any OS, `INVOCATION_ID` set, `/var/log/ai-memory/` writable) | `/var/log/ai-memory/logs/` | `/var/log/ai-memory/audit/` |
+
+### Worked examples
+
+**Laptop dev (no config — accept the default).**
+
+```bash
+$ ai-memory audit path
+/Users/alice/Library/Logs/ai-memory/audit/audit.log
+
+$ ai-memory logs tail --lines 5
+# tails ~/Library/Logs/ai-memory/ai-memory.log.YYYY-MM-DD
+```
+
+**Docker container with a host-mounted log volume.** Mount the host
+directory into a stable container path, then point `ai-memory` at it
+with `AI_MEMORY_LOG_DIR` so the env-injected path wins over any
+baked-in `config.toml`:
+
+```bash
+docker run -d \
+  -v /var/log/ai-memory-host:/var/log/ai-memory \
+  -e AI_MEMORY_LOG_DIR=/var/log/ai-memory/logs \
+  -e AI_MEMORY_AUDIT_DIR=/var/log/ai-memory/audit \
+  ghcr.io/alphaonedev/ai-memory:0.6.3
+```
+
+**Kubernetes pod with `emptyDir` volume.** Project the volume into
+`/var/log/ai-memory/` and point both env vars at the matching
+subdirectories. Use a sidecar log shipper (Promtail, Filebeat,
+Fluentbit) to forward both streams off-pod before termination.
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: ai-memory
+spec:
+  containers:
+    - name: ai-memory
+      image: ghcr.io/alphaonedev/ai-memory:0.6.3
+      env:
+        - name: AI_MEMORY_LOG_DIR
+          value: /var/log/ai-memory/logs
+        - name: AI_MEMORY_AUDIT_DIR
+          value: /var/log/ai-memory/audit
+      volumeMounts:
+        - name: ai-memory-logs
+          mountPath: /var/log/ai-memory
+  volumes:
+    - name: ai-memory-logs
+      emptyDir: {}
+```
+
+**systemd unit with `LogsDirectory=`.** systemd creates and chowns the
+directory to the unit's `User=`; `ai-memory` auto-detects via
+`INVOCATION_ID` and lands logs in `/var/log/ai-memory/`:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/ai-memory serve
+User=ai-memory
+LogsDirectory=ai-memory
+LogsDirectoryMode=0700
+```
+
+No env vars or `config.toml` paths required — the platform-default
+branch picks `/var/log/ai-memory/` because `INVOCATION_ID` is set and
+the directory is writable.
+
+**Override at the CLI for a one-off run** (debugging, audit forensics):
+
+```bash
+ai-memory audit --audit-dir /tmp/ai-memory-forensics verify
+ai-memory logs --log-dir /tmp/ai-memory-debug tail --follow
+```
+
+### Security guard: no world-writable directories
+
+The resolver **refuses** to write to a directory whose Unix permissions
+include the world-writable bit (`mode & 0o002 != 0`). World-writable
+log destinations are a pivot target — any local user could append
+forged events, truncate the chain, or replace files atomically. The
+error message names the resolution layer that landed there so the
+operator can fix the right config:
+
+```
+Error: log directory /tmp/foo is world-writable (mode 0777); refusing
+for security. Resolved via: CLI flag (--log-dir / --audit-dir).
+Pick a non-world-writable directory and re-run.
+```
+
+When `ai-memory` creates the directory itself, it applies mode `0700`
+on Unix. On Windows the default ACL (Authenticated Users only) is
+sufficient.
+
+---
+
 ## Operator CLI
 
 ### `ai-memory audit verify`
@@ -147,11 +280,19 @@ ai-memory audit tail --actor 'ai:claude-code@laptop'
 ### `ai-memory audit path`
 
 Prints the resolved audit log path. Convenient for SIEM ingestion
-configuration scripts.
+configuration scripts. Honours the same `--audit-dir <PATH>` override
+as every other `ai-memory audit` subcommand, so you can point at an
+ad-hoc location for one-off inspection:
+
+```bash
+ai-memory audit --audit-dir /var/lib/forensics/2026-04-30 path
+```
 
 ### `ai-memory logs tail [--follow]`
 
-Tail and (optionally) stream operational logs.
+Tail and (optionally) stream operational logs. Accepts the global
+`--log-dir <PATH>` override. See the **Log directory resolution**
+section above for the full precedence ladder.
 
 ### `ai-memory logs archive`
 

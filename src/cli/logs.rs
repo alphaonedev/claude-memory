@@ -21,7 +21,8 @@ use clap::{Args, Subcommand};
 
 use crate::cli::CliOutput;
 use crate::config::{AppConfig, LoggingConfig};
-use crate::logging::resolve_log_dir;
+use crate::log_paths;
+use crate::logging::resolve_log_dir_with_override;
 
 #[derive(Args)]
 pub struct LogsArgs {
@@ -51,6 +52,12 @@ pub struct LogsArgs {
     /// line per JSON object).
     #[arg(long, global = true, default_value = "text")]
     pub format: String,
+    /// Override the operational log directory. Highest-priority layer
+    /// in the resolution ladder (CLI > `AI_MEMORY_LOG_DIR` > `[logging]
+    /// path` in config.toml > platform default). Refuses world-writable
+    /// directories — see `docs/security/audit-trail.md`.
+    #[arg(long, global = true, value_name = "PATH")]
+    pub log_dir: Option<PathBuf>,
 }
 
 #[derive(Subcommand)]
@@ -105,7 +112,10 @@ pub struct PurgeArgs {
 /// `ai-memory logs` entry point.
 pub fn run(args: LogsArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<()> {
     let logging_cfg = app_config.effective_logging();
-    let dir = resolve_log_dir(&logging_cfg);
+    let resolved = resolve_log_dir_with_override(args.log_dir.as_deref(), &logging_cfg)
+        .with_context(|| "resolving operational log directory")?;
+    let dir = resolved.path.clone();
+    let _source: log_paths::PathSource = resolved.source;
     let filters = args_filters(&args);
     match args.action {
         LogsAction::Tail(t) => run_tail(&dir, &filters, &t, out),

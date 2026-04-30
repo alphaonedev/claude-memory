@@ -28,6 +28,7 @@ pub mod handlers;
 pub mod hnsw;
 pub mod identity;
 pub mod llm;
+pub mod log_paths;
 pub mod logging;
 pub mod mcp;
 pub mod metrics;
