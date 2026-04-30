@@ -89,6 +89,14 @@ prometheus = { version = "0.13", default-features = false }
 # R1 ("budget_tokens recall — Letta has it, we don't, we need it").
 tiktoken-rs = "0.7"
 
+# Issue #487 PR-6 — `ai-memory wrap` uses `tempfile::NamedTempFile`
+# for the cross-platform `MessageFile` strategy (write the system
+# message to a tempfile, hand the path to the wrapped agent CLI, and
+# guarantee cleanup on parent exit). Pure-Rust, used by the production
+# wrap subcommand so it's promoted from dev-dependencies into the main
+# dep table. Same version pin as the existing dev-dep below.
+tempfile = "3"
+
 # v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
 # feature so default builds don't pull them. `async-trait` is the
 # standard bridge for async methods on traits until stable Rust native
@@ -126,6 +134,14 @@ sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
 # (BERT cross-encoder, MiniLM, etc.). Off by default so CI doesn't download
 # 80MB+ on every run.
 test-with-models = []
+# Issue #487 PR-3 — gated live-agent smoke tests. Off by default; enabled
+# explicitly by the local runner script (`scripts/run-session-boot-
+# lifetime-tests.sh`) when `E2E_AGENT_TESTS=1` AND the host has a `claude`
+# binary on PATH plus a real `ANTHROPIC_API_KEY`. The contract + lifecycle
+# tests under `tests/boot_*` and `tests/recipe_contract.rs` stay
+# unconditional and load-bearing; this feature is for the optional
+# end-to-end "did Claude actually see the seeded memory?" smoke.
+e2e = []
 
 [dev-dependencies]
 proptest = "1"

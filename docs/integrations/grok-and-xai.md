@@ -6,6 +6,23 @@ xAI's Grok models are accessible via the xAI API (raw HTTP / OpenAI-compat
 SDK), via Cursor (where Grok is one of several model choices), and via the
 xAI consumer apps. The integration depends on the surface.
 
+## Or for the simple wrapper case — `ai-memory wrap`
+
+If your integration is just "spawn a Grok CLI", PR-6 of issue #487
+ships a built-in cross-platform Rust subcommand:
+
+```bash
+ai-memory wrap grok-cli -- chat --model grok-2-latest
+```
+
+`ai-memory wrap` runs `ai-memory boot` in-process, builds a system
+message, and spawns the named CLI with the system message delivered
+via the appropriate strategy. Pure Rust — same binary works on macOS
+/ Linux / Windows / Docker / Kubernetes with no shell wrapper.
+
+For SDK code (the pattern below) `wrap` doesn't apply — that's for
+the launcher case.
+
 ## Via the xAI API (programmatic — recommended)
 
 The xAI API is OpenAI-compatible. Use the `openai-apps-sdk.md` recipe

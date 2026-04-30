@@ -3,6 +3,25 @@
 **Category 1 (hook-capable). 100% reliable.** This is the load-bearing
 remediation for issue [#487](https://github.com/alphaonedev/ai-memory-mcp/issues/487).
 
+## Quick install
+
+```bash
+# Preview the change (dry-run is the default — writes nothing):
+ai-memory install claude-code
+
+# Commit the change:
+ai-memory install claude-code --apply
+
+# Remove later:
+ai-memory install claude-code --uninstall --apply
+```
+
+The installer writes the SessionStart hook block into `~/.claude/settings.json`
+inside a clearly-marked managed block, backs up the original to
+`<config>.bak.<timestamp>` first, and is idempotent — re-running `--apply`
+with no upstream changes is a no-op. Pass `--config <path>` to target a
+non-default settings file (project-scoped or test fixture).
+
 ## What it does
 
 Claude Code supports a `SessionStart` hook in `~/.claude/settings.json` (or
@@ -89,8 +108,9 @@ brand-new install before first `ai-memory store`.
 If you see **no manifest at all** in your session log, the hook never
 fired. Run the diagnostic from the same shell Claude Code launched from:
 
-```bash
+```text
 ai-memory boot --limit 1
+
 # Should emit the manifest with one of the four status words above.
 # If it errors instead, the binary or DB is misconfigured.
 # If it works but Claude Code never sees a manifest, the SessionStart
@@ -129,16 +149,17 @@ project-level hooks only when you need a non-default namespace.
 
 Cold-start test (the issue #487 acceptance criterion):
 
-```bash
-# 1. Quit Claude Code entirely
+```text
+# 1. Quit Claude Code entirely.
 # 2. From a fresh shell, anywhere on the filesystem:
 cd /tmp
 claude
+
 # 3. First message:
 #    > what do you remember?
-# 4. Expected: Claude responds with recalled titles, namespaces, ages — no
-#    "I don't have context to continue this", no need to type "access your
-#    memories".
+# 4. Expected: Claude responds with recalled titles, namespaces, ages,
+#    no "I do not have context to continue this", no need to type
+#    "access your memories".
 ```
 
 If the cold-start fails, check:

@@ -7,6 +7,17 @@ Protocol, and supports project-scoped behavior via `.cursorrules` at the
 repo root. There is no documented SessionStart hook today, so the recipe
 is two-part.
 
+## Quick install
+
+```bash
+ai-memory install cursor              # dry-run (default)
+ai-memory install cursor --apply      # write ~/.cursor/mcp.json
+ai-memory install cursor --uninstall --apply
+```
+
+This handles **Part 1** (MCP-server registration) automatically. Part 2
+(`.cursorrules` directive) is project-scoped and still manual — see below.
+
 ## Part 1 — register the MCP server
 
 Cursor's MCP config (Settings → Features → MCP, or `~/.cursor/mcp.json`):

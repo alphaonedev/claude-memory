@@ -2,6 +2,17 @@
 
 **Category 2.** Continue supports MCP via `~/.continue/config.json`.
 
+## Quick install
+
+```bash
+ai-memory install continue              # dry-run (default)
+ai-memory install continue --apply      # write ~/.continue/config.json
+ai-memory install continue --uninstall --apply
+```
+
+Handles **Part 1** (MCP server registration). Part 2 (`systemMessage`)
+is best-effort and still manual.
+
 ## Part 1 — MCP server
 
 In `~/.continue/config.json`:
