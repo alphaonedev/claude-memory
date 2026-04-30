@@ -179,6 +179,23 @@ pub fn run(
     let contradictions =
         db::find_contradictions(&conn, &mem.title, &mem.namespace).unwrap_or_default();
     let actual_id = db::insert(&conn, &mem)?;
+
+    // PR-5 (issue #487): security audit trail. No-op when disabled.
+    crate::audit::emit(crate::audit::EventBuilder::new(
+        crate::audit::AuditAction::Store,
+        crate::audit::actor(
+            agent_id.clone(),
+            cli_agent_id.map_or("default_fallback", |_| "explicit"),
+            args.scope.clone(),
+        ),
+        crate::audit::target_memory(
+            actual_id.clone(),
+            mem.namespace.clone(),
+            Some(mem.title.clone()),
+            Some(mem.tier.to_string()),
+            args.scope.clone(),
+        ),
+    ));
     let filtered: Vec<&String> = contradictions
         .iter()
         .filter(|c| c.id != mem.id && c.id != actual_id)

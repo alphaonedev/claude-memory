@@ -963,6 +963,171 @@ pub struct AppConfig {
     /// behind an Ollama round-trip. `AI_MEMORY_AUTONOMOUS_HOOKS=1`
     /// env var overrides the config file.
     pub autonomous_hooks: Option<bool>,
+    /// v0.6.3.1 (PR-5 / issue #487) — operational logging facility.
+    /// Default-OFF for privacy; opt-in turns on the rolling file
+    /// appender that captures every `tracing::*` call site to disk.
+    pub logging: Option<LoggingConfig>,
+    /// v0.6.3.1 (PR-5 / issue #487) — security audit trail. Default-OFF
+    /// for privacy; opt-in emits a hash-chained, tamper-evident JSON
+    /// log of every memory mutation suitable for SIEM ingestion and
+    /// SOC2 / HIPAA / GDPR / FedRAMP compliance evidence.
+    pub audit: Option<AuditConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Logging facility (PR-5)
+// ---------------------------------------------------------------------------
+
+/// `[logging]` block in `config.toml`. Every field is `Option`; missing
+/// fields fall back to the documented defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Master toggle. Default `false`.
+    pub enabled: Option<bool>,
+    /// Directory for rotated logs. Default `~/.local/state/ai-memory/logs/`.
+    pub path: Option<String>,
+    /// Soft cap on a single rotated file (advisory — informs rotation
+    /// configuration; the appender enforces this via the chosen
+    /// `rotation` cadence). Default 100.
+    pub max_size_mb: Option<u64>,
+    /// Maximum number of rotated files retained on disk. Default 30.
+    pub max_files: Option<usize>,
+    /// Days of log history to keep before `ai-memory logs archive`
+    /// would compress them. Default 90.
+    pub retention_days: Option<u32>,
+    /// Emit JSON lines instead of the human-readable fmt layer. Default `false`.
+    pub structured: Option<bool>,
+    /// Tracing level / `EnvFilter` directive. Default `"info"`.
+    pub level: Option<String>,
+    /// Rotation policy: `minutely | hourly | daily | never`. Default `"daily"`.
+    pub rotation: Option<String>,
+    /// Override the rotated-file prefix. Default `"ai-memory.log"`.
+    pub filename_prefix: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Audit facility (PR-5)
+// ---------------------------------------------------------------------------
+
+/// `[audit]` block in `config.toml`. Drives the hash-chained audit
+/// trail emitted from every memory mutation call site.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Master toggle. Default `false`.
+    pub enabled: Option<bool>,
+    /// Audit log path. Either a directory (in which case `audit.log`
+    /// is appended) or an explicit file path. Default
+    /// `~/.local/state/ai-memory/audit/`.
+    pub path: Option<String>,
+    /// Documented schema version on the wire. The binary always emits
+    /// `audit::SCHEMA_VERSION`; this knob is reserved for forward
+    /// compatibility and must equal the binary's emitted version
+    /// today (validated at init).
+    pub schema_version: Option<u32>,
+    /// Whether to redact `memory.content` from emitted events. **The
+    /// only supported value in v1 is `true`** — the audit schema does
+    /// not expose a content field at all; this flag is reserved for a
+    /// future per-namespace exception API.
+    pub redact_content: Option<bool>,
+    /// Whether to compute and verify the per-line hash chain. Default `true`.
+    pub hash_chain: Option<bool>,
+    /// Cadence in minutes for the periodic `CHECKPOINT.sig`
+    /// attestation marker. The marker is a synthetic audit event that
+    /// pins the chain head into the log so an attacker who truncates
+    /// the file can't silently rewind history. Default 60. 0 disables.
+    pub attestation_cadence_minutes: Option<u32>,
+    /// Apply the platform-appropriate "append-only" file flag at
+    /// startup. Best-effort defense in depth; the chain is the
+    /// load-bearing tamper-evidence. Default `true`.
+    pub append_only: Option<bool>,
+    /// Retention horizon (days). `ai-memory logs purge` warns about
+    /// deleting audit records younger than this, and `audit verify`
+    /// surfaces gaps when retention is shorter than the chain extent.
+    /// Default 90. Compliance presets override.
+    pub retention_days: Option<u32>,
+    /// Compliance presets — apply industry-standard retention /
+    /// redaction policy on top of the base config. See
+    /// `docs/security/audit-trail.md` §Compliance.
+    pub compliance: Option<AuditComplianceConfig>,
+}
+
+impl AuditConfig {
+    /// Resolve the effective retention horizon after applying any
+    /// active compliance preset. Presets win when `applied = true`;
+    /// when multiple presets are applied the most-conservative
+    /// (longest) retention wins so the binary never picks a value
+    /// that violates any active policy.
+    #[must_use]
+    pub fn effective_retention_days(&self) -> u32 {
+        let mut chosen = self.retention_days.unwrap_or(90);
+        if let Some(comp) = &self.compliance {
+            for preset in comp.applied_presets() {
+                if let Some(d) = preset.retention_days
+                    && d > chosen
+                {
+                    chosen = d;
+                }
+            }
+        }
+        chosen
+    }
+
+    /// Resolve the effective attestation cadence — the most-frequent
+    /// (smallest non-zero) cadence across the base config and applied
+    /// presets so the strictest compliance rule wins.
+    #[must_use]
+    pub fn effective_attestation_cadence_minutes(&self) -> u32 {
+        let base = self.attestation_cadence_minutes.unwrap_or(60);
+        let mut chosen = base;
+        if let Some(comp) = &self.compliance {
+            for preset in comp.applied_presets() {
+                if let Some(m) = preset.attestation_cadence_minutes
+                    && m > 0
+                    && (chosen == 0 || m < chosen)
+                {
+                    chosen = m;
+                }
+            }
+        }
+        chosen
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditComplianceConfig {
+    pub soc2: Option<CompliancePreset>,
+    pub hipaa: Option<CompliancePreset>,
+    pub gdpr: Option<CompliancePreset>,
+    pub fedramp: Option<CompliancePreset>,
+}
+
+impl AuditComplianceConfig {
+    /// Iterate over every preset whose `applied = true`.
+    pub fn applied_presets(&self) -> impl Iterator<Item = &CompliancePreset> {
+        [
+            self.soc2.as_ref(),
+            self.hipaa.as_ref(),
+            self.gdpr.as_ref(),
+            self.fedramp.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.applied.unwrap_or(false))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompliancePreset {
+    pub applied: Option<bool>,
+    pub retention_days: Option<u32>,
+    pub redact_content: Option<bool>,
+    pub attestation_cadence_minutes: Option<u32>,
+    /// Reserved for compliance contexts that mandate at-rest crypto.
+    /// HIPAA preset surfaces this so operators can pair audit with
+    /// `--features sqlcipher` for end-to-end at-rest encryption.
+    pub encrypt_at_rest: Option<bool>,
+    /// GDPR-style actor pseudonymization toggle. Reserved for v0.7+.
+    pub pseudonymize_actors: Option<bool>,
 }
 
 /// Identity-resolution configuration (Task 1.2 follow-up #198).
@@ -1091,6 +1256,18 @@ impl AppConfig {
         self.identity.as_ref().is_some_and(|i| i.anonymize_default)
     }
 
+    /// Resolve the [`LoggingConfig`] block, returning a default
+    /// (disabled) instance when the config file omits it.
+    pub fn effective_logging(&self) -> LoggingConfig {
+        self.logging.clone().unwrap_or_default()
+    }
+
+    /// Resolve the [`AuditConfig`] block, returning a default
+    /// (disabled) instance when the config file omits it.
+    pub fn effective_audit(&self) -> AuditConfig {
+        self.audit.clone().unwrap_or_default()
+    }
+
     /// Resolve URL for embedding model (falls back to `ollama_url`).
     pub fn effective_embed_url(&self) -> &str {
         self.embed_url
@@ -1147,6 +1324,62 @@ impl AppConfig {
 # long_ttl_secs = 0             # 0 = never expires (default)
 # short_extend_secs = 3600      # +1h on access (default)
 # mid_extend_secs = 86400       # +1d on access (default)
+
+# v0.6.3.1 (PR-5 / issue #487) — operational logging facility.
+# Default-OFF. Uncomment + set enabled = true to capture every
+# `tracing::*` call site to a rotating on-disk log file. See
+# `docs/security/audit-trail.md` §SIEM ingestion guide for Splunk /
+# Datadog / Elastic / Loki recipes.
+# [logging]
+# enabled = false
+# path = "~/.local/state/ai-memory/logs/"
+# max_size_mb = 100
+# max_files = 30
+# retention_days = 90
+# structured = false              # true = emit JSON lines for SIEM ingest
+# level = "info"                  # tracing EnvFilter directive
+# rotation = "daily"              # minutely | hourly | daily | never
+
+# v0.6.3.1 (PR-5 / issue #487) — security audit trail. Default-OFF.
+# When enabled, every memory mutation emits one hash-chained JSON
+# line per event suitable for SOC2 / HIPAA / GDPR / FedRAMP evidence.
+# `ai-memory audit verify` walks the chain; `ai-memory logs tail`
+# streams events.
+# [audit]
+# enabled = false
+# path = "~/.local/state/ai-memory/audit/"
+# schema_version = 1
+# redact_content = true            # v1 schema never emits content; reserved
+# hash_chain = true
+# attestation_cadence_minutes = 60
+# append_only = true               # best-effort chflags(2) / FS_IOC_SETFLAGS
+
+# Compliance presets. Set `applied = true` and the documented retention
+# / cadence values override the defaults above. See
+# `docs/security/audit-trail.md` §Compliance.
+# [audit.compliance.soc2]
+# applied = false
+# retention_days = 730
+# redact_content = true
+# attestation_cadence_minutes = 60
+#
+# [audit.compliance.hipaa]
+# applied = false
+# retention_days = 2190
+# redact_content = true
+# encrypt_at_rest = true           # pair with --features sqlcipher
+#
+# [audit.compliance.gdpr]
+# applied = false
+# retention_days = 1095
+# redact_content = true
+# pseudonymize_actors = true       # reserved for v0.7+
+#
+# [audit.compliance.fedramp]
+# applied = false
+# retention_days = 1095
+# redact_content = true
+# attestation_cadence_minutes = 30
 "#;
         let _ = std::fs::write(&path, default_toml);
     }

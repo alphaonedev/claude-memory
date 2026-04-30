@@ -9,7 +9,7 @@
 // load, env-var seeding, clap parse) and immediately delegates. Coverage
 // for serve()/dispatch is now attributed to the lib crate.
 use ai_memory::daemon_runtime::Cli;
-use ai_memory::{color, config, daemon_runtime};
+use ai_memory::{audit, color, config, daemon_runtime, logging};
 use anyhow::Result;
 use clap::Parser;
 
@@ -24,6 +24,21 @@ async fn main() -> Result<()> {
     let app_config = config::AppConfig::load();
     config::AppConfig::write_default_if_missing();
     daemon_runtime::apply_anonymize_default(&app_config);
+
+    // PR-5 (issue #487): bootstrap operational logging + security
+    // audit trail. Both are default-OFF; init returns silently when
+    // disabled. The `_log_guard` MUST stay in scope for the lifetime
+    // of the process — when dropped it flushes the non-blocking
+    // tracing writer to disk.
+    let _log_guard =
+        logging::init_file_logging(&app_config.effective_logging()).unwrap_or_else(|e| {
+            eprintln!("ai-memory: file logging init failed (continuing without): {e}");
+            None
+        });
+    if let Err(e) = audit::init_from_config(&app_config.effective_audit()) {
+        eprintln!("ai-memory: audit init failed (continuing without): {e}");
+    }
+
     let cli = Cli::parse();
     daemon_runtime::run(cli, &app_config).await
 }

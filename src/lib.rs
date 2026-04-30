@@ -12,6 +12,7 @@
 
 // Library interface for ai-memory. Exposes public modules for testing and external use.
 
+pub mod audit;
 pub mod autonomy;
 pub mod bench;
 pub mod cli;
@@ -27,6 +28,8 @@ pub mod handlers;
 pub mod hnsw;
 pub mod identity;
 pub mod llm;
+pub mod log_paths;
+pub mod logging;
 pub mod mcp;
 pub mod metrics;
 pub mod mine;

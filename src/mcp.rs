@@ -71,6 +71,79 @@ fn err_response(id: Value, code: i64, message: String) -> RpcResponse {
     }
 }
 
+/// PR-5 (issue #487): emit an audit event for an MCP `tools/call`
+/// dispatch. Per-handler emissions inside `handle_store` /
+/// `handle_delete` already produce their canonical events; this
+/// helper covers the remaining mutation+recall tool surface so
+/// `audit_emits_at_every_call_site` holds across the matrix.
+fn audit_emit_for_mcp_dispatch(
+    tool_name: &str,
+    arguments: &Value,
+    result: &Result<Value, String>,
+    mcp_client: Option<&str>,
+) {
+    if !crate::audit::is_enabled() {
+        return;
+    }
+    let action = match tool_name {
+        // Skipped — emitted from inside the handler with full target context.
+        "memory_store" | "memory_delete" => return,
+        "memory_recall"
+        | "memory_search"
+        | "memory_get"
+        | "memory_list"
+        | "memory_session_start" => crate::audit::AuditAction::Recall,
+        "memory_update" => crate::audit::AuditAction::Update,
+        "memory_promote" => crate::audit::AuditAction::Promote,
+        "memory_forget" => crate::audit::AuditAction::Forget,
+        "memory_link" => crate::audit::AuditAction::Link,
+        "memory_consolidate" => crate::audit::AuditAction::Consolidate,
+        "memory_pending_approve" => crate::audit::AuditAction::Approve,
+        "memory_pending_reject" => crate::audit::AuditAction::Reject,
+        // Read-only / metadata tools — no audit event.
+        _ => return,
+    };
+    let agent_id = arguments
+        .get("agent_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            mcp_client
+                .map(|c| format!("ai:{c}"))
+                .unwrap_or_else(|| "anonymous".into())
+        });
+    let namespace = arguments
+        .get("namespace")
+        .and_then(Value::as_str)
+        .unwrap_or("global")
+        .to_string();
+    let memory_id = arguments
+        .get("id")
+        .or_else(|| arguments.get("memory_id"))
+        .and_then(Value::as_str)
+        .unwrap_or("*")
+        .to_string();
+    let mut builder = crate::audit::EventBuilder::new(
+        action,
+        crate::audit::actor(
+            agent_id,
+            mcp_client.map_or("host_fallback", |_| "mcp_client_info"),
+            None,
+        ),
+        crate::audit::AuditTarget {
+            memory_id,
+            namespace,
+            title: None,
+            tier: None,
+            scope: None,
+        },
+    );
+    if let Err(e) = result {
+        builder = builder.error(e.clone());
+    }
+    crate::audit::emit(builder);
+}
+
 // --- Tool definitions ---
 
 /// Version tag for the `tools/list` response schema. Bumped whenever
@@ -998,6 +1071,23 @@ fn handle_store(
     }
 
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
+
+    // PR-5 (issue #487): security audit trail. No-op when disabled.
+    crate::audit::emit(crate::audit::EventBuilder::new(
+        crate::audit::AuditAction::Store,
+        crate::audit::actor(
+            agent_id.clone(),
+            mcp_client.map_or("host_fallback", |_| "mcp_client_info"),
+            explicit_scope.clone(),
+        ),
+        crate::audit::target_memory(
+            actual_id.clone(),
+            mem.namespace.clone(),
+            Some(mem.title.clone()),
+            Some(mem.tier.to_string()),
+            explicit_scope.clone(),
+        ),
+    ));
 
     // Exclude self-ID from contradictions (both proposed and actual, since upsert may reuse existing ID)
     let contradiction_ids: Vec<String> = existing
@@ -2109,6 +2199,24 @@ fn handle_delete(
         if let Some(idx) = vector_index {
             idx.remove(&target.id);
         }
+        // PR-5 (issue #487): security audit trail. No-op when disabled.
+        crate::audit::emit(crate::audit::EventBuilder::new(
+            crate::audit::AuditAction::Delete,
+            crate::audit::actor(
+                snapshot_owner
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
+                mcp_client.map_or("host_fallback", |_| "mcp_client_info"),
+                None,
+            ),
+            crate::audit::target_memory(
+                target.id.clone(),
+                snapshot_namespace.clone(),
+                Some(snapshot_title.clone()),
+                Some(snapshot_tier.clone()),
+                None,
+            ),
+        ));
         // P5 (G9): fire `memory_delete` webhook AFTER the row is gone
         // (best-effort, fire-and-forget — same pattern as memory_store).
         let details = serde_json::to_value(crate::subscriptions::DeleteEventDetails {
@@ -3471,6 +3579,13 @@ fn handle_request(
                 Ok(_) => tracing::info!(elapsed_ms, "ok"),
                 Err(err) => tracing::warn!(elapsed_ms, error = %err, "err"),
             }
+
+            // PR-5 (issue #487): MCP-dispatch-level audit emission for
+            // mutation/recall tools that the per-handler instrumentation
+            // doesn't already cover. `memory_store` and `memory_delete`
+            // each emit their own canonical event from inside the
+            // handler so we skip them here to avoid double-counting.
+            audit_emit_for_mcp_dispatch(tool_name, arguments, &result, mcp_client);
 
             match result {
                 Ok(val) => {

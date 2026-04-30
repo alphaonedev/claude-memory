@@ -17,6 +17,7 @@
 
 pub mod agents;
 pub mod archive;
+pub mod audit;
 pub mod backup;
 pub mod boot;
 pub mod consolidate;
@@ -31,6 +32,7 @@ pub mod install;
 pub mod io;
 pub mod io_writer;
 pub mod link;
+pub mod logs;
 pub mod promote;
 pub mod recall;
 pub mod search;

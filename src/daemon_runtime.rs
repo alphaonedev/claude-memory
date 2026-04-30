@@ -51,6 +51,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::agents::{AgentsArgs, PendingArgs};
 use crate::cli::archive::ArchiveArgs;
+use crate::cli::audit::AuditArgs;
 use crate::cli::backup::{BackupArgs, RestoreArgs};
 use crate::cli::boot::BootArgs;
 use crate::cli::consolidate::{AutoConsolidateArgs, ConsolidateArgs};
@@ -60,6 +61,7 @@ use crate::cli::forget::ForgetArgs;
 use crate::cli::install::InstallArgs;
 use crate::cli::io::{ImportArgs, MineArgs};
 use crate::cli::link::{LinkArgs, ResolveArgs};
+use crate::cli::logs::LogsArgs;
 use crate::cli::promote::PromoteArgs;
 use crate::cli::recall::RecallArgs;
 use crate::cli::search::SearchArgs;
@@ -245,6 +247,15 @@ pub enum Command {
     /// `--system-flag` / `--system-env` / `--message-file-flag`
     /// override). Exit code is propagated from the wrapped agent.
     Wrap(WrapArgs),
+    /// Issue #487 PR-5: operator-facing CLI for the operational logging
+    /// facility (`tail`, `cat`, `archive`, `purge`). Default-OFF — emits
+    /// nothing useful unless `[logging] enabled = true` is set in
+    /// `config.toml`.
+    Logs(LogsArgs),
+    /// Issue #487 PR-5: operator-facing CLI for the security audit
+    /// trail (`verify`, `tail`, `path`). Default-OFF — emits nothing
+    /// useful unless `[audit] enabled = true` is set in `config.toml`.
+    Audit(AuditArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -729,6 +740,17 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut so = stdout.lock();
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            // PR-5: a `boot` invocation is itself an audit-worthy event.
+            // Emission is a no-op when audit is disabled.
+            crate::audit::emit(crate::audit::EventBuilder::new(
+                crate::audit::AuditAction::SessionBoot,
+                crate::audit::actor(
+                    cli_agent_id.as_deref().unwrap_or("anonymous"),
+                    "explicit_or_default",
+                    None,
+                ),
+                crate::audit::target_sweep(a.namespace.as_deref().unwrap_or("auto")),
+            ));
             cli::boot::run(&db_path, &a, app_config, &mut out)
         }
         Command::Install(a) => {
@@ -763,6 +785,25 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 Ok(())
             } else {
                 std::process::exit(code);
+            }
+        }
+        Command::Logs(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::logs::run(a, app_config, &mut out)
+        }
+        Command::Audit(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::audit::run(a, app_config, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
             }
         }
     };

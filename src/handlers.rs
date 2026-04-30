@@ -491,6 +491,28 @@ pub async fn create_memory(
                 .get("agent_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            // PR-5 (issue #487): security audit trail for HTTP store.
+            crate::audit::emit(crate::audit::EventBuilder::new(
+                crate::audit::AuditAction::Store,
+                crate::audit::actor(
+                    resolved_agent_id.clone().unwrap_or_default(),
+                    "http_body",
+                    mem.metadata
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                ),
+                crate::audit::target_memory(
+                    actual_id.clone(),
+                    mem.namespace.clone(),
+                    Some(mem.title.clone()),
+                    Some(mem.tier.to_string()),
+                    mem.metadata
+                        .get("scope")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string),
+                ),
+            ));
             let mut response = json!({
                 "id": actual_id,
                 "tier": mem.tier,
@@ -1185,6 +1207,30 @@ pub async fn delete_memory(
     drop(lock);
     match delete_outcome {
         Ok(true) => {
+            // PR-5 (issue #487): security audit trail for HTTP delete.
+            let owner = target
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .unwrap_or_else(|| {
+                    headers
+                        .get("x-agent-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("anonymous")
+                        .to_string()
+                });
+            crate::audit::emit(crate::audit::EventBuilder::new(
+                crate::audit::AuditAction::Delete,
+                crate::audit::actor(owner, "http_header", None),
+                crate::audit::target_memory(
+                    target.id.clone(),
+                    target.namespace.clone(),
+                    Some(target.title.clone()),
+                    Some(target.tier.to_string()),
+                    None,
+                ),
+            ));
             // v0.6.0.1: propagate tombstone via sync_push.deletions.
             if let Some(fed) = app.federation.as_ref()
                 && let Ok(tracker) =
