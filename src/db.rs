@@ -170,7 +170,10 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+// v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
+// v18 = v0.6.3.1 (P2, audit G4/G5/G13) data-integrity hardening:
+//       embedding_dim guard, archive lossless, magic-byte header.
+const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -223,7 +226,14 @@ fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
 }
 
 const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_hierarchy_kg.sql");
-const MIGRATION_V17_SQLITE: &str =
+// v0.6.3.1 (P4, audit G1): backfill `metadata.governance.inherit = true`
+// on existing policies so downstream readers and SQL-side dashboards
+// see a consistent shape after upgrade. Idempotent.
+const MIGRATION_V17_SQLITE: &str = include_str!("../migrations/sqlite/0012_governance_inherit.sql");
+// v0.6.3.1 (P2, audit G4/G5/G13): data-integrity hardening. ALTER TABLEs
+// emitted from Rust because SQLite has no `ADD COLUMN IF NOT EXISTS`;
+// the SQL file holds idempotent backfills + indexes.
+const MIGRATION_V18_SQLITE: &str =
     include_str!("../migrations/sqlite/0011_v0631_data_integrity.sql");
 
 #[allow(clippy::too_many_lines)]
@@ -584,6 +594,17 @@ fn migrate(conn: &Connection) -> Result<()> {
         }
 
         if version < 17 {
+            // v0.6.3.1 (P4, audit G1): backfill `metadata.governance.inherit = true`
+            // on existing namespace standards so the inheritance-enforcement
+            // patch (resolve_governance_policy walking the chain leaf-first)
+            // sees an explicit, physically-present field on legacy rows.
+            // The field deserializes as `true` via #[serde(default)] either
+            // way; the backfill keeps replication payloads, JSON-extract
+            // dashboards, and operator inspect output consistent. Idempotent.
+            conn.execute_batch(MIGRATION_V17_SQLITE)?;
+        }
+
+        if version < 18 {
             // v0.6.3.1 Phase P2 — Data-integrity hardening (G4, G5, G13).
             // See REMEDIATIONv0631 §"Phase P2".
             //
@@ -594,9 +615,8 @@ fn migrate(conn: &Connection) -> Result<()> {
             //
             // memories.embedding_dim — declared dimension of the stored embedding.
             // Backfill below infers from `length(embedding)/4` (legacy LE-f32
-            // payloads have no header so length is exactly 4n; v17+ writes that
-            // happen during this same migration window are still 4n+1 only AFTER
-            // commit, so the 4n-only inference here is safe).
+            // payloads have no header so length is exactly 4n; v18+ writes
+            // happen after commit, so the 4n-only inference here is safe).
             let has_embedding_dim = conn
                 .prepare("SELECT embedding_dim FROM memories LIMIT 0")
                 .is_ok();
@@ -605,7 +625,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             }
 
             // archived_memories — preserve embedding + original tier/expiry on
-            // archive (G5). Pre-v17 archive rows have lost this metadata
+            // archive (G5). Pre-v18 archive rows have lost this metadata
             // permanently; the SQL backfill below fills `original_tier='long'`
             // so restore_archived treats them as permanent on first restore.
             let has_archive_embedding = conn
@@ -646,7 +666,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             }
 
             // Backfill + indexes — UPDATE/INDEX statements are idempotent.
-            conn.execute_batch(MIGRATION_V17_SQLITE)?;
+            conn.execute_batch(MIGRATION_V18_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -1339,6 +1359,48 @@ pub fn apply_token_budget(
 /// Task 1.11: after ranking, applies optional `budget_tokens` cap.
 /// Returns `(truncated_list, tokens_used)`.
 #[allow(clippy::too_many_arguments)]
+/// v0.6.3.1 (P3): keyword-only recall with retrieval-stage telemetry.
+///
+/// Identical to [`recall`] but additionally returns a [`crate::models::RecallTelemetry`]
+/// describing the FTS5 candidate count (HNSW count is always 0 for this
+/// path — no semantic stage runs). MCP `handle_recall` uses this to build
+/// the `meta` block; [`recall`] is preserved as a thin wrapper for
+/// existing callers (HTTP handlers, CLI, bench).
+#[allow(clippy::too_many_arguments)]
+pub fn recall_with_telemetry(
+    conn: &Connection,
+    context: &str,
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    short_extend: i64,
+    mid_extend: i64,
+    as_agent: Option<&str>,
+    budget_tokens: Option<usize>,
+) -> Result<(Vec<(Memory, f64)>, usize, crate::models::RecallTelemetry)> {
+    let (results, tokens_used) = recall(
+        conn,
+        context,
+        namespace,
+        limit,
+        tags_filter,
+        since,
+        until,
+        short_extend,
+        mid_extend,
+        as_agent,
+        budget_tokens,
+    )?;
+    let telemetry = crate::models::RecallTelemetry {
+        fts_candidates: results.len(),
+        hnsw_candidates: 0,
+        blend_weight_avg: 0.0,
+    };
+    Ok((results, tokens_used, telemetry))
+}
+
 pub fn recall(
     conn: &Connection,
     context: &str,
@@ -2909,6 +2971,12 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
     // any error here returns 0 rather than failing the stats endpoint.
     let dim_violations = dim_violations(conn).unwrap_or(0);
 
+    // v0.6.3.1 (P3, G2): cumulative HNSW eviction count is process-local
+    // state — read from the static counter in src/hnsw.rs. Surfacing it in
+    // `stats` lets `memory_stats` callers and `ai-memory doctor` (P7) flag
+    // operators who are sustaining at the index cap.
+    let index_evictions_total = crate::hnsw::index_evictions_total();
+
     Ok(Stats {
         total,
         by_tier,
@@ -2917,6 +2985,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         links_count,
         db_size_bytes,
         dim_violations,
+        index_evictions_total,
     })
 }
 
@@ -3476,7 +3545,12 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
 /// When an HNSW `vector_index` is provided, uses approximate nearest-neighbor
 /// search instead of scanning all embeddings linearly.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
+/// v0.6.3.1 (P3): hybrid recall preserving the existing 2-tuple return
+/// shape for HTTP / CLI / bench callers. Delegates to
+/// [`recall_hybrid_with_telemetry`] and discards the telemetry. Kept so
+/// the dozen-plus call sites need no churn for a feature only MCP
+/// `handle_recall` consumes.
+#[allow(clippy::too_many_arguments)]
 pub fn recall_hybrid(
     conn: &Connection,
     context: &str,
@@ -3493,6 +3567,54 @@ pub fn recall_hybrid(
     budget_tokens: Option<usize>,
     scoring: &crate::config::ResolvedScoring,
 ) -> Result<(Vec<(Memory, f64)>, usize)> {
+    let (results, tokens, _telemetry) = recall_hybrid_with_telemetry(
+        conn,
+        context,
+        query_embedding,
+        namespace,
+        limit,
+        tags_filter,
+        since,
+        until,
+        vector_index,
+        short_extend,
+        mid_extend,
+        as_agent,
+        budget_tokens,
+        scoring,
+    )?;
+    Ok((results, tokens))
+}
+
+/// v0.6.3.1 (P3): hybrid recall reporting per-stage candidate counts and
+/// the average semantic blend weight. MCP `handle_recall` uses the
+/// telemetry to populate the `meta` block (closes audit gaps G2/G8/G11).
+///
+/// The retrieval logic is unchanged — anti-goal of this phase is "do not
+/// change recall scoring or fusion logic." Counters are computed in
+/// place: `fts_candidates` is the pre-fusion FTS5 row count,
+/// `hnsw_candidates` is the pre-fusion HNSW (or linear-scan) hit count
+/// admitted past the 0.2 cosine gate, `blend_weight_avg` is the mean
+/// `semantic_weight` across the *returned* set (not the full candidate
+/// pool — operators care about what made it out).
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub fn recall_hybrid_with_telemetry(
+    conn: &Connection,
+    context: &str,
+    query_embedding: &[f32],
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    vector_index: Option<&crate::hnsw::VectorIndex>,
+    short_extend: i64,
+    mid_extend: i64,
+    as_agent: Option<&str>,
+    budget_tokens: Option<usize>,
+    scoring: &crate::config::ResolvedScoring,
+) -> Result<(Vec<(Memory, f64)>, usize, crate::models::RecallTelemetry)> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
     let prefixes = compute_visibility_prefixes(as_agent);
@@ -3589,6 +3711,13 @@ pub fn recall_hybrid(
         },
     )?;
 
+    // v0.6.3.1 (P3): pre-fusion candidate-pool counters surfaced to the
+    // MCP `meta` block. Counted here at retrieval time, not after fusion,
+    // so operators see how each stage contributed even when fusion
+    // collapses the union to a smaller set.
+    let mut fts_candidates_count: usize = 0;
+    let mut hnsw_candidates_count: usize = 0;
+
     let mut max_fts_score: f64 = 1.0;
     for row in fts_rows {
         let (mem, fts_score) = row?;
@@ -3603,6 +3732,7 @@ pub fn recall_hybrid(
             ))
         });
         scored.insert(mem.id.clone(), (mem, fts_score, cosine));
+        fts_candidates_count += 1;
     }
 
     // Semantic-only candidates — use HNSW index for fast ANN if available,
@@ -3667,6 +3797,7 @@ pub fn recall_hybrid(
                     continue;
                 }
                 scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                hnsw_candidates_count += 1;
             }
         }
     } else {
@@ -3715,6 +3846,7 @@ pub fn recall_hybrid(
                 // v0.6.2 (S18): see matching note above at the HNSW gate.
                 if cosine > 0.2 {
                     scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                    hnsw_candidates_count += 1;
                 }
             }
         }
@@ -3729,6 +3861,11 @@ pub fn recall_hybrid(
     // `legacy_scoring` config knob short-circuits the decay back to 1.0 for
     // A/B comparison and emergency regression rollback.
     let now_utc = Utc::now();
+    // v0.6.3.1 (P3): collect per-candidate semantic weight in parallel with
+    // the existing fusion pass so MCP `meta.blend_weight` reports the
+    // *applied* (not configured) weight. Wrapped in `RefCell` so the map
+    // closure can side-effect without restructuring the iterator chain.
+    let blend_weights: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new());
     let mut results: Vec<(Memory, f64)> = scored
         .into_values()
         .map(|(mem, fts_score, cosine)| {
@@ -3746,6 +3883,7 @@ pub fn recall_hybrid(
             } else {
                 0.50 - 0.35 * ((content_len - 500.0) / 4500.0)
             };
+            blend_weights.borrow_mut().push(semantic_weight);
             let blended = semantic_weight * cosine + (1.0 - semantic_weight) * norm_fts;
             let age_days = chrono::DateTime::parse_from_rfc3339(&mem.created_at)
                 .ok()
@@ -3785,7 +3923,28 @@ pub fn recall_hybrid(
         }
     }
 
-    Ok((budgeted, tokens_used))
+    // v0.6.3.1 (P3): summarize per-stage candidate counts and the average
+    // semantic blend weight for the MCP `meta` block. `blend_weight_avg`
+    // is the unweighted mean across the *post-fusion* candidate set so
+    // operators see the typical weight applied to what shipped, not the
+    // configured ceiling. Pre-fusion counts come from the retrieval
+    // counters (FTS / HNSW), which gives an honest picture of stage
+    // contribution even when fusion deduplicates.
+    let weights = blend_weights.into_inner();
+    let blend_weight_avg = if weights.is_empty() {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let n = weights.len() as f64;
+        weights.iter().sum::<f64>() / n
+    };
+    let telemetry = crate::models::RecallTelemetry {
+        fts_candidates: fts_candidates_count,
+        hnsw_candidates: hnsw_candidates_count,
+        blend_weight_avg,
+    };
+
+    Ok((budgeted, tokens_used, telemetry))
 }
 
 /// Checkpoint WAL for clean shutdown.
@@ -4031,20 +4190,156 @@ pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bo
 // Task 1.9 — governance enforcement + pending_actions CRUD
 // ---------------------------------------------------------------------------
 
-/// Resolve the explicit governance policy for a namespace from its standard
-/// memory's `metadata.governance`. Returns `None` when no policy is set —
-/// enforcement is **opt-in**, so namespaces without explicit policy skip
-/// every governance check (historical behavior preserved). The "default
-/// policy" (`{ write: Any, promote: Any, delete: Owner, approver: Human }`)
-/// is surfaced by `get_standard` for display purposes only; it does not
-/// gate operations.
-pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
+/// Build the namespace inheritance chain in **top-down** order
+/// (`["*", root, ..., leaf]`). Mirrors and replaces the historical
+/// `mcp::build_namespace_chain` so non-MCP call sites (db-layer
+/// governance enforcement, HTTP handlers, future hook pipelines) can
+/// reuse the same walk.
+///
+/// Properties (preserved from the prior MCP-only implementation):
+/// - cycle-safe (visited set + bounded by `MAX_EXPLICIT_DEPTH = 8`)
+/// - includes the global standard `*` as the most-general entry
+/// - prepends explicit `namespace_meta.parent_namespace` ancestors
+///   before the `/`-derived hierarchy, supporting flat→hierarchical
+///   linking (e.g. legacy `ai-memory` → `ai-memory-mcp`)
+///
+/// The MCP layer's display path consumes this top-down. The governance
+/// resolver in [`resolve_governance_policy`] reverses it for a
+/// leaf-first walk (most-specific wins).
+#[must_use]
+pub fn build_namespace_chain(conn: &Connection, namespace: &str) -> Vec<String> {
+    const MAX_EXPLICIT_DEPTH: usize = 8;
+    let mut chain: Vec<String> = Vec::new();
+
+    if namespace == "*" {
+        chain.push("*".to_string());
+        return chain;
+    }
+
+    // Always start with the global standard — most general.
+    chain.push("*".to_string());
+
+    // 1. /-derived ancestors. `namespace_ancestors` returns most-specific-first;
+    //    reverse for top-down (root ancestor first, then namespace itself last).
+    let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
+        .into_iter()
+        .rev()
+        .collect();
+
+    // 2. If the ROOTmost of the /-chain has an explicit `namespace_meta` parent,
+    //    prepend that chain (bounded by MAX_EXPLICIT_DEPTH + cycle-safe).
+    //    Supports legacy flat namespaces (e.g. `ai-memory` → `ai-memory-mcp`).
+    if let Some(root) = hierarchy_chain.first().cloned() {
+        let mut explicit_above: Vec<String> = Vec::new();
+        let mut current = root;
+        for _ in 0..MAX_EXPLICIT_DEPTH {
+            match get_namespace_parent(conn, &current) {
+                Some(p)
+                    if p != "*"
+                        && !explicit_above.contains(&p)
+                        && !hierarchy_chain.contains(&p) =>
+                {
+                    explicit_above.push(p.clone());
+                    current = p;
+                }
+                _ => break,
+            }
+        }
+        // `explicit_above` is [immediate-explicit-parent, grandparent, ...];
+        // reverse to prepend in top-down order.
+        for p in explicit_above.into_iter().rev() {
+            chain.push(p);
+        }
+    }
+
+    // 3. Append the /-derived chain (top-down).
+    for entry in hierarchy_chain.drain(..) {
+        if !chain.contains(&entry) {
+            chain.push(entry);
+        }
+    }
+
+    chain
+}
+
+/// Read the explicit governance policy attached to a single namespace's
+/// standard memory. Does **not** walk the inheritance chain — callers
+/// that want hierarchical resolution should use
+/// [`resolve_governance_policy`] instead.
+fn read_namespace_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
     let standard_id = get_namespace_standard(conn, namespace).ok()??;
     let mem = get(conn, &standard_id).ok()??;
     match GovernancePolicy::from_metadata(&mem.metadata) {
         Some(Ok(p)) => Some(p),
         _ => None,
     }
+}
+
+/// Resolve the governance policy that gates actions in `namespace`.
+///
+/// v0.6.3.1 (P4, audit G1): walks the inheritance chain leaf-first and
+/// returns the most-specific policy. This closes the audit's
+/// highest-severity finding — prior to this fix the resolver consulted
+/// only the leaf, which left children of governed parents (e.g.
+/// `alphaone/secure/team-a` under an `Approve` policy at
+/// `alphaone/secure`) **completely ungoverned** despite the
+/// architecture page T2 promising "Hierarchical policy inheritance
+/// (default at `org/`, overridable at `org/team/`)".
+///
+/// **Walk semantics** (carefully — easy to get subtly wrong):
+///   1. Build the chain via [`build_namespace_chain`] (top-down) and
+///      reverse it so we walk leaf → root. The leaf is the namespace
+///      we were asked about; the root is the global `*` standard.
+///   2. At each level `k`, look up the policy attached to that
+///      namespace's standard memory.
+///      - If a policy **exists**, it is the most-specific match seen
+///        so far. Return it immediately. ("Most specific wins.")
+///      - If a policy **also says `inherit: false`**, this is already
+///        the same return path — we never reach the parent because
+///        we already returned.
+///   3. If level `k` has **no policy at all**, keep walking — this is
+///      the implicit-inherit branch (no policy means "I don't override
+///      my parent").
+///   4. If we walk off the top of the chain without finding a policy,
+///      return `None` (enforcement remains opt-in for namespaces with
+///      no governance configured anywhere in the chain).
+///
+/// **Where does `inherit: false` actually do work?** When the most-
+/// specific policy we hit on the walk has `inherit: false`. That
+/// policy is returned (same return point as the inherit=true case),
+/// so its rules govern the action; the false flag is what
+/// **conceptually stops** the walk above it, but the implementation
+/// stops the walk simply by virtue of having found a policy. The flag
+/// matters most as a documented contract surfaced to operators: "a
+/// policy here authoritatively replaces, not extends, what's above."
+/// The flag also flows through the queued-pending-action approver
+/// resolution so consensus/agent rules don't accidentally re-walk to
+/// a parent.
+///
+/// Cycle-safety is inherited from `build_namespace_chain`
+/// (`MAX_EXPLICIT_DEPTH = 8` + visited set). No new cache is
+/// introduced — profile-driven optimization is a v0.7 item.
+pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
+    // build_namespace_chain returns top-down (`["*", root, ..., leaf]`).
+    // Governance resolution wants leaf-first (most specific first), so
+    // we reverse before walking.
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        // Most-specific match wins. Returning immediately here means
+        // an explicit policy at the leaf (or any descendant level
+        // with a policy) authoritatively overrides anything above —
+        // which is precisely the inherit=false semantic, applied
+        // implicitly. The inherit=false flag is preserved on the
+        // returned policy so callers (e.g. the pending_action
+        // approver resolver) don't accidentally re-walk to a parent.
+        if let Some(policy) = read_namespace_policy(conn, &level) {
+            return Some(policy);
+        }
+        // Implicit branch: no policy at this level → keep walking
+        // toward the root. This is the "default inherit" behavior
+        // that closes G1.
+    }
+    None
 }
 
 /// Return true if `agent_id` matches a registered agent in `_agents`.

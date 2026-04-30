@@ -11,12 +11,77 @@
 
 use instant_distance::{Builder, HnswMap, Point, Search};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum overflow entries before triggering a rebuild.
 const REBUILD_THRESHOLD: usize = 200;
 
 /// Maximum entries before evicting oldest to prevent unbounded memory growth.
 const MAX_ENTRIES: usize = 100_000;
+
+// ---------------------------------------------------------------------------
+// v0.6.3.1 (P3, G2): eviction observability
+//
+// `MAX_ENTRIES`-triggered eviction in `insert()` previously dropped the
+// oldest embeddings silently — operators near the cap lost recall quality
+// invisibly. The two counters below + the structured `hnsw.eviction`
+// tracing event close that gap:
+//
+//   - `INDEX_EVICTIONS_TOTAL` — cumulative count surfaced via
+//     `db::stats().index_evictions_total` (and capabilities).
+//   - `LAST_EVICTION_AT_NANOS` — wall-clock UNIX nanoseconds of the most
+//     recent eviction; capabilities derive `hnsw.evicted_recently` from
+//     this with a 60 s rolling window.
+//
+// Process-local. The counters reset on restart because the index itself
+// resets on restart. Both atomics are touched only on the eviction edge
+// (rare: requires >100k vectors), so there is no measurable hot-path cost.
+// ---------------------------------------------------------------------------
+
+static INDEX_EVICTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_EVICTION_AT_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative HNSW oldest-eviction count since process start.
+///
+/// Surfaces in `memory_stats`. Non-zero indicates the in-memory vector
+/// index has hit `MAX_ENTRIES` and dropped older embeddings; recall
+/// quality may have degraded for evicted ids until they are re-inserted
+/// (e.g. on next access via `recall` touch path).
+#[must_use]
+pub fn index_evictions_total() -> u64 {
+    INDEX_EVICTIONS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Whether an eviction occurred within the trailing `window_secs`.
+///
+/// Used by capabilities (P1) to set `hnsw.evicted_recently` so operators
+/// can see ongoing pressure on the cap, not just the cumulative count.
+/// Returns `false` when no evictions have ever happened in this process.
+#[must_use]
+pub fn evicted_recently(window_secs: u64) -> bool {
+    let last = LAST_EVICTION_AT_NANOS.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Saturating math: clock can move backwards on some VMs.
+    let elapsed_nanos = u128::from(u64::MAX).min(now_nanos.saturating_sub(u128::from(last)));
+    elapsed_nanos < u128::from(window_secs).saturating_mul(1_000_000_000)
+}
+
+/// Reset the eviction counters. Test-only — production callers must not
+/// reach into the counter directly. The function is `pub` (rather than
+/// `pub(crate)`) so the integration-test crate at `tests/` can drive it
+/// alongside the public `index_evictions_total()` accessor; renaming
+/// keeps the intent obvious at every call site.
+#[doc(hidden)]
+pub fn reset_eviction_counters_for_test() {
+    INDEX_EVICTIONS_TOTAL.store(0, Ordering::Relaxed);
+    LAST_EVICTION_AT_NANOS.store(0, Ordering::Relaxed);
+}
 
 /// A point in the HNSW index — wraps a dense embedding vector.
 #[derive(Clone, Debug)]
@@ -106,9 +171,41 @@ impl VectorIndex {
         // Evict oldest entries if over capacity
         if state.all_entries.len() > MAX_ENTRIES {
             let excess = state.all_entries.len() - MAX_ENTRIES;
+            // v0.6.3.1 (P3, G2): emit one structured tracing event per evicted
+            // id BEFORE we drop the rows so operators can post-mortem which
+            // memories lost their semantic-search affordance. Bumping the
+            // counter and last-eviction timestamp surfaces aggregate pressure
+            // through `memory_stats` and capabilities. The drain itself is
+            // unchanged — observability only.
+            for (evicted_id, _) in state.all_entries.iter().take(excess) {
+                tracing::warn!(
+                    target: "hnsw.eviction",
+                    evicted_id = %evicted_id,
+                    reason = "max_entries_reached",
+                    max_entries = MAX_ENTRIES,
+                    "hnsw index evicting oldest entry: cap reached"
+                );
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let evicted = excess as u64;
+            INDEX_EVICTIONS_TOTAL.fetch_add(evicted, Ordering::Relaxed);
+
             state.all_entries.drain(..excess);
             state.hnsw = Self::build_hnsw(&state.all_entries);
             state.overflow.clear();
+
+            // Record completion time AFTER the rebuild. `evicted_recently` is
+            // a "did we evict in the trailing N seconds" check; an operator
+            // asking that wants the operation completion time, not the
+            // start. At cap, build_hnsw dominates wall time (~minutes at
+            // 100k entries) — using the start would make evicted_recently
+            // misreport even immediately after insert returns.
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let now_nanos_u64 = u64::try_from(now_nanos).unwrap_or(u64::MAX);
+            LAST_EVICTION_AT_NANOS.store(now_nanos_u64, Ordering::Relaxed);
         }
     }
 

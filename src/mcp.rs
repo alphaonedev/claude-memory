@@ -11,12 +11,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::config::{AppConfig, FeatureTier, TierConfig};
+use crate::config::{AppConfig, FeatureTier, RerankerMode, TierConfig};
 use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::{GovernancePolicy, Memory, Tier};
+use crate::models::{CandidateCounts, GovernancePolicy, Memory, RecallMeta, RecallTelemetry, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -365,8 +365,18 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system.",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "accept": {
+                            "type": "string",
+                            "enum": ["v1", "v2"],
+                            "default": "v2",
+                            "description": "Capabilities-schema version. v2 is the honest, runtime-overlaid shape (default). v1 returns the legacy pre-v0.6.3.1 shape for backward compat."
+                        }
+                    }
+                }
             },
             {
                 "name": "memory_expand_query",
@@ -476,12 +486,13 @@ fn tool_definitions() -> Value {
                         "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"},
                         "governance": {
                             "type": "object",
-                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types.",
+                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types. v0.6.3.1 (P4, G1): adds `inherit` flag controlling parent-namespace policy bubbling.",
                             "properties": {
                                 "write":    {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "promote":  {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "delete":   {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
-                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"}
+                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"},
+                                "inherit":  {"type": "boolean", "default": true, "description": "v0.6.3.1 (P4, G1): when true (default), missing policy at this namespace falls through to parent in the chain. Set false to opt this subtree out of parent inheritance."}
                             }
                         }
                     },
@@ -1143,59 +1154,15 @@ fn handle_store(
 ///
 /// Returned vector is top-down: `[*, org, unit, team, agent]` for a
 /// 4-level hierarchical namespace. Cycle-safe and bounded.
+/// Display-side wrapper around [`db::build_namespace_chain`].
+///
+/// v0.6.3.1 (P4, audit G1): the chain walker moved into `db.rs` so the
+/// governance enforcement gate could share a single canonical
+/// implementation with the recall/standard injection paths. This thin
+/// shim keeps existing call sites compiling without re-routing every
+/// invocation through `db::`.
 fn build_namespace_chain(conn: &rusqlite::Connection, namespace: &str) -> Vec<String> {
-    const MAX_EXPLICIT_DEPTH: usize = 8;
-    let mut chain: Vec<String> = Vec::new();
-
-    if namespace == "*" {
-        chain.push("*".to_string());
-        return chain;
-    }
-
-    // Always start with the global standard — most general.
-    chain.push("*".to_string());
-
-    // 1. /-derived ancestors. `namespace_ancestors` returns most-specific-first;
-    //    reverse for top-down (root ancestor first, then namespace itself last).
-    let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
-        .into_iter()
-        .rev()
-        .collect();
-
-    // 2. If the ROOTmost of the /-chain has an explicit `namespace_meta` parent,
-    //    prepend that chain (bounded by MAX_EXPLICIT_DEPTH + cycle-safe).
-    //    Supports legacy flat namespaces (e.g. `ai-memory` → `ai-memory-mcp`).
-    if let Some(root) = hierarchy_chain.first().cloned() {
-        let mut explicit_above: Vec<String> = Vec::new();
-        let mut current = root;
-        for _ in 0..MAX_EXPLICIT_DEPTH {
-            match db::get_namespace_parent(conn, &current) {
-                Some(p)
-                    if p != "*"
-                        && !explicit_above.contains(&p)
-                        && !hierarchy_chain.contains(&p) =>
-                {
-                    explicit_above.push(p.clone());
-                    current = p;
-                }
-                _ => break,
-            }
-        }
-        // `explicit_above` is [immediate-explicit-parent, grandparent, ...];
-        // reverse to prepend in top-down order.
-        for p in explicit_above.into_iter().rev() {
-            chain.push(p);
-        }
-    }
-
-    // 3. Append the /-derived chain (top-down).
-    for entry in hierarchy_chain.drain(..) {
-        if !chain.contains(&entry) {
-            chain.push(entry);
-        }
-    }
-
-    chain
+    db::build_namespace_chain(conn, namespace)
 }
 
 /// Inject namespace standards into a `recall/session_start` response.
@@ -1254,7 +1221,7 @@ fn inject_namespace_standard(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-fn handle_recall(
+pub fn handle_recall(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,
@@ -1323,6 +1290,35 @@ fn handle_recall(
         }
     };
 
+    // v0.6.3.1 (P3): build the per-request meta block from retrieval-stage
+    // telemetry + the runtime reranker variant. The block is always
+    // present in the response — clients that don't read it ignore unknown
+    // fields per JSON-RPC convention. Closes audit gaps G2/G8/G11 by
+    // making silent-degrade paths visible at request time.
+    let reranker_used = match reranker {
+        Some(ce) if ce.is_neural() => "neural",
+        Some(_) => "lexical",
+        None => "none",
+    };
+    let attach_meta = |resp: &mut Value, recall_mode: &str, telemetry: &RecallTelemetry| {
+        // Round blend_weight to 3 decimals — matches the score field
+        // precision and keeps the wire shape stable regardless of f64
+        // representation jitter.
+        let blend_weight = (telemetry.blend_weight_avg * 1000.0).round() / 1000.0;
+        let meta = RecallMeta {
+            recall_mode: recall_mode.to_string(),
+            reranker_used: reranker_used.to_string(),
+            candidate_counts: CandidateCounts {
+                fts: telemetry.fts_candidates,
+                hnsw: telemetry.hnsw_candidates,
+            },
+            blend_weight,
+        };
+        if let Ok(v) = serde_json::to_value(&meta) {
+            resp["meta"] = v;
+        }
+    };
+
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
         match emb.embed(context) {
@@ -1343,7 +1339,7 @@ fn handle_recall(
                         }
                     }
                 };
-                let (results, tokens_used) = db::recall_hybrid(
+                let (results, tokens_used, telemetry) = db::recall_hybrid_with_telemetry(
                     conn,
                     context,
                     &query_emb,
@@ -1367,6 +1363,7 @@ fn handle_recall(
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     decorate_budget(&mut resp, tokens_used);
+                    attach_meta(&mut resp, "hybrid", &telemetry);
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
                 }
@@ -1375,17 +1372,24 @@ fn handle_recall(
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
                 decorate_budget(&mut resp, tokens_used);
+                attach_meta(&mut resp, "hybrid", &telemetry);
                 inject_namespace_standard(conn, namespace, &mut resp);
                 return Ok(resp);
             }
             Err(e) => {
+                // v0.6.3.1 (P3, G11): the embedder being present but the
+                // per-query embed failing is a different silent-degrade
+                // path than "embedder unavailable at startup" — preserve
+                // the existing tracing event and fall through to
+                // keyword_only mode below, which is what the meta block
+                // will report.
                 tracing::warn!("embedding failed, falling back to FTS: {}", e);
             }
         }
     }
 
     // Fallback to keyword-only recall
-    let (results, tokens_used) = db::recall(
+    let (results, tokens_used, telemetry) = db::recall_with_telemetry(
         conn,
         context,
         namespace,
@@ -1402,42 +1406,96 @@ fn handle_recall(
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
     decorate_budget(&mut resp, tokens_used);
+    attach_meta(&mut resp, "keyword_only", &telemetry);
     inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
 }
 
-/// v0.6.3 (capabilities schema v2): the canonical capabilities entry
-/// point. When `conn` is `Some`, the dynamic blocks
+/// Capabilities schema selector (v0.6.3.1 P1 honesty patch).
+///
+/// HTTP callers send `Accept-Capabilities: v1` (or `v2`) to request a
+/// shape; MCP callers pass `accept: "v1"` (or `"v2"`) to
+/// `memory_capabilities`. Default is v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitiesAccept {
+    V1,
+    V2,
+}
+
+impl CapabilitiesAccept {
+    /// Parse the wire value sent by the client. Unknown values fall back
+    /// to v2 (the default). Whitespace and case insensitive.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "v1" | "1" => Self::V1,
+            _ => Self::V2,
+        }
+    }
+}
+
+/// v0.6.3 (capabilities schema v2 / P1 honesty patch): the canonical
+/// capabilities entry point.
+///
+/// **Live overlays.** When the wrapper has access to the corresponding
+/// runtime handle, it overlays:
+/// - `features.embedder_loaded` from `embedder_loaded`,
+/// - `features.recall_mode_active` from `embedder_loaded` (loaded ⇒
+///   `Hybrid`; not loaded but configured ⇒ `KeywordOnly`; configured
+///   but failed ⇒ `Degraded`; tier == keyword ⇒ `Disabled`),
+/// - `features.reranker_active` from the `CrossEncoder` enum variant
+///   (`Neural` / `LexicalFallback` / `Off`),
+/// - `features.cross_encoder_reranking` flips to `false` when the
+///   neural reranker fell back to lexical (the v1 honesty fix #93),
+/// - `models.cross_encoder` annotated with `lexical-fallback` when the
+///   neural download failed.
+///
+/// **Live DB counts.** When `conn` is `Some`, the dynamic blocks
 /// (`permissions.active_rules`, `hooks.registered_count`,
-/// `approval.pending_requests`) are populated from live DB counts.
-/// When `None`, they remain at the zero-state defaults set in
-/// `TierConfig::capabilities`. Both shapes are valid schema-v2 output —
-/// old clients reading by named path continue to work either way.
-pub(crate) fn handle_capabilities_with_conn(
+/// `approval.pending_requests`) are populated from live counts. DB
+/// errors are non-fatal — the report falls back to zero-state so a
+/// transient blip cannot 500 the capabilities endpoint.
+///
+/// **Schema selection.** `accept` controls the wire shape. `V2` is the
+/// default and recommended; `V1` projects the v2 report down to the
+/// legacy shape for backward compat (see [`Capabilities::to_v1`]).
+pub fn handle_capabilities_with_conn(
     tier_config: &TierConfig,
     reranker: Option<&CrossEncoder>,
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
+    accept: CapabilitiesAccept,
 ) -> Result<Value, String> {
     let mut caps = tier_config.capabilities();
-    // Report actual cross-encoder state, not just config (#93)
-    if let Some(ce) = reranker
-        && !ce.is_neural()
-    {
-        caps.features.cross_encoder_reranking = false;
-        caps.features.memory_reflection = false;
-        caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
-    }
-    // v0.6.2 (S18): report whether the embedder successfully materialized
-    // at serve startup. `semantic_search` reflects the tier CONFIG while
-    // this bool reflects the RUNTIME — the two can diverge when the HF
-    // model fetch fails on an offline runner.
-    caps.features.embedder_loaded = embedder_loaded;
 
-    // v0.6.3 (capabilities schema v2): when we have a connection, fill
-    // the dynamic blocks with live counts. Failures here are non-fatal —
-    // the report still serializes with the zero-state defaults so a
-    // transient DB blip can't 500 the capabilities endpoint.
+    // --- Reranker live state (P1) ---
+    // The old (#93) handler flipped `cross_encoder_reranking` to false
+    // when the neural model fell back to lexical. The honesty patch
+    // additionally surfaces the runtime variant in `reranker_active`.
+    caps.features.reranker_active = match reranker {
+        Some(ce) if ce.is_neural() => RerankerMode::Neural,
+        Some(_) => {
+            // Lexical fallback — neural download or load failed.
+            caps.features.cross_encoder_reranking = false;
+            caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
+            RerankerMode::LexicalFallback
+        }
+        None => RerankerMode::Off,
+    };
+
+    // --- Embedder live state (P1, S18) ---
+    caps.features.embedder_loaded = embedder_loaded;
+    caps.features.recall_mode_active = compute_recall_mode(tier_config, embedder_loaded);
+
+    // --- HNSW eviction surface (P3, G2) ---
+    // Mirror the per-process HNSW eviction counters into the capabilities
+    // surface so a `memory_capabilities` poll can tell operators whether
+    // the index is currently shedding embeddings. Same values surfaced in
+    // `memory_stats.index_evictions_total`.
+    caps.hnsw.evictions_total = crate::hnsw::index_evictions_total();
+    caps.hnsw.evicted_recently = crate::hnsw::evicted_recently(60);
+
+    // --- Live DB-count overlays ---
     if let Some(c) = conn {
         if let Ok(n) = db::count_active_governance_rules(c) {
             caps.permissions.active_rules = n;
@@ -1450,7 +1508,34 @@ pub(crate) fn handle_capabilities_with_conn(
         }
     }
 
-    serde_json::to_value(caps).map_err(|e| e.to_string())
+    // --- Schema selection ---
+    match accept {
+        CapabilitiesAccept::V2 => serde_json::to_value(caps).map_err(|e| e.to_string()),
+        CapabilitiesAccept::V1 => serde_json::to_value(caps.to_v1()).map_err(|e| e.to_string()),
+    }
+}
+
+/// Compute the live `recall_mode_active` tag from the configured tier
+/// and the runtime embedder-loaded signal. P1 honesty patch.
+///
+/// - Tier configured no embedder (keyword tier) → `Disabled`.
+/// - Tier configured an embedder and it loaded → `Hybrid`.
+/// - Tier configured an embedder but it did not load → `Degraded`.
+/// - (Reserved) `KeywordOnly` is returned only when the daemon has an
+///   embedder configured but the operator explicitly disabled hybrid
+///   blending — not possible in v0.6.3.1, so unreachable today.
+fn compute_recall_mode(
+    tier_config: &TierConfig,
+    embedder_loaded: bool,
+) -> crate::config::RecallMode {
+    use crate::config::RecallMode;
+    if tier_config.embedding_model.is_none() {
+        RecallMode::Disabled
+    } else if embedder_loaded {
+        RecallMode::Hybrid
+    } else {
+        RecallMode::Degraded
+    }
 }
 
 fn handle_expand_query(llm: Option<&OllamaClient>, params: &Value) -> Result<Value, String> {
@@ -3142,12 +3227,22 @@ fn handle_request(
                 "memory_consolidate" => {
                     handle_consolidate(conn, arguments, llm, embedder, vector_index, mcp_client)
                 }
-                "memory_capabilities" => handle_capabilities_with_conn(
-                    tier_config,
-                    reranker,
-                    embedder.is_some(),
-                    Some(conn),
-                ),
+                "memory_capabilities" => {
+                    // P1 honesty patch: optional `accept` argument lets MCP
+                    // clients opt into the legacy v1 shape, mirroring the
+                    // HTTP `Accept-Capabilities` header.
+                    let accept = arguments
+                        .get("accept")
+                        .and_then(Value::as_str)
+                        .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
+                    handle_capabilities_with_conn(
+                        tier_config,
+                        reranker,
+                        embedder.is_some(),
+                        Some(conn),
+                        accept,
+                    )
+                }
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
                 "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
@@ -4529,8 +4624,10 @@ mod tests {
         assert!(val["features"].is_object());
     }
 
-    /// v0.6.3 (capabilities schema v2 — arch-enhancement-spec §7).
+    /// v0.6.3.1 (capabilities schema v2 — P1 honesty patch).
     /// Every new top-level block is present with the expected shape.
+    /// Dropped fields (`rule_summary`, `by_event`, `subscribers`,
+    /// `default_timeout_seconds`) must be absent from v2 output.
     #[test]
     fn mcp_capabilities_v2_schema_includes_all_blocks() {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
@@ -4544,40 +4641,70 @@ mod tests {
 
         assert_eq!(val["schema_version"], "2", "schema_version bumped to 2");
 
-        // permissions block
+        // permissions block — `mode` flipped from "ask" to "advisory"
+        // (P1 honesty patch: no enforcement gate exists pre-P4).
         assert!(val["permissions"].is_object(), "permissions block present");
-        assert!(val["permissions"]["mode"].is_string());
-        assert_eq!(val["permissions"]["mode"], "ask");
+        assert_eq!(val["permissions"]["mode"], "advisory");
         assert!(val["permissions"]["active_rules"].is_number());
-        assert!(val["permissions"]["rule_summary"].is_array());
+        assert!(
+            val["permissions"].get("rule_summary").is_none(),
+            "v2 drops rule_summary (no per-rule serializer)"
+        );
+        // v0.6.3.1 (P4, audit G1): inheritance posture must be reported
+        // as "enforced" so consumers can distinguish a fixed deployment
+        // from a pre-fix one (which historically returned "display_only").
+        assert_eq!(val["permissions"]["inheritance"], "enforced");
 
-        // hooks block
+        // hooks block — `by_event` dropped (no event registry).
         assert!(val["hooks"].is_object(), "hooks block present");
         assert!(val["hooks"]["registered_count"].is_number());
-        assert!(val["hooks"]["by_event"].is_object());
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 drops hooks.by_event (no event registry)"
+        );
 
-        // compaction block — pre-v0.8 reports zero-state
+        // compaction block — planned-feature shape (P1 honesty patch).
         assert!(val["compaction"].is_object(), "compaction block present");
+        assert_eq!(val["compaction"]["planned"], true);
         assert_eq!(val["compaction"]["enabled"], false);
-        assert!(val["compaction"]["interval_minutes"].is_null());
-        assert!(val["compaction"]["last_run_at"].is_null());
-        assert!(val["compaction"]["last_run_stats"].is_null());
+        assert_eq!(val["compaction"]["version"], "v0.8+");
+        assert!(val["compaction"].get("interval_minutes").is_none());
+        assert!(val["compaction"].get("last_run_at").is_none());
+        assert!(val["compaction"].get("last_run_stats").is_none());
 
-        // approval block
+        // approval block — `subscribers` and `default_timeout_seconds`
+        // dropped (no subscription API, no sweeper).
         assert!(val["approval"].is_object(), "approval block present");
-        assert!(val["approval"]["subscribers"].is_number());
         assert!(val["approval"]["pending_requests"].is_number());
-        assert_eq!(val["approval"]["default_timeout_seconds"], 30);
+        assert!(
+            val["approval"].get("subscribers").is_none(),
+            "v2 drops approval.subscribers (no subscription API)"
+        );
+        assert!(
+            val["approval"].get("default_timeout_seconds").is_none(),
+            "v2 drops approval.default_timeout_seconds (no sweeper)"
+        );
 
-        // transcripts block — pre-v0.7 reports zero-state
+        // transcripts block — planned-feature shape (P1 honesty patch).
         assert!(val["transcripts"].is_object(), "transcripts block present");
+        assert_eq!(val["transcripts"]["planned"], true);
         assert_eq!(val["transcripts"]["enabled"], false);
-        assert_eq!(val["transcripts"]["total_count"], 0);
-        assert_eq!(val["transcripts"]["total_size_mb"], 0);
+        assert_eq!(val["transcripts"]["version"], "v0.7+");
+
+        // memory_reflection: planned-feature object (was bool in v1).
+        assert_eq!(val["features"]["memory_reflection"]["planned"], true);
+        assert_eq!(val["features"]["memory_reflection"]["enabled"], false);
+
+        // Live runtime overlays: keyword-tier daemon with no embedder
+        // and no reranker → disabled / off.
+        assert_eq!(val["features"]["recall_mode_active"], "disabled");
+        assert_eq!(val["features"]["reranker_active"], "off");
     }
 
-    /// v0.6.3 (capabilities schema v2). Old clients reading the v1 paths
-    /// must continue to find them at the same top-level keys.
+    /// v0.6.3.1 (P1 honesty patch). Default v2 response keeps the legacy
+    /// top-level keys (`tier`, `version`, `features`, `models`) so old
+    /// path-readers don't break, even though `memory_reflection` was
+    /// reshaped into an object.
     #[test]
     fn mcp_capabilities_v2_backwards_compatible() {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
@@ -4589,19 +4716,48 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
 
-        // v1 fields preserved at the same paths
+        // v1 top-level keys preserved at the same paths
         assert!(val["tier"].is_string(), "v1: tier preserved");
         assert!(val["version"].is_string(), "v1: version preserved");
         assert!(val["features"].is_object(), "v1: features preserved");
         assert!(val["models"].is_object(), "v1: models preserved");
 
-        // Specifically, well-known v1 sub-fields still resolve.
+        // Well-known v1 sub-fields still resolve.
         assert!(val["features"]["keyword_search"].is_boolean());
         assert!(val["features"]["semantic_search"].is_boolean());
         assert!(val["features"]["embedder_loaded"].is_boolean());
         assert!(val["models"]["embedding"].is_string());
         assert!(val["models"]["llm"].is_string());
         assert!(val["models"]["cross_encoder"].is_string());
+    }
+
+    /// P1 honesty patch: explicit `accept = "v1"` returns the legacy
+    /// shape (no `schema_version`, `memory_reflection` is a bool, no
+    /// v2-only blocks).
+    #[test]
+    fn mcp_capabilities_accept_v1_returns_legacy_shape() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_capabilities", json!({"accept": "v1"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+
+        // v1 has no schema_version
+        assert!(val.get("schema_version").is_none());
+        // v2-only blocks are absent
+        assert!(val.get("permissions").is_none());
+        assert!(val.get("hooks").is_none());
+        assert!(val.get("compaction").is_none());
+        assert!(val.get("approval").is_none());
+        assert!(val.get("transcripts").is_none());
+        // v1 features.memory_reflection is a bool (not the v2 object)
+        assert!(val["features"]["memory_reflection"].is_boolean());
+        // v1 features carry no recall_mode_active / reranker_active
+        assert!(val["features"].get("recall_mode_active").is_none());
+        assert!(val["features"].get("reranker_active").is_none());
     }
 
     /// v0.6.3 (capabilities schema v2). `approval.pending_requests`
