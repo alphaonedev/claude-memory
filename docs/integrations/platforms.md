@@ -413,18 +413,18 @@ shared shell. Two equivalents:
 1. **HTTP boot (recommended for production).** `ai-memory daemon`
    exposes a boot endpoint. The agent fetches it at session start:
 
-   ```bash
+   ```text
    curl -s "http://ai-memory:9077/v1/boot?namespace=my-project&limit=10&format=text"
    ```
 
-   The response body is identical to `ai-memory boot --format text` —
+   The response body is identical to `ai-memory boot --format text` --
    same status header, same body. Wire it into your agent the same way
    the [Codex CLI recipe](codex-cli.md) wires the local CLI.
 
 2. **`kubectl exec` (dev only).** For interactive debugging, you can
    shell into the sidecar:
 
-   ```bash
+   ```text
    kubectl exec -it agent-with-ai-memory -c ai-memory -- ai-memory boot --quiet --limit 10
    ```
 
@@ -435,7 +435,7 @@ shared shell. Two equivalents:
 
 For stdio-only agents (no HTTP client), the current best practice is
 the sidecar pattern with a shared `emptyDir` volume holding a Unix
-socket, and `ai-memory daemon --unix-socket /run/ai-memory.sock` — but
+socket, and `ai-memory daemon --unix-socket /run/ai-memory.sock` -- but
 that's outside the scope of issue #487 PR-8 and tracked as a separate
 follow-up.
 
@@ -517,7 +517,7 @@ specifically.
 
 ### Native build (on the ARM device itself)
 
-```bash
+```text
 # 64-bit ARM (Pi 4/5, Graviton, ARM64 servers)
 cargo build --release --target aarch64-unknown-linux-gnu
 
@@ -533,14 +533,14 @@ cross-compile from a beefier host instead (see below).
 
 Add the target and a cross linker:
 
-```bash
+```text
 # Add Rust target
 rustup target add aarch64-unknown-linux-gnu
 
 # Linker (Linux x86_64 host)
 sudo apt install gcc-aarch64-linux-gnu
 
-# Linker (macOS x86_64 host — install ARM64 ELF cross GCC via Homebrew)
+# Linker (macOS x86_64 host -- install ARM64 ELF cross GCC via Homebrew)
 brew tap messense/macos-cross-toolchains
 brew install aarch64-unknown-linux-gnu
 
@@ -551,7 +551,7 @@ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
 
 For armv7 (older Pis):
 
-```bash
+```text
 rustup target add armv7-unknown-linux-gnueabihf
 sudo apt install gcc-arm-linux-gnueabihf
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc \
@@ -663,7 +663,7 @@ the keyword tier is usually plenty.
 
 Static-linked musl build, cross-compiled from a Linux x86_64 host:
 
-```bash
+```text
 rustup target add armv7-unknown-linux-musleabihf
 # install musl cross toolchain (e.g. via musl.cc or buildroot SDK)
 CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER=armv7l-linux-musleabihf-gcc \

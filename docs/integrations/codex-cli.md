@@ -14,7 +14,7 @@ in Rust with no shell. Same code path on macOS / Linux / Windows /
 Docker / Kubernetes. No bash, no PowerShell, no `chmod +x`, no
 `%PATH%` quirks.
 
-```bash
+```text
 ai-memory wrap codex -- chat --model gpt-5
 ```
 
@@ -33,7 +33,7 @@ What it does:
 Use `--no-boot` to skip the in-process boot call (useful for testing
 or when the DB is known to be unavailable):
 
-```bash
+```text
 ai-memory wrap codex --no-boot -- chat --model gpt-5
 ```
 
@@ -42,7 +42,7 @@ The default lookup table maps `codex` and `codex-cli` to the
 exposes a different flag (`--system-prompt`, env-var-only, etc.),
 override:
 
-```bash
+```text
 # Different flag
 ai-memory wrap codex --system-flag --system-prompt -- chat
 

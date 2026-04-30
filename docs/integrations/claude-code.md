@@ -5,8 +5,8 @@ remediation for issue [#487](https://github.com/alphaonedev/ai-memory-mcp/issues
 
 ## Quick install
 
-```bash
-# Preview the change (dry-run is the default — writes nothing):
+```text
+# Preview the change (dry-run is the default -- writes nothing):
 ai-memory install claude-code
 
 # Commit the change:
@@ -201,7 +201,7 @@ If the cold-start fails, check:
 
 ## Uninstall
 
-```bash
+```text
 ai-memory install claude-code --uninstall   # see PR-2 (issue #487 item E)
 ```
 
