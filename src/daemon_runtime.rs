@@ -212,6 +212,33 @@ pub enum Command {
     /// and both adapters upsert on id.
     #[cfg(feature = "sal")]
     Migrate(MigrateArgs),
+    /// v0.6.3.1 (P7 / R7): operator-visible health dashboard. Reads
+    /// Capabilities v2 (P1) + data integrity surfaces (P2) + recall
+    /// observability (P3). With `--remote <url>` becomes a fleet doctor
+    /// at T3+. Read-only — never mutates the database. Exits 0 on a
+    /// healthy report, 2 on critical findings, and 1 on warnings when
+    /// `--fail-on-warn` is passed.
+    Doctor(DoctorCliArgs),
+}
+
+/// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
+/// derives them automatically; the actual report logic lives in
+/// `cli::doctor::run`.
+#[derive(Args)]
+pub struct DoctorCliArgs {
+    /// Query a remote ai-memory daemon's HTTP capabilities + stats
+    /// endpoints instead of opening the local DB. Sections that need
+    /// raw SQL access render as N/A in this mode.
+    #[arg(long, value_name = "URL")]
+    pub remote: Option<String>,
+    /// Emit the report as JSON instead of human-readable text. Useful
+    /// for CI consumers and for `jq`-style filtering.
+    #[arg(long)]
+    pub json: bool,
+    /// Exit 1 when at least one section is at WARN severity. Without
+    /// this flag, warnings keep exit 0; criticals always exit 2.
+    #[arg(long)]
+    pub fail_on_warn: bool,
 }
 
 #[derive(Args)]
@@ -633,6 +660,37 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
         Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
         Command::Migrate(a) => cmd_migrate(&a).await,
+        Command::Doctor(a) => {
+            // P7 / R7. The doctor is read-only; it never sets
+            // `needs_checkpoint`. We compute the exit code from the
+            // overall severity and propagate it via the process-exit
+            // path below so callers (CI, ops scripts) can branch on it.
+            //
+            // The remote mode uses `reqwest::blocking::Client` which
+            // panics when dropped on a tokio runtime thread, so the
+            // entire doctor pass runs inside `spawn_blocking`.
+            let db_path_doctor = db_path.clone();
+            let args = cli::doctor::DoctorArgs {
+                remote: a.remote,
+                json: a.json,
+                fail_on_warn: a.fail_on_warn,
+            };
+            let join = tokio::task::spawn_blocking(move || {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::doctor::run(&db_path_doctor, &args, &mut out)
+            })
+            .await;
+            match join {
+                Ok(Ok(0)) => Ok(()),
+                Ok(Ok(code)) => std::process::exit(code),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(anyhow::anyhow!("doctor task join failed: {e}")),
+            }
+        }
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth

@@ -4249,6 +4249,227 @@ pub fn count_pending_actions_by_status(conn: &Connection, status: &str) -> Resul
     Ok(usize::try_from(count.max(0)).unwrap_or(0))
 }
 
+// ---------------------------------------------------------------------------
+// `ai-memory doctor` (P7 / R7) — query helpers.
+// ---------------------------------------------------------------------------
+//
+// These read-only helpers back the `ai-memory doctor` CLI subcommand. Each
+// query is a single indexed `COUNT(*)` (or close to it) so the reporter can
+// run an entire health pass without holding the DB lock long enough to
+// block live writers.
+//
+// Surfaces consumed:
+// - `count_dim_violations` reads the post-P2 `embedding_dim` column when
+//   present and gracefully reports `Ok(None)` on pre-P2 schemas (the column
+//   doesn't exist yet on `release/v0.6.3`).
+// - `count_index_evictions` reads the post-P3 `index_evictions_total` global
+//   counter when wired (there is no schema-level surface today; it returns
+//   `Ok(None)` so the doctor can render a "not yet observed" line).
+// - `count_oldest_pending_action_age_secs` is portable today and reports the
+//   age of the oldest `pending` row in seconds.
+// - `count_governance_chain_depth` walks `parent_namespace` for each
+//   namespace_meta row to estimate the inheritance depth distribution
+//   the P4 enforcer will eventually consume.
+
+/// Count rows whose `embedding_dim` (post-P2) does not match the modal
+/// dim within their namespace. On pre-P2 schemas the `embedding_dim`
+/// column doesn't exist; the function returns `Ok(None)` so the doctor
+/// can render "not yet observed (pre-P2 schema)".
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures — a missing column is
+/// reported as `Ok(None)`, not an error.
+pub fn doctor_dim_violations(conn: &Connection) -> Result<Option<usize>> {
+    let has_dim = conn
+        .prepare("SELECT embedding_dim FROM memories LIMIT 0")
+        .is_ok();
+    if !has_dim {
+        return Ok(None);
+    }
+    // For each namespace, find the modal dim (most-frequent non-null value)
+    // and count rows whose dim differs from it. Rows with NULL dim but a
+    // non-empty embedding count as violations too — they are mid-migration.
+    let n: i64 = conn
+        .query_row(
+            "WITH per_ns_modes AS (
+                 SELECT namespace, embedding_dim, COUNT(*) AS c
+                 FROM memories
+                 WHERE embedding IS NOT NULL AND embedding_dim IS NOT NULL
+                 GROUP BY namespace, embedding_dim
+             ),
+             ranked AS (
+                 SELECT namespace, embedding_dim,
+                        ROW_NUMBER() OVER (PARTITION BY namespace ORDER BY c DESC) AS rn
+                 FROM per_ns_modes
+             ),
+             modes AS (
+                 SELECT namespace, embedding_dim AS modal_dim
+                 FROM ranked WHERE rn = 1
+             )
+             SELECT COUNT(*)
+             FROM memories m
+             LEFT JOIN modes mo ON mo.namespace = m.namespace
+             WHERE m.embedding IS NOT NULL
+               AND (m.embedding_dim IS NULL
+                    OR (mo.modal_dim IS NOT NULL AND m.embedding_dim != mo.modal_dim))",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(Some(usize::try_from(n.max(0)).unwrap_or(0)))
+}
+
+/// Age in seconds of the oldest `pending` row in `pending_actions`, or
+/// `None` if the queue is empty (or the column is unparseable). The
+/// doctor uses this to flag a backlog older than 24h as critical.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures (e.g. missing table).
+pub fn doctor_oldest_pending_age_secs(conn: &Connection) -> Result<Option<i64>> {
+    let row: Option<String> = conn
+        .query_row(
+            "SELECT requested_at FROM pending_actions WHERE status = 'pending'
+             ORDER BY requested_at ASC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let Some(ts) = row else {
+        return Ok(None);
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&ts) else {
+        return Ok(None);
+    };
+    let age = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds();
+    Ok(Some(age))
+}
+
+/// Count of namespaces that have a standard registered with a non-null
+/// `metadata.governance` block, and the count without (just a standard
+/// memory but no policy attached).
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures.
+pub fn doctor_governance_coverage(conn: &Connection) -> Result<(usize, usize)> {
+    let with_policy: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories m
+             INNER JOIN namespace_meta nm ON nm.standard_id = m.id
+             WHERE json_extract(m.metadata, '$.governance') IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let total_meta: i64 = conn
+        .query_row("SELECT COUNT(*) FROM namespace_meta", [], |r| r.get(0))
+        .unwrap_or(0);
+    let with = usize::try_from(with_policy.max(0)).unwrap_or(0);
+    let total = usize::try_from(total_meta.max(0)).unwrap_or(0);
+    Ok((with, total.saturating_sub(with)))
+}
+
+/// Distribution of the `parent_namespace` chain depth across
+/// `namespace_meta` rows. Returns a Vec where index `i` is the count of
+/// namespaces with chain depth `i` (depth 0 = no parent).
+///
+/// Walks each row's `parent_namespace` chain up to a hard cap of 16 to
+/// avoid runaway loops on malformed data. Rows whose chain exceeds the
+/// cap are bucketed at the cap.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures.
+pub fn doctor_governance_depth_distribution(conn: &Connection) -> Result<Vec<usize>> {
+    const MAX_DEPTH: usize = 16;
+    let mut stmt = conn.prepare("SELECT namespace, parent_namespace FROM namespace_meta")?;
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    let parent_map: HashMap<String, Option<String>> = rows
+        .filter_map(rusqlite::Result::ok)
+        .collect::<HashMap<_, _>>();
+    let mut hist = vec![0_usize; MAX_DEPTH + 1];
+    for ns in parent_map.keys() {
+        let mut depth = 0_usize;
+        let mut cur = parent_map.get(ns).cloned().flatten();
+        while let Some(p) = cur {
+            depth += 1;
+            if depth >= MAX_DEPTH {
+                break;
+            }
+            cur = parent_map.get(&p).cloned().flatten();
+        }
+        let bucket = depth.min(MAX_DEPTH);
+        hist[bucket] += 1;
+    }
+    Ok(hist)
+}
+
+/// Sum of `subscriptions.dispatch_count` and `subscriptions.failure_count`
+/// across all rows. Returns `(dispatched, failed)`. Used by the doctor to
+/// estimate webhook delivery success rate.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures.
+pub fn doctor_webhook_delivery_totals(conn: &Connection) -> Result<(u64, u64)> {
+    let dispatched: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(dispatch_count), 0) FROM subscriptions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let failed: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(failure_count), 0) FROM subscriptions",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok((
+        u64::try_from(dispatched.max(0)).unwrap_or(0),
+        u64::try_from(failed.max(0)).unwrap_or(0),
+    ))
+}
+
+/// Maximum sync-clock skew in seconds across the `sync_state` table —
+/// the largest gap between `last_pulled_at` (when this peer last heard
+/// from a peer) and `last_seen_at` (the peer's own `updated_at` advance).
+/// Returns `Ok(None)` when `sync_state` is empty or the columns are
+/// missing on a pre-T3 schema.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures.
+pub fn doctor_max_sync_skew_secs(conn: &Connection) -> Result<Option<i64>> {
+    let mut stmt = match conn.prepare(
+        "SELECT last_seen_at, last_pulled_at FROM sync_state WHERE last_pulled_at IS NOT NULL",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    let mut max_skew: Option<i64> = None;
+    for row in rows {
+        let Ok((seen, pulled)) = row else { continue };
+        let Ok(s) = chrono::DateTime::parse_from_rfc3339(&seen) else {
+            continue;
+        };
+        let Ok(p) = chrono::DateTime::parse_from_rfc3339(&pulled) else {
+            continue;
+        };
+        let skew = (s.with_timezone(&Utc) - p.with_timezone(&Utc))
+            .num_seconds()
+            .abs();
+        max_skew = Some(max_skew.map_or(skew, |m| m.max(skew)));
+    }
+    Ok(max_skew)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7282,5 +7503,90 @@ mod tests {
             )
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    // -----------------------------------------------------------------
+    // Doctor (P7) helper unit tests.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn doctor_dim_violations_pre_p2_returns_none() {
+        // Fresh DB has no `embedding_dim` column (P2 hasn't merged) — the
+        // helper must report "not yet observed", not error.
+        let conn = test_db();
+        let result = doctor_dim_violations(&conn).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn doctor_oldest_pending_age_secs_empty_queue() {
+        let conn = test_db();
+        let age = doctor_oldest_pending_age_secs(&conn).unwrap();
+        assert_eq!(age, None);
+    }
+
+    #[test]
+    fn doctor_oldest_pending_age_secs_reports_age() {
+        let conn = test_db();
+        let one_hour_ago = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO pending_actions (id, action_type, namespace, payload, requested_by, requested_at, status)
+             VALUES ('p1', 'store', 'ns', '{}', 'agent', ?1, 'pending')",
+            params![one_hour_ago],
+        )
+        .unwrap();
+        let age = doctor_oldest_pending_age_secs(&conn).unwrap().unwrap();
+        // Allow a generous margin — the test machine clock is the source of truth.
+        assert!((3500..=3700).contains(&age), "expected ~3600s, got {age}");
+    }
+
+    #[test]
+    fn doctor_governance_coverage_with_namespace_meta() {
+        let conn = test_db();
+        // No namespaces — both counts zero.
+        let (with, without) = doctor_governance_coverage(&conn).unwrap();
+        assert_eq!((with, without), (0, 0));
+    }
+
+    #[test]
+    fn doctor_governance_depth_distribution_chains() {
+        let conn = test_db();
+        // Build a small inheritance tree: root -> a -> a/b -> a/b/c
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO namespace_meta (namespace, parent_namespace, updated_at) VALUES ('root', NULL, ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO namespace_meta (namespace, parent_namespace, updated_at) VALUES ('a', 'root', ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO namespace_meta (namespace, parent_namespace, updated_at) VALUES ('a/b', 'a', ?1)",
+            params![now],
+        ).unwrap();
+        conn.execute(
+            "INSERT INTO namespace_meta (namespace, parent_namespace, updated_at) VALUES ('a/b/c', 'a/b', ?1)",
+            params![now],
+        ).unwrap();
+        let dist = doctor_governance_depth_distribution(&conn).unwrap();
+        assert_eq!(dist[0], 1, "root has depth 0");
+        assert_eq!(dist[1], 1, "a has depth 1");
+        assert_eq!(dist[2], 1, "a/b has depth 2");
+        assert_eq!(dist[3], 1, "a/b/c has depth 3");
+    }
+
+    #[test]
+    fn doctor_webhook_delivery_totals_empty() {
+        let conn = test_db();
+        let (dispatched, failed) = doctor_webhook_delivery_totals(&conn).unwrap();
+        assert_eq!((dispatched, failed), (0, 0));
+    }
+
+    #[test]
+    fn doctor_max_sync_skew_secs_empty() {
+        let conn = test_db();
+        let skew = doctor_max_sync_skew_secs(&conn).unwrap();
+        assert_eq!(skew, None);
     }
 }

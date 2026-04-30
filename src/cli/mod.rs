@@ -21,6 +21,7 @@ pub mod backup;
 pub mod consolidate;
 pub mod crud;
 pub mod curator;
+pub mod doctor;
 pub mod forget;
 pub mod gc;
 pub mod governance;
