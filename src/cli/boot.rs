@@ -46,6 +46,31 @@ use models::Tier;
 use std::path::Path;
 use std::time::Instant;
 
+/// Lower bound of the DB-schema range this binary supports. Below this
+/// we emit a `warn-schema-unsupported` manifest header so the user
+/// knows their `ai-memory` binary is too new for an old DB. Set to the
+/// v0.6.3 baseline (16) — older schemas won't have the columns the
+/// recall pipeline expects. v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
+pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
+
+/// Upper bound of the DB-schema range this binary supports. Mirrors
+/// `db::CURRENT_SCHEMA_VERSION` (19 today). When a DB's
+/// `schema_version` exceeds this, the binary is too old for a newer
+/// DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497
+/// req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 19;
+
+/// Pure boundary check: `true` when `v` lies within
+/// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the
+/// boundary semantics (inclusive both ends) can be unit-tested without
+/// needing a synthetic DB whose `schema_version` lies outside the
+/// migration ladder's reach. v0.6.3.1 (PR-9h / issue #487 PR #497 req
+/// #72).
+#[must_use]
+pub fn schema_in_supported_range(v: u32) -> bool {
+    v >= MIN_SUPPORTED_SCHEMA && v <= MAX_SUPPORTED_SCHEMA
+}
+
 /// Default budget — large enough for ~10 toon-compact rows, small enough that
 /// a misconfigured hook can't wedge the first turn with megabytes of context.
 const DEFAULT_BUDGET_TOKENS: usize = 4096;
@@ -225,6 +250,13 @@ enum BootStatus {
     /// the agent can say "I would have loaded context but couldn't" rather
     /// than silently appearing memory-less.
     WarnDbUnavailable,
+    /// DB opened cleanly but its `schema_version` falls outside the
+    /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]` range this binary
+    /// implements. We still proceed (boot exits 0 — never wedge the
+    /// agent's first turn) but the manifest tells the user to run
+    /// `ai-memory doctor` and consider upgrading. v0.6.3.1 (PR-9h /
+    /// issue #487 PR #497 req #72).
+    WarnSchemaUnsupported { db_schema: u32 },
 }
 
 impl BootStatus {
@@ -232,21 +264,33 @@ impl BootStatus {
         match self {
             Self::OkLoaded => "ok",
             Self::InfoFallback | Self::InfoEmpty => "info",
-            Self::WarnDbUnavailable => "warn",
+            Self::WarnDbUnavailable | Self::WarnSchemaUnsupported { .. } => "warn",
         }
     }
 }
 
-/// Read the schema version from the DB's `schema_version` table. Returns
-/// the sentinel string when the DB is unreachable or the table is empty —
-/// the manifest is best-effort, never an error.
-fn read_schema_version(conn: &rusqlite::Connection) -> String {
-    conn.query_row(
+/// Read the schema version from the DB's `schema_version` table.
+/// Returns the formatted display string (`vN` or `<unavailable>`) and,
+/// when the table read succeeded, the parsed integer for in-range checks
+/// against `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. The manifest
+/// is best-effort: a query error degrades to the sentinel rather than
+/// failing boot.
+fn read_schema_version(conn: &rusqlite::Connection) -> (String, Option<u32>) {
+    match conn.query_row(
         "SELECT COALESCE(MAX(version), 0) FROM schema_version",
         [],
         |r| r.get::<_, i64>(0),
-    )
-    .map_or_else(|_| UNAVAILABLE.to_string(), |v| format!("v{v}"))
+    ) {
+        Ok(v) => {
+            let display = format!("v{v}");
+            // Negative or absurdly-large values fall back to the
+            // sentinel — schema_version is monotonically increasing
+            // u32-ish in practice.
+            let numeric = u32::try_from(v).ok();
+            (display, numeric)
+        }
+        Err(_) => (UNAVAILABLE.to_string(), None),
+    }
 }
 
 /// Cheap COUNT of live (non-expired) memories. Same expiry semantics as
@@ -294,6 +338,14 @@ struct BootManifest {
     // multi-line text/toon header expansion.
     note: String,
     status: BootStatus,
+    /// PR-9h (#487 PR #497 req #72) — `true` when the DB's
+    /// `schema_version` lies within `[MIN_SUPPORTED_SCHEMA,
+    /// MAX_SUPPORTED_SCHEMA]`. Surfaced as a top-level JSON field
+    /// (`schema_supported`) so SIEMs / fleet dashboards can alert on
+    /// schema drift without parsing the free-text status note. `false`
+    /// when the DB couldn't be opened or the schema falls outside the
+    /// supported range.
+    schema_supported: bool,
 }
 
 impl BootManifest {
@@ -306,6 +358,7 @@ impl BootManifest {
         schema_version: String,
         total_memories: String,
         latency_ms: u128,
+        schema_supported: bool,
     ) -> Self {
         // Resolve the *configured* tier. Boot doesn't materialize the
         // embedder / LLM / reranker handles, so these reflect what would
@@ -343,6 +396,14 @@ impl BootManifest {
                  See https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/integrations/README.md",
                 db_path.display()
             ),
+            BootStatus::WarnSchemaUnsupported { db_schema } => format!(
+                "db schema v{db_schema} unsupported by binary {bin_ver} \
+                 (supports v{min}..v{max}); proceeding with degraded context. \
+                 Run `ai-memory doctor` and consider upgrading.",
+                bin_ver = env!("CARGO_PKG_VERSION"),
+                min = MIN_SUPPORTED_SCHEMA,
+                max = MAX_SUPPORTED_SCHEMA,
+            ),
         };
 
         Self {
@@ -359,6 +420,7 @@ impl BootManifest {
             count,
             note,
             status,
+            schema_supported,
         }
     }
 }
@@ -372,6 +434,20 @@ pub fn run(
     out: &mut CliOutput<'_>,
 ) -> Result<()> {
     let start = Instant::now();
+
+    // PR-9h (#487 PR #497 req #73) — privacy kill-switch. When the
+    // operator sets `[boot] enabled = false` (or
+    // `AI_MEMORY_BOOT_ENABLED=0`), boot exits 0 with empty stdout AND
+    // empty stderr. The hook injects nothing — true silence for
+    // privacy-sensitive hosts. This MUST run before any other side
+    // effect (file open, env probe, etc.) so the contract is "boot
+    // produces zero output."
+    let boot_cfg = app_config.effective_boot();
+    if !boot_cfg.effective_enabled() {
+        return Ok(());
+    }
+    let redact_titles = boot_cfg.effective_redact_titles();
+
     let format = BootFormat::parse(&args.format)?;
     let limit = args.limit.clamp(1, 50);
     let namespace = resolve_namespace(args);
@@ -399,6 +475,7 @@ pub fn run(
                     UNAVAILABLE.to_string(),
                     UNAVAILABLE.to_string(),
                     start.elapsed().as_millis(),
+                    false, // schema_supported: DB unavailable → unknown → false
                 );
                 emit_status_header(out, &manifest, format)?;
             }
@@ -408,8 +485,36 @@ pub fn run(
 
     // Cheap diagnostic lookups. Both degrade to the sentinel rather than
     // fail the boot — the manifest is best-effort.
-    let schema_version = read_schema_version(&conn);
+    let (schema_version, schema_int) = read_schema_version(&conn);
     let total_memories = count_live_memories(&conn);
+
+    // PR-9h (#487 PR #497 req #72) — version-drift detection. If the
+    // DB's schema lies outside `[MIN, MAX]`, surface a warn-schema
+    // header. Boot still exits 0 (consistent with WarnDbUnavailable —
+    // never wedge the agent's first turn). When schema_int is None
+    // (parse failure / unreadable table) we treat schema as unsupported
+    // for SIEM purposes but otherwise carry on with the existing
+    // status flow.
+    let schema_supported = schema_int.is_some_and(schema_in_supported_range);
+    if let Some(v) = schema_int
+        && !schema_in_supported_range(v)
+    {
+        if !args.no_header {
+            let manifest = BootManifest::build(
+                BootStatus::WarnSchemaUnsupported { db_schema: v },
+                &namespace,
+                0,
+                db_path,
+                app_config,
+                schema_version,
+                total_memories,
+                start.elapsed().as_millis(),
+                false,
+            );
+            emit_status_header(out, &manifest, format)?;
+        }
+        return Ok(());
+    }
 
     let (mems, used_namespace) = fetch_boot_memories(&conn, &namespace, limit)?;
     let mems = clamp_to_budget(mems, args.budget_tokens);
@@ -426,6 +531,7 @@ pub fn run(
                 schema_version,
                 total_memories,
                 start.elapsed().as_millis(),
+                schema_supported,
             );
             emit_status_header(out, &manifest, format)?;
         }
@@ -449,7 +555,9 @@ pub fn run(
                 writeln!(
                     out.stdout,
                     "{}",
-                    serde_json::to_string(&serde_json::json!({"memories": mems}))?
+                    serde_json::to_string(&serde_json::json!({
+                        "memories": render_memories_for_emit(&mems, redact_titles)
+                    }))?
                 )?;
             } else {
                 let manifest = BootManifest::build(
@@ -461,8 +569,9 @@ pub fn run(
                     schema_version,
                     total_memories,
                     start.elapsed().as_millis(),
+                    schema_supported,
                 );
-                emit_json_with_status(out, &manifest, &mems, fell_back)?;
+                emit_json_with_status(out, &manifest, &mems, fell_back, redact_titles)?;
             }
         }
         BootFormat::Text => {
@@ -476,10 +585,11 @@ pub fn run(
                     schema_version,
                     total_memories,
                     start.elapsed().as_millis(),
+                    schema_supported,
                 );
                 emit_status_header(out, &manifest, format)?;
             }
-            emit_text(out, &mems)?;
+            emit_text(out, &mems, redact_titles)?;
         }
         BootFormat::Toon => {
             if !args.no_header {
@@ -492,14 +602,39 @@ pub fn run(
                     schema_version,
                     total_memories,
                     start.elapsed().as_millis(),
+                    schema_supported,
                 );
                 emit_status_header(out, &manifest, format)?;
             }
-            emit_toon(out, &mems)?;
+            emit_toon(out, &mems, redact_titles)?;
         }
     }
 
     Ok(())
+}
+
+/// Sentinel substituted for `memory.title` when `[boot] redact_titles =
+/// true`. Identical to the `redact_content` placeholder pattern used by
+/// the audit subsystem (PR-5). v0.6.3.1 (PR-9h / issue #487 PR #497 req
+/// #73).
+const REDACTED_TITLE: &str = "<redacted>";
+
+/// Apply title redaction to a slice of memories, returning a freshly
+/// owned `Vec` with each `title` replaced by [`REDACTED_TITLE`] when
+/// the operator opted in via `[boot] redact_titles = true`. The
+/// no-redact path returns a clone — the cost is one Vec allocation per
+/// boot, which is dwarfed by the SQL list call.
+fn render_memories_for_emit(mems: &[models::Memory], redact_titles: bool) -> Vec<models::Memory> {
+    if !redact_titles {
+        return mems.to_vec();
+    }
+    mems.iter()
+        .map(|m| {
+            let mut redacted = m.clone();
+            redacted.title = REDACTED_TITLE.to_string();
+            redacted
+        })
+        .collect()
 }
 
 /// Always-visible diagnostic header. Agents see this in their session log
@@ -535,6 +670,7 @@ fn emit_status_header(
                     "version": manifest.version,
                     "db_path": manifest.db_path,
                     "schema_version": manifest.schema_version,
+                    "schema_supported": manifest.schema_supported,
                     "total_memories": manifest.total_memories,
                     "tier": manifest.tier,
                     "embedder": manifest.embedder,
@@ -600,21 +736,50 @@ fn emit_status_header(
                         manifest.namespace
                     )?;
                 }
+                BootStatus::WarnSchemaUnsupported { db_schema } => {
+                    // PR-9h (#487 PR #497 req #72) — full warn-schema
+                    // message: `db schema vN unsupported by binary
+                    // X.Y.Z (supports v{MIN}..v{MAX}); proceeding with
+                    // degraded context. Run \`ai-memory doctor\` and
+                    // consider upgrading.`
+                    writeln!(
+                        out.stdout,
+                        "#   namespace:  {} (db schema v{} unsupported by binary {} \
+                         (supports v{}..v{}); proceeding with degraded context. \
+                         Run `ai-memory doctor` and consider upgrading.)",
+                        manifest.namespace,
+                        db_schema,
+                        manifest.version,
+                        MIN_SUPPORTED_SCHEMA,
+                        MAX_SUPPORTED_SCHEMA,
+                    )?;
+                }
             }
         }
     }
     Ok(())
 }
 
-fn emit_text(out: &mut CliOutput<'_>, mems: &[models::Memory]) -> Result<()> {
+fn emit_text(out: &mut CliOutput<'_>, mems: &[models::Memory], redact_titles: bool) -> Result<()> {
     for mem in mems {
         let age = human_age(&mem.updated_at);
+        // PR-9h (#487 PR #497 req #73) — when `[boot] redact_titles =
+        // true`, replace the title field with the redaction sentinel.
+        // Every other row field (tier, id_short, namespace, priority,
+        // age) still surfaces so the operator retains the audit-trail
+        // signal of "boot ran with N memories" without exposing
+        // memory subjects.
+        let title: &str = if redact_titles {
+            REDACTED_TITLE
+        } else {
+            &mem.title
+        };
         writeln!(
             out.stdout,
             "- [{}/{}] {} (ns={}, p={}, {})",
             mem.tier,
             id_short(&mem.id),
-            mem.title,
+            title,
             mem.namespace,
             mem.priority,
             age
@@ -628,16 +793,19 @@ fn emit_json_with_status(
     manifest: &BootManifest,
     mems: &[models::Memory],
     fell_back: bool,
+    redact_titles: bool,
 ) -> Result<()> {
     // Same shape as `emit_status_header` JSON path, plus `memories` and
     // `fell_back_to_global`. Agents that ingest JSON get every manifest
     // field as a top-level key so they can reason about the runtime
     // without parsing a free-text header.
+    let rendered = render_memories_for_emit(mems, redact_titles);
     let body = serde_json::json!({
         "status": manifest.status.label(),
         "version": manifest.version,
         "db_path": manifest.db_path,
         "schema_version": manifest.schema_version,
+        "schema_supported": manifest.schema_supported,
         "total_memories": manifest.total_memories,
         "tier": manifest.tier,
         "embedder": manifest.embedder,
@@ -648,19 +816,20 @@ fn emit_json_with_status(
         "count": manifest.count,
         "note": manifest.note,
         "fell_back_to_global": fell_back,
-        "memories": mems,
+        "memories": rendered,
     });
     writeln!(out.stdout, "{}", serde_json::to_string(&body)?)?;
     Ok(())
 }
 
-fn emit_toon(out: &mut CliOutput<'_>, mems: &[models::Memory]) -> Result<()> {
+fn emit_toon(out: &mut CliOutput<'_>, mems: &[models::Memory], redact_titles: bool) -> Result<()> {
     // Reuse the canonical TOON serializer used by `memory_recall` so boot
     // output is byte-identical to a recall response on the wire format.
     // `memories_to_toon` takes the `{memories: [...], count: N}` shape.
+    let rendered = render_memories_for_emit(mems, redact_titles);
     let body = serde_json::json!({
-        "memories": mems,
-        "count": mems.len(),
+        "memories": rendered,
+        "count": rendered.len(),
     });
     let toon_str = toon::memories_to_toon(&body, true);
     writeln!(out.stdout, "{toon_str}")?;
@@ -688,6 +857,20 @@ mod tests {
         AppConfig::default()
     }
 
+    /// Process-wide guard for the boot-test suite. `BootConfig::
+    /// effective_enabled` reads `AI_MEMORY_BOOT_ENABLED` on every
+    /// invocation — to avoid parallel tests observing the env-var
+    /// override fired by [`boot_disabled_via_env_var_overrides_config`],
+    /// every test that calls [`run`] takes this guard. Cheap (one
+    /// `Mutex` lock) and bullet-proof.
+    fn test_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn boot_format_parse_accepts_aliases() {
         assert_eq!(BootFormat::parse("text").unwrap(), BootFormat::Text);
@@ -700,6 +883,7 @@ mod tests {
 
     #[test]
     fn boot_emits_ok_header_with_loaded_memories() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-x", "first", "content one");
         seed_memory(&env.db_path, "ns-x", "second", "content two");
@@ -744,6 +928,7 @@ mod tests {
 
     #[test]
     fn boot_header_includes_version() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-v", "row", "x");
         let db_path = env.db_path.clone();
@@ -764,6 +949,7 @@ mod tests {
 
     #[test]
     fn boot_header_includes_db_path() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-d", "row", "x");
         let db_path = env.db_path.clone();
@@ -782,6 +968,7 @@ mod tests {
 
     #[test]
     fn boot_header_includes_schema_version() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-s", "row", "x");
         let db_path = env.db_path.clone();
@@ -799,6 +986,7 @@ mod tests {
 
     #[test]
     fn boot_header_includes_latency_ms() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-lat", "row", "x");
         let db_path = env.db_path.clone();
@@ -828,6 +1016,7 @@ mod tests {
 
     #[test]
     fn boot_json_includes_all_manifest_fields() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-jm", "row", "x");
         let db_path = env.db_path.clone();
@@ -876,6 +1065,7 @@ mod tests {
 
     #[test]
     fn boot_respects_limit() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         for i in 0..5 {
             seed_memory(&env.db_path, "ns-l", &format!("m{i}"), "x");
@@ -895,6 +1085,7 @@ mod tests {
 
     #[test]
     fn boot_no_header_with_flag_suppresses_status() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-h", "row-one", "x");
         let db_path = env.db_path.clone();
@@ -911,6 +1102,7 @@ mod tests {
 
     #[test]
     fn boot_json_format_emits_status_and_memories() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         seed_memory(&env.db_path, "ns-j", "row", "x");
         let db_path = env.db_path.clone();
@@ -936,6 +1128,7 @@ mod tests {
         // couldn't load context. --quiet suppresses *only* stderr.
         // PR-4: the warn variant still emits the manifest fields, with
         // `<unavailable>` in slots that need a live DB to fill.
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let bad_path = env
             .db_path
@@ -986,6 +1179,7 @@ mod tests {
 
     #[test]
     fn boot_db_unavailable_without_quiet_writes_to_stderr() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let bad_path = env
             .db_path
@@ -1008,6 +1202,7 @@ mod tests {
     fn boot_quiet_with_no_header_silent_for_legacy_wrappers() {
         // Wrappers that frame their own context can opt out of both the
         // diagnostic header AND any error output by combining flags.
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let bad_path = env
             .db_path
@@ -1026,6 +1221,7 @@ mod tests {
 
     #[test]
     fn boot_falls_back_to_long_tier_when_namespace_empty() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let id = seed_memory(&env.db_path, "other", "long-tier-row", "x");
         let conn = db::open(&env.db_path).unwrap();
@@ -1051,6 +1247,7 @@ mod tests {
 
     #[test]
     fn boot_empty_namespace_emits_info_empty_status() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let db_path = env.db_path.clone();
         let cfg = default_config();
@@ -1069,6 +1266,7 @@ mod tests {
 
     #[test]
     fn boot_budget_tokens_clamps_output() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         for i in 0..20 {
             seed_memory(
@@ -1096,6 +1294,7 @@ mod tests {
 
     #[test]
     fn boot_json_warn_status_when_db_unavailable() {
+        let _g = test_lock();
         let mut env = TestEnv::fresh();
         let bad_path = env
             .db_path
@@ -1118,5 +1317,359 @@ mod tests {
         assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
         assert_eq!(parsed["schema_version"], UNAVAILABLE);
         assert_eq!(parsed["total_memories"], UNAVAILABLE);
+        // PR-9h (req #72): schema_supported is `false` when DB unavailable.
+        assert_eq!(parsed["schema_supported"], false);
+    }
+
+    // -----------------------------------------------------------------
+    // PR-9h Part 1 — version-drift detection (#487 PR #497 req #72)
+    // -----------------------------------------------------------------
+
+    /// Force-set the on-disk schema_version row to a synthetic value
+    /// AFTER a previous `db::open` (via `seed_memory`) has run the
+    /// migration ladder up to `CURRENT_SCHEMA_VERSION` (== MAX). Used
+    /// to drive the ABOVE-MAX path. Uses a raw `rusqlite::Connection`
+    /// so we don't trigger another round of migrations that would
+    /// re-bump the version. The BELOW-MIN path is unreachable by this
+    /// technique (the migration ladder ratchets any sub-MAX version
+    /// back to MAX); see [`schema_below_min_is_unsupported`] for the
+    /// pure-function unit test that covers the lower-bound semantics.
+    fn override_schema_version(db_path: &std::path::Path, v: i64) {
+        let conn = rusqlite::Connection::open(db_path).expect("rusqlite::open");
+        conn.execute("DELETE FROM schema_version", []).unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?1)",
+            rusqlite::params![v],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn boot_warns_on_schema_above_max() {
+        let _g = test_lock();
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-drift", "row", "x");
+        // Bump schema beyond MAX_SUPPORTED_SCHEMA. Cast through i64 to
+        // sidestep the migration ladder which would force MAX on
+        // re-open.
+        override_schema_version(&env.db_path, i64::from(MAX_SUPPORTED_SCHEMA) + 1);
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-drift".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        assert!(
+            stdout.contains("# ai-memory boot: warn"),
+            "expected warn header for schema drift: {stdout}"
+        );
+        assert!(
+            stdout.contains("unsupported by binary"),
+            "expected schema-drift message text: {stdout}"
+        );
+        assert!(
+            stdout.contains(&format!(
+                "v{}..v{}",
+                MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA
+            )),
+            "expected supported range in message: {stdout}"
+        );
+    }
+
+    #[test]
+    fn boot_warns_on_schema_below_min() {
+        // The maintainer's #72 directive lists this as a required test.
+        // BELOW-MIN drift is unreachable via a synthetic DB because the
+        // migration ladder in `db::open` ratchets any sub-MAX version
+        // back to `CURRENT_SCHEMA_VERSION`. We therefore exercise the
+        // lower-bound semantics through the pure boundary helper.
+        // See [`schema_below_min_is_unsupported`] for the exhaustive
+        // boundary table; this test is the directive-named smoke
+        // check.
+        assert!(
+            !schema_in_supported_range(MIN_SUPPORTED_SCHEMA - 1),
+            "schemas below MIN must be reported as unsupported"
+        );
+    }
+
+    #[test]
+    fn schema_below_min_is_unsupported() {
+        // Exhaustive boundary table for the inclusive [MIN, MAX]
+        // window. Pure-function — no DB, no env, no test_lock needed.
+        assert!(!schema_in_supported_range(0));
+        assert!(!schema_in_supported_range(MIN_SUPPORTED_SCHEMA - 1));
+        assert!(schema_in_supported_range(MIN_SUPPORTED_SCHEMA));
+        assert!(schema_in_supported_range(MAX_SUPPORTED_SCHEMA));
+        assert!(!schema_in_supported_range(MAX_SUPPORTED_SCHEMA + 1));
+        assert!(!schema_in_supported_range(u32::MAX));
+    }
+
+    #[test]
+    fn boot_ok_for_schema_at_min() {
+        let _g = test_lock();
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-min", "row", "x");
+        override_schema_version(&env.db_path, i64::from(MIN_SUPPORTED_SCHEMA));
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-min".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        assert!(
+            stdout.contains("# ai-memory boot: ok"),
+            "MIN boundary should be supported (not warn): {stdout}"
+        );
+    }
+
+    #[test]
+    fn boot_ok_for_schema_at_max() {
+        let _g = test_lock();
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-max", "row", "x");
+        override_schema_version(&env.db_path, i64::from(MAX_SUPPORTED_SCHEMA));
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-max".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        assert!(
+            stdout.contains("# ai-memory boot: ok"),
+            "MAX boundary should be supported (not warn): {stdout}"
+        );
+    }
+
+    #[test]
+    fn boot_json_includes_schema_supported_flag() {
+        // Happy path — schema in range → schema_supported = true.
+        let _g = test_lock();
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-ssj", "row", "x");
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-ssj".to_string());
+        args.format = "json".to_string();
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        assert_eq!(
+            parsed["schema_supported"], true,
+            "happy path → schema_supported=true: {stdout}"
+        );
+
+        // Drift path — schema beyond MAX → schema_supported = false.
+        let mut env2 = TestEnv::fresh();
+        seed_memory(&env2.db_path, "ns-ssj2", "row", "x");
+        override_schema_version(&env2.db_path, i64::from(MAX_SUPPORTED_SCHEMA) + 1);
+        let db_path2 = env2.db_path.clone();
+        let mut args2 = default_args();
+        args2.namespace = Some("ns-ssj2".to_string());
+        args2.format = "json".to_string();
+        let mut out2 = env2.output();
+        run(&db_path2, &args2, &cfg, &mut out2).unwrap();
+        let stdout2 = std::str::from_utf8(&env2.stdout).unwrap();
+        let parsed2: serde_json::Value = serde_json::from_str(stdout2.trim()).unwrap();
+        assert_eq!(
+            parsed2["schema_supported"], false,
+            "drift path → schema_supported=false: {stdout2}"
+        );
+        assert_eq!(parsed2["status"], "warn");
+    }
+
+    // -----------------------------------------------------------------
+    // PR-9h Part 2 — `[boot]` privacy controls (#487 PR #497 req #73)
+    // -----------------------------------------------------------------
+
+    fn config_with_boot(enabled: Option<bool>, redact_titles: Option<bool>) -> AppConfig {
+        let mut cfg = AppConfig::default();
+        cfg.boot = Some(crate::config::BootConfig {
+            enabled,
+            redact_titles,
+        });
+        cfg
+    }
+
+    #[test]
+    fn boot_disabled_emits_nothing_at_all() {
+        // `[boot] enabled = false` → empty stdout AND empty stderr,
+        // exit 0. This is the privacy-sensitive escape hatch.
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-silent", "private-title", "secret");
+        let db_path = env.db_path.clone();
+        let cfg = config_with_boot(Some(false), None);
+        let args = default_args();
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        assert!(
+            env.stdout.is_empty(),
+            "stdout must be empty when boot is disabled: {:?}",
+            std::str::from_utf8(&env.stdout)
+        );
+        assert!(
+            env.stderr.is_empty(),
+            "stderr must be empty when boot is disabled: {:?}",
+            std::str::from_utf8(&env.stderr)
+        );
+    }
+
+    #[test]
+    fn boot_disabled_via_env_var_overrides_config() {
+        // Config says enabled=true (default), but env var forces disabled.
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::set_var("AI_MEMORY_BOOT_ENABLED", "0");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-envoff", "row", "x");
+        let db_path = env.db_path.clone();
+        let cfg = config_with_boot(Some(true), None);
+        let args = default_args();
+        let mut out = env.output();
+        let result = run(&db_path, &args, &cfg, &mut out);
+        // Always restore the env var before assertions so a panic
+        // doesn't poison subsequent tests.
+        // SAFETY: process-wide env mutation; serialized by `_guard`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        result.unwrap();
+        assert!(
+            env.stdout.is_empty(),
+            "env-var off must override config: stdout={:?}",
+            std::str::from_utf8(&env.stdout)
+        );
+        assert!(env.stderr.is_empty());
+    }
+
+    #[test]
+    fn boot_redact_titles_replaces_titles_in_body() {
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-redact", "secret-subject-alpha", "x");
+        seed_memory(&env.db_path, "ns-redact", "secret-subject-beta", "y");
+        let db_path = env.db_path.clone();
+        let cfg = config_with_boot(Some(true), Some(true));
+        let mut args = default_args();
+        args.namespace = Some("ns-redact".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        // Manifest still appears (audit-trail signal preserved).
+        assert!(
+            stdout.contains("# ai-memory boot: ok"),
+            "manifest header should still appear when only redacting titles: {stdout}"
+        );
+        // Body rows replace title with `<redacted>`.
+        let row_count = stdout.lines().filter(|l| l.starts_with("- [")).count();
+        assert_eq!(row_count, 2, "expected 2 body rows: {stdout}");
+        assert!(
+            stdout.contains(REDACTED_TITLE),
+            "expected redacted sentinel in body: {stdout}"
+        );
+        // The original distinctive titles MUST NOT leak.
+        assert!(
+            !stdout.contains("secret-subject-alpha"),
+            "title leaked despite redact_titles=true: {stdout}"
+        );
+        assert!(
+            !stdout.contains("secret-subject-beta"),
+            "title leaked despite redact_titles=true: {stdout}"
+        );
+    }
+
+    #[test]
+    fn boot_redact_titles_keeps_other_fields() {
+        // Redacting titles MUST NOT redact namespace, tier, id_short,
+        // priority, or age — those are non-PII operational signal.
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-redact-keep", "private-title", "x");
+        let db_path = env.db_path.clone();
+        let cfg = config_with_boot(Some(true), Some(true));
+        let mut args = default_args();
+        args.namespace = Some("ns-redact-keep".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        // namespace surfaces.
+        assert!(
+            stdout.contains("ns-redact-keep"),
+            "namespace must still surface under redact_titles: {stdout}"
+        );
+        // Find the body row line.
+        let row_line = stdout
+            .lines()
+            .find(|l| l.starts_with("- ["))
+            .expect("body row must exist");
+        // Tier prefix `[mid/...]` (test_utils seeds Tier::Mid).
+        assert!(
+            row_line.starts_with("- [mid/"),
+            "tier + id_short prefix must remain: {row_line}"
+        );
+        // Priority + age suffix appears.
+        assert!(row_line.contains("p=5"), "priority must remain: {row_line}");
+        // The redaction sentinel sits in the title slot.
+        assert!(
+            row_line.contains(REDACTED_TITLE),
+            "title slot must carry the redaction sentinel: {row_line}"
+        );
+        // The original title MUST NOT leak anywhere.
+        assert!(
+            !stdout.contains("private-title"),
+            "raw title must not leak: {stdout}"
+        );
+    }
+
+    #[test]
+    fn boot_default_config_unchanged_behavior() {
+        // Sanity: no [boot] section in config → behaves identically to
+        // the PR-1 / PR-4 baseline (manifest + body, titles surfaced
+        // verbatim).
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-default", "visible-title", "x");
+        let db_path = env.db_path.clone();
+        let cfg = AppConfig::default(); // boot = None
+        let mut args = default_args();
+        args.namespace = Some("ns-default".to_string());
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        assert!(
+            stdout.contains("# ai-memory boot: ok"),
+            "default config → manifest header: {stdout}"
+        );
+        assert!(
+            stdout.contains("visible-title"),
+            "default config → title surfaces verbatim: {stdout}"
+        );
+        assert!(
+            !stdout.contains(REDACTED_TITLE),
+            "default config must NOT redact: {stdout}"
+        );
     }
 }

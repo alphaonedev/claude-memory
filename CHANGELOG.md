@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Boot follow-ups folded from v0.6.4 into v0.6.3.1 (PR-9h, issue #487
+  PR #497 reqs #72 + #73)** — version-drift detection adds
+  `MIN_SUPPORTED_SCHEMA = 16` / `MAX_SUPPORTED_SCHEMA = 19` constants in
+  `src/cli/boot.rs`, a new `WarnSchemaUnsupported { db_schema }`
+  manifest variant, and the JSON top-level `schema_supported: bool`
+  field for SIEM ingest. Boot privacy controls add a `[boot]` config
+  block with `enabled` (default `true`; `false` exits 0 silently with
+  empty stdout AND empty stderr — the privacy-sensitive escape hatch
+  for hosts where memory titles must not enter CI logs) and
+  `redact_titles` (default `false`; `true` keeps the manifest header
+  but replaces every body row's `title` with `<redacted>`). Env-var
+  `AI_MEMORY_BOOT_ENABLED=0` takes precedence over the config-file
+  value. Documented in `docs/integrations/claude-code.md` and
+  `docs/integrations/README.md`.
 - **`ai-memory doctor` CLI (Phase P7 / R7)** — operator-visible health
   dashboard. New subcommand
   `ai-memory doctor [--db <path>] [--remote <url>] [--json] [--fail-on-warn]`

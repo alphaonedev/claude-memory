@@ -73,6 +73,33 @@ end-user-visible signal that ai-memory ran. Suppressing it makes silent
 failure indistinguishable from "no memories yet" — exactly the failure
 mode issue #487 is fixing.
 
+## Privacy / disable (v0.6.3.1, PR-9h)
+
+Two operator-controlled knobs gate what boot emits, for hosts where
+memory titles must never enter CI logs or where compliance contexts
+need an audit-trail signal without exposing memory subjects:
+
+| Knob | Effect | Use case |
+|---|---|---|
+| `[boot] enabled = false` (in `~/.config/ai-memory/config.toml`) or `AI_MEMORY_BOOT_ENABLED=0` | `ai-memory boot` exits 0 with **empty stdout AND empty stderr** — true silence. The hook injects nothing. | Privacy-sensitive hosts where memory titles must not enter CI logs. |
+| `[boot] redact_titles = true` | The manifest header still appears (so the agent + human still see boot fired) but every body row's `title` field is replaced with `<redacted>`. Namespace, tier, id_short, priority, and age still surface. | Compliance contexts that need an audit-trail signal of "boot ran with N memories" without exposing memory subjects. |
+
+Both default to the historical (pre-v0.6.3.1) behaviour — omit the
+`[boot]` section entirely to preserve existing behaviour.
+
+The env var `AI_MEMORY_BOOT_ENABLED=0` takes precedence over the
+config file (same precedence pattern as PR-5's log-dir resolution),
+so a CI runner can force-disable boot for one job without editing
+the host config.
+
+**Schema-drift detection.** From v0.6.3.1, boot also surfaces a
+`# ai-memory boot: warn` header when the DB's `schema_version` lies
+outside the binary's supported `[v16, v19]` range — an agent or human
+running an older `ai-memory` binary against a newer DB (or vice versa)
+sees the drift directly in their session log instead of having boot
+silently degrade. The JSON variant carries `schema_supported: bool`
+as a top-level key for SIEM / fleet-dashboard ingest.
+
 ## End-user diagnostic — how to know boot fired
 
 Every boot invocation emits a transparent multi-field manifest. Agents
