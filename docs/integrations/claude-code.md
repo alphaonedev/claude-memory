@@ -68,9 +68,8 @@ Every boot invocation emits one of four status headers:
 If you see **no header at all** in your session log, the hook never fired.
 Run the diagnostic from the same shell Claude Code launched from:
 
-```text
+```bash
 ai-memory boot --limit 1
-
 # Should emit one of the four headers above.
 # If it errors instead, the binary or DB is misconfigured.
 # If it works but Claude Code never sees a header, the SessionStart hook
@@ -109,17 +108,16 @@ project-level hooks only when you need a non-default namespace.
 
 Cold-start test (the issue #487 acceptance criterion):
 
-```text
-# 1. Quit Claude Code entirely.
+```bash
+# 1. Quit Claude Code entirely
 # 2. From a fresh shell, anywhere on the filesystem:
 cd /tmp
 claude
-
 # 3. First message:
 #    > what do you remember?
-# 4. Expected: Claude responds with recalled titles, namespaces, ages,
-#    no "I do not have context to continue this", no need to type
-#    "access your memories".
+# 4. Expected: Claude responds with recalled titles, namespaces, ages — no
+#    "I don't have context to continue this", no need to type "access your
+#    memories".
 ```
 
 If the cold-start fails, check:
