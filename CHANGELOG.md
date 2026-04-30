@@ -5,6 +5,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.3.1 closure
+
+### Added
+
+- **`ai-memory doctor` CLI (Phase P7 / R7)** — operator-visible health
+  dashboard. New subcommand
+  `ai-memory doctor [--db <path>] [--remote <url>] [--json] [--fail-on-warn]`
+  produces a 7-section health report (Storage, Index, Recall, Governance,
+  Sync, Webhook, Capabilities) with per-section severity tagging
+  (`INFO` / `WARN` / `CRIT` / `N/A`). Exits `0` healthy / `1` warning
+  with `--fail-on-warn` / `2` critical. `--remote <url>` queries a live
+  daemon's `/api/v1/capabilities` + `/api/v1/stats` endpoints to support
+  fleet-wide health sweeps at T3+. Read-only — never mutates the DB;
+  every query is a single indexed `COUNT(*)` so the lock window stays
+  sub-millisecond on a populated store. Consumes Capabilities v2 (P1),
+  data integrity (P2 — `embedding_dim`), and recall observability (P3 —
+  eviction counter, recall_mode distribution) surfaces with graceful
+  fallback when those phases haven't merged yet — pre-P2/P3 schemas
+  render the affected fields as `not_observed (pre-PX schema)` instead
+  of erroring. New helpers in `src/db.rs`: `doctor_dim_violations`,
+  `doctor_oldest_pending_age_secs`, `doctor_governance_coverage`,
+  `doctor_governance_depth_distribution`,
+  `doctor_webhook_delivery_totals`, `doctor_max_sync_skew_secs`. New
+  module `src/cli/doctor.rs` and integration tests in
+  `tests/doctor_cli.rs` (4 acceptance tests:
+  `doctor_reports_clean_on_fresh_db`, `doctor_warns_on_dim_violations`,
+  `doctor_critical_on_pending_actions_older_than_24h`,
+  `doctor_remote_queries_capabilities_endpoint`). Documented in
+  `docs/operations/doctor.md`.
+
 ## [v0.6.3] — 2026-04-27 — STRUCTURED MEMORY + PERFORMANCE
 
 The grand-slam release. Hierarchical namespace taxonomy + temporal-validity
