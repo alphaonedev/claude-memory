@@ -5,6 +5,44 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.3.1 closure
+
+### Phase P6 (R1) — `budget_tokens` recall recovery
+
+Recovered the prior phased ROADMAP's "killer feature, no competitor has
+this." `memory_recall` (MCP / HTTP / CLI) accepts an optional
+`budget_tokens` parameter and returns the highest-ranked memories whose
+cumulative content tokens fit under the budget, using the deterministic
+`tiktoken-rs` `cl100k_base` BPE — the same tokenizer Claude / GPT use
+for context-window accounting. The R1 always-return-at-least-one
+guarantee surfaces an overflow flag rather than dropping a top-ranked
+hit when the caller asks for an unrealistically tight budget.
+
+- `tiktoken-rs` 0.7 added (pure-Rust BPE; ~1.7 MB bundled table; offline
+  deterministic).
+- New response `meta` block when a budget is supplied:
+  `budget_tokens_used`, `budget_tokens_remaining`, `memories_dropped`,
+  `budget_overflow`. Legacy top-level `tokens_used` / `budget_tokens`
+  fields preserved verbatim — pre-P6 callers continue to work
+  byte-for-byte.
+- `budget_tokens=0` is now a valid request meaning "give me nothing"
+  (returns an empty memories array with `meta.budget_overflow=false`).
+  Supersedes the v0.6.3 Ultrareview #348 hard-reject of 0 — the meta
+  block now disambiguates "user asked for zero" from "buggy
+  uninitialised counter" by always round-tripping the requested budget.
+- Budget-unset path is unchanged on the recall hot path: cl100k_base
+  is skipped entirely, `tokens_used` falls back to a fast `len/4` byte
+  heuristic so the bench harness's `recall_hot` p95 budget (< 50 ms)
+  is preserved.
+- Documentation: new `docs/recall.md`; `PERFORMANCE.md` gets a new row
+  for `memory_recall (budget, budget_tokens=4096)` at < 90 ms p95
+  (autonomous tier budget).
+- Scoring and fusion are unchanged — budget is a strict post-rank
+  filter. Two recalls of the same query with different budgets produce
+  a strict prefix-of-prefix relationship.
+
+Acceptance tests in `tests/budget_tokens.rs`.
+
 ## [v0.6.3] — 2026-04-27 — STRUCTURED MEMORY + PERFORMANCE
 
 The grand-slam release. Hierarchical namespace taxonomy + temporal-validity

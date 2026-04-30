@@ -20,6 +20,7 @@ target by more than the published 10% tolerance.
 | `memory_session_start` hook | < 100 ms | < 200 ms | Claude Code hook critical path |
 | `memory_recall` (hot, depth=1) | < 50 ms | < 150 ms | Felt during agent reasoning |
 | `memory_recall` (cold, full hybrid) | < 200 ms | < 500 ms | First-query path |
+| `memory_recall` (budget, `budget_tokens=4096`) | < 90 ms | < 200 ms | v0.6.3.1 R1 — autonomous tier budget. Adds cl100k_base BPE tokenization on the survivors only; budget-unset path is unchanged (skips BPE, falls back to a byte heuristic for the `tokens_used` tally). The first call in a process pays a one-shot ~200 ms BPE table parse, amortized away from the steady-state p95. |
 | `memory_store` (no embedding) | < 20 ms | < 50 ms | Pure write |
 | `memory_store` (with embedding) | < 200 ms | < 500 ms | Includes ONNX/Ollama call |
 | `memory_search` (FTS5) | < 100 ms | < 250 ms | Keyword baseline |
