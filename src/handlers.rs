@@ -288,6 +288,22 @@ pub async fn create_memory(
                 }
             });
 
+    // v0.6.3.1 P2 (G6) — resolve `on_conflict` policy. HTTP defaults to
+    // 'error' (no legacy v1 backward-compat to honor); callers that want
+    // the v0.6.3 silent-merge behaviour must pass on_conflict='merge'.
+    let on_conflict_mode = body.on_conflict.as_deref().unwrap_or("error");
+    if !matches!(on_conflict_mode, "error" | "merge" | "version") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!(
+                    "invalid on_conflict '{on_conflict_mode}' (expected error|merge|version)"
+                )
+            })),
+        )
+            .into_response();
+    }
+
     let now = Utc::now();
     let lock = state.lock().await;
     let expires_at = body.expires_at.or_else(|| {
@@ -295,11 +311,57 @@ pub async fn create_memory(
             .or(lock.2.ttl_for_tier(&body.tier))
             .map(|s| (now + Duration::seconds(s)).to_rfc3339())
     });
+
+    // v0.6.3.1 P2 (G6) — apply the conflict policy before building the
+    // canonical row. Mirror MCP handle_store: 'error' returns 409 with a
+    // typed payload; 'version' rewrites the title to a free suffix;
+    // 'merge' falls through to db::insert which keeps the legacy
+    // INSERT...ON CONFLICT upsert.
+    let resolved_title = match on_conflict_mode {
+        "error" => match db::find_by_title_namespace(&lock.0, &body.title, &body.namespace) {
+            Ok(Some(existing_id)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(json!({
+                        "code": "CONFLICT",
+                        "error": format!(
+                            "memory with title '{}' already exists in namespace '{}'",
+                            body.title, body.namespace
+                        ),
+                        "existing_id": existing_id,
+                    })),
+                )
+                    .into_response();
+            }
+            Ok(None) => body.title.clone(),
+            Err(e) => {
+                tracing::error!("on_conflict lookup failed: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "conflict check failed"})),
+                )
+                    .into_response();
+            }
+        },
+        "version" => match db::next_versioned_title(&lock.0, &body.title, &body.namespace) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("on_conflict=version failed: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": "could not pick a versioned title"})),
+                )
+                    .into_response();
+            }
+        },
+        _ => body.title.clone(),
+    };
+
     let mem = Memory {
         id: Uuid::new_v4().to_string(),
         tier: body.tier,
         namespace: body.namespace,
-        title: body.title,
+        title: resolved_title,
         content: body.content,
         tags: body.tags,
         priority: body.priority.clamp(1, 10),

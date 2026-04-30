@@ -118,6 +118,13 @@ pub struct CreateMemory {
     /// unset, treated as `private` by the query layer.
     #[serde(default)]
     pub scope: Option<String>,
+    /// v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already
+    /// exists. One of `error` | `merge` | `version`. When unset, the
+    /// daemon defaults to `error` for HTTP callers (HTTP is not legacy
+    /// like MCP v1; clients that want the legacy silent-merge contract
+    /// must opt in explicitly).
+    #[serde(default)]
+    pub on_conflict: Option<String>,
 }
 
 fn default_tier() -> Tier {
@@ -285,6 +292,12 @@ pub struct Stats {
     pub expiring_soon: usize,
     pub links_count: usize,
     pub db_size_bytes: u64,
+    /// v0.6.3.1 P2 (G4) — count of rows whose stored `embedding_dim`
+    /// disagrees with the BLOB length (or whose column is missing while
+    /// a BLOB exists). 0 on a fresh database; non-zero indicates legacy
+    /// rows the operator should re-embed. Consumed by the P7 doctor.
+    #[serde(default)]
+    pub dim_violations: u64,
     /// v0.6.3.1 (P3, G2): cumulative HNSW oldest-eviction count since this
     /// process started. Non-zero indicates the in-memory vector index has
     /// hit its `MAX_ENTRIES` cap and silently dropped older embeddings —

@@ -171,7 +171,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
 ";
 
 // v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
-const CURRENT_SCHEMA_VERSION: i64 = 17;
+// v18 = v0.6.3.1 (P2, audit G4/G5/G13) data-integrity hardening:
+//       embedding_dim guard, archive lossless, magic-byte header.
+const CURRENT_SCHEMA_VERSION: i64 = 18;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -228,6 +230,11 @@ const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_
 // on existing policies so downstream readers and SQL-side dashboards
 // see a consistent shape after upgrade. Idempotent.
 const MIGRATION_V17_SQLITE: &str = include_str!("../migrations/sqlite/0012_governance_inherit.sql");
+// v0.6.3.1 (P2, audit G4/G5/G13): data-integrity hardening. ALTER TABLEs
+// emitted from Rust because SQLite has no `ADD COLUMN IF NOT EXISTS`;
+// the SQL file holds idempotent backfills + indexes.
+const MIGRATION_V18_SQLITE: &str =
+    include_str!("../migrations/sqlite/0011_v0631_data_integrity.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -597,6 +604,71 @@ fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V17_SQLITE)?;
         }
 
+        if version < 18 {
+            // v0.6.3.1 Phase P2 — Data-integrity hardening (G4, G5, G13).
+            // See REMEDIATIONv0631 §"Phase P2".
+            //
+            // The DDL itself lives in migrations/sqlite/0011_v0631_data_integrity.sql.
+            // ALTER TABLE ADD COLUMN statements are emitted here because SQLite
+            // cannot do `ADD COLUMN IF NOT EXISTS`; the SQL file holds the
+            // backfill UPDATE statements and the new indexes.
+            //
+            // memories.embedding_dim — declared dimension of the stored embedding.
+            // Backfill below infers from `length(embedding)/4` (legacy LE-f32
+            // payloads have no header so length is exactly 4n; v18+ writes
+            // happen after commit, so the 4n-only inference here is safe).
+            let has_embedding_dim = conn
+                .prepare("SELECT embedding_dim FROM memories LIMIT 0")
+                .is_ok();
+            if !has_embedding_dim {
+                conn.execute("ALTER TABLE memories ADD COLUMN embedding_dim INTEGER", [])?;
+            }
+
+            // archived_memories — preserve embedding + original tier/expiry on
+            // archive (G5). Pre-v18 archive rows have lost this metadata
+            // permanently; the SQL backfill below fills `original_tier='long'`
+            // so restore_archived treats them as permanent on first restore.
+            let has_archive_embedding = conn
+                .prepare("SELECT embedding FROM archived_memories LIMIT 0")
+                .is_ok();
+            if !has_archive_embedding {
+                conn.execute(
+                    "ALTER TABLE archived_memories ADD COLUMN embedding BLOB",
+                    [],
+                )?;
+            }
+            let has_archive_embedding_dim = conn
+                .prepare("SELECT embedding_dim FROM archived_memories LIMIT 0")
+                .is_ok();
+            if !has_archive_embedding_dim {
+                conn.execute(
+                    "ALTER TABLE archived_memories ADD COLUMN embedding_dim INTEGER",
+                    [],
+                )?;
+            }
+            let has_original_tier = conn
+                .prepare("SELECT original_tier FROM archived_memories LIMIT 0")
+                .is_ok();
+            if !has_original_tier {
+                conn.execute(
+                    "ALTER TABLE archived_memories ADD COLUMN original_tier TEXT",
+                    [],
+                )?;
+            }
+            let has_original_expires_at = conn
+                .prepare("SELECT original_expires_at FROM archived_memories LIMIT 0")
+                .is_ok();
+            if !has_original_expires_at {
+                conn.execute(
+                    "ALTER TABLE archived_memories ADD COLUMN original_expires_at TEXT",
+                    [],
+                )?;
+            }
+
+            // Backfill + indexes — UPDATE/INDEX statements are idempotent.
+            conn.execute_batch(MIGRATION_V18_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -921,14 +993,19 @@ pub fn archive_memory(conn: &Connection, id: &str, reason: Option<&str>) -> Resu
         if !exists {
             return Ok(false);
         }
+        // v0.6.3.1 P2 (G5) — copy embedding + embedding_dim into the archive
+        // and capture original tier + expires_at so restore_archived can
+        // round-trip the row instead of resetting to long/permanent.
         conn.execute(
             "INSERT OR REPLACE INTO archived_memories
              (id, tier, namespace, title, content, tags, priority, confidence,
               source, access_count, created_at, updated_at, last_accessed_at,
-              expires_at, archived_at, archive_reason, metadata)
+              expires_at, archived_at, archive_reason, metadata,
+              embedding, embedding_dim, original_tier, original_expires_at)
              SELECT id, tier, namespace, title, content, tags, priority, confidence,
                     source, access_count, created_at, updated_at, last_accessed_at,
-                    expires_at, ?1, ?2, metadata
+                    expires_at, ?1, ?2, metadata,
+                    embedding, embedding_dim, tier, expires_at
              FROM memories WHERE id = ?3",
             params![now, reason, id],
         )?;
@@ -1007,14 +1084,17 @@ pub fn forget(
         if let Some(pat) = pattern {
             let fts_query = sanitize_fts_query(pat, true);
             let tier_str = tier.map(|t| t.as_str().to_string());
+            // v0.6.3.1 P2 (G5) — preserve embedding + tier + expiry on forget-archive.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason)
+                  expires_at, archived_at, archive_reason,
+                  embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?4, 'forget'
+                        expires_at, ?4, 'forget',
+                        embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE rowid IN (
                     SELECT m.rowid FROM memories_fts fts
                     JOIN memories m ON m.rowid = fts.rowid
@@ -1030,10 +1110,12 @@ pub fn forget(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason)
+                  expires_at, archived_at, archive_reason,
+                  embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?3, 'forget'
+                        expires_at, ?3, 'forget',
+                        embedding, embedding_dim, tier, expires_at
                  FROM memories WHERE (?1 IS NULL OR namespace = ?1) AND (?2 IS NULL OR tier = ?2)",
                 params![namespace, tier_str, now],
             )?;
@@ -1472,6 +1554,61 @@ pub fn promote_to_namespace(
     // short-circuits on self-link (impossible here — distinct IDs).
     create_link(conn, &actual_id, source_id, "derived_from")?;
     Ok(actual_id)
+}
+
+/// v0.6.3.1 P2 (G6) — quick existence check for `(title, namespace)`. Used by
+/// `on_conflict='error'` callers to short-circuit before the full upsert
+/// machinery runs. Returns the existing row id if there is one.
+///
+/// # Errors
+///
+/// Returns the underlying SQLite error.
+pub fn find_by_title_namespace(
+    conn: &Connection,
+    title: &str,
+    namespace: &str,
+) -> Result<Option<String>> {
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT id FROM memories WHERE title = ?1 AND namespace = ?2 LIMIT 1",
+            params![title, namespace],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(id)
+}
+
+/// v0.6.3.1 P2 (G6) — pick a title that does not collide with an existing
+/// `(title, namespace)` row by appending `(2)`, `(3)`, ... up to a hard cap.
+/// The first available suffix wins. Used by `on_conflict='version'`.
+///
+/// The cap (`MAX_VERSION_SUFFIX`) prevents an infinite loop in pathological
+/// cases (e.g. an attacker spamming the same title in a loop). Once the cap
+/// is hit, the caller falls back to error mode.
+const MAX_VERSION_SUFFIX: u32 = 1024;
+
+/// # Errors
+///
+/// Returns the underlying SQLite error or an error if no free suffix is
+/// found within `MAX_VERSION_SUFFIX` attempts.
+pub fn next_versioned_title(
+    conn: &Connection,
+    base_title: &str,
+    namespace: &str,
+) -> Result<String> {
+    if find_by_title_namespace(conn, base_title, namespace)?.is_none() {
+        return Ok(base_title.to_string());
+    }
+    for n in 2..=MAX_VERSION_SUFFIX {
+        let candidate = format!("{base_title} ({n})");
+        if find_by_title_namespace(conn, &candidate, namespace)?.is_none() {
+            return Ok(candidate);
+        }
+    }
+    anyhow::bail!(
+        "could not find a free versioned title for '{base_title}' in namespace '{namespace}' \
+         within {MAX_VERSION_SUFFIX} attempts"
+    )
 }
 
 /// Detect potential contradictions: memories in same namespace with similar titles.
@@ -2057,23 +2194,21 @@ pub fn check_duplicate(
         if bytes.is_empty() {
             continue;
         }
-        // Skip blobs whose length is not a multiple of 4 (corrupted /
-        // truncated embedding column). chunks_exact silently drops a
-        // trailing partial chunk; we explicitly bail on the row so a
-        // bad blob doesn't compute against a shorter candidate vector
-        // (which would produce a wrong cosine score).
-        if !bytes.len().is_multiple_of(4) {
-            tracing::warn!(
-                memory_id = %id,
-                blob_len = bytes.len(),
-                "skipping duplicate-check candidate with malformed embedding length"
-            );
-            continue;
-        }
-        let candidate: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        // v0.6.3.1 P2 — magic-byte aware decode. Malformed payloads
+        // (anything other than headed-LE or legacy-LE) are skipped with
+        // telemetry so a corrupted row can't poison duplicate detection.
+        let candidate = match crate::embeddings::decode_embedding_blob(&bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(
+                    memory_id = %id,
+                    blob_len = bytes.len(),
+                    error = %e,
+                    "skipping duplicate-check candidate with malformed embedding"
+                );
+                continue;
+            }
+        };
         // Vectors of mismatched dimension would compute against a
         // truncated query (Embedder::cosine_similarity zips). Skip
         // rather than report a misleading similarity score.
@@ -2832,6 +2967,9 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         .query_row("SELECT COUNT(*) FROM memory_links", [], |r| r.get(0))
         .unwrap_or(0);
     let db_size_bytes = std::fs::metadata(db_path).map_or(0, |m| m.len());
+    // v0.6.3.1 P2 (G4) — surface mixed-dim corruption to operators. Best-effort:
+    // any error here returns 0 rather than failing the stats endpoint.
+    let dim_violations = dim_violations(conn).unwrap_or(0);
 
     // v0.6.3.1 (P3, G2): cumulative HNSW eviction count is process-local
     // state — read from the static counter in src/hnsw.rs. Surfacing it in
@@ -2846,6 +2984,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         expiring_soon,
         links_count,
         db_size_bytes,
+        dim_violations,
         index_evictions_total,
     })
 }
@@ -2880,14 +3019,17 @@ pub fn gc(conn: &Connection, archive: bool) -> Result<usize> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| -> Result<usize> {
         if archive {
+            // v0.6.3.1 P2 (G5) — preserve embedding + tier + expiry on GC archive.
             conn.execute(
                 "INSERT OR REPLACE INTO archived_memories
                  (id, tier, namespace, title, content, tags, priority, confidence,
                   source, access_count, created_at, updated_at, last_accessed_at,
-                  expires_at, archived_at, archive_reason, metadata)
+                  expires_at, archived_at, archive_reason, metadata,
+                  embedding, embedding_dim, original_tier, original_expires_at)
                  SELECT id, tier, namespace, title, content, tags, priority, confidence,
                         source, access_count, created_at, updated_at, last_accessed_at,
-                        expires_at, ?1, 'ttl_expired', metadata
+                        expires_at, ?1, 'ttl_expired', metadata,
+                        embedding, embedding_dim, tier, expires_at
                  FROM memories
                  WHERE expires_at IS NOT NULL AND expires_at < ?1",
                 params![now],
@@ -3024,12 +3166,20 @@ pub fn restore_archived(conn: &Connection, id: &str) -> Result<bool> {
             )?;
         }
 
+        // v0.6.3.1 P2 (G5) — preserve original tier + expires_at + embedding
+        // on restore. Pre-v17 rows lost this metadata permanently; the
+        // migration backfills `original_tier='long'` so they still restore
+        // as permanent (the prior behavior — no regression for legacy data).
+        // Live writes from v0.6.3.1 onward round-trip the original tier.
         conn.execute(
             "INSERT INTO memories
              (id, tier, namespace, title, content, tags, priority, confidence,
-              source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
-             SELECT id, 'long', namespace, title, content, tags, priority, confidence,
-                    source, access_count, created_at, ?1, last_accessed_at, NULL, metadata
+              source, access_count, created_at, updated_at, last_accessed_at,
+              expires_at, metadata, embedding, embedding_dim)
+             SELECT id, COALESCE(original_tier, 'long'), namespace, title, content,
+                    tags, priority, confidence, source, access_count, created_at,
+                    ?1, last_accessed_at, original_expires_at, metadata,
+                    embedding, embedding_dim
              FROM archived_memories WHERE id = ?2",
             params![now, id],
         )?;
@@ -3184,18 +3334,146 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
 
 // --- Embedding support ---
 
+/// v0.6.3.1 P2 (G4): error returned by `set_embedding` when a write would
+/// introduce a new embedding dimensionality into a namespace that has already
+/// established one via an earlier write. Surfaced as a typed error so the
+/// MCP/HTTP handlers can map it to a 409 Conflict rather than letting cosine
+/// silently return 0.0 on every subsequent recall.
+#[derive(Debug)]
+pub struct EmbeddingDimMismatch {
+    pub namespace: String,
+    pub established: usize,
+    pub attempted: usize,
+}
+
+impl std::fmt::Display for EmbeddingDimMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "embedding dim mismatch in namespace '{}': established {}-dim, refused {}-dim write",
+            self.namespace, self.established, self.attempted
+        )
+    }
+}
+
+impl std::error::Error for EmbeddingDimMismatch {}
+
+/// Lookup the embedding dimensionality already established for `namespace`.
+/// Returns `Ok(None)` when no row in that namespace has an embedding yet.
+///
+/// # Errors
+///
+/// Returns the underlying SQLite error.
+pub fn namespace_embedding_dim(conn: &Connection, namespace: &str) -> Result<Option<usize>> {
+    // Use the v17 idx_memories_ns_dim partial index.
+    let dim: Option<i64> = conn
+        .query_row(
+            "SELECT embedding_dim FROM memories \
+             WHERE namespace = ?1 AND embedding_dim IS NOT NULL \
+             LIMIT 1",
+            params![namespace],
+            |r| r.get(0),
+        )
+        .ok();
+    Ok(dim.and_then(|d| usize::try_from(d).ok()))
+}
+
+/// Count rows whose stored `embedding_dim` does not match what the BLOB
+/// contains (or where the column is missing while a BLOB exists). Surfaced
+/// in `Stats::dim_violations` and consumed by P7 doctor.
+///
+/// # Errors
+///
+/// Returns the underlying SQLite error.
+pub fn dim_violations(conn: &Connection) -> Result<u64> {
+    // The expression `length(embedding)` returns the BLOB length; we map
+    // legacy (no-header) payloads to `length/4` and headed (v17+) payloads
+    // to `(length-1)/4` because length parity tells us which form is on
+    // disk. Both forms must match the declared `embedding_dim` column.
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories \
+             WHERE embedding IS NOT NULL \
+               AND length(embedding) >= 4 \
+               AND ( \
+                   embedding_dim IS NULL \
+                   OR ( \
+                       (length(embedding) % 4 = 0 AND embedding_dim != length(embedding)/4) \
+                       OR (length(embedding) % 4 = 1 AND embedding_dim != (length(embedding)-1)/4) \
+                       OR (length(embedding) % 4 NOT IN (0,1)) \
+                   ) \
+               )",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(u64::try_from(n).unwrap_or(0))
+}
+
 /// Store an embedding vector for a memory.
+///
+/// v0.6.3.1 P2 — writes are now headed with the magic byte (`encode_embedding_blob`)
+/// and the namespace's first established dim is enforced. A dim mismatch
+/// returns a typed [`EmbeddingDimMismatch`] surfaced as a 409 by the handler
+/// layer. The same call also persists `embedding_dim` so future stats /
+/// doctor passes don't re-derive from BLOB length.
+///
+/// # Errors
+///
+/// Returns [`EmbeddingDimMismatch`] (boxed via anyhow) when the embedding's
+/// dimensionality differs from what the namespace established, or the
+/// underlying SQLite error on failure.
 pub fn set_embedding(conn: &Connection, id: &str, embedding: &[f32]) -> Result<()> {
-    let bytes: Vec<u8> = embedding.iter().flat_map(|f| f.to_le_bytes()).collect();
+    // Resolve namespace + check the dim invariant before mutating.
+    let namespace: Option<String> = conn
+        .query_row(
+            "SELECT namespace FROM memories WHERE id = ?1",
+            params![id],
+            |r| r.get(0),
+        )
+        .ok();
+    let attempted = embedding.len();
+    if attempted == 0 {
+        // Empty embeddings are a degenerate case — earlier code accepted
+        // them; preserve that to avoid breaking legacy tests but skip the
+        // dim check.
+        let bytes = crate::embeddings::encode_embedding_blob(embedding);
+        conn.execute(
+            "UPDATE memories SET embedding = ?1, embedding_dim = NULL WHERE id = ?2",
+            params![bytes, id],
+        )?;
+        return Ok(());
+    }
+    if let Some(ref ns) = namespace
+        && let Some(established) = namespace_embedding_dim(conn, ns)?
+        && established != attempted
+    {
+        return Err(EmbeddingDimMismatch {
+            namespace: ns.clone(),
+            established,
+            attempted,
+        }
+        .into());
+    }
+    let bytes = crate::embeddings::encode_embedding_blob(embedding);
+    let dim_i64 = i64::try_from(attempted).unwrap_or(i64::MAX);
     conn.execute(
-        "UPDATE memories SET embedding = ?1 WHERE id = ?2",
-        params![bytes, id],
+        "UPDATE memories SET embedding = ?1, embedding_dim = ?2 WHERE id = ?3",
+        params![bytes, dim_i64, id],
     )?;
     Ok(())
 }
 
 /// Load an embedding vector for a memory. Returns None if not set.
-#[allow(clippy::unnecessary_wraps)]
+///
+/// v0.6.3.1 P2 — tolerant of legacy unheaded payloads (raw LE f32, length
+/// `4n`) and v17 headed payloads (`0x01` + `4n` bytes). Anything else returns
+/// an error so the caller can surface a typed corruption signal.
+///
+/// # Errors
+///
+/// Returns [`EmbeddingFormatError`](crate::embeddings::EmbeddingFormatError)
+/// when the on-disk BLOB is malformed.
 pub fn get_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
     let result: Option<Vec<u8>> = conn
         .query_row(
@@ -3206,10 +3484,7 @@ pub fn get_embedding(conn: &Connection, id: &str) -> Result<Option<Vec<f32>>> {
         .ok();
     match result {
         Some(bytes) if !bytes.is_empty() => {
-            let floats: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
-                .collect();
+            let floats = crate::embeddings::decode_embedding_blob(&bytes)?;
             Ok(Some(floats))
         }
         _ => Ok(None),
@@ -3232,6 +3507,11 @@ pub fn get_unembedded_ids(conn: &Connection) -> Result<Vec<(String, String, Stri
 }
 
 /// Get all stored embeddings as (id, embedding) pairs for building the HNSW index.
+///
+/// v0.6.3.1 P2 — uses the magic-byte tolerant decoder. Rows whose BLOB is
+/// malformed are logged and skipped (the alternative — bailing the entire
+/// HNSW build — would take the whole semantic-search surface offline for one
+/// corrupt row).
 pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> {
     let mut stmt =
         conn.prepare("SELECT id, embedding FROM memories WHERE embedding IS NOT NULL")?;
@@ -3246,11 +3526,16 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
         if bytes.is_empty() {
             continue;
         }
-        let floats: Vec<f32> = bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        entries.push((id, floats));
+        match crate::embeddings::decode_embedding_blob(&bytes) {
+            Ok(floats) => entries.push((id, floats)),
+            Err(e) => {
+                tracing::warn!(
+                    memory_id = %id,
+                    error = %e,
+                    "skipping memory with malformed embedding BLOB during HNSW build"
+                );
+            }
+        }
     }
     Ok(entries)
 }
@@ -3544,10 +3829,16 @@ pub fn recall_hybrid_with_telemetry(
             if let Some(bytes) = emb_bytes
                 && !bytes.is_empty()
             {
-                let emb: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                    .collect();
+                // v0.6.3.1 P2 — tolerate legacy + headed payloads; skip
+                // (with telemetry) on malformed BLOBs so a single corrupt
+                // row can't poison the whole semantic stage.
+                let Ok(emb) = crate::embeddings::decode_embedding_blob(&bytes) else {
+                    tracing::warn!(
+                        memory_id = %mem.id,
+                        "skipping malformed embedding BLOB during semantic recall"
+                    );
+                    continue;
+                };
                 let cosine = f64::from(crate::embeddings::Embedder::cosine_similarity(
                     query_embedding,
                     &emb,
@@ -5086,9 +5377,14 @@ mod tests {
 
     #[test]
     fn restore_archived_memory() {
+        // v0.6.3.1 P2 (G5) — restore preserves the original tier and
+        // expires_at instead of resetting to long/permanent. Pre-v17 this
+        // test asserted `is_none()` for expires_at — that was the bug
+        // being fixed.
         let conn = test_db();
         let mut mem = make_memory("Restorable", "test", Tier::Short, 5);
-        mem.expires_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        let original_expiry = "2020-01-01T00:00:00+00:00".to_string();
+        mem.expires_at = Some(original_expiry.clone());
         let id = insert(&conn, &mem).unwrap();
 
         gc(&conn, true).unwrap();
@@ -5099,7 +5395,16 @@ mod tests {
 
         let got = get(&conn, &id).unwrap().unwrap();
         assert_eq!(got.title, "Restorable");
-        assert!(got.expires_at.is_none()); // restored without expiry
+        assert_eq!(
+            got.tier.as_str(),
+            "short",
+            "G5: restore must preserve the original tier"
+        );
+        assert_eq!(
+            got.expires_at,
+            Some(original_expiry),
+            "G5: restore must preserve the original expires_at"
+        );
     }
 
     #[test]

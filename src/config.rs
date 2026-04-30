@@ -478,7 +478,6 @@ pub struct CapabilityPermissions {
     pub active_rules: usize,
     // P1 honesty patch: `rule_summary` was always empty — no per-rule
     // serializer existed. Dropped from the v2 wire schema.
-
     /// v0.6.3.1 (P4, audit G1): governance-inheritance posture.
     /// `"enforced"` = `resolve_governance_policy` walks the namespace
     /// chain leaf-first and returns the most-specific policy (with

@@ -284,6 +284,142 @@ impl Embedder {
 #[allow(dead_code)]
 pub const EMBEDDING_DIM: usize = MINILM_DIM;
 
+// ---------------------------------------------------------------------------
+// v0.6.3.1 Phase P2 — embedding BLOB magic-byte header (G13)
+// ---------------------------------------------------------------------------
+//
+// Storage hardening: every embedding written from v0.6.3.1 onward is prefixed
+// with a single byte declaring the on-disk float layout. Pre-v17 rows have no
+// header — readers tolerate "no-header" as little-endian f32 (the historical
+// format) and reject any unknown header byte with a typed error rather than
+// silently producing a wrong cosine score after federation across mixed-arch
+// clusters.
+//
+// Endianness conversion (BE → LE) is intentionally NOT done here. The v0.7
+// federation work will add it once the cross-arch path has explicit test
+// coverage. Until then, any 0x02 BLOB returns `EmbeddingFormatError` so the
+// operator sees the corruption immediately instead of degrading recall.
+/// Magic byte declaring "little-endian f32" payload follows.
+pub const EMBEDDING_HEADER_LE_F32: u8 = 0x01;
+
+/// Magic byte declaring "big-endian f32" payload follows. Reserved — the
+/// reader rejects this until v0.7 adds endianness conversion.
+pub const EMBEDDING_HEADER_BE_F32: u8 = 0x02;
+
+/// Errors produced by the embedding BLOB codec. Distinguishes the three
+/// failure modes operators want to triage independently:
+///
+/// * `UnknownHeader` — first byte is neither 0x01 nor "looks like raw LE f32".
+///   Most likely cause: a 0.7+ federation peer pushed a payload this binary
+///   cannot decode, or the BLOB was corrupted on-disk.
+/// * `BigEndianUnsupported` — header is 0x02. Documented as an explicit error
+///   so the doctor command can surface "you have BE-f32 rows; upgrade to v0.7
+///   to read them". Until v0.7 ships, BE writes do not happen so this is a
+///   hard-error path.
+/// * `MalformedLength` — payload length is not a multiple of 4. Indicates a
+///   truncated BLOB; the row should be re-embedded.
+#[derive(Debug)]
+pub enum EmbeddingFormatError {
+    UnknownHeader(u8),
+    BigEndianUnsupported,
+    MalformedLength(usize),
+}
+
+impl std::fmt::Display for EmbeddingFormatError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownHeader(b) => write!(f, "unknown embedding header byte: 0x{b:02x}"),
+            Self::BigEndianUnsupported => write!(
+                f,
+                "big-endian f32 embeddings (header 0x02) are not supported until v0.7"
+            ),
+            Self::MalformedLength(n) => {
+                write!(f, "embedding payload length {n} is not a multiple of 4")
+            }
+        }
+    }
+}
+
+impl std::error::Error for EmbeddingFormatError {}
+
+/// Encode a `[f32]` slice as a length-prefixed BLOB suitable for the
+/// `memories.embedding` column.
+///
+/// Layout: `[0x01][LE f32 #0 (4 bytes)][LE f32 #1]...`. Empty input still
+/// emits the header so the round-trip preserves "I am an empty vector"
+/// versus "I am a legacy unheaded blob"; downstream code should treat
+/// empty embeddings as "no embedding" before reaching this codec.
+#[must_use]
+pub fn encode_embedding_blob(embedding: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + embedding.len() * 4);
+    out.push(EMBEDDING_HEADER_LE_F32);
+    for f in embedding {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+/// Decode an `embedding` BLOB back into `Vec<f32>`.
+///
+/// Tolerates legacy (pre-v17) rows that have no header byte — the historical
+/// format was raw LE f32, so a payload whose length is a multiple of 4 with
+/// no leading 0x01 is treated as legacy and decoded directly. This match is
+/// intentionally tight: any other first byte (including 0x02 for BE) becomes
+/// a typed error so the doctor command can flag corrupt rows.
+///
+/// # Errors
+///
+/// Returns [`EmbeddingFormatError`] on:
+/// * Unknown header byte (anything other than 0x01 in a row whose length is
+///   `1 + 4n`).
+/// * Big-endian header (0x02) — reserved for v0.7.
+/// * Length neither `4n` (legacy) nor `1 + 4n` (v17).
+pub fn decode_embedding_blob(bytes: &[u8]) -> Result<Vec<f32>, EmbeddingFormatError> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Headed case: leading byte is the magic and the rest is `4n` bytes.
+    if bytes.len() % 4 == 1 {
+        let header = bytes[0];
+        return match header {
+            EMBEDDING_HEADER_LE_F32 => {
+                let payload = &bytes[1..];
+                Ok(payload
+                    .chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect())
+            }
+            EMBEDDING_HEADER_BE_F32 => Err(EmbeddingFormatError::BigEndianUnsupported),
+            other => Err(EmbeddingFormatError::UnknownHeader(other)),
+        };
+    }
+
+    // Legacy unheaded case: raw LE f32, length must be a multiple of 4.
+    if bytes.len() % 4 == 0 {
+        return Ok(bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect());
+    }
+
+    Err(EmbeddingFormatError::MalformedLength(bytes.len()))
+}
+
+/// Number of f32 elements encoded in `bytes`, regardless of header presence.
+/// Used by the `dim_violations` stats path to compute per-row dim without
+/// allocating a `Vec<f32>`.
+#[must_use]
+pub fn decoded_dim(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    if bytes.len() % 4 == 1 {
+        return (bytes.len() - 1) / 4;
+    }
+    bytes.len() / 4
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +461,70 @@ mod tests {
         let b = vec![1.0, 0.0]; // Different dimension
         let sim = Embedder::cosine_similarity(&a, &b);
         assert_eq!(sim, 0.0);
+    }
+
+    // --- v0.6.3.1 P2 — embedding magic-byte codec ---
+
+    #[test]
+    fn encode_embedding_blob_prefixes_le_header() {
+        let v = vec![1.0_f32, 2.0_f32];
+        let blob = encode_embedding_blob(&v);
+        assert_eq!(blob.len(), 1 + 8);
+        assert_eq!(blob[0], EMBEDDING_HEADER_LE_F32);
+    }
+
+    #[test]
+    fn decode_embedding_blob_round_trip_v17() {
+        let v = vec![1.5_f32, -0.25, 0.0];
+        let blob = encode_embedding_blob(&v);
+        let back = decode_embedding_blob(&blob).expect("round-trips");
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn decode_embedding_blob_legacy_unheaded_le_f32() {
+        // Pre-v17 rows: raw LE f32, no header. Length is `4n`.
+        let v = vec![1.0_f32, 2.0, 3.0];
+        let raw: Vec<u8> = v.iter().flat_map(|f| f.to_le_bytes()).collect();
+        let back = decode_embedding_blob(&raw).expect("legacy decodes");
+        assert_eq!(back, v);
+    }
+
+    #[test]
+    fn decode_embedding_blob_rejects_be_header() {
+        let mut blob = vec![EMBEDDING_HEADER_BE_F32];
+        blob.extend_from_slice(&1.0_f32.to_be_bytes());
+        let err = decode_embedding_blob(&blob).expect_err("BE rejected");
+        assert!(matches!(err, EmbeddingFormatError::BigEndianUnsupported));
+    }
+
+    #[test]
+    fn decode_embedding_blob_rejects_unknown_header() {
+        let mut blob = vec![0xff_u8];
+        blob.extend_from_slice(&1.0_f32.to_le_bytes());
+        let err = decode_embedding_blob(&blob).expect_err("unknown header rejected");
+        assert!(matches!(err, EmbeddingFormatError::UnknownHeader(0xff)));
+    }
+
+    #[test]
+    fn decode_embedding_blob_rejects_malformed_length() {
+        // Length `4n + 2` is neither legacy (4n) nor headed (4n+1).
+        let blob = vec![0u8; 6];
+        let err = decode_embedding_blob(&blob).expect_err("malformed length rejected");
+        assert!(matches!(err, EmbeddingFormatError::MalformedLength(6)));
+    }
+
+    #[test]
+    fn decoded_dim_handles_all_three_paths() {
+        // Empty.
+        assert_eq!(decoded_dim(&[]), 0);
+        // Legacy (4n).
+        let raw: Vec<u8> = vec![0u8; 16];
+        assert_eq!(decoded_dim(&raw), 4);
+        // Headed (4n+1).
+        let mut headed = vec![EMBEDDING_HEADER_LE_F32];
+        headed.extend_from_slice(&[0u8; 12]);
+        assert_eq!(decoded_dim(&headed), 3);
     }
 
     // --- v0.6.0.0 contextual recall — fuse() ---

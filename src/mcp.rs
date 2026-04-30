@@ -100,7 +100,8 @@ fn tool_definitions() -> Value {
                         "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system", "chaos"], "default": "claude"},
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
                         "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
-                        "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."}
+                        "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."},
+                        "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already exists. 'error' returns CONFLICT (default for v2-capable clients). 'merge' updates the existing row in place (legacy v0.6.3 behaviour, default for v1 clients). 'version' appends a monotonic suffix to the title — 'My Memory (2)', '(3)', ..."}
                     },
                     "required": ["title", "content"]
                 }
@@ -726,6 +727,58 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
 /// LLM round-trip cost exceeds the informational payoff.
 const AUTONOMY_MIN_CONTENT_LEN: usize = 50;
 
+/// v0.6.3.1 P2 (G6) — `on_conflict` modes for `memory_store`.
+///
+/// * `Error`   — refuse the write with a typed CONFLICT error. This is the
+///               new default for v2-aware clients.
+/// * `Merge`   — keep the v0.6.3 silent-merge upsert behaviour. Default for
+///               v1 / unknown clients to preserve backward compatibility.
+/// * `Version` — auto-suffix the title with `(2)`, `(3)`, ... to write a
+///               distinct row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnConflict {
+    Error,
+    Merge,
+    Version,
+}
+
+impl OnConflict {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "error" => Ok(Self::Error),
+            "merge" => Ok(Self::Merge),
+            "version" => Ok(Self::Version),
+            other => Err(format!(
+                "invalid on_conflict '{other}' (expected error|merge|version)"
+            )),
+        }
+    }
+}
+
+/// Capability profile detection. v2-aware clients default to `Error`; v1 /
+/// unknown clients default to `Merge` to preserve the v0.6.3 contract. The
+/// determination keys off the MCP client name (captured at `initialize`
+/// from `clientInfo.name`). Known v2 clients are listed explicitly so the
+/// policy is auditable. The list is intentionally narrow — adding a name
+/// here is a deliberate decision that "this client knows how to handle a
+/// CONFLICT response from memory_store".
+fn default_on_conflict_for_client(mcp_client: Option<&str>) -> OnConflict {
+    let Some(client) = mcp_client else {
+        return OnConflict::Merge;
+    };
+    // Match on the prefix before any '@' — `ai:foo@host:pid-N` style ids.
+    let head = client.split('@').next().unwrap_or(client);
+    let normalized = head.to_ascii_lowercase();
+    // v2-capable clients (explicitly opted-in via known name).
+    const V2_CLIENT_PREFIXES: &[&str] = &["ai:claude-code", "ai:ai-memory-cli/v2"];
+    for prefix in V2_CLIENT_PREFIXES {
+        if normalized.starts_with(prefix) {
+            return OnConflict::Error;
+        }
+    }
+    OnConflict::Merge
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn handle_store(
@@ -745,6 +798,12 @@ fn handle_store(
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
     let namespace = params["namespace"].as_str().unwrap_or("global").to_string();
     let source = params["source"].as_str().unwrap_or("claude").to_string();
+    // v0.6.3.1 P2 (G6) — explicit `on_conflict` overrides the per-client default.
+    let on_conflict = if let Some(s) = params["on_conflict"].as_str() {
+        OnConflict::parse(s)?
+    } else {
+        default_on_conflict_for_client(mcp_client)
+    };
     let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).expect("i64 as i32");
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
@@ -804,11 +863,34 @@ fn handle_store(
         .ttl_for_tier(&tier)
         .map(|s| (now + chrono::Duration::seconds(s)).to_rfc3339());
 
+    // v0.6.3.1 P2 (G6) — apply the conflict policy BEFORE building the
+    // canonical Memory. `Version` mode rewrites `title` to a free suffix;
+    // `Error` mode short-circuits with a typed error if the row already
+    // exists; `Merge` defers to the legacy code path below.
+    let resolved_title = match on_conflict {
+        OnConflict::Error => {
+            if let Some(existing_id) =
+                db::find_by_title_namespace(conn, title, &namespace).map_err(|e| e.to_string())?
+            {
+                return Err(format!(
+                    "CONFLICT: memory with title '{title}' already exists in namespace \
+                     '{namespace}' (existing id: {existing_id}). Pass \
+                     on_conflict='merge' to update in place or 'version' to suffix the title."
+                ));
+            }
+            title.to_string()
+        }
+        OnConflict::Version => {
+            db::next_versioned_title(conn, title, &namespace).map_err(|e| e.to_string())?
+        }
+        OnConflict::Merge => title.to_string(),
+    };
+
     let mem = Memory {
         id: uuid::Uuid::new_v4().to_string(),
         tier,
         namespace,
-        title: title.to_string(),
+        title: resolved_title,
         content: content.to_string(),
         tags,
         priority: priority.clamp(1, 10),
@@ -853,11 +935,21 @@ fn handle_store(
         }
     }
 
-    // True dedup: check for exact title+namespace match (#97)
+    // True dedup: check for exact title+namespace match (#97).
+    //
+    // v0.6.3.1 P2 (G6) — only the Merge policy enters the dedup-then-update
+    // branch. `Error` mode already short-circuited above; `Version` mode
+    // already rewrote the title to a free suffix so an exact dup cannot
+    // exist. Both still call `find_contradictions` so the response can
+    // surface `potential_contradictions` (similar-title fuzzy matches).
     let existing = db::find_contradictions(conn, &mem.title, &mem.namespace).unwrap_or_default();
-    let exact_dup = existing
-        .iter()
-        .find(|c| c.title == mem.title && c.namespace == mem.namespace);
+    let exact_dup = if matches!(on_conflict, OnConflict::Merge) {
+        existing
+            .iter()
+            .find(|c| c.title == mem.title && c.namespace == mem.namespace)
+    } else {
+        None
+    };
     if let Some(dup) = exact_dup {
         // Update existing memory instead of creating a duplicate.
         // Preserve the original agent_id (provenance is immutable) — the

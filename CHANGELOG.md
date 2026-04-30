@@ -5,7 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.3.1 — REMEDIATION
+## [Unreleased] — v0.6.3.1 closure (in flight)
+
+### Phase P2 — Data-integrity hardening (G4, G5, G6, G13)
+
+Schema **v18** (migration `0011_v0631_data_integrity.sql`) closes four
+silent-corruption / silent-mutation paths surfaced by the v0.6.3 audit.
+(Schema v17 was claimed by P4 governance-inheritance backfill — see below.)
+
+- **G4 — mixed embedding dims silently tolerated.** New
+  `memories.embedding_dim` and `archived_memories.embedding_dim` columns;
+  `db::set_embedding` enforces "first write establishes the namespace's
+  dim" and returns a typed `EmbeddingDimMismatch` on any subsequent
+  write at a different dim. New `Stats::dim_violations` counter (also
+  exposed via `db::dim_violations`) surfaces legacy mismatched rows so
+  the P7 doctor can flag them. Migration backfills existing rows from
+  `length(embedding) / 4`.
+- **G5 — archive lossy + restore resets.** `archived_memories` now
+  carries `embedding`, `embedding_dim`, `original_tier`, and
+  `original_expires_at`. `archive_memory`, `gc(archive=true)`, and
+  `forget(archive=true)` populate them; `restore_archived` round-trips
+  the original tier and expiry instead of forcing `tier='long'` /
+  `expires_at=NULL`. Pre-v17 archive rows are backfilled to
+  `original_tier='long'` (the loss is acknowledged — the live row was
+  gone before v17 ever shipped).
+- **G6 — UNIQUE(title, namespace) silent merge.** `memory_store` MCP
+  tool grows an `on_conflict: error | merge | version` parameter.
+  Capability negotiation: v2-aware MCP clients default to `error`; v1 /
+  unknown clients keep the legacy `merge` upsert. HTTP
+  `POST /api/v1/memories` accepts `on_conflict` in the body and
+  defaults to `error` (HTTP has no v1 backward-compat to honour). New
+  `db::find_by_title_namespace` and `db::next_versioned_title` helpers.
+- **G13 — f32 endianness magic byte.** Embedding BLOBs now carry a
+  one-byte header (`0x01` = LE-f32). Readers tolerate missing-header as
+  legacy LE-f32 and return a typed `EmbeddingFormatError` for any
+  unknown header; `0x02` (BE-f32) is reserved and rejected until v0.7
+  adds the conversion path. New `embeddings::encode_embedding_blob` /
+  `decode_embedding_blob` / `decoded_dim` helpers.
+
+Tests: `tests/data_integrity_v17.rs` (8 cases — every charter-cited
+acceptance test passes plus two doctor-stat round-trips).
 
 ### Capabilities v2 honesty schema (P1, REMEDIATIONv0631 §"Phase P1")
 
