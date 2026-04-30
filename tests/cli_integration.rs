@@ -100,6 +100,7 @@ fn each_subcommand_help() {
         "restore",
         "curator",
         "bench",
+        "doctor",
     ];
     for sub in subcommands {
         Command::cargo_bin("ai-memory")
