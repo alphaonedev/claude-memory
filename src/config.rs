@@ -972,6 +972,15 @@ pub struct AppConfig {
     /// log of every memory mutation suitable for SIEM ingestion and
     /// SOC2 / HIPAA / GDPR / FedRAMP compliance evidence.
     pub audit: Option<AuditConfig>,
+    /// v0.6.3.1 (PR-9h / issue #487 PR #497 req #73) — boot privacy
+    /// kill-switch. Default-ON (existing users see no behavior change);
+    /// `[boot] enabled = false` silences boot entirely (empty stdout +
+    /// empty stderr, exit 0) for privacy-sensitive hosts where memory
+    /// titles must not enter CI logs. `[boot] redact_titles = true`
+    /// keeps the manifest header but replaces row titles with
+    /// `<redacted>` for compliance contexts that need the audit-trail
+    /// signal of "boot ran with N memories" without exposing subjects.
+    pub boot: Option<BootConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1090,6 +1099,59 @@ impl AuditConfig {
             }
         }
         chosen
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot privacy controls (PR-9h, v0.6.3.1, issue #487 PR #497 req #73)
+// ---------------------------------------------------------------------------
+
+/// `[boot]` block in `config.toml`. Drives the privacy kill-switch +
+/// title-redaction behaviour of `ai-memory boot`. Both fields default
+/// to the historical (pre-v0.6.3.1) behaviour so existing users see no
+/// change.
+///
+/// Precedence for `enabled`:
+///   `AI_MEMORY_BOOT_ENABLED=0` env var (truthy "0/false/no/off") >
+///   `[boot] enabled` config value > compiled default `true`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BootConfig {
+    /// Master toggle. Default `true`. When set to `false`, `ai-memory
+    /// boot` exits 0 with **empty stdout AND empty stderr** — the
+    /// privacy-sensitive escape hatch for hosts where memory titles
+    /// must never enter CI logs. The hook injects nothing.
+    pub enabled: Option<bool>,
+    /// When `true`, the manifest header still appears but every
+    /// memory row's `title` field is replaced with `<redacted>` —
+    /// useful for compliance contexts that need an audit trail of
+    /// "boot ran with N memories" without exposing memory subjects.
+    /// Default `false`.
+    pub redact_titles: Option<bool>,
+}
+
+impl BootConfig {
+    /// Resolve the effective `enabled` value with env-var precedence.
+    /// `AI_MEMORY_BOOT_ENABLED=0/false/no/off` forces disabled;
+    /// `=1/true/yes/on` forces enabled. Anything else falls through to
+    /// the config file value (or the compiled default `true`).
+    #[must_use]
+    pub fn effective_enabled(&self) -> bool {
+        if let Ok(v) = std::env::var("AI_MEMORY_BOOT_ENABLED") {
+            let v = v.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+                return false;
+            }
+            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+        }
+        self.enabled.unwrap_or(true)
+    }
+
+    /// Resolve the effective `redact_titles` value. Default `false`.
+    #[must_use]
+    pub fn effective_redact_titles(&self) -> bool {
+        self.redact_titles.unwrap_or(false)
     }
 }
 
@@ -1268,6 +1330,13 @@ impl AppConfig {
         self.audit.clone().unwrap_or_default()
     }
 
+    /// Resolve the [`BootConfig`] block, returning a default
+    /// (enabled, no redaction) instance when the config file omits
+    /// it. v0.6.3.1 (PR-9h / issue #487 PR #497 req #73).
+    pub fn effective_boot(&self) -> BootConfig {
+        self.boot.clone().unwrap_or_default()
+    }
+
     /// Resolve URL for embedding model (falls back to `ollama_url`).
     pub fn effective_embed_url(&self) -> &str {
         self.embed_url
@@ -1380,6 +1449,24 @@ impl AppConfig {
 # retention_days = 1095
 # redact_content = true
 # attestation_cadence_minutes = 30
+
+# v0.6.3.1 (PR-9h / issue #487 PR #497 req #73) — boot privacy controls.
+# Default-ON (omit the section entirely for the historical pre-v0.6.3.1
+# behavior). Two knobs:
+#
+# - `enabled = false` silences `ai-memory boot` entirely: empty stdout,
+#   empty stderr, exit 0. The SessionStart hook injects nothing. Use on
+#   privacy-sensitive hosts where memory titles must never enter CI
+#   logs. The env var `AI_MEMORY_BOOT_ENABLED=0` takes precedence over
+#   this config (same precedence pattern as PR-5's log-dir resolution).
+#
+# - `redact_titles = true` keeps the manifest header but replaces row
+#   `title` fields with `<redacted>` — useful for compliance contexts
+#   that need the audit-trail signal of "boot ran with N memories"
+#   without exposing memory subjects.
+# [boot]
+# enabled = true
+# redact_titles = false
 "#;
         let _ = std::fs::write(&path, default_toml);
     }

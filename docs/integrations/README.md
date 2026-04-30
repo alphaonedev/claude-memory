@@ -173,6 +173,19 @@ recipe's snippets and `ai-memory wrap <agent>` (PR-6).
   context.
 - Hook output too large: `--budget-tokens` (default 4096) clamps the row
   count cheaply (cumulative chars / 4 ≈ tokens).
+- Privacy-sensitive deployment: set `[boot] enabled = false` to silence
+  boot entirely (empty stdout + empty stderr, exit 0 — the hook injects
+  nothing), or `[boot] redact_titles = true` to keep the manifest but
+  hide memory subjects (`title` → `<redacted>`, every other field —
+  namespace, tier, id_short, priority, age — still surfaces). The env
+  var `AI_MEMORY_BOOT_ENABLED=0` overrides the config-file value. See
+  [`claude-code.md` §Privacy / disable](claude-code.md#privacy--disable-v0631-pr-9h)
+  for the full table.
+- Schema drift across a fleet: from v0.6.3.1 the JSON manifest exposes
+  `schema_supported: bool` as a top-level key so SIEMs can alert when a
+  host's `ai-memory` binary version-drifts away from its DB. The text
+  variant surfaces a `# ai-memory boot: warn — db schema vN unsupported
+  by binary X.Y.Z (supports v16..v19)` header directly.
 - Platform mismatch: a recipe written for `bash` doesn't run on native
   Windows, embedded BusyBox `ash`, or inside a Kubernetes sidecar with
   no shell. See
