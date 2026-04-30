@@ -63,7 +63,7 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 None,
                 None,
             ) {
-                Ok((results, _tokens_used)) => {
+                Ok((results, _outcome)) => {
                     for (mem, score) in &results {
                         let _ = writeln!(
                             out.stdout,

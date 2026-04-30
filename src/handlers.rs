@@ -1505,14 +1505,11 @@ pub async fn recall_memories_get(
         )
             .into_response();
     }
-    // Ultrareview #348: reject budget_tokens=0 explicitly.
-    if p.budget_tokens == Some(0) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "budget_tokens must be >= 1"})),
-        )
-            .into_response();
-    }
+    // Phase P6 (R1): `budget_tokens=0` is now a valid request meaning
+    // "return zero memories" — see `db::apply_token_budget`. The
+    // earlier Ultrareview #348 hard-reject is replaced by always
+    // round-tripping the requested budget in the response so a
+    // genuinely buggy uninitialised counter is still observable.
     if let Some(ref a) = p.as_agent
         && let Err(e) = validate::validate_namespace(a)
     {
@@ -1548,13 +1545,8 @@ pub async fn recall_memories_post(
         )
             .into_response();
     }
-    if body.budget_tokens == Some(0) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({"error": "budget_tokens must be >= 1"})),
-        )
-            .into_response();
-    }
+    // Phase P6 (R1): `budget_tokens=0` is now a valid request — see
+    // the matching note on the GET handler above.
     if let Some(ref a) = body.as_agent
         && let Err(e) = validate::validate_namespace(a)
     {
@@ -1656,7 +1648,7 @@ async fn recall_response(
     };
 
     match result {
-        Ok((r, tokens_used)) => {
+        Ok((r, outcome)) => {
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {
@@ -1670,11 +1662,18 @@ async fn recall_response(
             let mut resp = json!({
                 "memories": scored,
                 "count": scored.len(),
-                "tokens_used": tokens_used,
+                "tokens_used": outcome.tokens_used,
                 "mode": mode,
             });
             if let Some(b) = budget_tokens {
                 resp["budget_tokens"] = json!(b);
+                // Phase P6 (R1) meta block — same shape as the MCP path.
+                resp["meta"] = json!({
+                    "budget_tokens_used": outcome.tokens_used,
+                    "budget_tokens_remaining": outcome.tokens_remaining.unwrap_or(0),
+                    "memories_dropped": outcome.memories_dropped,
+                    "budget_overflow": outcome.budget_overflow,
+                });
             }
             Json(resp).into_response()
         }
@@ -4899,7 +4898,7 @@ mod tests {
             metadata: serde_json::json!({}),
         };
         db::insert(&lock.0, &mem).unwrap();
-        let (results, _tokens) = db::recall(
+        let (results, _outcome) = db::recall(
             &lock.0,
             "recall handler",
             Some("test"),
@@ -6711,7 +6710,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recall_post_rejects_zero_budget_tokens() {
+    async fn recall_post_zero_budget_tokens_returns_empty() {
+        // Phase P6 (R1): budget_tokens=0 is a valid request meaning
+        // "give me nothing"; returns 200 with an empty memories array
+        // and meta.budget_overflow=false. Supersedes the v0.6.3
+        // Ultrareview #348 hard-reject of 0.
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/memories/recall", axum_post(recall_memories_post))
@@ -6733,12 +6736,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(v["error"].as_str().unwrap().contains("budget_tokens"));
+        assert_eq!(v["count"], 0, "budget_tokens=0 returns zero memories");
+        assert_eq!(v["budget_tokens"], 0);
+        assert_eq!(v["meta"]["budget_overflow"], false);
     }
 
     #[tokio::test]
@@ -7888,7 +7893,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_recall_get_rejects_zero_budget_tokens() {
+    async fn http_recall_get_zero_budget_tokens_returns_empty() {
+        // Phase P6 (R1): budget_tokens=0 is now a valid request — see
+        // recall_post_zero_budget_tokens_returns_empty for full
+        // semantics. Returns 200 with an empty memories array.
         let state = test_state();
         let app = Router::new()
             .route(
@@ -7905,12 +7913,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(v["error"].as_str().unwrap().contains("budget_tokens"));
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["budget_tokens"], 0);
+        assert_eq!(v["meta"]["budget_overflow"], false);
     }
 
     #[tokio::test]
@@ -15035,7 +15045,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn http_recall_post_zero_budget_tokens_returns_400() {
+    async fn http_recall_post_zero_budget_tokens_returns_200() {
+        // Phase P6 (R1): budget_tokens=0 returns 200 with an empty
+        // memories list — see recall_post_zero_budget_tokens_returns_empty
+        // for the matching unit-tested handler-level test.
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/recall", axum_post(recall_memories_post))
@@ -15052,7 +15065,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     // ---- search_memories with as_agent invalid ----

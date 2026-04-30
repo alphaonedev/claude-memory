@@ -80,6 +80,15 @@ toml = "0.8"
 # text/plain`). Per sprint authorization #260.
 prometheus = { version = "0.13", default-features = false }
 
+# v0.6.3.1 (P6 / R1) — deterministic context-budgeted recall. tiktoken-rs
+# exposes OpenAI's `cl100k_base` BPE which is also Anthropic's de-facto
+# context-window tokenizer for budgeting purposes. Used post-rank in
+# `memory_recall` when the caller supplies `budget_tokens`. Pure Rust,
+# no C deps; the BPE table is embedded in the crate (~1.7 MB) so the
+# tokenizer is offline-deterministic across all hosts. Per ROADMAP2.md
+# R1 ("budget_tokens recall — Letta has it, we don't, we need it").
+tiktoken-rs = "0.7"
+
 # v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
 # feature so default builds don't pull them. `async-trait` is the
 # standard bridge for async methods on traits until stable Rust native

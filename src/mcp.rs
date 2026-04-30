@@ -119,7 +119,7 @@ fn tool_definitions() -> Value {
                         "since": {"type": "string", "description": "Only memories created after this RFC3339 timestamp"},
                         "until": {"type": "string", "description": "Only memories created before this RFC3339 timestamp"},
                         "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5). Enables scope-based visibility filtering — results include private memories at this namespace, team/unit/org memories at ancestor subtrees, and collective memories globally."},
-                        "budget_tokens": {"type": "integer", "minimum": 1, "description": "Task 1.11 — context-budget-aware recall. Return the top-ranked memories whose cumulative estimated tokens (title+content, ~4 chars/token) fit in N. Response includes tokens_used + budget_tokens."},
+                        "budget_tokens": {"type": "integer", "minimum": 0, "description": "Phase P6 (R1) — context-budget-aware recall. Return the highest-ranked memories whose cumulative content tokens (deterministic cl100k_base BPE; matches Claude/GPT context accounting) fit in N. If the top-ranked memory alone exceeds the budget, it is returned anyway with meta.budget_overflow=true (R1 always-return-at-least-one guarantee). budget_tokens=0 returns zero memories with overflow=false. Response meta block: budget_tokens_used, budget_tokens_remaining, memories_dropped, budget_overflow."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "v0.6.0.0 contextual recall — recent conversation tokens used to bias the query embedding at 70/30 (primary/context). Pulls results toward memories that match both the explicit query and nearby conversation topics."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
@@ -1260,17 +1260,16 @@ pub fn handle_recall(
     if let Some(a) = as_agent {
         validate::validate_namespace(a).map_err(|e| e.to_string())?;
     }
-    // Task 1.11: optional token budget.
-    // Ultrareview #348: reject budget_tokens=0 explicitly. An off-by-one
-    // or uninitialized counter passed as 0 would previously return an
-    // empty result with no error — hides the caller's bug.
-    let budget_tokens = match params["budget_tokens"].as_u64() {
-        Some(0) => {
-            return Err("budget_tokens must be >= 1".to_string());
-        }
-        Some(n) => usize::try_from(n).ok(),
-        None => None,
-    };
+    // Task 1.11 / Phase P6 (R1): optional token budget. R1 semantics
+    // permit `0` ("give me nothing") and return an empty result with
+    // `meta.budget_overflow = false` — see the comment on
+    // `db::apply_token_budget`. This supersedes the v0.6.3 Ultrareview
+    // #348 hard-reject of 0; the meta block now disambiguates "user
+    // asked for zero" from "buggy uninitialized counter" by always
+    // round-tripping the requested budget.
+    let budget_tokens = params["budget_tokens"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
 
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
@@ -1282,11 +1281,35 @@ pub fn handle_recall(
         })
         .unwrap_or_default();
 
-    // Helper: tack tokens_used / budget_tokens onto the response metadata.
-    let decorate_budget = |resp: &mut Value, tokens_used: usize| {
-        resp["tokens_used"] = json!(tokens_used);
+    // Helper: tack tokens_used / budget_tokens onto the response, plus
+    // — when a budget was supplied — the Phase P6 RecallMeta-style
+    // sub-block (`meta.budget_tokens_used`, `budget_tokens_remaining`,
+    // `memories_dropped`, `budget_overflow`). The legacy top-level
+    // `tokens_used` / `budget_tokens` fields are preserved verbatim so
+    // pre-P6 callers continue to work byte-for-byte.
+    //
+    // NOTE on RecallMeta: Phase P3 introduces a top-level `meta` block
+    // (recall_mode, reranker_used, candidate_counts, blend_weight). This
+    // P6 worktree pre-dates the P3 merge, so we define the budget-mode
+    // sub-block directly under `meta.budget` and let P3's rebase fold
+    // its fields in alongside ours. See REMEDIATIONv0631.md L488-489.
+    let decorate_budget = |resp: &mut Value, outcome: &db::BudgetOutcome| {
+        resp["tokens_used"] = json!(outcome.tokens_used);
         if let Some(b) = budget_tokens {
             resp["budget_tokens"] = json!(b);
+            // Phase P6 R1 meta block. Always emitted when a budget is
+            // supplied so callers can rely on the field set. Kept under
+            // a dedicated `meta` key so the top-level shape stays
+            // backward-compatible — pre-P6 callers ignore unknown keys.
+            let meta = resp
+                .as_object_mut()
+                .expect("recall response is always a JSON object")
+                .entry("meta".to_string())
+                .or_insert_with(|| json!({}));
+            meta["budget_tokens_used"] = json!(outcome.tokens_used);
+            meta["budget_tokens_remaining"] = json!(outcome.tokens_remaining.unwrap_or(0));
+            meta["memories_dropped"] = json!(outcome.memories_dropped);
+            meta["budget_overflow"] = json!(outcome.budget_overflow);
         }
     };
 
@@ -1339,7 +1362,7 @@ pub fn handle_recall(
                         }
                     }
                 };
-                let (results, tokens_used, telemetry) = db::recall_hybrid_with_telemetry(
+                let (results, outcome, telemetry) = db::recall_hybrid_with_telemetry(
                     conn,
                     context,
                     &query_emb,
@@ -1362,7 +1385,7 @@ pub fn handle_recall(
                     let ce_reranked = ce.rerank(context, results);
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
-                    decorate_budget(&mut resp, tokens_used);
+                    decorate_budget(&mut resp, &outcome);
                     attach_meta(&mut resp, "hybrid", &telemetry);
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
@@ -1371,7 +1394,7 @@ pub fn handle_recall(
                 let memories = scored_memories(results);
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
-                decorate_budget(&mut resp, tokens_used);
+                decorate_budget(&mut resp, &outcome);
                 attach_meta(&mut resp, "hybrid", &telemetry);
                 inject_namespace_standard(conn, namespace, &mut resp);
                 return Ok(resp);
@@ -1389,7 +1412,7 @@ pub fn handle_recall(
     }
 
     // Fallback to keyword-only recall
-    let (results, tokens_used, telemetry) = db::recall_with_telemetry(
+    let (results, outcome, telemetry) = db::recall_with_telemetry(
         conn,
         context,
         namespace,
@@ -1405,7 +1428,7 @@ pub fn handle_recall(
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
-    decorate_budget(&mut resp, tokens_used);
+    decorate_budget(&mut resp, &outcome);
     attach_meta(&mut resp, "keyword_only", &telemetry);
     inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
@@ -4534,14 +4557,30 @@ mod tests {
     }
 
     #[test]
-    fn handle_recall_error_budget_tokens_zero() {
+    fn handle_recall_budget_tokens_zero_returns_empty() {
+        // Phase P6 (R1): budget_tokens=0 is now a valid request — the
+        // user explicitly asked for zero context. Returns an empty
+        // memories array with meta.budget_overflow=false (the user
+        // didn't overflow anything, they asked for nothing). Supersedes
+        // the v0.6.3 Ultrareview #348 hard-reject of 0.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-        let req = make_tools_call("memory_recall", json!({"context": "x", "budget_tokens": 0}));
+        let req = make_tools_call(
+            "memory_recall",
+            json!({"context": "x", "budget_tokens": 0, "format": "json"}),
+        );
         let resp = invoke_handle_request(&conn, &req);
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], true);
-        let msg = result["content"][0]["text"].as_str().unwrap();
-        assert!(msg.contains("budget_tokens"));
+        assert!(resp.error.is_none(), "budget_tokens=0 must not error");
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["count"], 0, "budget_tokens=0 returns zero memories");
+        assert_eq!(val["budget_tokens"], 0);
+        assert_eq!(val["tokens_used"], 0);
+        assert_eq!(val["meta"]["budget_overflow"], false);
+        assert_eq!(val["meta"]["budget_tokens_used"], 0);
+        assert_eq!(val["meta"]["budget_tokens_remaining"], 0);
     }
 
     #[test]
