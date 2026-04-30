@@ -712,7 +712,7 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut so = stdout.lock();
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
-            cli::boot::run(&db_path, &a, &mut out)
+            cli::boot::run(&db_path, &a, app_config, &mut out)
         }
     };
 

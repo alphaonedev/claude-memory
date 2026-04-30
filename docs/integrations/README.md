@@ -26,19 +26,37 @@ but **a status header always appears on stdout** so the agent (and the
 human running it) can see whether boot fired and why context might be
 missing. See `ai-memory boot --help` for the full surface.
 
-### End-user diagnostic — always-visible status header
+### End-user diagnostic — always-visible manifest header
 
-Every invocation emits exactly one of these four headers (per [#487
-addendum](https://github.com/alphaonedev/ai-memory-mcp/issues/487)):
+Every invocation emits a transparent multi-field manifest (per [#487
+addendum](https://github.com/alphaonedev/ai-memory-mcp/issues/487), PR-4):
+agents and humans always know exactly what's loaded and what's configured.
 
-| Header | Meaning |
-|---|---|
-| `# ai-memory boot: ok — loaded N memories from ns=X` | Normal happy path. |
-| `# ai-memory boot: info — namespace empty; loaded N memories from global Long tier fallback` | Requested namespace empty; surfacing cross-project context instead. |
-| `# ai-memory boot: info — namespace 'X' is empty and no global Long-tier fallback found — nothing to load (this is normal on a fresh install)` | First-run / greenfield. |
-| `# ai-memory boot: warn — db unavailable at /path — proceeding without memory context. Run \`ai-memory doctor\` to diagnose.` | DB couldn't be opened. The hook fired but found no DB. |
+```text
+# ai-memory boot: ok
+#   version:    0.6.3+patch.1
+#   db:         /home/u/.claude/ai-memory.db (schema=v19, 161 memories)
+#   tier:       autonomous (embedder=nomic-ai/nomic-embed-text-v1.5, reranker=ms-marco-MiniLM-L-6-v2, llm=gemma4:e4b)
+#   latency:    12ms
+#   namespace:  ai-memory-mcp/v0631-release (loaded 3 memories)
+```
 
-**If no status header appears at all**, the integration recipe didn't
+The four status variants share the same manifest shape; only the first
+line's status word and the `namespace:` line's parenthetical change:
+
+| Status | First line | `namespace:` line |
+|---|---|---|
+| Happy path | `# ai-memory boot: ok` | `(loaded N memories)` |
+| Namespace empty, fell back | `# ai-memory boot: info` | `(fallback: loaded N memories from global Long tier)` |
+| First-run / greenfield | `# ai-memory boot: info` | `(empty — nothing to load; this is normal on a fresh install)` |
+| DB unavailable | `# ai-memory boot: warn` | `(db unavailable — see `ai-memory doctor`)` |
+
+In the warn variant, `db:` reports `<unavailable>` for `schema` and
+the live-memories count, while `version`, `tier`, and `latency` still
+surface — the manifest never disappears, only what depends on a live
+DB is sentinelled.
+
+**If no manifest appears at all**, the integration recipe didn't
 fire the hook — the agent host either skipped the hook, the binary isn't
 on `$PATH`, or the recipe is misconfigured. This absence is itself a
 diagnostic: silent vs. "warn" vs. "ok" tell the user three different
@@ -48,14 +66,16 @@ failure modes apart.
 suppressing the header makes silent failure indistinguishable from "no
 memories yet."
 
-The output body (after the header, when memories are loaded) is one of
+The output body (after the manifest, when memories are loaded) is one of
 three formats:
 
 - `text` (default) — human-readable bulleted list. Works in any agent's
   system message. Easiest to scan.
-- `json` — single object containing `status`, `namespace`, `count`,
-  `memories`, `note` for programmatic ingest (Claude Agent SDK, OpenAI
-  Apps SDK, Codex CLI prepend).
+- `json` — single object containing every manifest field as a top-level
+  key (`status`, `version`, `db_path`, `schema_version`, `total_memories`,
+  `tier`, `embedder`, `reranker`, `llm`, `latency_ms`, `namespace`,
+  `count`, `note`, `memories`, `fell_back_to_global`) for programmatic
+  ingest (Claude Agent SDK, OpenAI Apps SDK, Codex CLI prepend).
 - `toon` — the canonical token-efficient memory format, byte-identical
   to a `memory_recall` MCP response.
 

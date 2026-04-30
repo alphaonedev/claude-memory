@@ -56,24 +56,45 @@ mode issue #487 is fixing.
 
 ## End-user diagnostic — how to know boot fired
 
-Every boot invocation emits one of four status headers:
+Every boot invocation emits a transparent multi-field manifest. Agents
+and humans always see exactly what version ran, which DB / schema it
+opened, the configured tier and models, and the wall-clock latency —
+no black-box behaviour:
 
-| Header prefix | Meaning |
-|---|---|
-| `# ai-memory boot: ok — loaded N memories from ns=X` | Normal happy path. |
-| `# ai-memory boot: info — namespace empty; loaded N memories from global Long tier fallback` | Requested namespace was empty; we surfaced cross-project context. |
-| `# ai-memory boot: info — namespace 'X' is empty and no global Long-tier fallback found — nothing to load (this is normal on a fresh install)` | First-run / greenfield. Not an error. |
-| `# ai-memory boot: warn — db unavailable at /path — proceeding without memory context. Run \`ai-memory doctor\` to diagnose.` | The hook fired but the DB couldn't be opened. Common causes: wrong `AI_MEMORY_DB` path, permission denied, brand-new install before first `ai-memory store`. |
+```text
+# ai-memory boot: ok
+#   version:    0.6.3+patch.1
+#   db:         /home/u/.claude/ai-memory.db (schema=v19, 161 memories)
+#   tier:       autonomous (embedder=nomic-ai/nomic-embed-text-v1.5, reranker=ms-marco-MiniLM-L-6-v2, llm=gemma4:e4b)
+#   latency:    12ms
+#   namespace:  ai-memory-mcp (loaded 10 memories)
+```
 
-If you see **no header at all** in your session log, the hook never fired.
-Run the diagnostic from the same shell Claude Code launched from:
+The first line's status word is one of `ok` / `info` / `warn`; the
+`namespace:` line's parenthetical varies by status. The four variants:
+
+| Status | First line | `namespace:` line |
+|---|---|---|
+| Happy path | `# ai-memory boot: ok` | `(loaded N memories)` |
+| Namespace empty, fell back | `# ai-memory boot: info` | `(fallback: loaded N memories from global Long tier)` |
+| First-run / greenfield | `# ai-memory boot: info` | `(empty — nothing to load; this is normal on a fresh install)` |
+| DB unavailable | `# ai-memory boot: warn` | `(db unavailable — see `ai-memory doctor`)` |
+
+The manifest is *never* a black box: the warn variant still surfaces
+`version`, `tier`, and `latency`, with `<unavailable>` standing in for
+the live-DB-only fields (`schema`, `total memories`). Common causes for
+the warn variant: wrong `AI_MEMORY_DB` path, permission denied,
+brand-new install before first `ai-memory store`.
+
+If you see **no manifest at all** in your session log, the hook never
+fired. Run the diagnostic from the same shell Claude Code launched from:
 
 ```bash
 ai-memory boot --limit 1
-# Should emit one of the four headers above.
+# Should emit the manifest with one of the four status words above.
 # If it errors instead, the binary or DB is misconfigured.
-# If it works but Claude Code never sees a header, the SessionStart hook
-#   isn't installed correctly — re-check ~/.claude/settings.json.
+# If it works but Claude Code never sees a manifest, the SessionStart
+#   hook isn't installed correctly — re-check ~/.claude/settings.json.
 ```
 
 ## Project-scoped namespace override
