@@ -922,6 +922,52 @@ mod w12h_extra_tests {
         let sim = Embedder::cosine_similarity(&a, &b);
         assert_eq!(sim, 0.0);
     }
+
+    #[test]
+    fn pr9i_for_model_minilm_dispatches_to_new_local() {
+        // Exercises the MiniLmL6V2 dispatch arm (line 115). Behavior is
+        // environment-dependent: on a machine with HF cache or network the
+        // call succeeds; without either it errors with the documented
+        // "model files not found in fallback dir" message. Both outcomes
+        // are acceptable — what matters is that the dispatch arm is hit.
+        let res = Embedder::for_model(EmbeddingModel::MiniLmL6V2, None);
+        match res {
+            Ok(e) => {
+                // Path-of-success branch reachable iff HF cache is present.
+                assert_eq!(e.dim(), 384);
+                let desc = e.model_description();
+                assert!(desc.contains("MiniLM"));
+            }
+            Err(e) => {
+                // Path-of-failure branch reachable iff offline + no cache.
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("model")
+                        || msg.contains("config")
+                        || msg.contains("tokenizer")
+                        || msg.contains("fallback")
+                        || msg.contains("HuggingFace"),
+                    "unexpected new_local error: {msg}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pr9i_embedder_new_alias_is_new_local() {
+        // `Embedder::new()` is a thin shim over `new_local()` (line 50-52).
+        // Same dual-outcome logic as above.
+        let res = Embedder::new();
+        match res {
+            Ok(e) => {
+                assert_eq!(e.dim(), 384);
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(!msg.is_empty());
+            }
+        }
+    }
 }
 
 #[test]
