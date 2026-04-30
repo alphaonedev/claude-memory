@@ -1,0 +1,60 @@
+name: Session-boot lifetime suite
+
+# Issue #487 PR-3 — proves `ai-memory boot` loads on session start across
+# every supported AI / AI-agent recipe, on every supported platform, on a
+# recurring schedule. If a recipe in `docs/integrations/<agent>.md`
+# regresses, this workflow fails on the next nightly run.
+
+on:
+  schedule:
+    # 4am UTC daily — runs after the v0.6.x.y dogfood / tag-cut routine
+    # so a regression caught here lands in the next morning's review.
+    - cron: '0 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: [release/v0.6.3.1, main]
+    paths:
+      - 'docs/integrations/**'
+      - 'src/cli/boot.rs'
+      - 'tests/boot_primitive_contract.rs'
+      - 'tests/recipe_contract.rs'
+      - 'tests/boot_lifecycle.rs'
+      - 'scripts/run-session-boot-lifetime-tests.sh'
+      - '.github/workflows/session-boot-lifetime.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lifetime-tests:
+    name: Lifetime suite (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install python3 (recipe contract checks)
+        if: runner.os == 'Windows'
+        # The Linux + macOS runners ship python3 by default; the Windows
+        # runner ships `python` but not `python3`. The recipe contract
+        # tests probe via `python3` first, so the test gracefully skips
+        # the Python-syntax checks on Windows when python3 isn't present.
+        # We document the skip rather than installing a third interpreter
+        # to keep the Windows job fast and reproducible.
+        shell: pwsh
+        run: |
+          python --version
+          Write-Host "note: recipe_contract.rs gracefully skips python3-dependent checks when python3 is not on PATH."
+
+      - name: Run lifetime suite
+        env:
+          AI_MEMORY_NO_CONFIG: '1'
+        run: |
+          cargo test --test boot_primitive_contract --test recipe_contract --test boot_lifecycle

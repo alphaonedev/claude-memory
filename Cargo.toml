@@ -1,6 +1,6 @@
 [package]
 name = "ai-memory"
-version = "0.6.3"
+version = "0.6.3+patch.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["AlphaOne LLC"]
@@ -43,7 +43,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# v0.6.3.1 (PR-5 / issue #487) — rolling file appender for the
+# operational logging facility. Default-OFF; opt-in via
+# `[logging] enabled = true` in config.toml. Uses the non-blocking
+# writer so file I/O never stalls a tracing call site.
+tracing-appender = "0.2"
+# v0.6.3.1 (PR-5 / issue #487) — `ai-memory logs archive` compresses
+# rotated operational logs past their retention horizon. Pure-Rust
+# bindings via the `zstd` crate.
+zstd = { version = "0.13", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 gethostname = "0.5"
@@ -79,6 +88,23 @@ toml = "0.8"
 # only (which is what Prometheus scrapes by default via `Accept:
 # text/plain`). Per sprint authorization #260.
 prometheus = { version = "0.13", default-features = false }
+
+# v0.6.3.1 (P6 / R1) — deterministic context-budgeted recall. tiktoken-rs
+# exposes OpenAI's `cl100k_base` BPE which is also Anthropic's de-facto
+# context-window tokenizer for budgeting purposes. Used post-rank in
+# `memory_recall` when the caller supplies `budget_tokens`. Pure Rust,
+# no C deps; the BPE table is embedded in the crate (~1.7 MB) so the
+# tokenizer is offline-deterministic across all hosts. Per ROADMAP2.md
+# R1 ("budget_tokens recall — Letta has it, we don't, we need it").
+tiktoken-rs = "0.7"
+
+# Issue #487 PR-6 — `ai-memory wrap` uses `tempfile::NamedTempFile`
+# for the cross-platform `MessageFile` strategy (write the system
+# message to a tempfile, hand the path to the wrapped agent CLI, and
+# guarantee cleanup on parent exit). Pure-Rust, used by the production
+# wrap subcommand so it's promoted from dev-dependencies into the main
+# dep table. Same version pin as the existing dev-dep below.
+tempfile = "3"
 
 # v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
 # feature so default builds don't pull them. `async-trait` is the
@@ -117,6 +143,14 @@ sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
 # (BERT cross-encoder, MiniLM, etc.). Off by default so CI doesn't download
 # 80MB+ on every run.
 test-with-models = []
+# Issue #487 PR-3 — gated live-agent smoke tests. Off by default; enabled
+# explicitly by the local runner script (`scripts/run-session-boot-
+# lifetime-tests.sh`) when `E2E_AGENT_TESTS=1` AND the host has a `claude`
+# binary on PATH plus a real `ANTHROPIC_API_KEY`. The contract + lifecycle
+# tests under `tests/boot_*` and `tests/recipe_contract.rs` stay
+# unconditional and load-bearing; this feature is for the optional
+# end-to-end "did Claude actually see the seeded memory?" smoke.
+e2e = []
 
 [dev-dependencies]
 proptest = "1"
@@ -151,6 +185,14 @@ wiremock = "0.6"
 # already transitively in the dep tree via tokio, declared explicitly
 # here so the test can `use libc::SIGINT` without `rustc_private` errors.
 [target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+# v0.6.3.1 (PR-5 / issue #487) — `audit::mark_append_only` invokes
+# `libc::chflags` (BSD/macOS) and the `FS_IOC_SETFLAGS` ioctl (Linux)
+# to mark the audit log as append-only at the kernel level. Best-effort
+# defense in depth; the load-bearing tamper-evidence is the per-line
+# hash chain, not the file flag.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [[bench]]

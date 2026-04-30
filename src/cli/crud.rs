@@ -194,6 +194,22 @@ pub fn cmd_delete(
     }
 
     if db::delete(&conn, &target.id)? {
+        // PR-5 (issue #487): security audit trail.
+        crate::audit::emit(crate::audit::EventBuilder::new(
+            crate::audit::AuditAction::Delete,
+            crate::audit::actor(
+                identity::resolve_agent_id(cli_agent_id, None).unwrap_or_default(),
+                cli_agent_id.map_or("default_fallback", |_| "explicit"),
+                None,
+            ),
+            crate::audit::target_memory(
+                target.id.clone(),
+                target.namespace.clone(),
+                Some(target.title.clone()),
+                Some(target.tier.to_string()),
+                None,
+            ),
+        ));
         if json_out {
             writeln!(
                 out.stdout,
@@ -521,6 +537,7 @@ mod tests {
             promote: GovernanceLevel::Any,
             delete: GovernanceLevel::Approve,
             approver: ApproverType::Human,
+            inherit: true,
         };
         let conn = db::open(&db).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

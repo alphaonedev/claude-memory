@@ -20,6 +20,7 @@ target by more than the published 10% tolerance.
 | `memory_session_start` hook | < 100 ms | < 200 ms | Claude Code hook critical path |
 | `memory_recall` (hot, depth=1) | < 50 ms | < 150 ms | Felt during agent reasoning |
 | `memory_recall` (cold, full hybrid) | < 200 ms | < 500 ms | First-query path |
+| `memory_recall` (budget, `budget_tokens=4096`) | < 90 ms | < 200 ms | v0.6.3.1 R1 — autonomous tier budget. Adds cl100k_base BPE tokenization on the survivors only; budget-unset path is unchanged (skips BPE, falls back to a byte heuristic for the `tokens_used` tally). The first call in a process pays a one-shot ~200 ms BPE table parse, amortized away from the steady-state p95. |
 | `memory_store` (no embedding) | < 20 ms | < 50 ms | Pure write |
 | `memory_store` (with embedding) | < 200 ms | < 500 ms | Includes ONNX/Ollama call |
 | `memory_search` (FTS5) | < 100 ms | < 250 ms | Keyword baseline |
@@ -140,6 +141,38 @@ Three reasons, in order of importance:
 3. **Capacity planning.** Operators choosing where to host
    ai-memory (laptop, VPS, beefy server) need a comparison point.
    "p95 < 100 ms on M4" beats "should be fast enough."
+
+## Response Shape Overhead
+
+### v0.6.3.1 — `memory_recall.meta` block (P3)
+
+Every `memory_recall` response now carries a `meta` block reporting which
+recall path executed (`hybrid` vs `keyword_only`), which reranker scored
+the final ordering (`neural` / `lexical` / `none`), the per-stage
+candidate counts (`fts`, `hnsw`), and the average semantic blend weight.
+Closes audit gaps G2 / G8 / G11 by making silent-degrade paths visible at
+request time.
+
+The block is small — a representative serialization is:
+
+```json
+"meta": {
+  "recall_mode": "hybrid",
+  "reranker_used": "neural",
+  "candidate_counts": { "fts": 8, "hnsw": 12 },
+  "blend_weight": 0.42
+}
+```
+
+That's **~110 bytes wire-side** (closer to ~50 bytes after gzip on the
+HTTP path). The block is constant-size — it does not grow with the
+number of memories returned. Counter accumulation in
+`db::recall_hybrid_with_telemetry` adds two `usize` increments per
+candidate plus a single `f64` push to a `Vec`, none of which moves the
+needle on the `< 50 ms` p95 budget for `memory_recall (hot, depth=1)`.
+Local measurements on the M4 reference baseline show no detectable
+shift in the recall row of `ai-memory bench`; the published budget
+holds with margin.
 
 ## Forward References
 

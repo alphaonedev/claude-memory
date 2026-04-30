@@ -118,6 +118,13 @@ pub struct CreateMemory {
     /// unset, treated as `private` by the query layer.
     #[serde(default)]
     pub scope: Option<String>,
+    /// v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already
+    /// exists. One of `error` | `merge` | `version`. When unset, the
+    /// daemon defaults to `error` for HTTP callers (HTTP is not legacy
+    /// like MCP v1; clients that want the legacy silent-merge contract
+    /// must opt in explicitly).
+    #[serde(default)]
+    pub on_conflict: Option<String>,
 }
 
 fn default_tier() -> Tier {
@@ -285,6 +292,80 @@ pub struct Stats {
     pub expiring_soon: usize,
     pub links_count: usize,
     pub db_size_bytes: u64,
+    /// v0.6.3.1 P2 (G4) — count of rows whose stored `embedding_dim`
+    /// disagrees with the BLOB length (or whose column is missing while
+    /// a BLOB exists). 0 on a fresh database; non-zero indicates legacy
+    /// rows the operator should re-embed. Consumed by the P7 doctor.
+    #[serde(default)]
+    pub dim_violations: u64,
+    /// v0.6.3.1 (P3, G2): cumulative HNSW oldest-eviction count since this
+    /// process started. Non-zero indicates the in-memory vector index has
+    /// hit its `MAX_ENTRIES` cap and silently dropped older embeddings —
+    /// recall quality may have degraded for evicted ids. Process-local
+    /// (not persisted) because the index itself is process-local.
+    #[serde(default)]
+    pub index_evictions_total: u64,
+}
+
+/// v0.6.3.1 (P3): per-request observability for the recall pipeline.
+///
+/// Surfaces *which* recall path actually ran, *which* reranker was active,
+/// the candidate pool sizes coming out of FTS and HNSW (before fusion), and
+/// the blend weight applied to the semantic component. Always present in
+/// `memory_recall` responses; older clients ignore unknown fields per the
+/// JSON-RPC convention.
+///
+/// Closes G2/G8/G11 from the v0.6.3 audit by making every silent-degrade
+/// path observable at request time. The capabilities surface (P1) reports
+/// the same state at startup; this struct is the per-call mirror.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallMeta {
+    /// Which recall path executed.
+    /// - `"hybrid"` — embedder + FTS, blended (G11 happy path).
+    /// - `"keyword_only"` — embedder unavailable or query-embed failed,
+    ///   keyword-only recall served (G11 silent-degrade now visible).
+    pub recall_mode: String,
+    /// Which reranker scored the final ordering.
+    /// - `"neural"` — BERT cross-encoder (autonomous tier, model loaded).
+    /// - `"lexical"` — Jaccard/TF-IDF/bigram fallback (G8 silent-degrade
+    ///   now visible).
+    /// - `"none"` — reranking disabled at this tier.
+    pub reranker_used: String,
+    /// Candidate-pool sizes coming out of each retrieval stage *before*
+    /// fusion. Useful for spotting empty-FTS or empty-HNSW degradations.
+    pub candidate_counts: CandidateCounts,
+    /// Semantic blend weight applied during fusion. `0.0` for
+    /// `keyword_only` mode; otherwise the average semantic weight across
+    /// the returned candidates (varies 0.50→0.15 with content length).
+    pub blend_weight: f64,
+}
+
+/// v0.6.3.1 (P3): retrieval-stage candidate counts feeding `RecallMeta`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateCounts {
+    /// Number of candidates retrieved by FTS5 keyword scoring.
+    pub fts: usize,
+    /// Number of candidates retrieved by HNSW (or linear-scan fallback)
+    /// semantic search. `0` in keyword-only mode.
+    pub hnsw: usize,
+}
+
+/// v0.6.3.1 (P3): internal telemetry returned alongside recall results.
+///
+/// Plumbed from `db::recall_hybrid_with_telemetry` /
+/// `db::recall_with_telemetry` up to `mcp::handle_recall`, which uses it
+/// to populate `RecallMeta`. Not serialized — `RecallMeta` is the public
+/// shape.
+#[derive(Debug, Clone, Default)]
+pub struct RecallTelemetry {
+    /// Candidates returned by the FTS5 stage before fusion.
+    pub fts_candidates: usize,
+    /// Candidates returned by the HNSW (or linear-scan fallback) stage
+    /// before fusion. `0` for keyword-only recall.
+    pub hnsw_candidates: usize,
+    /// Average semantic blend weight applied across the returned set.
+    /// `0.0` for keyword-only recall.
+    pub blend_weight_avg: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -613,13 +694,21 @@ impl ApproverType {
 /// (stored in `metadata.governance`).
 ///
 /// Default policy when a standard has no `metadata.governance`:
-/// `{ write: Any, promote: Any, delete: Owner, approver: Human }`.
+/// `{ write: Any, promote: Any, delete: Owner, approver: Human, inherit: true }`.
 ///
 /// v0.6.2 (S34 defensive): `promote`, `delete`, and `approver` carry
 /// `#[serde(default)]` so partial-policy payloads (a common shape for
 /// operator CLIs / test harnesses that only care about `write`) round-trip
 /// instead of 400-ing out on missing fields. `write` remains required —
 /// it's the core knob a policy is attempting to set.
+///
+/// v0.6.3.1 (P4, audit G1): `inherit` controls whether parent-namespace
+/// policies bubble up. Default `true` matches the architecture page T2
+/// promise of "Hierarchical policy inheritance (default at `org/`,
+/// overridable at `org/team/`)". Setting `inherit: false` on a child
+/// stops the leaf-first walk in `resolve_governance_policy`, providing
+/// an explicit opt-out path for scoped overrides (e.g. an audit
+/// sandbox under a fully-governed parent).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernancePolicy {
     pub write: GovernanceLevel,
@@ -629,6 +718,14 @@ pub struct GovernancePolicy {
     pub delete: GovernanceLevel,
     #[serde(default = "default_approver")]
     pub approver: ApproverType,
+    /// v0.6.3.1 (P4, G1): when `true` (default), missing policy at a
+    /// child namespace falls through to the parent in the chain. When
+    /// `false`, the walk stops at this level — child operations are
+    /// gated by THIS policy and parents are not consulted. Backfilled
+    /// to `true` on existing rows by migration `0012_governance_inherit`
+    /// to preserve the architecturally-promised semantics.
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -643,6 +740,12 @@ fn default_approver() -> ApproverType {
     ApproverType::Human
 }
 
+/// v0.6.3.1 (P4): default for `GovernancePolicy::inherit`. Inheritance
+/// is the documented default — see architecture page T2 and audit G1.
+fn default_inherit() -> bool {
+    true
+}
+
 impl Default for GovernancePolicy {
     fn default() -> Self {
         Self {
@@ -650,6 +753,7 @@ impl Default for GovernancePolicy {
             promote: default_promote_level(),
             delete: default_delete_level(),
             approver: default_approver(),
+            inherit: default_inherit(),
         }
     }
 }
@@ -994,6 +1098,32 @@ mod tests {
         assert_eq!(p.promote, GovernanceLevel::Any);
         assert_eq!(p.delete, GovernanceLevel::Owner);
         assert_eq!(p.approver, ApproverType::Human);
+        // v0.6.3.1 (P4, G1): inheritance is the documented default. Existing
+        // rows are backfilled to true by migration 0012; new rows that omit
+        // the field deserialize as true via #[serde(default)].
+        assert!(p.inherit);
+    }
+
+    #[test]
+    fn governance_inherit_field_defaults_true_on_partial_payload() {
+        // P4 (G1): a partial-policy payload that omits `inherit` must
+        // default to true so legacy callers don't accidentally opt out
+        // of parent inheritance the moment they write a child policy.
+        let json = r#"{"write":"approve"}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.write, GovernanceLevel::Approve);
+        assert!(p.inherit, "missing `inherit` must deserialize as true");
+    }
+
+    #[test]
+    fn governance_inherit_field_explicit_false_round_trip() {
+        // P4 (G1): when an operator explicitly opts a subtree out of
+        // inheritance, the false value must round-trip and serialize.
+        let json = r#"{"write":"any","inherit":false}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert!(!p.inherit);
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["inherit"], false);
     }
 
     #[test]
@@ -1041,6 +1171,7 @@ mod tests {
             promote: GovernanceLevel::Approve,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("maintainer".to_string()),
+            inherit: true,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();

@@ -166,6 +166,7 @@ mod tests {
             promote: promote_level,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Human,
+            inherit: true,
         };
         let conn = db::open(db_path).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

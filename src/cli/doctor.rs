@@ -1,0 +1,1736 @@
+// Copyright 2026 AlphaOne LLC
+// SPDX-License-Identifier: Apache-2.0
+
+//! `ai-memory doctor` (Phase P7 / R7) — operator-visible health dashboard.
+//!
+//! The doctor reads three v0.6.3.1 surfaces — Capabilities v2 (P1), data
+//! integrity (P2), and recall observability (P3) — plus the v0.6.3 stats /
+//! governance / subscription tables, and produces a human-readable health
+//! report with severity tagging. It also has a `--json` mode for CI usage
+//! and a `--remote <url>` mode that becomes the **fleet doctor** at T3+.
+//!
+//! Exit codes:
+//!   - `0` — healthy (no warnings or critical findings).
+//!   - `1` — at least one warning (and `--fail-on-warn` was passed; without
+//!     the flag, warnings still keep exit 0).
+//!   - `2` — at least one critical finding.
+//!
+//! ## Severity rules (initial)
+//!
+//! - **Critical:** dim_violations > 0; pending_actions older than 24h;
+//!   sync skew > 600s; HNSW evictions > 0.
+//! - **Warning:** silent-degrade flag from Capabilities v2
+//!   (recall_mode != "hybrid" on capable tiers); subscription delivery
+//!   success < 95% over the lifetime of the subscription.
+//! - **Info:** anything else worth reporting.
+//!
+//! ## What is stubbed pending P1/P2/P3
+//!
+//! - **dim_violations** (P2): pre-P2 schemas have no `embedding_dim` column.
+//!   `db::doctor_dim_violations` returns `Ok(None)` and the doctor renders
+//!   "not yet observed (pre-P2 schema)".
+//! - **HNSW evictions** (P3): the eviction counter has no SQL surface today.
+//!   The doctor reports the value as 0 from a NOT_AVAILABLE-tagged section
+//!   until P3 lands the in-memory counter.
+//! - **recall_mode / reranker_used distribution** (P3): no rolling window
+//!   has been wired yet. The doctor consults the Capabilities response
+//!   for the *active* mode at this instant and reports it as the only
+//!   data point.
+//! - **Sync mesh** (T3+): we report `last_pulled_at` skew across
+//!   `sync_state` rows when present, otherwise NOT_AVAILABLE.
+//!
+//! ## Anti-goals (per spec)
+//!
+//! - Do NOT add new monitoring infrastructure (no Prometheus, OTel exporters).
+//! - Do NOT make doctor write to the DB. Read-only.
+//! - Do NOT make doctor block the database. Indexed `COUNT(*)` queries only.
+
+use crate::cli::CliOutput;
+use crate::db;
+use anyhow::{Context, Result};
+use serde::Serialize;
+use serde_json::Value;
+use std::path::Path;
+use std::time::Duration;
+
+/// Severity bucket attached to every doctor finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Severity {
+    Info,
+    Warning,
+    Critical,
+    /// The section couldn't be queried in this mode (e.g. raw SQL section
+    /// in remote mode, or P2-dependent section on pre-P2 schema).
+    NotAvailable,
+}
+
+impl Severity {
+    fn label(self) -> &'static str {
+        match self {
+            Severity::Info => "INFO",
+            Severity::Warning => "WARN",
+            Severity::Critical => "CRIT",
+            Severity::NotAvailable => "N/A ",
+        }
+    }
+}
+
+/// One section of the report. `facts` is a list of human-readable
+/// `(key, value)` lines so the JSON output stays structured and the text
+/// output stays scannable.
+#[derive(Debug, Serialize)]
+pub struct ReportSection {
+    pub name: String,
+    pub severity: Severity,
+    pub facts: Vec<(String, String)>,
+    /// Optional one-line explanation when severity != Info.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// The full doctor report.
+#[derive(Debug, Serialize)]
+pub struct Report {
+    pub mode: String,
+    pub source: String,
+    pub generated_at: String,
+    pub sections: Vec<ReportSection>,
+    pub overall: Severity,
+}
+
+impl Report {
+    /// Compute the overall severity as the max across sections (CRIT > WARN > INFO > N/A).
+    fn rank(s: Severity) -> u8 {
+        match s {
+            Severity::NotAvailable => 0,
+            Severity::Info => 1,
+            Severity::Warning => 2,
+            Severity::Critical => 3,
+        }
+    }
+
+    fn compute_overall(&mut self) {
+        self.overall = self
+            .sections
+            .iter()
+            .map(|s| s.severity)
+            .max_by_key(|s| Self::rank(*s))
+            .unwrap_or(Severity::Info);
+    }
+}
+
+/// Args from the CLI clap struct. Kept separate so `cli::doctor::run` can
+/// be called directly from tests without going through clap.
+pub struct DoctorArgs {
+    pub remote: Option<String>,
+    pub json: bool,
+    pub fail_on_warn: bool,
+}
+
+/// Entry point. Returns the process exit code as a `i32` (0/1/2). The
+/// caller (daemon_runtime) must `std::process::exit(code)` after the WAL
+/// checkpoint has been skipped (doctor never writes).
+///
+/// # Errors
+///
+/// Returns `Err` only when the report itself cannot be written to the
+/// output stream — DB / HTTP errors are folded into NOT_AVAILABLE
+/// sections so a partial report still renders.
+pub fn run(db_path: &Path, args: &DoctorArgs, out: &mut CliOutput<'_>) -> Result<i32> {
+    let mut report = if let Some(url) = &args.remote {
+        run_remote(url, db_path)
+    } else {
+        run_local(db_path)
+    };
+    report.compute_overall();
+
+    if args.json {
+        writeln!(out.stdout, "{}", serde_json::to_string_pretty(&report)?)?;
+    } else {
+        render_text(&report, out)?;
+    }
+
+    let code = match report.overall {
+        Severity::Critical => 2,
+        Severity::Warning if args.fail_on_warn => 1,
+        _ => 0,
+    };
+    Ok(code)
+}
+
+// ---------------------------------------------------------------------------
+// Local (--db) mode
+// ---------------------------------------------------------------------------
+
+fn run_local(db_path: &Path) -> Report {
+    let mut sections = Vec::with_capacity(7);
+
+    // Open the connection once; failures bubble into a single Critical
+    // section and the rest of the report is N/A.
+    let conn = match db::open(db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            sections.push(ReportSection {
+                name: "Storage".into(),
+                severity: Severity::Critical,
+                facts: vec![("error".into(), e.to_string())],
+                note: Some(format!(
+                    "could not open database at {} — every other section is N/A",
+                    db_path.display()
+                )),
+            });
+            return Report {
+                mode: "local".into(),
+                source: db_path.display().to_string(),
+                generated_at: chrono::Utc::now().to_rfc3339(),
+                sections,
+                overall: Severity::Critical,
+            };
+        }
+    };
+
+    sections.push(section_storage(&conn, db_path));
+    sections.push(section_index(&conn));
+    sections.push(section_recall_local());
+    sections.push(section_governance(&conn));
+    sections.push(section_sync(&conn));
+    sections.push(section_webhook(&conn));
+    sections.push(section_capabilities_local());
+
+    Report {
+        mode: "local".into(),
+        source: db_path.display().to_string(),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        sections,
+        overall: Severity::Info,
+    }
+}
+
+fn section_storage(conn: &rusqlite::Connection, db_path: &Path) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    match db::stats(conn, db_path) {
+        Ok(stats) => {
+            facts.push(("total_memories".into(), stats.total.to_string()));
+            facts.push(("expiring_within_1h".into(), stats.expiring_soon.to_string()));
+            facts.push(("links".into(), stats.links_count.to_string()));
+            facts.push(("db_size_bytes".into(), stats.db_size_bytes.to_string()));
+            for tc in &stats.by_tier {
+                facts.push((format!("tier::{}", tc.tier), tc.count.to_string()));
+            }
+            for nc in stats.by_namespace.iter().take(10) {
+                facts.push((format!("ns::{}", nc.namespace), nc.count.to_string()));
+            }
+        }
+        Err(e) => {
+            severity = Severity::Warning;
+            facts.push(("stats_error".into(), e.to_string()));
+        }
+    }
+
+    // dim_violations (P2 surface). Pre-P2: Ok(None) -> render N/A line, no severity bump.
+    match db::doctor_dim_violations(conn) {
+        Ok(Some(0)) => {
+            facts.push(("dim_violations".into(), "0".into()));
+        }
+        Ok(Some(n)) => {
+            facts.push(("dim_violations".into(), n.to_string()));
+            severity = Severity::Critical;
+            note = Some(format!(
+                "{n} memories have an embedding dim that disagrees with their namespace's modal dim"
+            ));
+        }
+        Ok(None) => {
+            facts.push((
+                "dim_violations".into(),
+                "not_observed (pre-P2 schema)".into(),
+            ));
+        }
+        Err(e) => {
+            facts.push(("dim_violations_error".into(), e.to_string()));
+        }
+    }
+
+    ReportSection {
+        name: "Storage".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_index(conn: &rusqlite::Connection) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    // HNSW size proxy: count of memories with an embedding (the in-memory
+    // index is rebuilt from this on startup).
+    let hnsw_size: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    facts.push(("hnsw_size_estimate".into(), hnsw_size.to_string()));
+
+    // Cold-start cost: rough estimate of the time to rebuild HNSW on
+    // daemon restart, derived from the canonical-workload measured rate
+    // (~50k inserts/sec). Surfaced as a sanity-check signal, not a budget.
+    let cold_start_secs = (hnsw_size as f64) / 50_000.0;
+    facts.push((
+        "cold_start_rebuild_secs_estimate".into(),
+        format!("{cold_start_secs:.2}"),
+    ));
+
+    // Eviction counter (P3). Until P3 wires the in-memory counter into a
+    // queryable surface, render NOT_AVAILABLE without a severity bump.
+    facts.push((
+        "index_evictions_total".into(),
+        "not_observed (pre-P3 surface)".into(),
+    ));
+
+    // P3-aware path: when MAX_ENTRIES (100_000) is approached, advise the
+    // operator. This is a forward-leaning hint that becomes accurate once
+    // P3 lands the counter.
+    if hnsw_size >= 95_000 {
+        severity = Severity::Warning;
+        note = Some(format!(
+            "HNSW is at {hnsw_size} embeddings, within 5% of the 100k MAX_ENTRIES cap; \
+             P3 will start emitting eviction events"
+        ));
+    }
+
+    ReportSection {
+        name: "Index".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_recall_local() -> ReportSection {
+    // Without P3's rolling window, the local doctor can only report the
+    // tier configuration that *would* drive recall today. The remote
+    // doctor (--remote) gets the live `recall_mode_active` from the v2
+    // capabilities endpoint when P1 lands.
+    ReportSection {
+        name: "Recall".into(),
+        severity: Severity::Info,
+        facts: vec![
+            (
+                "recall_mode_distribution".into(),
+                "not_observed (pre-P3 rolling counter)".into(),
+            ),
+            (
+                "reranker_used_distribution".into(),
+                "not_observed (pre-P3 rolling counter)".into(),
+            ),
+            (
+                "hint".into(),
+                "use --remote to read the live capabilities endpoint".into(),
+            ),
+        ],
+        note: None,
+    }
+}
+
+fn section_governance(conn: &rusqlite::Connection) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    let (with, without) = db::doctor_governance_coverage(conn).unwrap_or((0, 0));
+    facts.push(("namespaces_with_policy".into(), with.to_string()));
+    facts.push(("namespaces_without_policy".into(), without.to_string()));
+
+    let dist = db::doctor_governance_depth_distribution(conn).unwrap_or_default();
+    let depth_summary: String = dist
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n > 0)
+        .map(|(d, n)| format!("d{d}={n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    facts.push((
+        "inheritance_depth".into(),
+        if depth_summary.is_empty() {
+            "empty".into()
+        } else {
+            depth_summary
+        },
+    ));
+
+    match db::doctor_oldest_pending_age_secs(conn) {
+        Ok(Some(age)) => {
+            facts.push(("oldest_pending_age_secs".into(), age.to_string()));
+            if age > 86_400 {
+                severity = Severity::Critical;
+                note = Some(format!(
+                    "oldest pending action is {age}s old (>{} threshold = 24h)",
+                    86_400
+                ));
+            }
+        }
+        Ok(None) => {
+            facts.push(("oldest_pending_age_secs".into(), "queue_empty".into()));
+        }
+        Err(e) => {
+            facts.push(("pending_query_error".into(), e.to_string()));
+        }
+    }
+
+    let pending_count = db::count_pending_actions_by_status(conn, "pending").unwrap_or(0);
+    facts.push(("pending_actions_total".into(), pending_count.to_string()));
+
+    ReportSection {
+        name: "Governance".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_sync(conn: &rusqlite::Connection) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    let peer_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM sync_state", [], |r| r.get(0))
+        .unwrap_or(0);
+    facts.push(("peer_count".into(), peer_count.to_string()));
+
+    if peer_count == 0 {
+        facts.push((
+            "max_skew_secs".into(),
+            "not_observed (no peers registered)".into(),
+        ));
+        return ReportSection {
+            name: "Sync".into(),
+            severity: Severity::NotAvailable,
+            facts,
+            note: Some("no sync_state rows — single-node deployment or T3+ not yet enabled".into()),
+        };
+    }
+
+    match db::doctor_max_sync_skew_secs(conn) {
+        Ok(Some(skew)) => {
+            facts.push(("max_skew_secs".into(), skew.to_string()));
+            if skew > 600 {
+                severity = Severity::Critical;
+                note = Some(format!(
+                    "max sync skew is {skew}s (>600s threshold) — peer mesh is drifting"
+                ));
+            }
+        }
+        Ok(None) => {
+            facts.push(("max_skew_secs".into(), "not_observed".into()));
+        }
+        Err(e) => {
+            facts.push(("sync_query_error".into(), e.to_string()));
+        }
+    }
+
+    ReportSection {
+        name: "Sync".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_webhook(conn: &rusqlite::Connection) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    let sub_count = db::count_subscriptions(conn).unwrap_or(0);
+    facts.push(("subscription_count".into(), sub_count.to_string()));
+
+    let (dispatched, failed) = db::doctor_webhook_delivery_totals(conn).unwrap_or((0, 0));
+    facts.push(("dispatched_total".into(), dispatched.to_string()));
+    facts.push(("failed_total".into(), failed.to_string()));
+
+    if dispatched > 0 {
+        let success_rate = ((dispatched.saturating_sub(failed)) as f64 / dispatched as f64) * 100.0;
+        facts.push(("success_rate_pct".into(), format!("{success_rate:.2}")));
+        // 95% lifetime success threshold. P5 will refine this to a
+        // rolling-1h window when the dispatch table grows a timestamp
+        // log; for now we use the lifetime totals already present in
+        // `subscriptions.dispatch_count` / `failure_count`.
+        if success_rate < 95.0 {
+            severity = Severity::Warning;
+            note = Some(format!(
+                "lifetime delivery success {success_rate:.2}% < 95% threshold"
+            ));
+        }
+    } else {
+        facts.push(("success_rate_pct".into(), "no_deliveries_yet".into()));
+    }
+
+    ReportSection {
+        name: "Webhook".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_capabilities_local() -> ReportSection {
+    // The local doctor doesn't construct a TierConfig (would require
+    // loading user config). Surface the capability state via the remote
+    // mode against `--remote http://localhost:9077` instead. This local
+    // section just documents the gap.
+    ReportSection {
+        name: "Capabilities".into(),
+        severity: Severity::NotAvailable,
+        facts: vec![(
+            "capabilities".into(),
+            "use --remote <url> to query the live capabilities endpoint".into(),
+        )],
+        note: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Remote (--remote) mode
+// ---------------------------------------------------------------------------
+
+fn run_remote(url: &str, db_path: &Path) -> Report {
+    let mut sections = Vec::with_capacity(2);
+
+    let base = url.trim_end_matches('/');
+    let cap_url = format!("{base}/api/v1/capabilities");
+    let stats_url = format!("{base}/api/v1/stats");
+
+    sections.push(section_capabilities_remote(&cap_url));
+    sections.push(section_recall_remote(&cap_url));
+    sections.push(section_storage_remote(&stats_url));
+    sections.push(ReportSection {
+        name: "Index".into(),
+        severity: Severity::NotAvailable,
+        facts: vec![(
+            "hint".into(),
+            "raw SQL section — only available in --db mode".into(),
+        )],
+        note: None,
+    });
+    sections.push(ReportSection {
+        name: "Governance".into(),
+        severity: Severity::NotAvailable,
+        facts: vec![(
+            "hint".into(),
+            "raw SQL section — only available in --db mode".into(),
+        )],
+        note: None,
+    });
+    sections.push(ReportSection {
+        name: "Sync".into(),
+        severity: Severity::NotAvailable,
+        facts: vec![(
+            "hint".into(),
+            "raw SQL section — only available in --db mode".into(),
+        )],
+        note: None,
+    });
+    sections.push(ReportSection {
+        name: "Webhook".into(),
+        severity: Severity::NotAvailable,
+        facts: vec![(
+            "hint".into(),
+            "raw SQL section — only available in --db mode".into(),
+        )],
+        note: None,
+    });
+
+    Report {
+        mode: "remote".into(),
+        source: format!("{base} (local db reference: {})", db_path.display()),
+        generated_at: chrono::Utc::now().to_rfc3339(),
+        sections,
+        overall: Severity::Info,
+    }
+}
+
+/// Fetch a JSON document from `url` with a short timeout. Returns `Err`
+/// on transport failure or non-2xx status.
+fn http_get_json(url: &str) -> Result<Value> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .context("constructing HTTP client")?;
+    let resp = client.get(url).send().context("HTTP GET")?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("HTTP {status} from {url}");
+    }
+    resp.json::<Value>().context("decoding JSON response")
+}
+
+fn section_capabilities_remote(url: &str) -> ReportSection {
+    let mut facts = Vec::new();
+    let mut severity = Severity::Info;
+    let mut note: Option<String> = None;
+
+    match http_get_json(url) {
+        Ok(v) => {
+            // schema_version: "1" (legacy v0.6.3) or "2" (post-P1).
+            let schema = v
+                .get("schema_version")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            facts.push(("schema_version".into(), schema.to_string()));
+
+            // P1 v2 fields — best-effort lookup. The legacy v1 shape
+            // doesn't carry these; we render the missing ones as
+            // "not_in_response" rather than failing.
+            let recall_mode = v
+                .get("features")
+                .and_then(|f| f.get("recall_mode_active"))
+                .and_then(Value::as_str)
+                .unwrap_or("not_in_response");
+            facts.push(("recall_mode_active".into(), recall_mode.to_string()));
+
+            let reranker = v
+                .get("features")
+                .and_then(|f| f.get("reranker_active"))
+                .and_then(Value::as_str)
+                .unwrap_or("not_in_response");
+            facts.push(("reranker_active".into(), reranker.to_string()));
+
+            // Severity hints. recall_mode in {"degraded", "disabled",
+            // "keyword_only"} bumps to Warning when the tier is supposed
+            // to support hybrid (semantic / smart / autonomous).
+            if matches!(recall_mode, "degraded" | "disabled" | "keyword_only") {
+                let tier = v.get("feature_tier").and_then(Value::as_str).unwrap_or("");
+                if matches!(tier, "semantic" | "smart" | "autonomous") {
+                    severity = Severity::Warning;
+                    note = Some(format!(
+                        "tier={tier} but recall_mode_active={recall_mode} — silent degradation"
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            severity = Severity::Critical;
+            facts.push(("error".into(), e.to_string()));
+            note = Some(format!("could not reach {url}"));
+        }
+    }
+
+    ReportSection {
+        name: "Capabilities".into(),
+        severity,
+        facts,
+        note,
+    }
+}
+
+fn section_recall_remote(cap_url: &str) -> ReportSection {
+    let mut facts = Vec::new();
+    let severity = Severity::Info;
+
+    if let Ok(v) = http_get_json(cap_url) {
+        let recall_mode = v
+            .get("features")
+            .and_then(|f| f.get("recall_mode_active"))
+            .and_then(Value::as_str)
+            .unwrap_or("not_in_response");
+        facts.push(("active_recall_mode".into(), recall_mode.to_string()));
+        let reranker = v
+            .get("features")
+            .and_then(|f| f.get("reranker_active"))
+            .and_then(Value::as_str)
+            .unwrap_or("not_in_response");
+        facts.push(("active_reranker".into(), reranker.to_string()));
+        facts.push((
+            "recall_mode_distribution".into(),
+            "not_observed (pre-P3 rolling counter)".into(),
+        ));
+    } else {
+        facts.push(("error".into(), "could not fetch capabilities".into()));
+    }
+
+    ReportSection {
+        name: "Recall".into(),
+        severity,
+        facts,
+        note: None,
+    }
+}
+
+fn section_storage_remote(stats_url: &str) -> ReportSection {
+    let mut facts = Vec::new();
+    let severity = Severity::Info;
+
+    match http_get_json(stats_url) {
+        Ok(v) => {
+            if let Some(total) = v.get("total").and_then(Value::as_u64) {
+                facts.push(("total_memories".into(), total.to_string()));
+            }
+            if let Some(exp) = v.get("expiring_soon").and_then(Value::as_u64) {
+                facts.push(("expiring_within_1h".into(), exp.to_string()));
+            }
+            if let Some(links) = v.get("links_count").and_then(Value::as_u64) {
+                facts.push(("links".into(), links.to_string()));
+            }
+            facts.push((
+                "dim_violations".into(),
+                "not_in_remote_response (P2 surface lands at /api/v1/stats)".into(),
+            ));
+        }
+        Err(e) => {
+            facts.push(("error".into(), e.to_string()));
+        }
+    }
+
+    ReportSection {
+        name: "Storage".into(),
+        severity,
+        facts,
+        note: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Text rendering
+// ---------------------------------------------------------------------------
+
+fn render_text(report: &Report, out: &mut CliOutput<'_>) -> Result<()> {
+    writeln!(out.stdout, "ai-memory doctor — {} mode", report.mode)?;
+    writeln!(out.stdout, "  source:       {}", report.source)?;
+    writeln!(out.stdout, "  generated_at: {}", report.generated_at)?;
+    writeln!(out.stdout, "  overall:      {}", report.overall.label())?;
+    writeln!(out.stdout)?;
+    for section in &report.sections {
+        writeln!(
+            out.stdout,
+            "[{}] {}",
+            section.severity.label(),
+            section.name
+        )?;
+        for (k, v) in &section.facts {
+            writeln!(out.stdout, "    {k:<32} {v}")?;
+        }
+        if let Some(note) = &section.note {
+            writeln!(out.stdout, "    note: {note}")?;
+        }
+        writeln!(out.stdout)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Tests (unit-level — full integration tests live in tests/doctor_cli.rs)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::too_many_lines, clippy::similar_names)]
+mod tests {
+    use super::*;
+    use crate::cli::CliOutput;
+    use crate::cli::test_utils::{TestEnv, seed_memory};
+    use rusqlite::params;
+
+    // -------------------------------------------------------------------
+    // Severity / Report helpers (pure, no DB)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn severity_rank_orders_critical_highest() {
+        assert!(Report::rank(Severity::Critical) > Report::rank(Severity::Warning));
+        assert!(Report::rank(Severity::Warning) > Report::rank(Severity::Info));
+        assert!(Report::rank(Severity::Info) > Report::rank(Severity::NotAvailable));
+    }
+
+    #[test]
+    fn severity_label_renders_for_every_variant() {
+        assert_eq!(Severity::Info.label(), "INFO");
+        assert_eq!(Severity::Warning.label(), "WARN");
+        assert_eq!(Severity::Critical.label(), "CRIT");
+        assert_eq!(Severity::NotAvailable.label(), "N/A ");
+    }
+
+    #[test]
+    fn severity_serializes_lowercase_and_round_trips() {
+        // The Serialize derive uses `rename_all = "lowercase"`. We don't
+        // derive Deserialize, so we round-trip via the JSON Value form.
+        let s = serde_json::to_value(Severity::Critical).unwrap();
+        assert_eq!(s, serde_json::Value::String("critical".into()));
+        let s = serde_json::to_value(Severity::NotAvailable).unwrap();
+        assert_eq!(s, serde_json::Value::String("notavailable".into()));
+    }
+
+    fn mk_section(name: &str, severity: Severity) -> ReportSection {
+        ReportSection {
+            name: name.into(),
+            severity,
+            facts: vec![("k".into(), "v".into())],
+            note: None,
+        }
+    }
+
+    fn mk_report(sections: Vec<ReportSection>) -> Report {
+        Report {
+            mode: "local".into(),
+            source: ":memory:".into(),
+            generated_at: "now".into(),
+            sections,
+            overall: Severity::Info,
+        }
+    }
+
+    #[test]
+    fn compute_overall_picks_critical_when_present() {
+        let mut r = mk_report(vec![
+            mk_section("A", Severity::Info),
+            mk_section("B", Severity::Critical),
+            mk_section("C", Severity::Warning),
+        ]);
+        r.compute_overall();
+        assert_eq!(r.overall, Severity::Critical);
+    }
+
+    #[test]
+    fn compute_overall_picks_warning_when_no_critical() {
+        let mut r = mk_report(vec![
+            mk_section("A", Severity::Info),
+            mk_section("B", Severity::Warning),
+        ]);
+        r.compute_overall();
+        assert_eq!(r.overall, Severity::Warning);
+    }
+
+    #[test]
+    fn compute_overall_picks_info_when_no_warnings_or_critical() {
+        let mut r = mk_report(vec![
+            mk_section("A", Severity::NotAvailable),
+            mk_section("B", Severity::Info),
+        ]);
+        r.compute_overall();
+        assert_eq!(r.overall, Severity::Info);
+    }
+
+    #[test]
+    fn compute_overall_handles_empty_sections() {
+        let mut r = mk_report(vec![]);
+        r.compute_overall();
+        // unwrap_or fallback path — empty iterator collapses to Info.
+        assert_eq!(r.overall, Severity::Info);
+    }
+
+    #[test]
+    fn compute_overall_only_n_a_yields_n_a() {
+        let mut r = mk_report(vec![
+            mk_section("A", Severity::NotAvailable),
+            mk_section("B", Severity::NotAvailable),
+        ]);
+        r.compute_overall();
+        assert_eq!(r.overall, Severity::NotAvailable);
+    }
+
+    // -------------------------------------------------------------------
+    // ReportSection / Report serde shape
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn report_section_serializes_with_expected_keys() {
+        let section = ReportSection {
+            name: "Storage".into(),
+            severity: Severity::Warning,
+            facts: vec![("total".into(), "5".into())],
+            note: Some("hello".into()),
+        };
+        let v = serde_json::to_value(&section).unwrap();
+        assert_eq!(v["name"], "Storage");
+        assert_eq!(v["severity"], "warning");
+        // Facts is a list of 2-tuples encoded as JSON arrays.
+        assert!(v["facts"].is_array());
+        assert_eq!(v["facts"][0][0], "total");
+        assert_eq!(v["facts"][0][1], "5");
+        assert_eq!(v["note"], "hello");
+    }
+
+    #[test]
+    fn report_section_skips_note_when_none() {
+        let section = ReportSection {
+            name: "Recall".into(),
+            severity: Severity::Info,
+            facts: vec![],
+            note: None,
+        };
+        let v = serde_json::to_value(&section).unwrap();
+        assert!(
+            v.get("note").is_none(),
+            "note=None must be skipped per #[serde(skip_serializing_if)]"
+        );
+    }
+
+    #[test]
+    fn report_top_level_serialization_has_all_fields() {
+        let r = mk_report(vec![mk_section("S", Severity::Info)]);
+        let v = serde_json::to_value(&r).unwrap();
+        for k in ["mode", "source", "generated_at", "sections", "overall"] {
+            assert!(v.get(k).is_some(), "expected key {k} in JSON");
+        }
+        assert_eq!(v["sections"].as_array().unwrap().len(), 1);
+    }
+
+    // -------------------------------------------------------------------
+    // Local-DB mode — basic happy path
+    // -------------------------------------------------------------------
+
+    fn run_local_collect(db_path: &Path) -> Report {
+        let mut report = run_local(db_path);
+        report.compute_overall();
+        report
+    }
+
+    fn find<'a>(report: &'a Report, name: &str) -> &'a ReportSection {
+        report
+            .sections
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| panic!("section {name} not found"))
+    }
+
+    fn fact<'a>(section: &'a ReportSection, key: &str) -> &'a str {
+        section
+            .facts
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.as_str())
+            .unwrap_or_else(|| panic!("fact {key} not found in section {}", section.name))
+    }
+
+    #[test]
+    fn local_run_on_empty_db_produces_seven_sections() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        assert_eq!(report.mode, "local");
+        assert_eq!(report.sections.len(), 7);
+        let names: Vec<&str> = report.sections.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Storage",
+                "Index",
+                "Recall",
+                "Governance",
+                "Sync",
+                "Webhook",
+                "Capabilities"
+            ]
+        );
+    }
+
+    #[test]
+    fn local_run_empty_db_storage_section_is_info() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let storage = find(&report, "Storage");
+        assert_eq!(storage.severity, Severity::Info);
+        assert_eq!(fact(storage, "total_memories"), "0");
+        // Pre-P2 schema (current release) has no `embedding_dim` column —
+        // `db::doctor_dim_violations` returns Ok(None), rendered as
+        // "not_observed (pre-P2 schema)".
+        let dim = fact(storage, "dim_violations");
+        assert!(
+            dim.contains("not_observed") || dim == "0",
+            "unexpected dim_violations value: {dim}"
+        );
+    }
+
+    #[test]
+    fn local_run_with_seeded_memory_reports_total() {
+        let env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-a", "title-1", "content one");
+        seed_memory(&env.db_path, "ns-a", "title-2", "content two");
+        seed_memory(&env.db_path, "ns-b", "title-3", "content three");
+        let report = run_local_collect(&env.db_path);
+        let storage = find(&report, "Storage");
+        assert_eq!(fact(storage, "total_memories"), "3");
+        // Tier breakdown — seed_memory inserts at tier=mid.
+        let tier_mid = storage
+            .facts
+            .iter()
+            .find(|(k, _)| k == "tier::mid")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(tier_mid, Some("3"));
+        // Namespace breakdown caps at 10 entries; 2 namespaces fit.
+        let ns_a = storage
+            .facts
+            .iter()
+            .find(|(k, _)| k == "ns::ns-a")
+            .map(|(_, v)| v.as_str());
+        let ns_b = storage
+            .facts
+            .iter()
+            .find(|(k, _)| k == "ns::ns-b")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(ns_a, Some("2"));
+        assert_eq!(ns_b, Some("1"));
+    }
+
+    #[test]
+    fn local_run_index_section_reports_hnsw_estimate() {
+        let env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns", "t1", "c1");
+        let report = run_local_collect(&env.db_path);
+        let index = find(&report, "Index");
+        // seed_memory does not write an embedding so hnsw_size_estimate=0.
+        assert_eq!(fact(index, "hnsw_size_estimate"), "0");
+        // Cold-start estimate is rendered with two decimals.
+        let cs = fact(index, "cold_start_rebuild_secs_estimate");
+        assert!(
+            cs.contains('.'),
+            "cold_start_secs_estimate should be float-like, got {cs}"
+        );
+        assert_eq!(index.severity, Severity::Info);
+    }
+
+    #[test]
+    fn local_run_recall_section_documents_pre_p3_state() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let recall = find(&report, "Recall");
+        assert_eq!(recall.severity, Severity::Info);
+        assert!(fact(recall, "recall_mode_distribution").contains("pre-P3"));
+        assert!(fact(recall, "reranker_used_distribution").contains("pre-P3"));
+        // Hint nudges the operator toward --remote for the live feed.
+        assert!(fact(recall, "hint").contains("--remote"));
+    }
+
+    #[test]
+    fn local_run_sync_section_n_a_when_no_peers() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let sync = find(&report, "Sync");
+        // Empty sync_state => NotAvailable + note.
+        assert_eq!(sync.severity, Severity::NotAvailable);
+        assert_eq!(fact(sync, "peer_count"), "0");
+        assert!(sync.note.is_some());
+    }
+
+    #[test]
+    fn local_run_capabilities_local_section_n_a() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::NotAvailable);
+        assert!(fact(cap, "capabilities").contains("--remote"));
+    }
+
+    #[test]
+    fn local_run_governance_section_empty_is_info() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let gov = find(&report, "Governance");
+        assert_eq!(gov.severity, Severity::Info);
+        assert_eq!(fact(gov, "namespaces_with_policy"), "0");
+        assert_eq!(fact(gov, "namespaces_without_policy"), "0");
+        assert_eq!(fact(gov, "inheritance_depth"), "empty");
+        assert_eq!(fact(gov, "oldest_pending_age_secs"), "queue_empty");
+        assert_eq!(fact(gov, "pending_actions_total"), "0");
+    }
+
+    #[test]
+    fn local_run_webhook_section_empty_no_deliveries() {
+        let env = TestEnv::fresh();
+        let report = run_local_collect(&env.db_path);
+        let wh = find(&report, "Webhook");
+        assert_eq!(wh.severity, Severity::Info);
+        assert_eq!(fact(wh, "subscription_count"), "0");
+        assert_eq!(fact(wh, "dispatched_total"), "0");
+        assert_eq!(fact(wh, "failed_total"), "0");
+        assert_eq!(fact(wh, "success_rate_pct"), "no_deliveries_yet");
+    }
+
+    // -------------------------------------------------------------------
+    // Severity rule cases — DB-backed
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn governance_section_critical_when_pending_older_than_24h() {
+        let env = TestEnv::fresh();
+        // Open the DB once to materialize schema, then write a pending row.
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let twenty_five_hours_ago =
+                (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO pending_actions \
+                 (id, action_type, namespace, payload, requested_by, requested_at, status) \
+                 VALUES ('p1', 'store', 'ns', '{}', 'agent', ?1, 'pending')",
+                params![twenty_five_hours_ago],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let gov = find(&report, "Governance");
+        assert_eq!(gov.severity, Severity::Critical);
+        assert!(gov.note.as_ref().unwrap().contains("24h"));
+        // pending_actions_total reflects the row.
+        assert_eq!(fact(gov, "pending_actions_total"), "1");
+        // overall picks the Critical from Governance.
+        assert_eq!(report.overall, Severity::Critical);
+    }
+
+    #[test]
+    fn governance_section_info_when_pending_younger_than_24h() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let one_hour_ago = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO pending_actions \
+                 (id, action_type, namespace, payload, requested_by, requested_at, status) \
+                 VALUES ('p2', 'store', 'ns', '{}', 'agent', ?1, 'pending')",
+                params![one_hour_ago],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let gov = find(&report, "Governance");
+        // 1h pending — under the 24h threshold; Info, no critical bump.
+        assert_eq!(gov.severity, Severity::Info);
+        assert_eq!(fact(gov, "pending_actions_total"), "1");
+        // The age fact is set to a numeric string, not "queue_empty".
+        let age_str = fact(gov, "oldest_pending_age_secs");
+        assert!(
+            age_str.parse::<i64>().is_ok(),
+            "expected numeric age, got {age_str}"
+        );
+    }
+
+    #[test]
+    fn sync_section_critical_when_skew_exceeds_600s() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            // last_seen_at = now, last_pulled_at = 1 hour ago → 3600s skew.
+            let now = chrono::Utc::now();
+            let now_s = now.to_rfc3339();
+            let earlier = (now - chrono::Duration::seconds(3600)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO sync_state (agent_id, peer_id, last_seen_at, last_pulled_at) \
+                 VALUES ('me', 'peer-1', ?1, ?2)",
+                params![now_s, earlier],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let sync = find(&report, "Sync");
+        assert_eq!(sync.severity, Severity::Critical);
+        assert!(sync.note.as_ref().unwrap().contains("600s"));
+        assert_eq!(fact(sync, "peer_count"), "1");
+        assert_eq!(report.overall, Severity::Critical);
+    }
+
+    #[test]
+    fn sync_section_info_when_skew_under_threshold() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let now = chrono::Utc::now();
+            let now_s = now.to_rfc3339();
+            let close = (now - chrono::Duration::seconds(60)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO sync_state (agent_id, peer_id, last_seen_at, last_pulled_at) \
+                 VALUES ('me', 'peer-1', ?1, ?2)",
+                params![now_s, close],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let sync = find(&report, "Sync");
+        assert_eq!(sync.severity, Severity::Info);
+        // peer_count=1, skew column rendered as a numeric string.
+        assert_eq!(fact(sync, "peer_count"), "1");
+        let skew = fact(sync, "max_skew_secs");
+        assert!(
+            skew.parse::<i64>().is_ok(),
+            "expected numeric skew, got {skew}"
+        );
+    }
+
+    #[test]
+    fn webhook_section_warning_when_success_rate_below_95() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            // 100 dispatches, 10 failures = 90% success → < 95% threshold.
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO subscriptions \
+                 (id, url, events, created_at, dispatch_count, failure_count) \
+                 VALUES ('s1', 'http://example/x', '*', ?1, 100, 10)",
+                params![now],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let wh = find(&report, "Webhook");
+        assert_eq!(wh.severity, Severity::Warning);
+        assert!(wh.note.as_ref().unwrap().contains("95%"));
+        assert_eq!(fact(wh, "subscription_count"), "1");
+        assert_eq!(fact(wh, "dispatched_total"), "100");
+        assert_eq!(fact(wh, "failed_total"), "10");
+        assert_eq!(fact(wh, "success_rate_pct"), "90.00");
+    }
+
+    #[test]
+    fn webhook_section_info_when_success_rate_at_or_above_95() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            // 100 dispatches, 3 failures = 97% success.
+            conn.execute(
+                "INSERT INTO subscriptions \
+                 (id, url, events, created_at, dispatch_count, failure_count) \
+                 VALUES ('s1', 'http://example/x', '*', ?1, 100, 3)",
+                params![now],
+            )
+            .unwrap();
+        }
+        let report = run_local_collect(&env.db_path);
+        let wh = find(&report, "Webhook");
+        assert_eq!(wh.severity, Severity::Info);
+        assert!(wh.note.is_none());
+        assert_eq!(fact(wh, "success_rate_pct"), "97.00");
+    }
+
+    #[test]
+    fn governance_section_with_namespace_chain_reports_depths() {
+        let env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            for (ns, parent) in [
+                ("root", None::<&str>),
+                ("a", Some("root")),
+                ("a/b", Some("a")),
+            ] {
+                conn.execute(
+                    "INSERT INTO namespace_meta (namespace, parent_namespace, updated_at) \
+                     VALUES (?1, ?2, ?3)",
+                    params![ns, parent, now],
+                )
+                .unwrap();
+            }
+        }
+        let report = run_local_collect(&env.db_path);
+        let gov = find(&report, "Governance");
+        assert_eq!(gov.severity, Severity::Info);
+        let depth = fact(gov, "inheritance_depth");
+        assert!(depth.contains("d0=") && depth.contains("d1=") && depth.contains("d2="));
+        assert_eq!(fact(gov, "namespaces_without_policy"), "3");
+    }
+
+    // -------------------------------------------------------------------
+    // run() entry point — JSON / text / exit code branches
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn run_emits_json_when_json_flag_set() {
+        let mut env = TestEnv::fresh();
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: true,
+                fail_on_warn: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        // Healthy fresh DB → exit 0.
+        assert_eq!(exit, 0);
+        let s = env.stdout_str();
+        let v: serde_json::Value = serde_json::from_str(s).expect("JSON output must parse");
+        assert_eq!(v["mode"], "local");
+        assert!(v["sections"].is_array());
+        assert!(v["overall"].is_string());
+    }
+
+    #[test]
+    fn run_emits_text_by_default() {
+        let mut env = TestEnv::fresh();
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: false,
+                fail_on_warn: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0);
+        let s = env.stdout_str();
+        // Header + section labels.
+        assert!(s.contains("ai-memory doctor — local mode"));
+        assert!(s.contains("[INFO] Storage"));
+        assert!(s.contains("[INFO] Index"));
+        assert!(s.contains("[N/A ] Capabilities"));
+        // The label-prefixed fact key column is left-padded to 32 chars
+        // (smoke check that the format string compiles).
+        assert!(s.contains("total_memories"));
+    }
+
+    #[test]
+    fn run_returns_exit_2_on_critical() {
+        let mut env = TestEnv::fresh();
+        // Inject a 25h-old pending action → Governance CRIT → overall CRIT.
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let twenty_five_hours_ago =
+                (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO pending_actions \
+                 (id, action_type, namespace, payload, requested_by, requested_at, status) \
+                 VALUES ('p1', 'store', 'ns', '{}', 'agent', ?1, 'pending')",
+                params![twenty_five_hours_ago],
+            )
+            .unwrap();
+        }
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: true,
+                fail_on_warn: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 2);
+        // JSON overall is "critical".
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str()).unwrap();
+        assert_eq!(v["overall"], "critical");
+    }
+
+    #[test]
+    fn run_warning_keeps_exit_0_without_fail_on_warn() {
+        let mut env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO subscriptions \
+                 (id, url, events, created_at, dispatch_count, failure_count) \
+                 VALUES ('s1', 'http://x', '*', ?1, 10, 5)",
+                params![now],
+            )
+            .unwrap();
+        }
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: false,
+                fail_on_warn: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 0, "warning without --fail-on-warn must keep exit 0");
+        assert!(env.stdout_str().contains("[WARN] Webhook"));
+    }
+
+    #[test]
+    fn run_warning_returns_exit_1_with_fail_on_warn() {
+        let mut env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO subscriptions \
+                 (id, url, events, created_at, dispatch_count, failure_count) \
+                 VALUES ('s1', 'http://x', '*', ?1, 10, 5)",
+                params![now],
+            )
+            .unwrap();
+        }
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: false,
+                fail_on_warn: true,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 1, "--fail-on-warn must promote warning to exit 1");
+    }
+
+    #[test]
+    fn run_critical_is_exit_2_even_without_fail_on_warn() {
+        let mut env = TestEnv::fresh();
+        {
+            let conn = crate::db::open(&env.db_path).unwrap();
+            let twenty_five_hours_ago =
+                (chrono::Utc::now() - chrono::Duration::hours(25)).to_rfc3339();
+            conn.execute(
+                "INSERT INTO pending_actions \
+                 (id, action_type, namespace, payload, requested_by, requested_at, status) \
+                 VALUES ('p1', 'store', 'ns', '{}', 'agent', ?1, 'pending')",
+                params![twenty_five_hours_ago],
+            )
+            .unwrap();
+        }
+        let db_path = env.db_path.clone();
+        let mut out = env.output();
+        let exit = run(
+            &db_path,
+            &DoctorArgs {
+                remote: None,
+                json: false,
+                fail_on_warn: false,
+            },
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(exit, 2);
+    }
+
+    // -------------------------------------------------------------------
+    // run() — corrupt DB path: db::open() fails → CRITICAL Storage section.
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn local_run_on_unopenable_db_returns_critical_storage_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bad = tmp.path().join("not-a-db.db");
+        // Write garbage so SQLite refuses to open it.
+        std::fs::write(&bad, b"this is not a sqlite database, it's just text").unwrap();
+        let report = run_local_collect(&bad);
+        // The error path appends a single Storage section and returns.
+        assert_eq!(report.sections.len(), 1);
+        let storage = &report.sections[0];
+        assert_eq!(storage.name, "Storage");
+        assert_eq!(storage.severity, Severity::Critical);
+        // overall is computed from the single section.
+        assert_eq!(report.overall, Severity::Critical);
+        assert!(storage.note.as_ref().unwrap().contains("could not open"));
+    }
+
+    // -------------------------------------------------------------------
+    // Render helpers
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn render_text_emits_section_note_when_present() {
+        let r = mk_report(vec![ReportSection {
+            name: "Sync".into(),
+            severity: Severity::Critical,
+            facts: vec![("max_skew_secs".into(), "9999".into())],
+            note: Some("peer mesh is drifting".into()),
+        }]);
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        render_text(&r, &mut out).unwrap();
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("[CRIT] Sync"));
+        assert!(s.contains("note: peer mesh is drifting"));
+        assert!(s.contains("max_skew_secs"));
+        assert!(s.contains("9999"));
+    }
+
+    // -------------------------------------------------------------------
+    // Remote (--remote) mode — wiremock-driven HTTP fixtures
+    // -------------------------------------------------------------------
+
+    /// Helper: run `run_remote` from a multi-thread tokio test by spawning
+    /// the blocking reqwest call onto the spawn_blocking pool.
+    async fn run_remote_in_blocking(url: String, db_path: PathBuf) -> Report {
+        tokio::task::spawn_blocking(move || {
+            let mut r = run_remote(&url, &db_path);
+            r.compute_overall();
+            r
+        })
+        .await
+        .unwrap()
+    }
+
+    use std::path::PathBuf;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_section_capabilities_parses_v2_fields() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "feature_tier": "smart",
+                "features": {
+                    "recall_mode_active": "hybrid",
+                    "reranker_active": "cross_encoder"
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 42,
+                "expiring_soon": 1,
+                "links_count": 3
+            })))
+            .mount(&server)
+            .await;
+
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(server.uri(), env.db_path.clone()).await;
+        assert_eq!(report.mode, "remote");
+        assert!(report.source.starts_with(&server.uri()));
+        // Sections: 7 total — Capabilities, Recall, Storage, Index, Governance, Sync, Webhook.
+        assert_eq!(report.sections.len(), 7);
+
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::Info);
+        assert_eq!(fact(cap, "schema_version"), "2");
+        assert_eq!(fact(cap, "recall_mode_active"), "hybrid");
+        assert_eq!(fact(cap, "reranker_active"), "cross_encoder");
+
+        let recall = find(&report, "Recall");
+        assert_eq!(fact(recall, "active_recall_mode"), "hybrid");
+        assert_eq!(fact(recall, "active_reranker"), "cross_encoder");
+
+        let storage = find(&report, "Storage");
+        assert_eq!(fact(storage, "total_memories"), "42");
+        assert_eq!(fact(storage, "expiring_within_1h"), "1");
+        assert_eq!(fact(storage, "links"), "3");
+
+        // Raw-SQL sections must be NotAvailable in remote mode.
+        for raw in ["Index", "Governance", "Sync", "Webhook"] {
+            let s = find(&report, raw);
+            assert_eq!(s.severity, Severity::NotAvailable);
+            assert!(fact(s, "hint").contains("--db mode"));
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_capabilities_silent_degrade_warns_on_capable_tier() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "feature_tier": "semantic",
+                "features": {
+                    "recall_mode_active": "keyword_only",
+                    "reranker_active": "none"
+                }
+            })))
+            .mount(&server)
+            .await;
+        // /api/v1/stats not mocked → 404 → Storage carries an error fact
+        // but no severity bump (severity stays Info per the code path).
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(server.uri(), env.db_path.clone()).await;
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::Warning);
+        assert!(cap.note.as_ref().unwrap().contains("silent degradation"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_capabilities_degraded_on_keyword_tier_does_not_warn() {
+        // recall_mode=degraded but feature_tier=keyword → no silent-degrade
+        // (keyword tier was never expected to run hybrid in the first place).
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "feature_tier": "keyword",
+                "features": {
+                    "recall_mode_active": "keyword_only",
+                    "reranker_active": "none"
+                }
+            })))
+            .mount(&server)
+            .await;
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(server.uri(), env.db_path.clone()).await;
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::Info);
+        assert!(cap.note.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_capabilities_unreachable_endpoint_is_critical() {
+        // Reserve a free port and immediately drop the listener so the
+        // connection refusal is deterministic. Doctor's HTTP timeout is
+        // 5s; the kernel rejects almost immediately so the test stays
+        // well under the per-test timeout.
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let url = format!("http://127.0.0.1:{port}");
+
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(url, env.db_path.clone()).await;
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::Critical);
+        assert!(cap.note.as_ref().unwrap().contains("could not reach"));
+        assert_eq!(report.overall, Severity::Critical);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_capabilities_legacy_v1_renders_not_in_response() {
+        // Legacy v0.6.3 capabilities responses don't carry the v2 fields.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "1"
+            })))
+            .mount(&server)
+            .await;
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(server.uri(), env.db_path.clone()).await;
+        let cap = find(&report, "Capabilities");
+        // Legacy v1 → no severity bump, but missing fields are rendered.
+        assert_eq!(cap.severity, Severity::Info);
+        assert_eq!(fact(cap, "schema_version"), "1");
+        assert_eq!(fact(cap, "recall_mode_active"), "not_in_response");
+        assert_eq!(fact(cap, "reranker_active"), "not_in_response");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_run_via_run_entry_uses_remote_mode_string() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "feature_tier": "semantic",
+                "features": {
+                    "recall_mode_active": "hybrid",
+                    "reranker_active": "none"
+                }
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "total": 0
+            })))
+            .mount(&server)
+            .await;
+
+        let env_db = TestEnv::fresh().db_path;
+        let url = server.uri();
+        let (exit, stdout) = tokio::task::spawn_blocking(move || {
+            let mut stdout = Vec::<u8>::new();
+            let mut stderr = Vec::<u8>::new();
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            let exit = run(
+                &env_db,
+                &DoctorArgs {
+                    remote: Some(url),
+                    json: true,
+                    fail_on_warn: false,
+                },
+                &mut out,
+            )
+            .unwrap();
+            (exit, stdout)
+        })
+        .await
+        .unwrap();
+        assert_eq!(exit, 0);
+        let v: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(v["mode"], "remote");
+        // Trailing slash on the URL must be normalized.
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_url_trailing_slash_is_trimmed() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "features": {}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        let env = TestEnv::fresh();
+        // Append a trailing slash; format!("{base}/api/v1/...") would
+        // otherwise produce a `//api/v1/` path that wiremock would 404.
+        let report =
+            run_remote_in_blocking(format!("{}/", server.uri()), env.db_path.clone()).await;
+        let cap = find(&report, "Capabilities");
+        assert_eq!(cap.severity, Severity::Info);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn remote_storage_500_renders_error_without_severity_bump() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/capabilities"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "schema_version": "2",
+                "features": {}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/stats"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let env = TestEnv::fresh();
+        let report = run_remote_in_blocking(server.uri(), env.db_path.clone()).await;
+        let storage = find(&report, "Storage");
+        // Storage section preserves Info severity even on 5xx — by spec
+        // (remote storage is best-effort; sql truth is the local mode).
+        assert_eq!(storage.severity, Severity::Info);
+        let err = fact(storage, "error");
+        assert!(
+            err.contains("HTTP 500"),
+            "expected HTTP 500 message, got {err}"
+        );
+    }
+}

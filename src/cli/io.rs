@@ -696,4 +696,175 @@ mod tests {
         assert_eq!(v["total_conversations"].as_u64().unwrap(), 2);
         assert_eq!(v["filtered"].as_u64().unwrap(), 1);
     }
+
+    // PR-9i — buffer coverage uplift. Targets the actual mine() write path
+    // (lines 261-356) and invalid format/tier error paths.
+
+    #[test]
+    fn pr9i_mine_actual_write_path_text() {
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = write_minimal_claude_export(tmp.path());
+        let args = MineArgs {
+            path: claude_path,
+            format: "claude".to_string(),
+            namespace: Some("mined-real".to_string()),
+            tier: "long".to_string(),
+            min_messages: 3,
+            dry_run: false,
+        };
+        {
+            let mut out = env.output();
+            mine(&db, args, false, &cfg, Some("miner-id"), &mut out).unwrap();
+        }
+        let s = env.stdout_str();
+        assert!(s.contains("Imported"));
+        assert!(s.contains("mined-real"));
+        // The conversation with >=3 messages was actually written.
+        let conn = db::open(&db).unwrap();
+        let all = db::export_all(&conn).unwrap();
+        let in_ns: Vec<&_> = all.iter().filter(|m| m.namespace == "mined-real").collect();
+        assert_eq!(
+            in_ns.len(),
+            1,
+            "expected exactly one mined memory in mined-real ns: {all:?}"
+        );
+        // agent_id is the miner; mined_from is the source format.
+        assert_eq!(
+            in_ns[0].metadata.get("agent_id").and_then(|v| v.as_str()),
+            Some("miner-id")
+        );
+        assert_eq!(
+            in_ns[0].metadata.get("mined_from").and_then(|v| v.as_str()),
+            Some("mine-claude")
+        );
+    }
+
+    #[test]
+    fn pr9i_mine_actual_write_path_json() {
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = write_minimal_claude_export(tmp.path());
+        let args = MineArgs {
+            path: claude_path,
+            format: "claude".to_string(),
+            namespace: Some("mined-json".to_string()),
+            tier: "mid".to_string(),
+            min_messages: 3,
+            dry_run: false,
+        };
+        {
+            let mut out = env.output();
+            mine(&db, args, true, &cfg, Some("miner-x"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["namespace"].as_str().unwrap(), "mined-json");
+        assert_eq!(v["tier"].as_str().unwrap(), "mid");
+        assert!(v["imported"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn pr9i_mine_default_namespace_per_format() {
+        // Omit --namespace; defaults to "<format>-export".
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = write_minimal_claude_export(tmp.path());
+        let args = MineArgs {
+            path: claude_path,
+            format: "claude".to_string(),
+            namespace: None,
+            tier: "mid".to_string(),
+            min_messages: 3,
+            dry_run: true,
+        };
+        {
+            let mut out = env.output();
+            mine(&db, args, true, &cfg, Some("miner"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["namespace"].as_str().unwrap(), "claude-export");
+    }
+
+    #[test]
+    fn pr9i_mine_invalid_format_errors() {
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("anything.jsonl");
+        std::fs::write(&p, "{}").unwrap();
+        let args = MineArgs {
+            path: p,
+            format: "myspace".to_string(), // not claude/chatgpt/slack
+            namespace: None,
+            tier: "mid".to_string(),
+            min_messages: 3,
+            dry_run: true,
+        };
+        let mut out = env.output();
+        let res = mine(&db, args, false, &cfg, Some("miner"), &mut out);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("invalid format"));
+    }
+
+    #[test]
+    fn pr9i_mine_invalid_tier_errors() {
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("c.jsonl");
+        std::fs::write(&p, "{}").unwrap();
+        let args = MineArgs {
+            path: p,
+            format: "claude".to_string(),
+            namespace: None,
+            tier: "permanent".to_string(), // not short/mid/long
+            min_messages: 3,
+            dry_run: true,
+        };
+        let mut out = env.output();
+        let res = mine(&db, args, false, &cfg, Some("miner"), &mut out);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("invalid tier"));
+    }
+
+    #[test]
+    fn pr9i_mine_text_dry_run_lists_filtered_titles() {
+        // Text-mode dry_run prints conversation titles (lines 232-256).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let tmp = tempfile::tempdir().unwrap();
+        let claude_path = write_minimal_claude_export(tmp.path());
+        let args = MineArgs {
+            path: claude_path,
+            format: "claude".to_string(),
+            namespace: Some("dry-text".to_string()),
+            tier: "short".to_string(),
+            min_messages: 3,
+            dry_run: true,
+        };
+        {
+            let mut out = env.output();
+            mine(&db, args, false, &cfg, Some("miner"), &mut out).unwrap();
+        }
+        let s = env.stdout_str();
+        assert!(s.contains("Dry run"));
+        assert!(s.contains("Total conversations found"));
+        assert!(s.contains("After filter"));
+        assert!(s.contains("dry-text"));
+        // The Claude conversation with name "Conv with 5 messages" must be
+        // listed in the filtered preview.
+        assert!(
+            s.contains("5 msgs") || s.contains("Conv with 5 messages"),
+            "expected conversation listing in dry-run text output: {s}"
+        );
+    }
 }

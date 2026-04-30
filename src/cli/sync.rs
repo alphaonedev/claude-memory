@@ -649,4 +649,244 @@ mod tests {
                 .contains("insecure-skip-server-verify")
         );
     }
+
+    // PR-9i — buffer coverage uplift. Targets previously-uncovered branches
+    // in run() / cmd_sync_dry_run: link-sync paths in pull/push/merge,
+    // text-mode dry_run output, restamp_agent_id with no original agent_id.
+
+    #[test]
+    fn pr9i_pull_propagates_links() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        let id1 = seed_memory(&remote, "ns", "src", "src-content");
+        let id2 = seed_memory(&remote, "ns", "tgt", "tgt-content");
+        {
+            let conn = db::open(&remote).unwrap();
+            db::create_link(&conn, &id1, &id2, "related_to").unwrap();
+        }
+        let args = args_for(remote, "pull");
+        {
+            let mut out = env.output();
+            run(&local, &args, true, Some("test-agent"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["direction"].as_str().unwrap(), "pull");
+        let local_conn = db::open(&local).unwrap();
+        let local_links = db::export_links(&local_conn).unwrap();
+        assert!(
+            local_links.iter().any(|l| l.relation == "related_to"),
+            "expected pulled link to land in local: {local_links:?}"
+        );
+    }
+
+    #[test]
+    fn pr9i_push_propagates_links() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        let id1 = seed_memory(&local, "ns", "a", "a");
+        let id2 = seed_memory(&local, "ns", "b", "b");
+        {
+            let conn = db::open(&local).unwrap();
+            db::create_link(&conn, &id1, &id2, "supersedes").unwrap();
+        }
+        let args = args_for(remote.clone(), "push");
+        {
+            let mut out = env.output();
+            run(&local, &args, true, Some("test-agent"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["direction"].as_str().unwrap(), "push");
+        let remote_conn = db::open(&remote).unwrap();
+        let remote_links = db::export_links(&remote_conn).unwrap();
+        assert!(remote_links.iter().any(|l| l.relation == "supersedes"));
+    }
+
+    #[test]
+    fn pr9i_merge_propagates_links_both_directions() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        let l1 = seed_memory(&local, "ns", "l1", "l1");
+        let l2 = seed_memory(&local, "ns", "l2", "l2");
+        {
+            let conn = db::open(&local).unwrap();
+            db::create_link(&conn, &l1, &l2, "related_to").unwrap();
+        }
+        let r1 = seed_memory(&remote, "ns", "r1", "r1");
+        let r2 = seed_memory(&remote, "ns", "r2", "r2");
+        {
+            let conn = db::open(&remote).unwrap();
+            db::create_link(&conn, &r1, &r2, "derived_from").unwrap();
+        }
+        let args = args_for(remote.clone(), "merge");
+        {
+            let mut out = env.output();
+            run(&local, &args, false, Some("test-agent"), &mut out).unwrap();
+        }
+        assert!(env.stdout_str().contains("merged:"));
+        let lconn = db::open(&local).unwrap();
+        let rconn = db::open(&remote).unwrap();
+        let l_relations: Vec<String> = db::export_links(&lconn)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.relation)
+            .collect();
+        let r_relations: Vec<String> = db::export_links(&rconn)
+            .unwrap()
+            .into_iter()
+            .map(|l| l.relation)
+            .collect();
+        assert!(l_relations.iter().any(|r| r == "derived_from"));
+        assert!(r_relations.iter().any(|r| r == "related_to"));
+    }
+
+    #[test]
+    fn pr9i_dry_run_text_mode_merge() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        seed_memory(&local, "ns", "L", "L");
+        seed_memory(&remote, "ns", "R", "R");
+        let mut args = args_for(remote, "merge");
+        args.dry_run = true;
+        {
+            let mut out = env.output();
+            run(&local, &args, false, Some("test-agent"), &mut out).unwrap();
+        }
+        let s = env.stdout_str();
+        assert!(s.contains("DRY RUN"));
+        assert!(s.contains("pull:"));
+        assert!(s.contains("push:"));
+        assert!(s.contains("noop"));
+        assert!(s.contains("links"));
+    }
+
+    #[test]
+    fn pr9i_dry_run_text_mode_pull_only() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        seed_memory(&remote, "ns", "remote-only", "rr");
+        let mut args = args_for(remote, "pull");
+        args.dry_run = true;
+        {
+            let mut out = env.output();
+            run(&local, &args, false, Some("test-agent"), &mut out).unwrap();
+        }
+        let s = env.stdout_str();
+        assert!(s.contains("DRY RUN"));
+        assert!(s.contains("pull:"));
+        assert!(!s.contains("push:"));
+    }
+
+    #[test]
+    fn pr9i_dry_run_text_mode_push_only() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        seed_memory(&local, "ns", "local-only", "ll");
+        let mut args = args_for(remote, "push");
+        args.dry_run = true;
+        {
+            let mut out = env.output();
+            run(&local, &args, false, Some("test-agent"), &mut out).unwrap();
+        }
+        let s = env.stdout_str();
+        assert!(s.contains("DRY RUN"));
+        assert!(s.contains("push:"));
+        assert!(!s.contains("pull:"));
+    }
+
+    #[test]
+    fn pr9i_dry_run_classify_update_branch() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        let id = seed_memory(&local, "ns", "shared", "old-content");
+        let conn = db::open(&remote).unwrap();
+        let mem = models::Memory {
+            id: id.clone(),
+            tier: models::Tier::Mid,
+            namespace: "ns".to_string(),
+            title: "shared".to_string(),
+            content: "newer-content".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2099-01-01T00:00:00Z".to_string(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        };
+        db::insert(&conn, &mem).unwrap();
+        drop(conn);
+        let mut args = args_for(remote, "merge");
+        args.dry_run = true;
+        {
+            let mut out = env.output();
+            run(&local, &args, true, Some("test-agent"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert!(v["pull"]["update"].as_u64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn pr9i_restamp_no_original_agent_id() {
+        let mut mem = models::Memory {
+            id: "m-noid".to_string(),
+            tier: models::Tier::Mid,
+            namespace: "ns".to_string(),
+            title: "t".to_string(),
+            content: "c".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+        };
+        restamp_agent_id(&mut mem, "caller-agent");
+        assert_eq!(mem.metadata["agent_id"].as_str().unwrap(), "caller-agent");
+        assert!(mem.metadata.get("imported_from_agent_id").is_none());
+    }
+
+    #[test]
+    fn pr9i_pull_skips_invalid_link() {
+        let mut env = TestEnv::fresh();
+        let local = env.db_path.clone();
+        let remote_env = TestEnv::fresh();
+        let remote = remote_env.db_path.clone();
+        let id1 = seed_memory(&remote, "ns", "src", "src");
+        let id2 = seed_memory(&remote, "ns", "tgt", "tgt");
+        let conn = db::open(&remote).unwrap();
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, created_at) VALUES (?, ?, '', datetime('now'))",
+            rusqlite::params![id1, id2],
+        )
+        .unwrap();
+        drop(conn);
+        let args = args_for(remote, "pull");
+        {
+            let mut out = env.output();
+            run(&local, &args, true, Some("test-agent"), &mut out).unwrap();
+        }
+        let v: serde_json::Value = serde_json::from_str(env.stdout_str().trim()).unwrap();
+        assert_eq!(v["direction"].as_str().unwrap(), "pull");
+    }
 }

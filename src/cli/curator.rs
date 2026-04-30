@@ -394,4 +394,307 @@ mod tests {
         // No rollback log entries; should report 0.
         assert!(env.stdout_str().contains("reversed 0"));
     }
+
+    // PR-9i — buffer coverage uplift. Targets run_rollback() — rollback
+    // path with valid PriorityAdjust entry, rollback_last with both
+    // applied & malformed JSON entries (skip branch), already-reversed
+    // skip branch.
+
+    fn build_priority_rollback_entry_json(memory_id: &str, before: i32, after: i32) -> String {
+        // Serialize as the externally-tagged enum form `autonomy::RollbackEntry`
+        // uses (the Rust default).
+        serde_json::to_string(&autonomy::RollbackEntry::PriorityAdjust {
+            memory_id: memory_id.to_string(),
+            before,
+            after,
+        })
+        .unwrap()
+    }
+
+    fn seed_rollback_entry(db_path: &std::path::Path, content: &str) -> String {
+        // Insert a memory in the _curator/rollback namespace whose content
+        // is a serialized RollbackEntry. Returns the inserted id.
+        let conn = db::open(db_path).expect("db::open");
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = crate::models::default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String("test-agent".to_string()),
+            );
+        }
+        let mem = crate::models::Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: crate::models::Tier::Mid,
+            namespace: "_curator/rollback".to_string(),
+            title: format!("rollback-{}", uuid::Uuid::new_v4()),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        db::insert(&conn, &mem).expect("db::insert")
+    }
+
+    #[tokio::test]
+    async fn pr9i_curator_rollback_priority_adjust_applies() {
+        // Seed a real memory whose priority we'll roll back from 7→3.
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+
+        // 1. Seed a target memory at priority=7.
+        let target = {
+            let conn = db::open(&db).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut metadata = crate::models::default_metadata();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String("test-agent".to_string()),
+                );
+            }
+            let mem = crate::models::Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: crate::models::Tier::Mid,
+                namespace: "ns".to_string(),
+                title: "target".to_string(),
+                content: "c".to_string(),
+                tags: vec![],
+                priority: 7,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata,
+            };
+            db::insert(&conn, &mem).unwrap()
+        };
+
+        // 2. Seed a rollback entry that says "revert priority to 3".
+        let entry_json = build_priority_rollback_entry_json(&target, 3, 7);
+        let entry_id = seed_rollback_entry(&db, &entry_json);
+
+        // 3. Run rollback by id.
+        let mut args = default_args();
+        args.rollback = Some(entry_id.clone());
+        {
+            let mut out = env.output();
+            run(&db, &args, &cfg, &mut out).await.unwrap();
+        }
+        // Stdout reports rollback applied.
+        let s = env.stdout_str();
+        assert!(s.contains(&format!("rollback {entry_id}")));
+        assert!(s.contains("applied"));
+
+        // The target's priority must now be 3.
+        let conn = db::open(&db).unwrap();
+        let target_mem = db::get(&conn, &target).unwrap().unwrap();
+        assert_eq!(target_mem.priority, 3);
+
+        // The rollback entry must be tagged _reversed.
+        let entry_mem = db::get(&conn, &entry_id).unwrap().unwrap();
+        assert!(entry_mem.tags.iter().any(|t| t == "_reversed"));
+    }
+
+    #[tokio::test]
+    async fn pr9i_curator_rollback_last_processes_multiple() {
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+
+        // Seed two targets.
+        let t1;
+        let t2;
+        {
+            let conn = db::open(&db).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut metadata = crate::models::default_metadata();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String("test-agent".to_string()),
+                );
+            }
+            let m1 = crate::models::Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: crate::models::Tier::Mid,
+                namespace: "ns".to_string(),
+                title: "t1".to_string(),
+                content: "c1".to_string(),
+                tags: vec![],
+                priority: 8,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: metadata.clone(),
+            };
+            let m2 = crate::models::Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: crate::models::Tier::Mid,
+                namespace: "ns".to_string(),
+                title: "t2".to_string(),
+                content: "c2".to_string(),
+                tags: vec![],
+                priority: 9,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata,
+            };
+            t1 = db::insert(&conn, &m1).unwrap();
+            t2 = db::insert(&conn, &m2).unwrap();
+        }
+
+        // Seed two rollback entries plus one malformed JSON entry.
+        seed_rollback_entry(&db, &build_priority_rollback_entry_json(&t1, 4, 8));
+        seed_rollback_entry(&db, &build_priority_rollback_entry_json(&t2, 5, 9));
+        seed_rollback_entry(&db, "{not valid json: at all"); // malformed → skip branch
+
+        // Run rollback_last 5 (caps at actual count).
+        let mut args = default_args();
+        args.rollback_last = Some(5);
+        {
+            let mut out = env.output();
+            run(&db, &args, &cfg, &mut out).await.unwrap();
+        }
+        // Reverses 2 entries (the malformed one is skipped).
+        let s = env.stdout_str();
+        assert!(s.contains("reversed 2"));
+
+        // Both targets reverted.
+        let conn = db::open(&db).unwrap();
+        assert_eq!(db::get(&conn, &t1).unwrap().unwrap().priority, 4);
+        assert_eq!(db::get(&conn, &t2).unwrap().unwrap().priority, 5);
+    }
+
+    #[tokio::test]
+    async fn pr9i_curator_rollback_last_skips_already_reversed() {
+        // Seed a rollback entry pre-tagged as _reversed; rollback_last must
+        // skip it (lines 203-205).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+
+        // Seed a target.
+        let target;
+        {
+            let conn = db::open(&db).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut metadata = crate::models::default_metadata();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String("test-agent".to_string()),
+                );
+            }
+            let mem = crate::models::Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: crate::models::Tier::Mid,
+                namespace: "ns".to_string(),
+                title: "x".to_string(),
+                content: "c".to_string(),
+                tags: vec![],
+                priority: 7,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata,
+            };
+            target = db::insert(&conn, &mem).unwrap();
+        }
+
+        // Insert a rollback entry already tagged _reversed.
+        let entry_json = build_priority_rollback_entry_json(&target, 2, 7);
+        let entry_id;
+        {
+            let conn = db::open(&db).unwrap();
+            let now = chrono::Utc::now().to_rfc3339();
+            let mut metadata = crate::models::default_metadata();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String("test-agent".to_string()),
+                );
+            }
+            let mem = crate::models::Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: crate::models::Tier::Mid,
+                namespace: "_curator/rollback".to_string(),
+                title: "preexisting-reversed".to_string(),
+                content: entry_json,
+                tags: vec!["_reversed".to_string()],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now,
+                last_accessed_at: None,
+                expires_at: None,
+                metadata,
+            };
+            entry_id = db::insert(&conn, &mem).unwrap();
+        }
+
+        let mut args = default_args();
+        args.rollback_last = Some(5);
+        {
+            let mut out = env.output();
+            run(&db, &args, &cfg, &mut out).await.unwrap();
+        }
+        // Already-reversed entry is skipped → reversed 0.
+        let s = env.stdout_str();
+        assert!(s.contains("reversed 0"));
+
+        // Target's priority is unchanged from 7.
+        let conn = db::open(&db).unwrap();
+        assert_eq!(db::get(&conn, &target).unwrap().unwrap().priority, 7);
+        // Sanity: entry_id memory still tagged _reversed.
+        let entry_mem = db::get(&conn, &entry_id).unwrap().unwrap();
+        assert!(entry_mem.tags.iter().any(|t| t == "_reversed"));
+    }
+
+    #[tokio::test]
+    async fn pr9i_curator_rollback_id_with_malformed_content() {
+        // Seed a memory in _curator/rollback whose content is NOT a valid
+        // RollbackEntry — the explicit-id rollback path bails (lines 160-161).
+        let mut env = TestEnv::fresh();
+        let db = env.db_path.clone();
+        let cfg = config::AppConfig::default();
+        let entry_id = seed_rollback_entry(&db, "{invalid json");
+
+        let mut args = default_args();
+        args.rollback = Some(entry_id);
+        let mut out = env.output();
+        let res = run(&db, &args, &cfg, &mut out).await;
+        assert!(res.is_err());
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("rollback") || err.contains("RollbackEntry"),
+            "expected parse-error message, got: {err}"
+        );
+    }
 }

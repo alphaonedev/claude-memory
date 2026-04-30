@@ -51,19 +51,24 @@ use tracing_subscriber::EnvFilter;
 
 use crate::cli::agents::{AgentsArgs, PendingArgs};
 use crate::cli::archive::ArchiveArgs;
+use crate::cli::audit::AuditArgs;
 use crate::cli::backup::{BackupArgs, RestoreArgs};
+use crate::cli::boot::BootArgs;
 use crate::cli::consolidate::{AutoConsolidateArgs, ConsolidateArgs};
 use crate::cli::crud::{DeleteArgs, GetArgs, ListArgs};
 use crate::cli::curator::CuratorArgs;
 use crate::cli::forget::ForgetArgs;
+use crate::cli::install::InstallArgs;
 use crate::cli::io::{ImportArgs, MineArgs};
 use crate::cli::link::{LinkArgs, ResolveArgs};
+use crate::cli::logs::LogsArgs;
 use crate::cli::promote::PromoteArgs;
 use crate::cli::recall::RecallArgs;
 use crate::cli::search::SearchArgs;
 use crate::cli::store::StoreArgs;
 use crate::cli::sync::{SyncArgs, SyncDaemonArgs};
 use crate::cli::update::UpdateArgs;
+use crate::cli::wrap::WrapArgs;
 use crate::config::{AppConfig, FeatureTier};
 use crate::embeddings::Embedder;
 use crate::handlers::{ApiKeyState, AppState, Db};
@@ -212,6 +217,65 @@ pub enum Command {
     /// and both adapters upsert on id.
     #[cfg(feature = "sal")]
     Migrate(MigrateArgs),
+    /// v0.6.3.1 (P7 / R7): operator-visible health dashboard. Reads
+    /// Capabilities v2 (P1) + data integrity surfaces (P2) + recall
+    /// observability (P3). With `--remote <url>` becomes a fleet doctor
+    /// at T3+. Read-only — never mutates the database. Exits 0 on a
+    /// healthy report, 2 on critical findings, and 1 on warnings when
+    /// `--fail-on-warn` is passed.
+    Doctor(DoctorCliArgs),
+    /// Issue #487: emit session-boot context. Universal primitive every
+    /// AI-agent integration recipe (Claude Code SessionStart hook, Cursor /
+    /// Cline / Continue / Windsurf system-message, Codex / Apps SDK /
+    /// Agent SDK programmatic prepend, OpenClaw built-in, local models
+    /// via LM Studio / Ollama / vLLM) calls before the agent's first turn.
+    /// Read-only, fast, never blocks. With `--quiet` (recommended for
+    /// hooks) a missing DB exits 0 with empty stdout.
+    Boot(BootArgs),
+    /// Issue #487 PR-2: wire `ai-memory boot` and the `ai-memory-mcp`
+    /// server into AI agents' config files (Claude Code SessionStart hook,
+    /// Cursor / Cline / Continue / Windsurf / OpenClaw MCP config). Default
+    /// is `--dry-run` (prints the diff, writes nothing). Pass `--apply` to
+    /// commit. Pass `--uninstall --apply` to remove a previously-installed
+    /// managed block.
+    Install(InstallArgs),
+    /// Issue #487 PR-6: cross-platform Rust replacement for the bash /
+    /// PowerShell wrappers PR-1 shipped in the integration recipes. Runs
+    /// `ai-memory boot` in-process, builds a system message, then spawns
+    /// the named agent CLI with the system message delivered via the
+    /// strategy chosen by `default_strategy(<agent>)` (or an explicit
+    /// `--system-flag` / `--system-env` / `--message-file-flag`
+    /// override). Exit code is propagated from the wrapped agent.
+    Wrap(WrapArgs),
+    /// Issue #487 PR-5: operator-facing CLI for the operational logging
+    /// facility (`tail`, `cat`, `archive`, `purge`). Default-OFF — emits
+    /// nothing useful unless `[logging] enabled = true` is set in
+    /// `config.toml`.
+    Logs(LogsArgs),
+    /// Issue #487 PR-5: operator-facing CLI for the security audit
+    /// trail (`verify`, `tail`, `path`). Default-OFF — emits nothing
+    /// useful unless `[audit] enabled = true` is set in `config.toml`.
+    Audit(AuditArgs),
+}
+
+/// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
+/// derives them automatically; the actual report logic lives in
+/// `cli::doctor::run`.
+#[derive(Args)]
+pub struct DoctorCliArgs {
+    /// Query a remote ai-memory daemon's HTTP capabilities + stats
+    /// endpoints instead of opening the local DB. Sections that need
+    /// raw SQL access render as N/A in this mode.
+    #[arg(long, value_name = "URL")]
+    pub remote: Option<String>,
+    /// Emit the report as JSON instead of human-readable text. Useful
+    /// for CI consumers and for `jq`-style filtering.
+    #[arg(long)]
+    pub json: bool,
+    /// Exit 1 when at least one section is at WARN severity. Without
+    /// this flag, warnings keep exit 0; criticals always exit 2.
+    #[arg(long)]
+    pub fail_on_warn: bool,
 }
 
 #[derive(Args)]
@@ -633,6 +697,115 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
         Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
         Command::Migrate(a) => cmd_migrate(&a).await,
+        Command::Doctor(a) => {
+            // P7 / R7. The doctor is read-only; it never sets
+            // `needs_checkpoint`. We compute the exit code from the
+            // overall severity and propagate it via the process-exit
+            // path below so callers (CI, ops scripts) can branch on it.
+            //
+            // The remote mode uses `reqwest::blocking::Client` which
+            // panics when dropped on a tokio runtime thread, so the
+            // entire doctor pass runs inside `spawn_blocking`.
+            let db_path_doctor = db_path.clone();
+            let args = cli::doctor::DoctorArgs {
+                remote: a.remote,
+                json: a.json,
+                fail_on_warn: a.fail_on_warn,
+            };
+            let join = tokio::task::spawn_blocking(move || {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                cli::doctor::run(&db_path_doctor, &args, &mut out)
+            })
+            .await;
+            match join {
+                Ok(Ok(0)) => Ok(()),
+                Ok(Ok(code)) => std::process::exit(code),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(anyhow::anyhow!("doctor task join failed: {e}")),
+            }
+        }
+        Command::Boot(a) => {
+            // Issue #487. Read-only, fast, no embedder, no daemon. Suitable
+            // for invocation from any AI-agent integration (Claude Code
+            // SessionStart hook, Cursor / Cline / Continue / Windsurf
+            // system-message, programmatic prepend in Claude Agent SDK /
+            // OpenAI Apps SDK / Codex CLI, OpenClaw built-in, local models
+            // via LM Studio / Ollama / vLLM).
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            // PR-5: a `boot` invocation is itself an audit-worthy event.
+            // Emission is a no-op when audit is disabled.
+            crate::audit::emit(crate::audit::EventBuilder::new(
+                crate::audit::AuditAction::SessionBoot,
+                crate::audit::actor(
+                    cli_agent_id.as_deref().unwrap_or("anonymous"),
+                    "explicit_or_default",
+                    None,
+                ),
+                crate::audit::target_sweep(a.namespace.as_deref().unwrap_or("auto")),
+            ));
+            cli::boot::run(&db_path, &a, app_config, &mut out)
+        }
+        Command::Install(a) => {
+            // Issue #487 PR-2. Read-only filesystem op against the agent's
+            // config file (NOT the ai-memory DB). Default is dry-run; --apply
+            // is opt-in and writes a backup before mutating anything.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::install::run(&a, &mut out)
+        }
+        Command::Wrap(a) => {
+            // Issue #487 PR-6. Pure-Rust cross-platform replacement for
+            // the bash / PowerShell wrappers PR-1 shipped in the
+            // integration recipes. Runs boot in-process, builds the
+            // system message, spawns the wrapped agent, and propagates
+            // the agent's exit code via std::process::exit.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            let code = cli::wrap::run(&db_path, &a, app_config, &mut out)?;
+            // Drop the locks/output before exit so any pending writes
+            // get flushed by the OS on process teardown.
+            drop(out);
+            drop(so);
+            drop(se);
+            if code == 0 {
+                Ok(())
+            } else {
+                std::process::exit(code);
+            }
+        }
+        Command::Logs(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::logs::run(a, app_config, &mut out)
+        }
+        Command::Audit(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::audit::run(a, app_config, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth

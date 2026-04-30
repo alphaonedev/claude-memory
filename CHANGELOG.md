@@ -5,6 +5,166 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.3.1 closure
+
+
+### Added
+
+- **Boot follow-ups folded from v0.6.4 into v0.6.3.1 (PR-9h, issue #487
+  PR #497 reqs #72 + #73)** — version-drift detection adds
+  `MIN_SUPPORTED_SCHEMA = 16` / `MAX_SUPPORTED_SCHEMA = 19` constants in
+  `src/cli/boot.rs`, a new `WarnSchemaUnsupported { db_schema }`
+  manifest variant, and the JSON top-level `schema_supported: bool`
+  field for SIEM ingest. Boot privacy controls add a `[boot]` config
+  block with `enabled` (default `true`; `false` exits 0 silently with
+  empty stdout AND empty stderr — the privacy-sensitive escape hatch
+  for hosts where memory titles must not enter CI logs) and
+  `redact_titles` (default `false`; `true` keeps the manifest header
+  but replaces every body row's `title` with `<redacted>`). Env-var
+  `AI_MEMORY_BOOT_ENABLED=0` takes precedence over the config-file
+  value. Documented in `docs/integrations/claude-code.md` and
+  `docs/integrations/README.md`.
+- **`ai-memory doctor` CLI (Phase P7 / R7)** — operator-visible health
+  dashboard. New subcommand
+  `ai-memory doctor [--db <path>] [--remote <url>] [--json] [--fail-on-warn]`
+  produces a 7-section health report (Storage, Index, Recall, Governance,
+  Sync, Webhook, Capabilities) with per-section severity tagging
+  (`INFO` / `WARN` / `CRIT` / `N/A`). Exits `0` healthy / `1` warning
+  with `--fail-on-warn` / `2` critical. `--remote <url>` queries a live
+  daemon's `/api/v1/capabilities` + `/api/v1/stats` endpoints to support
+  fleet-wide health sweeps at T3+. Read-only — never mutates the DB;
+  every query is a single indexed `COUNT(*)` so the lock window stays
+  sub-millisecond on a populated store. Consumes Capabilities v2 (P1),
+  data integrity (P2 — `embedding_dim`), and recall observability (P3 —
+  eviction counter, recall_mode distribution) surfaces with graceful
+  fallback when those phases haven't merged yet — pre-P2/P3 schemas
+  render the affected fields as `not_observed (pre-PX schema)` instead
+  of erroring. New helpers in `src/db.rs`: `doctor_dim_violations`,
+  `doctor_oldest_pending_age_secs`, `doctor_governance_coverage`,
+  `doctor_governance_depth_distribution`,
+  `doctor_webhook_delivery_totals`, `doctor_max_sync_skew_secs`. New
+  module `src/cli/doctor.rs` and integration tests in
+  `tests/doctor_cli.rs` (4 acceptance tests:
+  `doctor_reports_clean_on_fresh_db`, `doctor_warns_on_dim_violations`,
+  `doctor_critical_on_pending_actions_older_than_24h`,
+  `doctor_remote_queries_capabilities_endpoint`). Documented in
+  `docs/operations/doctor.md`.
+=======
+### Phase P6 (R1) — `budget_tokens` recall recovery
+
+Recovered the prior phased ROADMAP's "killer feature, no competitor has
+this." `memory_recall` (MCP / HTTP / CLI) accepts an optional
+`budget_tokens` parameter and returns the highest-ranked memories whose
+cumulative content tokens fit under the budget, using the deterministic
+`tiktoken-rs` `cl100k_base` BPE — the same tokenizer Claude / GPT use
+for context-window accounting. The R1 always-return-at-least-one
+guarantee surfaces an overflow flag rather than dropping a top-ranked
+hit when the caller asks for an unrealistically tight budget.
+
+- `tiktoken-rs` 0.7 added (pure-Rust BPE; ~1.7 MB bundled table; offline
+  deterministic).
+- New response `meta` block when a budget is supplied:
+  `budget_tokens_used`, `budget_tokens_remaining`, `memories_dropped`,
+  `budget_overflow`. Legacy top-level `tokens_used` / `budget_tokens`
+  fields preserved verbatim — pre-P6 callers continue to work
+  byte-for-byte.
+- `budget_tokens=0` is now a valid request meaning "give me nothing"
+  (returns an empty memories array with `meta.budget_overflow=false`).
+  Supersedes the v0.6.3 Ultrareview #348 hard-reject of 0 — the meta
+  block now disambiguates "user asked for zero" from "buggy
+  uninitialised counter" by always round-tripping the requested budget.
+- Budget-unset path is unchanged on the recall hot path: cl100k_base
+  is skipped entirely, `tokens_used` falls back to a fast `len/4` byte
+  heuristic so the bench harness's `recall_hot` p95 budget (< 50 ms)
+  is preserved.
+- Documentation: new `docs/recall.md`; `PERFORMANCE.md` gets a new row
+  for `memory_recall (budget, budget_tokens=4096)` at < 90 ms p95
+  (autonomous tier budget).
+- Scoring and fusion are unchanged — budget is a strict post-rank
+  filter. Two recalls of the same query with different budgets produce
+  a strict prefix-of-prefix relationship.
+
+Acceptance tests in `tests/budget_tokens.rs`.
+
+### Phase P2 — Data-integrity hardening (G4, G5, G6, G13)
+
+Schema **v18** (migration `0011_v0631_data_integrity.sql`) closes four
+silent-corruption / silent-mutation paths surfaced by the v0.6.3 audit.
+(Schema v17 was claimed by P4 governance-inheritance backfill — see below.)
+
+- **G4 — mixed embedding dims silently tolerated.** New
+  `memories.embedding_dim` and `archived_memories.embedding_dim` columns;
+  `db::set_embedding` enforces "first write establishes the namespace's
+  dim" and returns a typed `EmbeddingDimMismatch` on any subsequent
+  write at a different dim. New `Stats::dim_violations` counter (also
+  exposed via `db::dim_violations`) surfaces legacy mismatched rows so
+  the P7 doctor can flag them. Migration backfills existing rows from
+  `length(embedding) / 4`.
+- **G5 — archive lossy + restore resets.** `archived_memories` now
+  carries `embedding`, `embedding_dim`, `original_tier`, and
+  `original_expires_at`. `archive_memory`, `gc(archive=true)`, and
+  `forget(archive=true)` populate them; `restore_archived` round-trips
+  the original tier and expiry instead of forcing `tier='long'` /
+  `expires_at=NULL`. Pre-v17 archive rows are backfilled to
+  `original_tier='long'` (the loss is acknowledged — the live row was
+  gone before v17 ever shipped).
+- **G6 — UNIQUE(title, namespace) silent merge.** `memory_store` MCP
+  tool grows an `on_conflict: error | merge | version` parameter.
+  Capability negotiation: v2-aware MCP clients default to `error`; v1 /
+  unknown clients keep the legacy `merge` upsert. HTTP
+  `POST /api/v1/memories` accepts `on_conflict` in the body and
+  defaults to `error` (HTTP has no v1 backward-compat to honour). New
+  `db::find_by_title_namespace` and `db::next_versioned_title` helpers.
+- **G13 — f32 endianness magic byte.** Embedding BLOBs now carry a
+  one-byte header (`0x01` = LE-f32). Readers tolerate missing-header as
+  legacy LE-f32 and return a typed `EmbeddingFormatError` for any
+  unknown header; `0x02` (BE-f32) is reserved and rejected until v0.7
+  adds the conversion path. New `embeddings::encode_embedding_blob` /
+  `decode_embedding_blob` / `decoded_dim` helpers.
+
+Tests: `tests/data_integrity_v17.rs` (8 cases — every charter-cited
+acceptance test passes plus two doctor-stat round-trips).
+
+### Capabilities v2 honesty schema (P1, REMEDIATIONv0631 §"Phase P1")
+
+The capabilities response was promising features that did not exist. v2
+keeps the wire envelope but tells the truth about what's wired.
+
+**Schema changes — bumped at the same `schema_version="2"` discriminator.**
+
+- **`features.recall_mode_active`** (new): live runtime tag —
+  `"hybrid"` when the embedder is loaded, `"degraded"` when configured
+  but failed to materialize, `"disabled"` for the keyword tier.
+  Operators can refuse to dispatch semantic-recall scenarios against a
+  daemon whose embedder did not load.
+- **`features.reranker_active`** (new): derived from the actual
+  `CrossEncoder` enum variant — `"neural"` / `"lexical_fallback"` /
+  `"off"`. Replaces the previous "trust the tier flag" reporting.
+- **`features.memory_reflection`** is now a `{planned, version,
+  enabled}` object (was `bool`). The subsystem is roadmap (v0.7+); the
+  bool form lied by claiming the feature was wired on the autonomous
+  tier.
+- **`compaction`** and **`transcripts`** carry the same planned-feature
+  shape, so operators can distinguish "feature exists but disabled"
+  from "feature not in this build."
+- **`permissions.mode = "advisory"`** (was `"ask"`, which implied an
+  interactive prompt loop the code does not run). Until P4 ships the
+  enforcement gate, governance metadata is recorded but not enforced.
+- **Dropped fields** (no backing implementation existed):
+  `permissions.rule_summary`, `hooks.by_event`,
+  `approval.subscribers`, `approval.default_timeout_seconds`.
+
+**Backward compatibility — v1 clients continue to work.** Pass
+`Accept-Capabilities: v1` (HTTP) or the MCP `accept: "v1"` argument to
+`memory_capabilities` to receive the legacy pre-v0.6.3.1 shape. v1
+projection collapses `memory_reflection` back to a bool and drops all
+v2-only blocks. Default response remains v2.
+
+**Files touched:** `src/config.rs`, `src/mcp.rs`, `src/handlers.rs`,
+`tests/capabilities_v2.rs` (new). 9 new integration tests pin the honest
+contract.
+
+
 ## [v0.6.3] — 2026-04-27 — STRUCTURED MEMORY + PERFORMANCE
 
 The grand-slam release. Hierarchical namespace taxonomy + temporal-validity

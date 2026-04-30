@@ -97,6 +97,25 @@ pub fn run(
         std::process::exit(1);
     }
     if let Some(mem) = db::get(&conn, &resolved_id)? {
+        // PR-5 (issue #487): security audit trail. No-op when disabled.
+        crate::audit::emit(crate::audit::EventBuilder::new(
+            crate::audit::AuditAction::Update,
+            crate::audit::actor(
+                mem.metadata
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default(),
+                "default_fallback",
+                None,
+            ),
+            crate::audit::target_memory(
+                mem.id.clone(),
+                mem.namespace.clone(),
+                Some(mem.title.clone()),
+                Some(mem.tier.to_string()),
+                None,
+            ),
+        ));
         if json_out {
             writeln!(out.stdout, "{}", serde_json::to_string(&mem)?)?;
         } else {

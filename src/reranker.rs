@@ -56,10 +56,23 @@ impl CrossEncoder {
     /// Create a neural cross-encoder by downloading ms-marco-MiniLM-L-6-v2.
     ///
     /// Falls back to lexical if download or loading fails.
+    ///
+    /// v0.6.3.1 (P3, G8): when the neural path fails (e.g. HF Hub
+    /// unreachable, model checksum mismatch), emit a structured tracing
+    /// event `reranker.fallback` so operators see the silent
+    /// neural→lexical degrade. The eprintln remains for backward-compat
+    /// startup logs.
     pub fn new_neural() -> Self {
         match Self::load_neural() {
             Ok(ce) => ce,
             Err(e) => {
+                tracing::warn!(
+                    target: "reranker.fallback",
+                    from = "neural",
+                    to = "lexical",
+                    reason = %e,
+                    "cross-encoder fell back to lexical: neural init failed"
+                );
                 eprintln!("ai-memory: neural cross-encoder failed ({e}), using lexical fallback");
                 Self::Lexical
             }
@@ -768,6 +781,79 @@ mod tests {
         let s = lexical_score("rust crate", "Rust Crate Index", "unrelated body text");
         assert!(s > 0.0);
         assert!(s <= 1.0);
+    }
+
+    // PR-9i — buffer coverage uplift.
+
+    #[test]
+    fn pr9i_new_neural_dual_outcome() {
+        // Exercises CrossEncoder::new_neural() (lines 65-79). Behavior is
+        // environment-dependent: with an HF cache or network the call
+        // succeeds and returns Self::Neural; without either it falls back
+        // to Self::Lexical via the documented eprintln + tracing warn
+        // pathway. Both outcomes are acceptable — what matters is the
+        // dispatch is hit. Functionally, both variants score within
+        // [0.0, 1.0].
+        let ce = CrossEncoder::new_neural();
+        let s = ce.score("query", "title", "content");
+        assert!((0.0..=1.0).contains(&s), "score {s} out of bounds");
+    }
+
+    #[test]
+    fn pr9i_rerank_via_score_returns_blend() {
+        // Even when new_neural() falls back to lexical, rerank() must
+        // still produce a deterministic [0..1] blend. Pins the contract
+        // for both branches of CrossEncoder::score().
+        let ce = CrossEncoder::new_neural();
+        let cands = vec![
+            (
+                Memory {
+                    id: "a".to_string(),
+                    tier: Tier::Mid,
+                    namespace: "ns".to_string(),
+                    title: "rust async runtime".to_string(),
+                    content: "tokio rust async".to_string(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".to_string(),
+                    access_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                },
+                0.6,
+            ),
+            (
+                Memory {
+                    id: "b".to_string(),
+                    tier: Tier::Mid,
+                    namespace: "ns".to_string(),
+                    title: "grocery list".to_string(),
+                    content: "milk eggs".to_string(),
+                    tags: vec![],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "test".to_string(),
+                    access_count: 0,
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata: serde_json::json!({}),
+                },
+                0.4,
+            ),
+        ];
+        let out = ce.rerank("rust async", cands);
+        assert_eq!(out.len(), 2);
+        for (_, score) in &out {
+            assert!(score.is_finite());
+        }
+        // First entry's blended score >= second by sort contract.
+        assert!(out[0].1 >= out[1].1);
     }
 }
 

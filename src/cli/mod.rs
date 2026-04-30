@@ -17,17 +17,22 @@
 
 pub mod agents;
 pub mod archive;
+pub mod audit;
 pub mod backup;
+pub mod boot;
 pub mod consolidate;
 pub mod crud;
 pub mod curator;
+pub mod doctor;
 pub mod forget;
 pub mod gc;
 pub mod governance;
 pub mod helpers;
+pub mod install;
 pub mod io;
 pub mod io_writer;
 pub mod link;
+pub mod logs;
 pub mod promote;
 pub mod recall;
 pub mod search;
@@ -35,6 +40,7 @@ pub mod shell;
 pub mod store;
 pub mod sync;
 pub mod update;
+pub mod wrap;
 
 #[cfg(test)]
 pub mod test_utils;
