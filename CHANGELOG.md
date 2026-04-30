@@ -5,6 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.3.1 — REMEDIATION
+
+### Capabilities v2 honesty schema (P1, REMEDIATIONv0631 §"Phase P1")
+
+The capabilities response was promising features that did not exist. v2
+keeps the wire envelope but tells the truth about what's wired.
+
+**Schema changes — bumped at the same `schema_version="2"` discriminator.**
+
+- **`features.recall_mode_active`** (new): live runtime tag —
+  `"hybrid"` when the embedder is loaded, `"degraded"` when configured
+  but failed to materialize, `"disabled"` for the keyword tier.
+  Operators can refuse to dispatch semantic-recall scenarios against a
+  daemon whose embedder did not load.
+- **`features.reranker_active`** (new): derived from the actual
+  `CrossEncoder` enum variant — `"neural"` / `"lexical_fallback"` /
+  `"off"`. Replaces the previous "trust the tier flag" reporting.
+- **`features.memory_reflection`** is now a `{planned, version,
+  enabled}` object (was `bool`). The subsystem is roadmap (v0.7+); the
+  bool form lied by claiming the feature was wired on the autonomous
+  tier.
+- **`compaction`** and **`transcripts`** carry the same planned-feature
+  shape, so operators can distinguish "feature exists but disabled"
+  from "feature not in this build."
+- **`permissions.mode = "advisory"`** (was `"ask"`, which implied an
+  interactive prompt loop the code does not run). Until P4 ships the
+  enforcement gate, governance metadata is recorded but not enforced.
+- **Dropped fields** (no backing implementation existed):
+  `permissions.rule_summary`, `hooks.by_event`,
+  `approval.subscribers`, `approval.default_timeout_seconds`.
+
+**Backward compatibility — v1 clients continue to work.** Pass
+`Accept-Capabilities: v1` (HTTP) or the MCP `accept: "v1"` argument to
+`memory_capabilities` to receive the legacy pre-v0.6.3.1 shape. v1
+projection collapses `memory_reflection` back to a bool and drops all
+v2-only blocks. Default response remains v2.
+
+**Files touched:** `src/config.rs`, `src/mcp.rs`, `src/handlers.rs`,
+`tests/capabilities_v2.rs` (new). 9 new integration tests pin the honest
+contract.
+
 ## [v0.6.3] — 2026-04-27 — STRUCTURED MEMORY + PERFORMANCE
 
 The grand-slam release. Hierarchical namespace taxonomy + temporal-validity

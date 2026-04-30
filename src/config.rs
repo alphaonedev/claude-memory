@@ -181,7 +181,17 @@ pub struct TierConfig {
 }
 
 impl TierConfig {
-    /// Produce a [`Capabilities`] report suitable for JSON serialisation.
+    /// Produce a [`Capabilities`] (schema v2) report suitable for JSON
+    /// serialisation. The MCP / HTTP `handle_capabilities_with_conn`
+    /// wrapper overlays live runtime state (recall mode, reranker mode,
+    /// embedder-loaded flag) and live DB counts (active rules, hook
+    /// registrations, pending approvals) before the report goes on the
+    /// wire.
+    ///
+    /// v2 honesty patch (P1, v0.6.3.1): `recall_mode_active` and
+    /// `reranker_active` start at conservative defaults (`disabled` /
+    /// `off`); the wrapper updates them based on the *runtime* embedder
+    /// + reranker handles, not the *configured* tier values.
     pub fn capabilities(&self) -> Capabilities {
         let has_embeddings = self.embedding_model.is_some();
         let has_llm = self.llm_model.is_some();
@@ -200,11 +210,25 @@ impl TierConfig {
                 auto_tagging: has_llm,
                 contradiction_analysis: has_llm,
                 cross_encoder_reranking: self.cross_encoder,
-                memory_reflection: self.cross_encoder && has_llm,
+                // Honesty patch: planned-not-implemented. The flag was
+                // previously a `bool` whose `true` value implied a wired
+                // feature that does not exist in this build.
+                memory_reflection: PlannedFeature::planned("v0.7+"),
                 // Default false — the HTTP/MCP capabilities handler
                 // overwrites this with the live runtime state when it
                 // has access to the embedder handle.
                 embedder_loaded: false,
+                // Conservative defaults; the handler wrapper overlays the
+                // live runtime state (`hybrid` when embedder is loaded,
+                // `keyword_only` when it is not, `degraded` if the load
+                // failed, `disabled` for the keyword tier).
+                recall_mode_active: RecallMode::Disabled,
+                // Conservative default; overwritten when the wrapper has
+                // the actual reranker handle. `off` means no reranker is
+                // configured; `lexical_fallback` means the neural model
+                // failed to materialize; `neural` means the BERT
+                // cross-encoder is loaded.
+                reranker_active: RerankerMode::Off,
             },
             models: CapabilityModels {
                 embedding: self
@@ -223,19 +247,23 @@ impl TierConfig {
             // v2 dynamic blocks — start at zero-state defaults. The MCP
             // and HTTP `handle_capabilities` wrappers overwrite these
             // with live counts when they have a `&Connection` handle.
+            //
+            // Honesty patch (P1): `permissions.mode` is `"advisory"`
+            // until P4 lands the enforcement gate. Was `"ask"`, which
+            // implied an active prompt loop that does not exist.
+            // `rule_summary`, `hooks.by_event`, `approval.subscribers`,
+            // and `approval.default_timeout_seconds` were dropped in v2
+            // because they have no backing implementation.
             permissions: CapabilityPermissions {
-                mode: "ask".to_string(),
+                mode: "advisory".to_string(),
                 active_rules: 0,
-                rule_summary: Vec::new(),
             },
             hooks: CapabilityHooks::default(),
-            compaction: CapabilityCompaction::default(),
+            compaction: CapabilityCompaction::planned(),
             approval: CapabilityApproval {
-                subscribers: 0,
                 pending_requests: 0,
-                default_timeout_seconds: 30,
             },
-            transcripts: CapabilityTranscripts::default(),
+            transcripts: CapabilityTranscripts::planned(),
         }
     }
 }
@@ -247,11 +275,29 @@ impl TierConfig {
 /// Top-level capabilities report for a running instance.
 ///
 /// Schema versions:
-/// - v1 (implicit, pre-v0.6.3.1): `tier`, `version`, `features`, `models`
-/// - v2 (v0.6.3 / arch-enhancement-spec §7): adds `schema_version` plus
-///   `permissions`, `hooks`, `compaction`, `approval`, `transcripts` blocks.
-///   v1 fields preserved at the same paths — old clients reading by name
-///   continue to work.
+/// - **v1** (legacy, pre-v0.6.3.1): `tier`, `version`, `features`,
+///   `models`. Reachable via `Accept-Capabilities: v1` (HTTP) or the MCP
+///   `accept` argument set to `"v1"`. See [`CapabilitiesV1`].
+/// - **v2** (v0.6.3.1 honesty patch): `schema_version="2"` plus the
+///   `permissions`, `hooks`, `compaction`, `approval`, `transcripts`
+///   blocks. v1 fields preserved at the same top-level paths — old
+///   clients that read v2 by name continue to work for the un-dropped
+///   fields. Default response shape.
+///
+/// **v2 honesty patch (P1, v0.6.3.1):**
+/// - `features.recall_mode_active` and `features.reranker_active` are
+///   *runtime* state, not config-derived flags.
+/// - `features.memory_reflection` is now a `{planned, version, enabled}`
+///   object, not a `bool`.
+/// - `compaction` and `transcripts` carry the same planned-feature
+///   shape so operators can distinguish "disabled but built" from "not
+///   in this build."
+/// - `permissions.mode = "advisory"` until the enforcement gate ships
+///   in P4. Was `"ask"`, which implied an active interactive loop.
+/// - The following fields were **removed** because no backing
+///   implementation exists: `permissions.rule_summary`,
+///   `hooks.by_event`, `approval.subscribers`,
+///   `approval.default_timeout_seconds`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
     /// Schema-version discriminator. Always `"2"` since v0.6.3.
@@ -261,27 +307,88 @@ pub struct Capabilities {
     pub features: CapabilityFeatures,
     pub models: CapabilityModels,
 
-    /// Active permission/governance rules. Pre-v0.7 reports the count of
+    /// Active permission/governance rules. Pre-P4 reports the count of
     /// namespaces that have a `metadata.governance` policy attached to
     /// their standard memory; the underlying permission system itself
-    /// is v0.7 work.
+    /// is P4 work.
     pub permissions: CapabilityPermissions,
 
     /// Registered hooks. Pre-v0.7 reports webhook subscriptions as a
     /// proxy (hook system itself is v0.7 Bucket 0).
     pub hooks: CapabilityHooks,
 
-    /// Compaction state. v0.8 work — pre-v0.8 reports `enabled: false`.
+    /// Compaction state. v0.8 work — reports `{planned, version,
+    /// enabled}` until the subsystem ships.
     pub compaction: CapabilityCompaction,
 
     /// Approval API state. Reports the live count of pending actions
-    /// from the existing `pending_actions` table; subscriber count is
-    /// v0.7 work.
+    /// from the existing `pending_actions` table.
     pub approval: CapabilityApproval,
 
-    /// Sidechain-transcript state. v0.7 Bucket 1.7 work — pre-v0.7
-    /// reports `enabled: false`.
+    /// Sidechain-transcript state. v0.7 Bucket 1.7 work — reports
+    /// `{planned, version, enabled}` until the subsystem ships.
     pub transcripts: CapabilityTranscripts,
+}
+
+/// Live recall-mode tag (P1 honesty patch). Reflects the *runtime*
+/// state of the embedder + LLM, not the configured tier.
+///
+/// - `Hybrid` — embedder loaded; semantic + keyword blending active.
+/// - `KeywordOnly` — no embedder loaded; FTS5 only.
+/// - `Degraded` — embedder configured but `Embedder::load()` failed
+///   (offline runner, read-only fs, missing HF token, etc.).
+/// - `Disabled` — keyword-tier daemon, semantic recall not configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallMode {
+    Hybrid,
+    KeywordOnly,
+    Degraded,
+    Disabled,
+}
+
+/// Live reranker-mode tag (P1 honesty patch). Reflects the *runtime*
+/// `CrossEncoder` enum variant, not the configured `cross_encoder` flag.
+///
+/// - `Neural` — `CrossEncoder::Neural` loaded successfully.
+/// - `LexicalFallback` — `cross_encoder` was requested but neural model
+///   download or load failed; running on the lexical scorer.
+/// - `Off` — no reranker handle in the daemon (non-autonomous tier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankerMode {
+    Neural,
+    LexicalFallback,
+    Off,
+}
+
+/// Generic "planned but not implemented" marker used by v2 capability
+/// fields whose underlying subsystem is on the roadmap but not in this
+/// build. Operators reading the JSON can distinguish "disabled but
+/// available" from "not in this build" by inspecting `planned`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannedFeature {
+    /// `true` when the feature exists only on the roadmap.
+    pub planned: bool,
+    /// Earliest release that is expected to ship the feature, e.g.
+    /// `"v0.7+"` or `"v0.8+"`. Free-form string; clients should treat
+    /// it as advisory.
+    pub version: String,
+    /// `true` only when the feature is built **and** turned on in this
+    /// daemon. Always `false` when `planned == true`.
+    pub enabled: bool,
+}
+
+impl PlannedFeature {
+    /// A planned-not-yet-shipped feature. `enabled = false`.
+    #[must_use]
+    pub fn planned(version: &str) -> Self {
+        Self {
+            planned: true,
+            version: version.to_string(),
+            enabled: false,
+        }
+    }
 }
 
 /// Boolean feature flags exposed in the capabilities report.
@@ -296,7 +403,11 @@ pub struct CapabilityFeatures {
     pub auto_tagging: bool,
     pub contradiction_analysis: bool,
     pub cross_encoder_reranking: bool,
-    pub memory_reflection: bool,
+    /// Memory-reflection (v0.7+): planned, not yet implemented.
+    /// Was a `bool` before the P1 honesty patch; an object now so
+    /// operators can tell "feature exists but disabled" apart from
+    /// "feature not in this build".
+    pub memory_reflection: PlannedFeature,
     /// v0.6.2 (S18): runtime-observed embedder state. `semantic_search`
     /// above reflects *configured* capability (derived from the tier's
     /// `embedding_model` setting). `embedder_loaded` reflects *actual*
@@ -311,6 +422,23 @@ pub struct CapabilityFeatures {
     /// live embedder handle.
     #[serde(default)]
     pub embedder_loaded: bool,
+    /// v0.6.3.1 (P1 honesty patch): runtime recall-mode tag. Reflects
+    /// the live embedder + LLM availability, not the configured tier.
+    /// See [`RecallMode`].
+    #[serde(default = "default_recall_mode")]
+    pub recall_mode_active: RecallMode,
+    /// v0.6.3.1 (P1 honesty patch): runtime reranker-mode tag.
+    /// Reflects the live `CrossEncoder` variant. See [`RerankerMode`].
+    #[serde(default = "default_reranker_mode")]
+    pub reranker_active: RerankerMode,
+}
+
+fn default_recall_mode() -> RecallMode {
+    RecallMode::Disabled
+}
+
+fn default_reranker_mode() -> RerankerMode {
+    RerankerMode::Off
 }
 
 /// Model identifiers exposed in the capabilities report.
@@ -322,21 +450,21 @@ pub struct CapabilityModels {
     pub cross_encoder: String,
 }
 
-/// Permissions block (capabilities schema v2). Pre-v0.7 reports a live
+/// Permissions block (capabilities schema v2). Pre-P4 reports a live
 /// count of namespace standards carrying a `metadata.governance` policy;
-/// the full permission system lands in v0.7 (arch-enhancement-spec §3).
+/// the full enforcement gate lands in P4. The honesty patch (P1)
+/// renames the mode from `"ask"` (which implied an interactive prompt
+/// loop) to `"advisory"` (governance metadata is recorded but not
+/// enforced).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CapabilityPermissions {
-    /// Enforcement mode. `"ask"` = current default (governance gate runs
-    /// on store/delete/promote and may return Pending). `"off"` would
-    /// disable enforcement; not yet wired.
+    /// Enforcement mode. `"advisory"` until P4 ships the gate.
     pub mode: String,
     /// Number of namespace standards whose `metadata.governance` is
     /// non-null. Counts policies, not memories.
     pub active_rules: usize,
-    /// Per-namespace summary; empty pre-v0.7.
-    #[serde(default)]
-    pub rule_summary: Vec<String>,
+    // P1 honesty patch: `rule_summary` was always empty — no per-rule
+    // serializer existed. Dropped from the v2 wire schema.
 }
 
 /// Hook-pipeline block (capabilities schema v2). Pre-v0.7 reports webhook
@@ -346,45 +474,174 @@ pub struct CapabilityPermissions {
 pub struct CapabilityHooks {
     /// Number of registered hook subscribers (proxy: webhook subscriptions).
     pub registered_count: usize,
-    /// Per-event registration map; empty pre-v0.7.
-    #[serde(default)]
-    pub by_event: std::collections::BTreeMap<String, usize>,
+    // P1 honesty patch: `by_event` was always an empty map — no event
+    // registry exists. Dropped from the v2 wire schema.
 }
 
 /// Compaction block (capabilities schema v2). v0.8 Pillar 2.5 work —
-/// pre-v0.8 reports `enabled: false` and the rest as `None`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// reports `{planned, version, enabled}` plus optional run stats. The
+/// honesty patch (P1) replaced the bare `enabled: false` with the
+/// planned-feature shape so operators can distinguish "feature exists
+/// but disabled" from "feature not in this build".
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityCompaction {
-    pub enabled: bool,
-    #[serde(default)]
+    /// Planned-feature marker. `planned = true` while compaction lives
+    /// only on the roadmap. When the subsystem ships the daemon will
+    /// flip `planned = false` and `enabled` will reflect runtime state.
+    #[serde(flatten)]
+    pub status: PlannedFeature,
+    /// Once shipped: scheduled compaction interval in minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_minutes: Option<u64>,
-    #[serde(default)]
+    /// Once shipped: timestamp of the most recent compaction run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<String>,
-    #[serde(default)]
+    /// Once shipped: arbitrary JSON describing the most recent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_stats: Option<serde_json::Value>,
 }
 
+impl CapabilityCompaction {
+    /// Pre-v0.8 zero-state: planned, not enabled.
+    #[must_use]
+    pub fn planned() -> Self {
+        Self {
+            status: PlannedFeature::planned("v0.8+"),
+            interval_minutes: None,
+            last_run_at: None,
+            last_run_stats: None,
+        }
+    }
+}
+
+impl Default for CapabilityCompaction {
+    fn default() -> Self {
+        Self::planned()
+    }
+}
+
 /// Approval-API block (capabilities schema v2). `pending_requests`
-/// counts the existing `pending_actions` table (live signal). Subscriber
-/// reporting is v0.7 work.
+/// counts the existing `pending_actions` table (live signal).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct CapabilityApproval {
-    /// Number of agents/humans subscribed to approval-decision events.
-    /// 0 pre-v0.7.
-    pub subscribers: usize,
     /// Live count of `pending_actions` with status='pending'.
     pub pending_requests: usize,
-    /// Default approval-request timeout. 30s for the v0.6.3 patch.
-    pub default_timeout_seconds: u64,
+    // P1 honesty patch: `subscribers` (no subscription API exists) and
+    // `default_timeout_seconds` (no sweeper enforces timeouts) dropped
+    // from the v2 wire schema.
 }
 
 /// Sidechain-transcript block (capabilities schema v2). v0.7 Bucket 1.7
-/// work — pre-v0.7 reports `enabled: false`.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+/// work — reports `{planned, version, enabled}` until the subsystem
+/// ships. The honesty patch (P1) replaced the bare `enabled: false`
+/// with the planned-feature shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityTranscripts {
-    pub enabled: bool,
+    /// Planned-feature marker. `planned = true` while sidechain
+    /// transcripts live only on the roadmap.
+    #[serde(flatten)]
+    pub status: PlannedFeature,
+    /// Once shipped: number of stored transcripts.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
     pub total_count: usize,
+    /// Once shipped: total transcript storage in megabytes.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub total_size_mb: u64,
+}
+
+impl CapabilityTranscripts {
+    /// Pre-v0.7 zero-state: planned, not enabled.
+    #[must_use]
+    pub fn planned() -> Self {
+        Self {
+            status: PlannedFeature::planned("v0.7+"),
+            total_count: 0,
+            total_size_mb: 0,
+        }
+    }
+}
+
+impl Default for CapabilityTranscripts {
+    fn default() -> Self {
+        Self::planned()
+    }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities v1 — legacy shape retained for backward compat
+// ---------------------------------------------------------------------------
+
+/// Legacy (v1) capabilities shape — the structure shipped before the
+/// v0.6.3.1 honesty patch. Returned only when a client opts in via
+/// `Accept-Capabilities: v1` (HTTP) or the MCP `accept` argument set
+/// to `"v1"`. Default response is v2.
+///
+/// The v1 schema is frozen — do not extend it. New fields go into v2
+/// (see [`Capabilities`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesV1 {
+    pub tier: String,
+    pub version: String,
+    pub features: CapabilityFeaturesV1,
+    pub models: CapabilityModels,
+}
+
+/// Legacy v1 feature-flag block. Notably, `memory_reflection` is a
+/// `bool` here (it became a `PlannedFeature` object in v2).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityFeaturesV1 {
+    pub keyword_search: bool,
+    pub semantic_search: bool,
+    pub hybrid_recall: bool,
+    pub query_expansion: bool,
+    pub auto_consolidation: bool,
+    pub auto_tagging: bool,
+    pub contradiction_analysis: bool,
+    pub cross_encoder_reranking: bool,
+    pub memory_reflection: bool,
+    #[serde(default)]
+    pub embedder_loaded: bool,
+}
+
+impl Capabilities {
+    /// Project the v2 report down to the legacy v1 shape. Used to
+    /// honour `Accept-Capabilities: v1` from older clients.
+    ///
+    /// `memory_reflection` collapses from `{planned, enabled}` to a
+    /// single bool (`enabled` value). All v2-only fields
+    /// (`recall_mode_active`, `reranker_active`, `permissions`,
+    /// `hooks`, `compaction`, `approval`, `transcripts`) are dropped.
+    #[must_use]
+    pub fn to_v1(&self) -> CapabilitiesV1 {
+        CapabilitiesV1 {
+            tier: self.tier.clone(),
+            version: self.version.clone(),
+            features: CapabilityFeaturesV1 {
+                keyword_search: self.features.keyword_search,
+                semantic_search: self.features.semantic_search,
+                hybrid_recall: self.features.hybrid_recall,
+                query_expansion: self.features.query_expansion,
+                auto_consolidation: self.features.auto_consolidation,
+                auto_tagging: self.features.auto_tagging,
+                contradiction_analysis: self.features.contradiction_analysis,
+                cross_encoder_reranking: self.features.cross_encoder_reranking,
+                memory_reflection: self.features.memory_reflection.enabled,
+                embedder_loaded: self.features.embedder_loaded,
+            },
+            models: self.models.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -870,8 +1127,15 @@ mod tests {
     fn autonomous_has_cross_encoder() {
         let cfg = FeatureTier::Autonomous.config();
         assert!(cfg.cross_encoder);
-        assert!(cfg.capabilities().features.cross_encoder_reranking);
-        assert!(cfg.capabilities().features.memory_reflection);
+        let caps = cfg.capabilities();
+        assert!(caps.features.cross_encoder_reranking);
+        // P1 honesty patch: memory_reflection is a planned-feature
+        // object now. Even on the autonomous tier the underlying
+        // subsystem is roadmap (v0.7+), so `planned == true` and
+        // `enabled == false` regardless of tier.
+        assert!(caps.features.memory_reflection.planned);
+        assert!(!caps.features.memory_reflection.enabled);
+        assert_eq!(caps.features.memory_reflection.version, "v0.7+");
     }
 
     #[test]
@@ -892,9 +1156,10 @@ mod tests {
         assert!(json.contains("gemma4:e2b"));
     }
 
-    /// v0.6.3 (capabilities schema v2 — arch-enhancement-spec §7).
-    /// Round-trip the new struct through serde_json and assert every
-    /// new top-level block is present with the documented zero-state.
+    /// v0.6.3.1 (capabilities schema v2, P1 honesty patch).
+    /// Round-trip the new struct through serde_json and assert the v2
+    /// honesty contract: dropped fields absent, planned-feature blocks
+    /// shaped correctly, runtime-state defaults conservative.
     #[test]
     fn capabilities_v2_zero_state_round_trip() {
         let caps = FeatureTier::Keyword.config().capabilities();
@@ -902,42 +1167,110 @@ mod tests {
 
         assert_eq!(val["schema_version"], "2");
 
-        // permissions zero-state: mode="ask", active_rules=0, empty summary
-        assert_eq!(val["permissions"]["mode"], "ask");
+        // permissions zero-state: mode="advisory" (was "ask" in v1),
+        // active_rules=0. `rule_summary` dropped from v2.
+        assert_eq!(val["permissions"]["mode"], "advisory");
         assert_eq!(val["permissions"]["active_rules"], 0);
         assert!(
-            val["permissions"]["rule_summary"]
-                .as_array()
-                .unwrap()
-                .is_empty()
+            val["permissions"].get("rule_summary").is_none(),
+            "v2 honesty patch drops `permissions.rule_summary` (no per-rule serializer)"
         );
 
-        // hooks zero-state: 0 registered, empty by_event map
+        // hooks zero-state: 0 registered. `by_event` dropped from v2.
         assert_eq!(val["hooks"]["registered_count"], 0);
-        assert!(val["hooks"]["by_event"].as_object().unwrap().is_empty());
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 honesty patch drops `hooks.by_event` (no event registry)"
+        );
 
-        // compaction zero-state: disabled
+        // compaction zero-state: planned, not enabled, optional fields omitted
+        assert_eq!(val["compaction"]["planned"], true);
         assert_eq!(val["compaction"]["enabled"], false);
-        assert!(val["compaction"]["interval_minutes"].is_null());
-        assert!(val["compaction"]["last_run_at"].is_null());
-        assert!(val["compaction"]["last_run_stats"].is_null());
+        assert_eq!(val["compaction"]["version"], "v0.8+");
+        assert!(
+            val["compaction"].get("interval_minutes").is_none(),
+            "Option::None values must be skipped in serialization"
+        );
+        assert!(val["compaction"].get("last_run_at").is_none());
+        assert!(val["compaction"].get("last_run_stats").is_none());
 
-        // approval zero-state: 0 subscribers, 0 pending, 30s timeout
-        assert_eq!(val["approval"]["subscribers"], 0);
+        // approval zero-state: 0 pending. `subscribers` and
+        // `default_timeout_seconds` dropped from v2.
         assert_eq!(val["approval"]["pending_requests"], 0);
-        assert_eq!(val["approval"]["default_timeout_seconds"], 30);
+        assert!(
+            val["approval"].get("subscribers").is_none(),
+            "v2 honesty patch drops `approval.subscribers` (no subscription API)"
+        );
+        assert!(
+            val["approval"].get("default_timeout_seconds").is_none(),
+            "v2 honesty patch drops `approval.default_timeout_seconds` (no sweeper)"
+        );
 
-        // transcripts zero-state: disabled
+        // transcripts zero-state: planned, not enabled, zero counts skipped
+        assert_eq!(val["transcripts"]["planned"], true);
         assert_eq!(val["transcripts"]["enabled"], false);
-        assert_eq!(val["transcripts"]["total_count"], 0);
-        assert_eq!(val["transcripts"]["total_size_mb"], 0);
+        assert_eq!(val["transcripts"]["version"], "v0.7+");
+
+        // memory_reflection: planned-feature object (was bool)
+        assert_eq!(val["features"]["memory_reflection"]["planned"], true);
+        assert_eq!(val["features"]["memory_reflection"]["enabled"], false);
+        assert_eq!(val["features"]["memory_reflection"]["version"], "v0.7+");
+
+        // Runtime-state defaults are conservative — they get overlaid
+        // at the handler boundary based on the live embedder + reranker
+        // handles. With no overlays, the keyword-tier daemon reports
+        // `disabled` / `off`.
+        assert_eq!(val["features"]["recall_mode_active"], "disabled");
+        assert_eq!(val["features"]["reranker_active"], "off");
 
         // Round-trip back to a typed Capabilities and confirm field
-        // identity (proves Deserialize works for all 5 new structs).
+        // identity (proves Deserialize works for all reshaped structs).
         let restored: Capabilities = serde_json::from_value(val).unwrap();
         assert_eq!(restored.schema_version, "2");
-        assert_eq!(restored.permissions.mode, "ask");
-        assert_eq!(restored.approval.default_timeout_seconds, 30);
+        assert_eq!(restored.permissions.mode, "advisory");
+        assert!(restored.compaction.status.planned);
+        assert!(restored.transcripts.status.planned);
+        assert_eq!(restored.features.recall_mode_active, RecallMode::Disabled);
+        assert_eq!(restored.features.reranker_active, RerankerMode::Off);
+    }
+
+    /// P1 honesty patch: legacy v1 projection preserves the old shape
+    /// for clients that opt in via `Accept-Capabilities: v1`.
+    #[test]
+    fn capabilities_v1_projection_preserves_legacy_shape() {
+        let caps = FeatureTier::Autonomous.config().capabilities();
+        let v1 = caps.to_v1();
+        let val: serde_json::Value = serde_json::to_value(&v1).unwrap();
+
+        // v1: no schema_version, no v2-only blocks
+        assert!(
+            val.get("schema_version").is_none(),
+            "v1 has no schema_version"
+        );
+        assert!(
+            val.get("permissions").is_none(),
+            "v1 has no permissions block"
+        );
+        assert!(val.get("hooks").is_none());
+        assert!(val.get("compaction").is_none());
+        assert!(val.get("approval").is_none());
+        assert!(val.get("transcripts").is_none());
+
+        // v1 keeps the four legacy top-level keys
+        assert!(val["tier"].is_string());
+        assert!(val["version"].is_string());
+        assert!(val["features"].is_object());
+        assert!(val["models"].is_object());
+
+        // v1 features.memory_reflection collapses to a bool — autonomous
+        // tier had cross_encoder + has_llm but the planned object's
+        // `enabled = false`, so the v1 bool is `false`.
+        assert!(val["features"]["memory_reflection"].is_boolean());
+        assert_eq!(val["features"]["memory_reflection"], false);
+
+        // v1 features carry no recall_mode_active / reranker_active
+        assert!(val["features"].get("recall_mode_active").is_none());
+        assert!(val["features"].get("reranker_active").is_none());
     }
 
     #[test]
