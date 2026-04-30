@@ -16,7 +16,7 @@ use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::{GovernancePolicy, Memory, Tier};
+use crate::models::{CandidateCounts, GovernancePolicy, Memory, RecallMeta, RecallTelemetry, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -1162,7 +1162,7 @@ fn inject_namespace_standard(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-fn handle_recall(
+pub fn handle_recall(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,
@@ -1231,6 +1231,35 @@ fn handle_recall(
         }
     };
 
+    // v0.6.3.1 (P3): build the per-request meta block from retrieval-stage
+    // telemetry + the runtime reranker variant. The block is always
+    // present in the response — clients that don't read it ignore unknown
+    // fields per JSON-RPC convention. Closes audit gaps G2/G8/G11 by
+    // making silent-degrade paths visible at request time.
+    let reranker_used = match reranker {
+        Some(ce) if ce.is_neural() => "neural",
+        Some(_) => "lexical",
+        None => "none",
+    };
+    let attach_meta = |resp: &mut Value, recall_mode: &str, telemetry: &RecallTelemetry| {
+        // Round blend_weight to 3 decimals — matches the score field
+        // precision and keeps the wire shape stable regardless of f64
+        // representation jitter.
+        let blend_weight = (telemetry.blend_weight_avg * 1000.0).round() / 1000.0;
+        let meta = RecallMeta {
+            recall_mode: recall_mode.to_string(),
+            reranker_used: reranker_used.to_string(),
+            candidate_counts: CandidateCounts {
+                fts: telemetry.fts_candidates,
+                hnsw: telemetry.hnsw_candidates,
+            },
+            blend_weight,
+        };
+        if let Ok(v) = serde_json::to_value(&meta) {
+            resp["meta"] = v;
+        }
+    };
+
     // Use hybrid recall if embedder is available
     if let Some(emb) = embedder {
         match emb.embed(context) {
@@ -1251,7 +1280,7 @@ fn handle_recall(
                         }
                     }
                 };
-                let (results, tokens_used) = db::recall_hybrid(
+                let (results, tokens_used, telemetry) = db::recall_hybrid_with_telemetry(
                     conn,
                     context,
                     &query_emb,
@@ -1275,6 +1304,7 @@ fn handle_recall(
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     decorate_budget(&mut resp, tokens_used);
+                    attach_meta(&mut resp, "hybrid", &telemetry);
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
                 }
@@ -1283,17 +1313,24 @@ fn handle_recall(
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
                 decorate_budget(&mut resp, tokens_used);
+                attach_meta(&mut resp, "hybrid", &telemetry);
                 inject_namespace_standard(conn, namespace, &mut resp);
                 return Ok(resp);
             }
             Err(e) => {
+                // v0.6.3.1 (P3, G11): the embedder being present but the
+                // per-query embed failing is a different silent-degrade
+                // path than "embedder unavailable at startup" — preserve
+                // the existing tracing event and fall through to
+                // keyword_only mode below, which is what the meta block
+                // will report.
                 tracing::warn!("embedding failed, falling back to FTS: {}", e);
             }
         }
     }
 
     // Fallback to keyword-only recall
-    let (results, tokens_used) = db::recall(
+    let (results, tokens_used, telemetry) = db::recall_with_telemetry(
         conn,
         context,
         namespace,
@@ -1310,6 +1347,7 @@ fn handle_recall(
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
     decorate_budget(&mut resp, tokens_used);
+    attach_meta(&mut resp, "keyword_only", &telemetry);
     inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
 }
@@ -1341,6 +1379,13 @@ pub(crate) fn handle_capabilities_with_conn(
     // this bool reflects the RUNTIME — the two can diverge when the HF
     // model fetch fails on an offline runner.
     caps.features.embedder_loaded = embedder_loaded;
+
+    // v0.6.3.1 (P3, G2): mirror the per-process HNSW eviction counters
+    // into the capabilities surface so a `memory_capabilities` poll can
+    // tell operators whether the index is currently shedding embeddings.
+    // These are the same values surfaced in `memory_stats.index_evictions_total`.
+    caps.hnsw.evictions_total = crate::hnsw::index_evictions_total();
+    caps.hnsw.evicted_recently = crate::hnsw::evicted_recently(60);
 
     // v0.6.3 (capabilities schema v2): when we have a connection, fill
     // the dynamic blocks with live counts. Failures here are non-fatal —

@@ -56,10 +56,23 @@ impl CrossEncoder {
     /// Create a neural cross-encoder by downloading ms-marco-MiniLM-L-6-v2.
     ///
     /// Falls back to lexical if download or loading fails.
+    ///
+    /// v0.6.3.1 (P3, G8): when the neural path fails (e.g. HF Hub
+    /// unreachable, model checksum mismatch), emit a structured tracing
+    /// event `reranker.fallback` so operators see the silent
+    /// neural→lexical degrade. The eprintln remains for backward-compat
+    /// startup logs.
     pub fn new_neural() -> Self {
         match Self::load_neural() {
             Ok(ce) => ce,
             Err(e) => {
+                tracing::warn!(
+                    target: "reranker.fallback",
+                    from = "neural",
+                    to = "lexical",
+                    reason = %e,
+                    "cross-encoder fell back to lexical: neural init failed"
+                );
                 eprintln!("ai-memory: neural cross-encoder failed ({e}), using lexical fallback");
                 Self::Lexical
             }

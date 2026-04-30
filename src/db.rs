@@ -1261,6 +1261,48 @@ pub fn apply_token_budget(
 /// Task 1.11: after ranking, applies optional `budget_tokens` cap.
 /// Returns `(truncated_list, tokens_used)`.
 #[allow(clippy::too_many_arguments)]
+/// v0.6.3.1 (P3): keyword-only recall with retrieval-stage telemetry.
+///
+/// Identical to [`recall`] but additionally returns a [`crate::models::RecallTelemetry`]
+/// describing the FTS5 candidate count (HNSW count is always 0 for this
+/// path — no semantic stage runs). MCP `handle_recall` uses this to build
+/// the `meta` block; [`recall`] is preserved as a thin wrapper for
+/// existing callers (HTTP handlers, CLI, bench).
+#[allow(clippy::too_many_arguments)]
+pub fn recall_with_telemetry(
+    conn: &Connection,
+    context: &str,
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    short_extend: i64,
+    mid_extend: i64,
+    as_agent: Option<&str>,
+    budget_tokens: Option<usize>,
+) -> Result<(Vec<(Memory, f64)>, usize, crate::models::RecallTelemetry)> {
+    let (results, tokens_used) = recall(
+        conn,
+        context,
+        namespace,
+        limit,
+        tags_filter,
+        since,
+        until,
+        short_extend,
+        mid_extend,
+        as_agent,
+        budget_tokens,
+    )?;
+    let telemetry = crate::models::RecallTelemetry {
+        fts_candidates: results.len(),
+        hnsw_candidates: 0,
+        blend_weight_avg: 0.0,
+    };
+    Ok((results, tokens_used, telemetry))
+}
+
 pub fn recall(
     conn: &Connection,
     context: &str,
@@ -2775,6 +2817,12 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         .unwrap_or(0);
     let db_size_bytes = std::fs::metadata(db_path).map_or(0, |m| m.len());
 
+    // v0.6.3.1 (P3, G2): cumulative HNSW eviction count is process-local
+    // state — read from the static counter in src/hnsw.rs. Surfacing it in
+    // `stats` lets `memory_stats` callers and `ai-memory doctor` (P7) flag
+    // operators who are sustaining at the index cap.
+    let index_evictions_total = crate::hnsw::index_evictions_total();
+
     Ok(Stats {
         total,
         by_tier,
@@ -2782,6 +2830,7 @@ pub fn stats(conn: &Connection, db_path: &Path) -> Result<Stats> {
         expiring_soon,
         links_count,
         db_size_bytes,
+        index_evictions_total,
     })
 }
 
@@ -3195,7 +3244,12 @@ pub fn get_all_embeddings(conn: &Connection) -> Result<Vec<(String, Vec<f32>)>> 
 /// When an HNSW `vector_index` is provided, uses approximate nearest-neighbor
 /// search instead of scanning all embeddings linearly.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_lines)]
+/// v0.6.3.1 (P3): hybrid recall preserving the existing 2-tuple return
+/// shape for HTTP / CLI / bench callers. Delegates to
+/// [`recall_hybrid_with_telemetry`] and discards the telemetry. Kept so
+/// the dozen-plus call sites need no churn for a feature only MCP
+/// `handle_recall` consumes.
+#[allow(clippy::too_many_arguments)]
 pub fn recall_hybrid(
     conn: &Connection,
     context: &str,
@@ -3212,6 +3266,54 @@ pub fn recall_hybrid(
     budget_tokens: Option<usize>,
     scoring: &crate::config::ResolvedScoring,
 ) -> Result<(Vec<(Memory, f64)>, usize)> {
+    let (results, tokens, _telemetry) = recall_hybrid_with_telemetry(
+        conn,
+        context,
+        query_embedding,
+        namespace,
+        limit,
+        tags_filter,
+        since,
+        until,
+        vector_index,
+        short_extend,
+        mid_extend,
+        as_agent,
+        budget_tokens,
+        scoring,
+    )?;
+    Ok((results, tokens))
+}
+
+/// v0.6.3.1 (P3): hybrid recall reporting per-stage candidate counts and
+/// the average semantic blend weight. MCP `handle_recall` uses the
+/// telemetry to populate the `meta` block (closes audit gaps G2/G8/G11).
+///
+/// The retrieval logic is unchanged — anti-goal of this phase is "do not
+/// change recall scoring or fusion logic." Counters are computed in
+/// place: `fts_candidates` is the pre-fusion FTS5 row count,
+/// `hnsw_candidates` is the pre-fusion HNSW (or linear-scan) hit count
+/// admitted past the 0.2 cosine gate, `blend_weight_avg` is the mean
+/// `semantic_weight` across the *returned* set (not the full candidate
+/// pool — operators care about what made it out).
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
+pub fn recall_hybrid_with_telemetry(
+    conn: &Connection,
+    context: &str,
+    query_embedding: &[f32],
+    namespace: Option<&str>,
+    limit: usize,
+    tags_filter: Option<&str>,
+    since: Option<&str>,
+    until: Option<&str>,
+    vector_index: Option<&crate::hnsw::VectorIndex>,
+    short_extend: i64,
+    mid_extend: i64,
+    as_agent: Option<&str>,
+    budget_tokens: Option<usize>,
+    scoring: &crate::config::ResolvedScoring,
+) -> Result<(Vec<(Memory, f64)>, usize, crate::models::RecallTelemetry)> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
     let prefixes = compute_visibility_prefixes(as_agent);
@@ -3308,6 +3410,13 @@ pub fn recall_hybrid(
         },
     )?;
 
+    // v0.6.3.1 (P3): pre-fusion candidate-pool counters surfaced to the
+    // MCP `meta` block. Counted here at retrieval time, not after fusion,
+    // so operators see how each stage contributed even when fusion
+    // collapses the union to a smaller set.
+    let mut fts_candidates_count: usize = 0;
+    let mut hnsw_candidates_count: usize = 0;
+
     let mut max_fts_score: f64 = 1.0;
     for row in fts_rows {
         let (mem, fts_score) = row?;
@@ -3322,6 +3431,7 @@ pub fn recall_hybrid(
             ))
         });
         scored.insert(mem.id.clone(), (mem, fts_score, cosine));
+        fts_candidates_count += 1;
     }
 
     // Semantic-only candidates — use HNSW index for fast ANN if available,
@@ -3386,6 +3496,7 @@ pub fn recall_hybrid(
                     continue;
                 }
                 scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                hnsw_candidates_count += 1;
             }
         }
     } else {
@@ -3428,6 +3539,7 @@ pub fn recall_hybrid(
                 // v0.6.2 (S18): see matching note above at the HNSW gate.
                 if cosine > 0.2 {
                     scored.insert(mem.id.clone(), (mem, 0.0, cosine));
+                    hnsw_candidates_count += 1;
                 }
             }
         }
@@ -3442,6 +3554,11 @@ pub fn recall_hybrid(
     // `legacy_scoring` config knob short-circuits the decay back to 1.0 for
     // A/B comparison and emergency regression rollback.
     let now_utc = Utc::now();
+    // v0.6.3.1 (P3): collect per-candidate semantic weight in parallel with
+    // the existing fusion pass so MCP `meta.blend_weight` reports the
+    // *applied* (not configured) weight. Wrapped in `RefCell` so the map
+    // closure can side-effect without restructuring the iterator chain.
+    let blend_weights: std::cell::RefCell<Vec<f64>> = std::cell::RefCell::new(Vec::new());
     let mut results: Vec<(Memory, f64)> = scored
         .into_values()
         .map(|(mem, fts_score, cosine)| {
@@ -3459,6 +3576,7 @@ pub fn recall_hybrid(
             } else {
                 0.50 - 0.35 * ((content_len - 500.0) / 4500.0)
             };
+            blend_weights.borrow_mut().push(semantic_weight);
             let blended = semantic_weight * cosine + (1.0 - semantic_weight) * norm_fts;
             let age_days = chrono::DateTime::parse_from_rfc3339(&mem.created_at)
                 .ok()
@@ -3498,7 +3616,28 @@ pub fn recall_hybrid(
         }
     }
 
-    Ok((budgeted, tokens_used))
+    // v0.6.3.1 (P3): summarize per-stage candidate counts and the average
+    // semantic blend weight for the MCP `meta` block. `blend_weight_avg`
+    // is the unweighted mean across the *post-fusion* candidate set so
+    // operators see the typical weight applied to what shipped, not the
+    // configured ceiling. Pre-fusion counts come from the retrieval
+    // counters (FTS / HNSW), which gives an honest picture of stage
+    // contribution even when fusion deduplicates.
+    let weights = blend_weights.into_inner();
+    let blend_weight_avg = if weights.is_empty() {
+        0.0
+    } else {
+        #[allow(clippy::cast_precision_loss)]
+        let n = weights.len() as f64;
+        weights.iter().sum::<f64>() / n
+    };
+    let telemetry = crate::models::RecallTelemetry {
+        fts_candidates: fts_candidates_count,
+        hnsw_candidates: hnsw_candidates_count,
+        blend_weight_avg,
+    };
+
+    Ok((budgeted, tokens_used, telemetry))
 }
 
 /// Checkpoint WAL for clean shutdown.

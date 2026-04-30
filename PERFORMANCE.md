@@ -141,6 +141,38 @@ Three reasons, in order of importance:
    ai-memory (laptop, VPS, beefy server) need a comparison point.
    "p95 < 100 ms on M4" beats "should be fast enough."
 
+## Response Shape Overhead
+
+### v0.6.3.1 — `memory_recall.meta` block (P3)
+
+Every `memory_recall` response now carries a `meta` block reporting which
+recall path executed (`hybrid` vs `keyword_only`), which reranker scored
+the final ordering (`neural` / `lexical` / `none`), the per-stage
+candidate counts (`fts`, `hnsw`), and the average semantic blend weight.
+Closes audit gaps G2 / G8 / G11 by making silent-degrade paths visible at
+request time.
+
+The block is small — a representative serialization is:
+
+```json
+"meta": {
+  "recall_mode": "hybrid",
+  "reranker_used": "neural",
+  "candidate_counts": { "fts": 8, "hnsw": 12 },
+  "blend_weight": 0.42
+}
+```
+
+That's **~110 bytes wire-side** (closer to ~50 bytes after gzip on the
+HTTP path). The block is constant-size — it does not grow with the
+number of memories returned. Counter accumulation in
+`db::recall_hybrid_with_telemetry` adds two `usize` increments per
+candidate plus a single `f64` push to a `Vec`, none of which moves the
+needle on the `< 50 ms` p95 budget for `memory_recall (hot, depth=1)`.
+Local measurements on the M4 reference baseline show no detectable
+shift in the recall row of `ai-memory bench`; the published budget
+holds with margin.
+
 ## Forward References
 
 - Stream E (bench tool): `src/bench.rs`, charter §"Stream E —

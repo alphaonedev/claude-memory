@@ -285,6 +285,74 @@ pub struct Stats {
     pub expiring_soon: usize,
     pub links_count: usize,
     pub db_size_bytes: u64,
+    /// v0.6.3.1 (P3, G2): cumulative HNSW oldest-eviction count since this
+    /// process started. Non-zero indicates the in-memory vector index has
+    /// hit its `MAX_ENTRIES` cap and silently dropped older embeddings —
+    /// recall quality may have degraded for evicted ids. Process-local
+    /// (not persisted) because the index itself is process-local.
+    #[serde(default)]
+    pub index_evictions_total: u64,
+}
+
+/// v0.6.3.1 (P3): per-request observability for the recall pipeline.
+///
+/// Surfaces *which* recall path actually ran, *which* reranker was active,
+/// the candidate pool sizes coming out of FTS and HNSW (before fusion), and
+/// the blend weight applied to the semantic component. Always present in
+/// `memory_recall` responses; older clients ignore unknown fields per the
+/// JSON-RPC convention.
+///
+/// Closes G2/G8/G11 from the v0.6.3 audit by making every silent-degrade
+/// path observable at request time. The capabilities surface (P1) reports
+/// the same state at startup; this struct is the per-call mirror.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallMeta {
+    /// Which recall path executed.
+    /// - `"hybrid"` — embedder + FTS, blended (G11 happy path).
+    /// - `"keyword_only"` — embedder unavailable or query-embed failed,
+    ///   keyword-only recall served (G11 silent-degrade now visible).
+    pub recall_mode: String,
+    /// Which reranker scored the final ordering.
+    /// - `"neural"` — BERT cross-encoder (autonomous tier, model loaded).
+    /// - `"lexical"` — Jaccard/TF-IDF/bigram fallback (G8 silent-degrade
+    ///   now visible).
+    /// - `"none"` — reranking disabled at this tier.
+    pub reranker_used: String,
+    /// Candidate-pool sizes coming out of each retrieval stage *before*
+    /// fusion. Useful for spotting empty-FTS or empty-HNSW degradations.
+    pub candidate_counts: CandidateCounts,
+    /// Semantic blend weight applied during fusion. `0.0` for
+    /// `keyword_only` mode; otherwise the average semantic weight across
+    /// the returned candidates (varies 0.50→0.15 with content length).
+    pub blend_weight: f64,
+}
+
+/// v0.6.3.1 (P3): retrieval-stage candidate counts feeding `RecallMeta`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateCounts {
+    /// Number of candidates retrieved by FTS5 keyword scoring.
+    pub fts: usize,
+    /// Number of candidates retrieved by HNSW (or linear-scan fallback)
+    /// semantic search. `0` in keyword-only mode.
+    pub hnsw: usize,
+}
+
+/// v0.6.3.1 (P3): internal telemetry returned alongside recall results.
+///
+/// Plumbed from `db::recall_hybrid_with_telemetry` /
+/// `db::recall_with_telemetry` up to `mcp::handle_recall`, which uses it
+/// to populate `RecallMeta`. Not serialized — `RecallMeta` is the public
+/// shape.
+#[derive(Debug, Clone, Default)]
+pub struct RecallTelemetry {
+    /// Candidates returned by the FTS5 stage before fusion.
+    pub fts_candidates: usize,
+    /// Candidates returned by the HNSW (or linear-scan fallback) stage
+    /// before fusion. `0` for keyword-only recall.
+    pub hnsw_candidates: usize,
+    /// Average semantic blend weight applied across the returned set.
+    /// `0.0` for keyword-only recall.
+    pub blend_weight_avg: f64,
 }
 
 #[derive(Debug, Serialize)]
