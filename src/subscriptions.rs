@@ -40,6 +40,13 @@ pub struct Subscription {
     pub created_at: String,
     pub dispatch_count: i64,
     pub failure_count: i64,
+    /// v0.6.3.1 P5 (G9): structured per-event-type opt-in list. When
+    /// `Some(list)` the subscription only fires for event types in
+    /// `list` (overriding the legacy comma-separated `events`
+    /// whitelist). When `None` (default) all events match — preserves
+    /// pre-P5 behaviour for existing subscribers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub event_types: Option<Vec<String>>,
 }
 
 /// Parameters for creating a subscription.
@@ -50,19 +57,60 @@ pub struct NewSubscription<'a> {
     pub namespace_filter: Option<&'a str>,
     pub agent_filter: Option<&'a str>,
     pub created_by: Option<&'a str>,
+    /// v0.6.3.1 P5 (G9): optional structured event-type whitelist. When
+    /// `Some`, only the listed event types fire. When `None`, the legacy
+    /// `events` field (comma-separated / `*`) governs — the historical
+    /// behaviour for backward compatibility.
+    pub event_types: Option<&'a [String]>,
 }
+
+/// Canonical list of webhook lifecycle events surfaced to subscribers
+/// and to `memory_capabilities` (capabilities v2 `webhook_events`).
+/// Keep stable: integrators pin against these strings.
+pub const WEBHOOK_EVENT_TYPES: &[&str] = &[
+    "memory_store",
+    "memory_promote",
+    "memory_delete",
+    "memory_link_created",
+    "memory_consolidated",
+];
 
 /// Insert a subscription, hashing any secret before persisting.
 ///
 /// Returns the new subscription's id.
+///
+/// P5 (G9): when `event_types` is `Some`, the structured opt-in list is
+/// JSON-encoded into the new `event_types` column AND mirrored into
+/// the legacy comma-separated `events` column so the existing
+/// dispatch matcher continues to work without a second code path. An
+/// unknown event type returns Err — the canonical list lives in
+/// `WEBHOOK_EVENT_TYPES`.
 pub fn insert(conn: &Connection, req: &NewSubscription<'_>) -> Result<String> {
     validate_url(req.url)?;
     let id = uuid::Uuid::new_v4().to_string();
     let secret_hash = req.secret.map(sha256_hex);
     let now = chrono::Utc::now().to_rfc3339();
+
+    // P5: validate + serialise the structured event-type list.
+    let (events_csv, event_types_json) = if let Some(list) = req.event_types {
+        for ev in list {
+            if !WEBHOOK_EVENT_TYPES.contains(&ev.as_str()) {
+                return Err(anyhow!(
+                    "unknown webhook event type {ev:?}; valid types: {WEBHOOK_EVENT_TYPES:?}"
+                ));
+            }
+        }
+        // Mirror into the legacy events column so dispatch keeps working.
+        let csv = list.join(",");
+        let json = serde_json::to_string(list).context("event_types serialise")?;
+        (csv, Some(json))
+    } else {
+        (req.events.to_string(), None)
+    };
+
     conn.execute(
-        "INSERT INTO subscriptions (id, url, events, secret_hash, namespace_filter, agent_filter, created_by, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![id, req.url, req.events, secret_hash, req.namespace_filter, req.agent_filter, req.created_by, now],
+        "INSERT INTO subscriptions (id, url, events, secret_hash, namespace_filter, agent_filter, created_by, created_at, event_types) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![id, req.url, events_csv, secret_hash, req.namespace_filter, req.agent_filter, req.created_by, now, event_types_json],
     )?;
     Ok(id)
 }
@@ -76,9 +124,22 @@ pub fn delete(conn: &Connection, id: &str) -> Result<bool> {
 /// List all active subscriptions.
 pub fn list(conn: &Connection) -> Result<Vec<Subscription>> {
     let mut stmt = conn.prepare(
-        "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count FROM subscriptions ORDER BY created_at DESC",
+        "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count, event_types FROM subscriptions ORDER BY created_at DESC",
     )?;
     let rows = stmt.query_map([], |row| {
+        let event_types_raw: Option<String> = row.get(9)?;
+        // P5: decode the JSON column. A corrupt row should not break
+        // the entire list — fall back to None (= all-events) and warn.
+        let event_types =
+            event_types_raw.and_then(|s| match serde_json::from_str::<Vec<String>>(&s) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!(
+                        "subscription event_types JSON decode failed, treating as all-events: {e}"
+                    );
+                    None
+                }
+            });
         Ok(Subscription {
             id: row.get(0)?,
             url: row.get(1)?,
@@ -89,27 +150,91 @@ pub fn list(conn: &Connection) -> Result<Vec<Subscription>> {
             created_at: row.get(6)?,
             dispatch_count: row.get(7)?,
             failure_count: row.get(8)?,
+            event_types,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .context("subscription row decode failed")
 }
 
+/// P5 (G9): list subscriptions matching a specific event type. Returns
+/// rows where either:
+///   - `event_types` is NULL (= all events; backward-compat default), OR
+///   - `event_types` JSON array contains `event_type`.
+///
+/// This is the DB-side variant of the per-event filter; the in-memory
+/// `matches_filters` is the authoritative gate at dispatch time and
+/// honours both the legacy `events` whitelist and the new
+/// `event_types` opt-in list.
+pub fn list_by_event(conn: &Connection, event_type: &str) -> Result<Vec<Subscription>> {
+    // SQLite doesn't have a JSON contains operator portable across all
+    // builds; we filter in Rust after a coarse SQL prefilter that drops
+    // rows whose stored JSON clearly doesn't mention the event. The
+    // text LIKE match is conservative (it can yield false positives the
+    // post-filter then rejects) which keeps the SQL simple while still
+    // letting an idx_subscriptions_event_types-backed scan win on large
+    // tables.
+    let pattern = format!("%{event_type}%");
+    let mut stmt = conn.prepare(
+        "SELECT id, url, events, namespace_filter, agent_filter, created_by, created_at, dispatch_count, failure_count, event_types FROM subscriptions WHERE event_types IS NULL OR event_types LIKE ?1 ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![pattern], |row| {
+        let event_types_raw: Option<String> = row.get(9)?;
+        let event_types =
+            event_types_raw.and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok());
+        Ok(Subscription {
+            id: row.get(0)?,
+            url: row.get(1)?,
+            events: row.get(2)?,
+            namespace_filter: row.get(3)?,
+            agent_filter: row.get(4)?,
+            created_by: row.get(5)?,
+            created_at: row.get(6)?,
+            dispatch_count: row.get(7)?,
+            failure_count: row.get(8)?,
+            event_types,
+        })
+    })?;
+    let mut out: Vec<Subscription> = Vec::new();
+    for sub in rows {
+        let s = sub.context("subscription row decode failed")?;
+        match &s.event_types {
+            None => out.push(s),
+            Some(list) if list.iter().any(|e| e == event_type) => out.push(s),
+            Some(_) => {} // structured opt-in present but doesn't include this event
+        }
+    }
+    Ok(out)
+}
+
 /// Test whether a subscription's filters match the given event.
+///
+/// P5 (G9): when `sub_event_types` is `Some(list)` it overrides the
+/// legacy `sub_events` comma-string — the structured opt-in is the
+/// authoritative filter for that subscriber. When `None`, the legacy
+/// whitelist applies (backward compat for pre-P5 subscribers).
 fn matches_filters(
     sub_events: &str,
+    sub_event_types: Option<&[String]>,
     sub_namespace: Option<&str>,
     sub_agent: Option<&str>,
     event: &str,
     namespace: &str,
     agent: Option<&str>,
 ) -> bool {
-    // Event whitelist (comma-separated or `*`).
-    let event_match = sub_events == "*"
-        || sub_events
-            .split(',')
-            .map(str::trim)
-            .any(|e| e == event || e == "*");
+    let event_match = if let Some(list) = sub_event_types {
+        // Structured opt-in: empty list means "no events" (defensive — the
+        // insert path validates non-empty, but defend against hand-crafted
+        // rows).
+        list.iter().any(|e| e == event)
+    } else {
+        // Legacy whitelist (comma-separated or `*`).
+        sub_events == "*"
+            || sub_events
+                .split(',')
+                .map(str::trim)
+                .any(|e| e == event || e == "*")
+    };
     if !event_match {
         return false;
     }
@@ -136,6 +261,74 @@ struct DispatchPayload<'a> {
     namespace: &'a str,
     agent_id: Option<&'a str>,
     delivered_at: String,
+    /// P5 (G9): event-specific extra fields. Flattened so the wire shape
+    /// stays a flat object — older subscribers that ignore unknown keys
+    /// keep working. Each new event type uses one of the
+    /// `*EventDetails` structs below.
+    #[serde(flatten, skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
+}
+
+// ---------------------------------------------------------------------
+// P5 (G9) — event payload structs for the four new lifecycle events.
+//
+// Each struct is the `details` block flattened into `DispatchPayload`
+// for its event type. They are intentionally small and JSON-stable —
+// the same shape ships on both the MCP and HTTP webhook surfaces.
+// Adding a new field is backward-compatible (subscribers ignore
+// unknowns); renaming or removing a field is breaking — bump the
+// payload schema version per AI_DEVELOPER_GOVERNANCE.md.
+// ---------------------------------------------------------------------
+
+/// `memory_promote` event — fires after a tier or vertical promotion
+/// commits. `to_namespace` is `Some` for vertical (`memory_promote`
+/// with a `to_namespace` argument); for the default tier promotion it
+/// is `None` and `tier` is set to the new tier (`"long"`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromoteEventDetails {
+    /// `"vertical"` for namespace promote-clone, `"tier"` for the
+    /// default tier upgrade.
+    pub mode: String,
+    /// New tier after promotion (always `"long"` for `mode = "tier"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    /// Target namespace (vertical promote only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_namespace: Option<String>,
+    /// Clone id (vertical promote only); the `memory_id` field on the
+    /// outer payload carries the source memory id in vertical mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clone_id: Option<String>,
+}
+
+/// `memory_delete` event — fires after the row is removed from
+/// `memories`. `title` and `tier` come from the pre-delete snapshot so
+/// subscribers can write meaningful audit entries without a
+/// roundtrip.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeleteEventDetails {
+    pub title: String,
+    pub tier: String,
+}
+
+/// `memory_link_created` event — fires after `db::create_link`
+/// commits. The outer `memory_id` carries the source id (the
+/// link-author side); `target_id` is the destination of the directed
+/// link.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkCreatedEventDetails {
+    pub target_id: String,
+    pub relation: String,
+}
+
+/// `memory_consolidated` event — fires after `db::consolidate`
+/// commits. The outer `memory_id` carries the new consolidated
+/// memory's id; `source_ids` is the array of memories that were
+/// merged (and deleted by the consolidate op).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidatedEventDetails {
+    pub source_ids: Vec<String>,
+    pub source_count: usize,
 }
 
 /// Fire an event to all matching subscribers. Each dispatch runs in
@@ -145,6 +338,11 @@ struct DispatchPayload<'a> {
 /// Caller owns the connection. Dispatch threads re-open the connection
 /// as needed to update counters (cheap — `SQLite` connections are
 /// process-shared via WAL).
+///
+/// P5 (G9): convenience wrapper for the historical no-details case
+/// (used by `memory_store`). New event types should call
+/// `dispatch_event_with_details` and pass the matching
+/// `*EventDetails` struct serialised to JSON.
 pub fn dispatch_event(
     conn: &Connection,
     event: &str,
@@ -152,6 +350,25 @@ pub fn dispatch_event(
     namespace: &str,
     agent_id: Option<&str>,
     db_path: &std::path::Path,
+) {
+    dispatch_event_with_details(conn, event, memory_id, namespace, agent_id, db_path, None);
+}
+
+/// P5 (G9): full lifecycle dispatch with optional event-specific
+/// details. The details JSON is FLATTENED into the dispatch payload —
+/// keys must not collide with the outer envelope (`event`,
+/// `memory_id`, `namespace`, `agent_id`, `delivered_at`). The four
+/// new event types (`memory_promote`, `memory_delete`,
+/// `memory_link_created`, `memory_consolidated`) supply their
+/// `*EventDetails` struct serialised via `serde_json::to_value`.
+pub fn dispatch_event_with_details(
+    conn: &Connection,
+    event: &str,
+    memory_id: &str,
+    namespace: &str,
+    agent_id: Option<&str>,
+    db_path: &std::path::Path,
+    details: Option<serde_json::Value>,
 ) {
     let subs = match list(conn) {
         Ok(s) => s,
@@ -165,6 +382,7 @@ pub fn dispatch_event(
         .filter(|s| {
             matches_filters(
                 &s.events,
+                s.event_types.as_deref(),
                 s.namespace_filter.as_deref(),
                 s.agent_filter.as_deref(),
                 event,
@@ -182,6 +400,7 @@ pub fn dispatch_event(
         namespace,
         agent_id,
         delivered_at: chrono::Utc::now().to_rfc3339(),
+        details,
     };
     let body = match serde_json::to_string(&payload) {
         Ok(s) => s,
@@ -536,9 +755,18 @@ mod tests {
 
     #[test]
     fn filter_wildcards() {
-        assert!(matches_filters("*", None, None, "memory_store", "ns", None));
+        assert!(matches_filters(
+            "*",
+            None,
+            None,
+            None,
+            "memory_store",
+            "ns",
+            None
+        ));
         assert!(matches_filters(
             "memory_store,memory_delete",
+            None,
             None,
             None,
             "memory_store",
@@ -549,12 +777,14 @@ mod tests {
             "memory_delete",
             None,
             None,
+            None,
             "memory_store",
             "ns",
             None
         ));
         assert!(matches_filters(
             "*",
+            None,
             Some("foo"),
             None,
             "memory_store",
@@ -563,6 +793,7 @@ mod tests {
         ));
         assert!(!matches_filters(
             "*",
+            None,
             Some("foo"),
             None,
             "memory_store",
@@ -572,6 +803,7 @@ mod tests {
         assert!(matches_filters(
             "*",
             None,
+            None,
             Some("alice"),
             "memory_store",
             "ns",
@@ -580,10 +812,72 @@ mod tests {
         assert!(!matches_filters(
             "*",
             None,
+            None,
             Some("alice"),
             "memory_store",
             "ns",
             Some("bob")
+        ));
+    }
+
+    #[test]
+    fn filter_event_types_overrides_legacy_events() {
+        // P5 (G9): when the structured `event_types` opt-in is Some,
+        // the legacy `events` whitelist is ignored.
+        let opt_in_store_only: Vec<String> = vec!["memory_store".to_string()];
+        // Legacy says "all events", structured says "store only" — store
+        // matches, delete does not.
+        assert!(matches_filters(
+            "*",
+            Some(&opt_in_store_only),
+            None,
+            None,
+            "memory_store",
+            "ns",
+            None
+        ));
+        assert!(!matches_filters(
+            "*",
+            Some(&opt_in_store_only),
+            None,
+            None,
+            "memory_delete",
+            "ns",
+            None
+        ));
+        // Structured opt-in with multiple types matches each.
+        let multi: Vec<String> = vec![
+            "memory_promote".to_string(),
+            "memory_link_created".to_string(),
+        ];
+        assert!(matches_filters(
+            "memory_store",
+            Some(&multi),
+            None,
+            None,
+            "memory_promote",
+            "ns",
+            None
+        ));
+        assert!(!matches_filters(
+            "memory_store",
+            Some(&multi),
+            None,
+            None,
+            "memory_store",
+            "ns",
+            None
+        ));
+        // Empty structured list = no events match (defensive).
+        let empty: Vec<String> = vec![];
+        assert!(!matches_filters(
+            "*",
+            Some(&empty),
+            None,
+            None,
+            "memory_store",
+            "ns",
+            None
         ));
     }
 
@@ -779,6 +1073,7 @@ mod tests {
                 namespace_filter: Some("ns1"),
                 agent_filter: Some("alice"),
                 created_by: Some("op"),
+                event_types: None,
             },
         )
         .unwrap();
@@ -810,6 +1105,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         );
         assert!(res.is_err(), "insert must reject invalid URL");
@@ -829,6 +1125,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -857,6 +1154,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -883,6 +1181,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -912,6 +1211,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -925,6 +1225,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -993,6 +1294,7 @@ mod tests {
             "memory_store, *",
             None,
             None,
+            None,
             "anything",
             "ns",
             None,
@@ -1000,6 +1302,7 @@ mod tests {
         // Whitespace around tokens is trimmed.
         assert!(matches_filters(
             "  memory_delete , memory_store ",
+            None,
             None,
             None,
             "memory_store",
@@ -1013,6 +1316,7 @@ mod tests {
         // sub_agent set, but event has no agent → reject.
         assert!(!matches_filters(
             "*",
+            None,
             None,
             Some("alice"),
             "memory_store",
@@ -1037,6 +1341,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1069,6 +1374,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1124,6 +1430,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1171,6 +1478,7 @@ mod tests {
                 namespace_filter: None,
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -1200,6 +1508,7 @@ mod tests {
                 namespace_filter: Some("only-this-ns"),
                 agent_filter: None,
                 created_by: None,
+                event_types: None,
             },
         )
         .unwrap();
@@ -1374,6 +1683,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1435,6 +1745,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1497,6 +1808,7 @@ mod tests {
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
+                    event_types: None,
                 },
             )
             .unwrap()
@@ -1579,6 +1891,7 @@ fn namespace_pattern_matches_glob_correctly() {
     // Test namespace filter matching with exact-match semantics.
     assert!(matches_filters(
         "*",
+        None,
         Some("app"),
         None,
         "memory_store",
@@ -1587,6 +1900,7 @@ fn namespace_pattern_matches_glob_correctly() {
     ));
     assert!(!matches_filters(
         "*",
+        None,
         Some("app"),
         None,
         "memory_store",
@@ -1596,6 +1910,7 @@ fn namespace_pattern_matches_glob_correctly() {
     // Empty namespace filter matches any namespace (no filter applied)
     assert!(matches_filters(
         "*",
+        None,
         Some(""),
         None,
         "memory_store",

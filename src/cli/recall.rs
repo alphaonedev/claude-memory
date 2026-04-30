@@ -163,7 +163,7 @@ pub fn run(
     let resolved_scoring = app_config.effective_scoring();
 
     // Perform recall: hybrid if embedder available, keyword otherwise
-    let (results, tokens_used, mode) = if let Some(ref emb) = embedder {
+    let (results, outcome, mode) = if let Some(ref emb) = embedder {
         match emb.embed(&args.context) {
             Ok(primary_emb) => {
                 // v0.6.0.0 contextual recall. Fuse the primary query
@@ -187,7 +187,7 @@ pub fn run(
                     }
                     _ => primary_emb,
                 };
-                let (results, tokens_used) = db::recall_hybrid(
+                let (results, outcome) = db::recall_hybrid(
                     &conn,
                     &args.context,
                     &query_emb,
@@ -204,13 +204,9 @@ pub fn run(
                     &resolved_scoring,
                 )?;
                 if let Some(ref ce) = reranker {
-                    (
-                        ce.rerank(&args.context, results),
-                        tokens_used,
-                        "hybrid+rerank",
-                    )
+                    (ce.rerank(&args.context, results), outcome, "hybrid+rerank")
                 } else {
-                    (results, tokens_used, "hybrid")
+                    (results, outcome, "hybrid")
                 }
             }
             Err(e) => {
@@ -218,7 +214,7 @@ pub fn run(
                     out.stderr,
                     "ai-memory: embedding query failed: {e}, falling back to keyword"
                 )?;
-                let (results, tokens_used) = db::recall(
+                let (results, outcome) = db::recall(
                     &conn,
                     &args.context,
                     args.namespace.as_deref(),
@@ -231,11 +227,11 @@ pub fn run(
                     args.as_agent.as_deref(),
                     args.budget_tokens,
                 )?;
-                (results, tokens_used, "keyword")
+                (results, outcome, "keyword")
             }
         }
     } else {
-        let (results, tokens_used) = db::recall(
+        let (results, outcome) = db::recall(
             &conn,
             &args.context,
             args.namespace.as_deref(),
@@ -248,7 +244,7 @@ pub fn run(
             args.as_agent.as_deref(),
             args.budget_tokens,
         )?;
-        (results, tokens_used, "keyword")
+        (results, outcome, "keyword")
     };
 
     if json_out {
@@ -269,10 +265,17 @@ pub fn run(
             "memories": scored,
             "count": results.len(),
             "mode": mode,
-            "tokens_used": tokens_used,
+            "tokens_used": outcome.tokens_used,
         });
         if let Some(b) = args.budget_tokens {
             body["budget_tokens"] = serde_json::json!(b);
+            // Phase P6 (R1) meta block — same shape as MCP / HTTP paths.
+            body["meta"] = serde_json::json!({
+                "budget_tokens_used": outcome.tokens_used,
+                "budget_tokens_remaining": outcome.tokens_remaining.unwrap_or(0),
+                "memories_dropped": outcome.memories_dropped,
+                "budget_overflow": outcome.budget_overflow,
+            });
         }
         writeln!(out.stdout, "{}", serde_json::to_string(&body)?)?;
         return Ok(());

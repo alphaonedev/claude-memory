@@ -744,6 +744,7 @@ mod tests {
             promote: GovernanceLevel::Any,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Consensus(0),
+            inherit: true,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
@@ -756,6 +757,7 @@ mod tests {
             promote: GovernanceLevel::Any,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("has space".to_string()),
+            inherit: true,
         };
         assert!(validate_governance_policy(&bad).is_err());
 
@@ -764,6 +766,7 @@ mod tests {
             promote: GovernanceLevel::Any,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("alice".to_string()),
+            inherit: true,
         };
         assert!(validate_governance_policy(&good).is_ok());
     }

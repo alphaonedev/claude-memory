@@ -11,12 +11,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crate::config::{AppConfig, FeatureTier, TierConfig};
+use crate::config::{AppConfig, FeatureTier, RerankerMode, TierConfig};
 use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
-use crate::models::{GovernancePolicy, Memory, Tier};
+use crate::models::{CandidateCounts, GovernancePolicy, Memory, RecallMeta, RecallTelemetry, Tier};
 use crate::reranker::CrossEncoder;
 use crate::validate;
 
@@ -100,7 +100,8 @@ fn tool_definitions() -> Value {
                         "source": {"type": "string", "enum": ["user", "claude", "hook", "api", "cli", "import", "consolidation", "system", "chaos"], "default": "claude"},
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
                         "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
-                        "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."}
+                        "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."},
+                        "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already exists. 'error' returns CONFLICT (default for v2-capable clients). 'merge' updates the existing row in place (legacy v0.6.3 behaviour, default for v1 clients). 'version' appends a monotonic suffix to the title — 'My Memory (2)', '(3)', ..."}
                     },
                     "required": ["title", "content"]
                 }
@@ -118,7 +119,7 @@ fn tool_definitions() -> Value {
                         "since": {"type": "string", "description": "Only memories created after this RFC3339 timestamp"},
                         "until": {"type": "string", "description": "Only memories created before this RFC3339 timestamp"},
                         "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5). Enables scope-based visibility filtering — results include private memories at this namespace, team/unit/org memories at ancestor subtrees, and collective memories globally."},
-                        "budget_tokens": {"type": "integer", "minimum": 1, "description": "Task 1.11 — context-budget-aware recall. Return the top-ranked memories whose cumulative estimated tokens (title+content, ~4 chars/token) fit in N. Response includes tokens_used + budget_tokens."},
+                        "budget_tokens": {"type": "integer", "minimum": 0, "description": "Phase P6 (R1) — context-budget-aware recall. Return the highest-ranked memories whose cumulative content tokens (deterministic cl100k_base BPE; matches Claude/GPT context accounting) fit in N. If the top-ranked memory alone exceeds the budget, it is returned anyway with meta.budget_overflow=true (R1 always-return-at-least-one guarantee). budget_tokens=0 returns zero memories with overflow=false. Response meta block: budget_tokens_used, budget_tokens_remaining, memories_dropped, budget_overflow."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "v0.6.0.0 contextual recall — recent conversation tokens used to bias the query embedding at 70/30 (primary/context). Pulls results toward memories that match both the explicit query and nearby conversation topics."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
@@ -364,8 +365,18 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system.",
-                "inputSchema": { "type": "object", "properties": {} }
+                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "accept": {
+                            "type": "string",
+                            "enum": ["v1", "v2"],
+                            "default": "v2",
+                            "description": "Capabilities-schema version. v2 is the honest, runtime-overlaid shape (default). v1 returns the legacy pre-v0.6.3.1 shape for backward compat."
+                        }
+                    }
+                }
             },
             {
                 "name": "memory_expand_query",
@@ -475,12 +486,13 @@ fn tool_definitions() -> Value {
                         "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"},
                         "governance": {
                             "type": "object",
-                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types.",
+                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types. v0.6.3.1 (P4, G1): adds `inherit` flag controlling parent-namespace policy bubbling.",
                             "properties": {
                                 "write":    {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "promote":  {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "delete":   {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
-                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"}
+                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"},
+                                "inherit":  {"type": "boolean", "default": true, "description": "v0.6.3.1 (P4, G1): when true (default), missing policy at this namespace falls through to parent in the chain. Set false to opt this subtree out of parent inheritance."}
                             }
                         }
                     },
@@ -715,6 +727,58 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
 /// LLM round-trip cost exceeds the informational payoff.
 const AUTONOMY_MIN_CONTENT_LEN: usize = 50;
 
+/// v0.6.3.1 P2 (G6) — `on_conflict` modes for `memory_store`.
+///
+/// * `Error`   — refuse the write with a typed CONFLICT error. This is the
+///               new default for v2-aware clients.
+/// * `Merge`   — keep the v0.6.3 silent-merge upsert behaviour. Default for
+///               v1 / unknown clients to preserve backward compatibility.
+/// * `Version` — auto-suffix the title with `(2)`, `(3)`, ... to write a
+///               distinct row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OnConflict {
+    Error,
+    Merge,
+    Version,
+}
+
+impl OnConflict {
+    fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "error" => Ok(Self::Error),
+            "merge" => Ok(Self::Merge),
+            "version" => Ok(Self::Version),
+            other => Err(format!(
+                "invalid on_conflict '{other}' (expected error|merge|version)"
+            )),
+        }
+    }
+}
+
+/// Capability profile detection. v2-aware clients default to `Error`; v1 /
+/// unknown clients default to `Merge` to preserve the v0.6.3 contract. The
+/// determination keys off the MCP client name (captured at `initialize`
+/// from `clientInfo.name`). Known v2 clients are listed explicitly so the
+/// policy is auditable. The list is intentionally narrow — adding a name
+/// here is a deliberate decision that "this client knows how to handle a
+/// CONFLICT response from memory_store".
+fn default_on_conflict_for_client(mcp_client: Option<&str>) -> OnConflict {
+    let Some(client) = mcp_client else {
+        return OnConflict::Merge;
+    };
+    // Match on the prefix before any '@' — `ai:foo@host:pid-N` style ids.
+    let head = client.split('@').next().unwrap_or(client);
+    let normalized = head.to_ascii_lowercase();
+    // v2-capable clients (explicitly opted-in via known name).
+    const V2_CLIENT_PREFIXES: &[&str] = &["ai:claude-code", "ai:ai-memory-cli/v2"];
+    for prefix in V2_CLIENT_PREFIXES {
+        if normalized.starts_with(prefix) {
+            return OnConflict::Error;
+        }
+    }
+    OnConflict::Merge
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn handle_store(
@@ -734,6 +798,12 @@ fn handle_store(
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
     let namespace = params["namespace"].as_str().unwrap_or("global").to_string();
     let source = params["source"].as_str().unwrap_or("claude").to_string();
+    // v0.6.3.1 P2 (G6) — explicit `on_conflict` overrides the per-client default.
+    let on_conflict = if let Some(s) = params["on_conflict"].as_str() {
+        OnConflict::parse(s)?
+    } else {
+        default_on_conflict_for_client(mcp_client)
+    };
     let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).expect("i64 as i32");
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
@@ -793,11 +863,34 @@ fn handle_store(
         .ttl_for_tier(&tier)
         .map(|s| (now + chrono::Duration::seconds(s)).to_rfc3339());
 
+    // v0.6.3.1 P2 (G6) — apply the conflict policy BEFORE building the
+    // canonical Memory. `Version` mode rewrites `title` to a free suffix;
+    // `Error` mode short-circuits with a typed error if the row already
+    // exists; `Merge` defers to the legacy code path below.
+    let resolved_title = match on_conflict {
+        OnConflict::Error => {
+            if let Some(existing_id) =
+                db::find_by_title_namespace(conn, title, &namespace).map_err(|e| e.to_string())?
+            {
+                return Err(format!(
+                    "CONFLICT: memory with title '{title}' already exists in namespace \
+                     '{namespace}' (existing id: {existing_id}). Pass \
+                     on_conflict='merge' to update in place or 'version' to suffix the title."
+                ));
+            }
+            title.to_string()
+        }
+        OnConflict::Version => {
+            db::next_versioned_title(conn, title, &namespace).map_err(|e| e.to_string())?
+        }
+        OnConflict::Merge => title.to_string(),
+    };
+
     let mem = Memory {
         id: uuid::Uuid::new_v4().to_string(),
         tier,
         namespace,
-        title: title.to_string(),
+        title: resolved_title,
         content: content.to_string(),
         tags,
         priority: priority.clamp(1, 10),
@@ -842,11 +935,21 @@ fn handle_store(
         }
     }
 
-    // True dedup: check for exact title+namespace match (#97)
+    // True dedup: check for exact title+namespace match (#97).
+    //
+    // v0.6.3.1 P2 (G6) — only the Merge policy enters the dedup-then-update
+    // branch. `Error` mode already short-circuited above; `Version` mode
+    // already rewrote the title to a free suffix so an exact dup cannot
+    // exist. Both still call `find_contradictions` so the response can
+    // surface `potential_contradictions` (similar-title fuzzy matches).
     let existing = db::find_contradictions(conn, &mem.title, &mem.namespace).unwrap_or_default();
-    let exact_dup = existing
-        .iter()
-        .find(|c| c.title == mem.title && c.namespace == mem.namespace);
+    let exact_dup = if matches!(on_conflict, OnConflict::Merge) {
+        existing
+            .iter()
+            .find(|c| c.title == mem.title && c.namespace == mem.namespace)
+    } else {
+        None
+    };
     if let Some(dup) = exact_dup {
         // Update existing memory instead of creating a duplicate.
         // Preserve the original agent_id (provenance is immutable) — the
@@ -1051,59 +1154,15 @@ fn handle_store(
 ///
 /// Returned vector is top-down: `[*, org, unit, team, agent]` for a
 /// 4-level hierarchical namespace. Cycle-safe and bounded.
+/// Display-side wrapper around [`db::build_namespace_chain`].
+///
+/// v0.6.3.1 (P4, audit G1): the chain walker moved into `db.rs` so the
+/// governance enforcement gate could share a single canonical
+/// implementation with the recall/standard injection paths. This thin
+/// shim keeps existing call sites compiling without re-routing every
+/// invocation through `db::`.
 fn build_namespace_chain(conn: &rusqlite::Connection, namespace: &str) -> Vec<String> {
-    const MAX_EXPLICIT_DEPTH: usize = 8;
-    let mut chain: Vec<String> = Vec::new();
-
-    if namespace == "*" {
-        chain.push("*".to_string());
-        return chain;
-    }
-
-    // Always start with the global standard — most general.
-    chain.push("*".to_string());
-
-    // 1. /-derived ancestors. `namespace_ancestors` returns most-specific-first;
-    //    reverse for top-down (root ancestor first, then namespace itself last).
-    let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
-        .into_iter()
-        .rev()
-        .collect();
-
-    // 2. If the ROOTmost of the /-chain has an explicit `namespace_meta` parent,
-    //    prepend that chain (bounded by MAX_EXPLICIT_DEPTH + cycle-safe).
-    //    Supports legacy flat namespaces (e.g. `ai-memory` → `ai-memory-mcp`).
-    if let Some(root) = hierarchy_chain.first().cloned() {
-        let mut explicit_above: Vec<String> = Vec::new();
-        let mut current = root;
-        for _ in 0..MAX_EXPLICIT_DEPTH {
-            match db::get_namespace_parent(conn, &current) {
-                Some(p)
-                    if p != "*"
-                        && !explicit_above.contains(&p)
-                        && !hierarchy_chain.contains(&p) =>
-                {
-                    explicit_above.push(p.clone());
-                    current = p;
-                }
-                _ => break,
-            }
-        }
-        // `explicit_above` is [immediate-explicit-parent, grandparent, ...];
-        // reverse to prepend in top-down order.
-        for p in explicit_above.into_iter().rev() {
-            chain.push(p);
-        }
-    }
-
-    // 3. Append the /-derived chain (top-down).
-    for entry in hierarchy_chain.drain(..) {
-        if !chain.contains(&entry) {
-            chain.push(entry);
-        }
-    }
-
-    chain
+    db::build_namespace_chain(conn, namespace)
 }
 
 /// Inject namespace standards into a `recall/session_start` response.
@@ -1162,7 +1221,7 @@ fn inject_namespace_standard(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
-fn handle_recall(
+pub fn handle_recall(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,
@@ -1201,17 +1260,16 @@ fn handle_recall(
     if let Some(a) = as_agent {
         validate::validate_namespace(a).map_err(|e| e.to_string())?;
     }
-    // Task 1.11: optional token budget.
-    // Ultrareview #348: reject budget_tokens=0 explicitly. An off-by-one
-    // or uninitialized counter passed as 0 would previously return an
-    // empty result with no error — hides the caller's bug.
-    let budget_tokens = match params["budget_tokens"].as_u64() {
-        Some(0) => {
-            return Err("budget_tokens must be >= 1".to_string());
-        }
-        Some(n) => usize::try_from(n).ok(),
-        None => None,
-    };
+    // Task 1.11 / Phase P6 (R1): optional token budget. R1 semantics
+    // permit `0` ("give me nothing") and return an empty result with
+    // `meta.budget_overflow = false` — see the comment on
+    // `db::apply_token_budget`. This supersedes the v0.6.3 Ultrareview
+    // #348 hard-reject of 0; the meta block now disambiguates "user
+    // asked for zero" from "buggy uninitialized counter" by always
+    // round-tripping the requested budget.
+    let budget_tokens = params["budget_tokens"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
 
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
@@ -1223,11 +1281,64 @@ fn handle_recall(
         })
         .unwrap_or_default();
 
-    // Helper: tack tokens_used / budget_tokens onto the response metadata.
-    let decorate_budget = |resp: &mut Value, tokens_used: usize| {
-        resp["tokens_used"] = json!(tokens_used);
+    // Helper: tack tokens_used / budget_tokens onto the response, plus
+    // — when a budget was supplied — the Phase P6 RecallMeta-style
+    // sub-block (`meta.budget_tokens_used`, `budget_tokens_remaining`,
+    // `memories_dropped`, `budget_overflow`). The legacy top-level
+    // `tokens_used` / `budget_tokens` fields are preserved verbatim so
+    // pre-P6 callers continue to work byte-for-byte.
+    //
+    // NOTE on RecallMeta: Phase P3 introduces a top-level `meta` block
+    // (recall_mode, reranker_used, candidate_counts, blend_weight). This
+    // P6 worktree pre-dates the P3 merge, so we define the budget-mode
+    // sub-block directly under `meta.budget` and let P3's rebase fold
+    // its fields in alongside ours. See REMEDIATIONv0631.md L488-489.
+    let decorate_budget = |resp: &mut Value, outcome: &db::BudgetOutcome| {
+        resp["tokens_used"] = json!(outcome.tokens_used);
         if let Some(b) = budget_tokens {
             resp["budget_tokens"] = json!(b);
+            // Phase P6 R1 meta block. Always emitted when a budget is
+            // supplied so callers can rely on the field set. Kept under
+            // a dedicated `meta` key so the top-level shape stays
+            // backward-compatible — pre-P6 callers ignore unknown keys.
+            let meta = resp
+                .as_object_mut()
+                .expect("recall response is always a JSON object")
+                .entry("meta".to_string())
+                .or_insert_with(|| json!({}));
+            meta["budget_tokens_used"] = json!(outcome.tokens_used);
+            meta["budget_tokens_remaining"] = json!(outcome.tokens_remaining.unwrap_or(0));
+            meta["memories_dropped"] = json!(outcome.memories_dropped);
+            meta["budget_overflow"] = json!(outcome.budget_overflow);
+        }
+    };
+
+    // v0.6.3.1 (P3): build the per-request meta block from retrieval-stage
+    // telemetry + the runtime reranker variant. The block is always
+    // present in the response — clients that don't read it ignore unknown
+    // fields per JSON-RPC convention. Closes audit gaps G2/G8/G11 by
+    // making silent-degrade paths visible at request time.
+    let reranker_used = match reranker {
+        Some(ce) if ce.is_neural() => "neural",
+        Some(_) => "lexical",
+        None => "none",
+    };
+    let attach_meta = |resp: &mut Value, recall_mode: &str, telemetry: &RecallTelemetry| {
+        // Round blend_weight to 3 decimals — matches the score field
+        // precision and keeps the wire shape stable regardless of f64
+        // representation jitter.
+        let blend_weight = (telemetry.blend_weight_avg * 1000.0).round() / 1000.0;
+        let meta = RecallMeta {
+            recall_mode: recall_mode.to_string(),
+            reranker_used: reranker_used.to_string(),
+            candidate_counts: CandidateCounts {
+                fts: telemetry.fts_candidates,
+                hnsw: telemetry.hnsw_candidates,
+            },
+            blend_weight,
+        };
+        if let Ok(v) = serde_json::to_value(&meta) {
+            resp["meta"] = v;
         }
     };
 
@@ -1251,7 +1362,7 @@ fn handle_recall(
                         }
                     }
                 };
-                let (results, tokens_used) = db::recall_hybrid(
+                let (results, outcome, telemetry) = db::recall_hybrid_with_telemetry(
                     conn,
                     context,
                     &query_emb,
@@ -1274,7 +1385,8 @@ fn handle_recall(
                     let ce_reranked = ce.rerank(context, results);
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
-                    decorate_budget(&mut resp, tokens_used);
+                    decorate_budget(&mut resp, &outcome);
+                    attach_meta(&mut resp, "hybrid", &telemetry);
                     inject_namespace_standard(conn, namespace, &mut resp);
                     return Ok(resp);
                 }
@@ -1282,18 +1394,25 @@ fn handle_recall(
                 let memories = scored_memories(results);
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
-                decorate_budget(&mut resp, tokens_used);
+                decorate_budget(&mut resp, &outcome);
+                attach_meta(&mut resp, "hybrid", &telemetry);
                 inject_namespace_standard(conn, namespace, &mut resp);
                 return Ok(resp);
             }
             Err(e) => {
+                // v0.6.3.1 (P3, G11): the embedder being present but the
+                // per-query embed failing is a different silent-degrade
+                // path than "embedder unavailable at startup" — preserve
+                // the existing tracing event and fall through to
+                // keyword_only mode below, which is what the meta block
+                // will report.
                 tracing::warn!("embedding failed, falling back to FTS: {}", e);
             }
         }
     }
 
     // Fallback to keyword-only recall
-    let (results, tokens_used) = db::recall(
+    let (results, outcome, telemetry) = db::recall_with_telemetry(
         conn,
         context,
         namespace,
@@ -1309,43 +1428,97 @@ fn handle_recall(
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
-    decorate_budget(&mut resp, tokens_used);
+    decorate_budget(&mut resp, &outcome);
+    attach_meta(&mut resp, "keyword_only", &telemetry);
     inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
 }
 
-/// v0.6.3 (capabilities schema v2): the canonical capabilities entry
-/// point. When `conn` is `Some`, the dynamic blocks
+/// Capabilities schema selector (v0.6.3.1 P1 honesty patch).
+///
+/// HTTP callers send `Accept-Capabilities: v1` (or `v2`) to request a
+/// shape; MCP callers pass `accept: "v1"` (or `"v2"`) to
+/// `memory_capabilities`. Default is v2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapabilitiesAccept {
+    V1,
+    V2,
+}
+
+impl CapabilitiesAccept {
+    /// Parse the wire value sent by the client. Unknown values fall back
+    /// to v2 (the default). Whitespace and case insensitive.
+    #[must_use]
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "v1" | "1" => Self::V1,
+            _ => Self::V2,
+        }
+    }
+}
+
+/// v0.6.3 (capabilities schema v2 / P1 honesty patch): the canonical
+/// capabilities entry point.
+///
+/// **Live overlays.** When the wrapper has access to the corresponding
+/// runtime handle, it overlays:
+/// - `features.embedder_loaded` from `embedder_loaded`,
+/// - `features.recall_mode_active` from `embedder_loaded` (loaded ⇒
+///   `Hybrid`; not loaded but configured ⇒ `KeywordOnly`; configured
+///   but failed ⇒ `Degraded`; tier == keyword ⇒ `Disabled`),
+/// - `features.reranker_active` from the `CrossEncoder` enum variant
+///   (`Neural` / `LexicalFallback` / `Off`),
+/// - `features.cross_encoder_reranking` flips to `false` when the
+///   neural reranker fell back to lexical (the v1 honesty fix #93),
+/// - `models.cross_encoder` annotated with `lexical-fallback` when the
+///   neural download failed.
+///
+/// **Live DB counts.** When `conn` is `Some`, the dynamic blocks
 /// (`permissions.active_rules`, `hooks.registered_count`,
-/// `approval.pending_requests`) are populated from live DB counts.
-/// When `None`, they remain at the zero-state defaults set in
-/// `TierConfig::capabilities`. Both shapes are valid schema-v2 output —
-/// old clients reading by named path continue to work either way.
-pub(crate) fn handle_capabilities_with_conn(
+/// `approval.pending_requests`) are populated from live counts. DB
+/// errors are non-fatal — the report falls back to zero-state so a
+/// transient blip cannot 500 the capabilities endpoint.
+///
+/// **Schema selection.** `accept` controls the wire shape. `V2` is the
+/// default and recommended; `V1` projects the v2 report down to the
+/// legacy shape for backward compat (see [`Capabilities::to_v1`]).
+pub fn handle_capabilities_with_conn(
     tier_config: &TierConfig,
     reranker: Option<&CrossEncoder>,
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
+    accept: CapabilitiesAccept,
 ) -> Result<Value, String> {
     let mut caps = tier_config.capabilities();
-    // Report actual cross-encoder state, not just config (#93)
-    if let Some(ce) = reranker
-        && !ce.is_neural()
-    {
-        caps.features.cross_encoder_reranking = false;
-        caps.features.memory_reflection = false;
-        caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
-    }
-    // v0.6.2 (S18): report whether the embedder successfully materialized
-    // at serve startup. `semantic_search` reflects the tier CONFIG while
-    // this bool reflects the RUNTIME — the two can diverge when the HF
-    // model fetch fails on an offline runner.
-    caps.features.embedder_loaded = embedder_loaded;
 
-    // v0.6.3 (capabilities schema v2): when we have a connection, fill
-    // the dynamic blocks with live counts. Failures here are non-fatal —
-    // the report still serializes with the zero-state defaults so a
-    // transient DB blip can't 500 the capabilities endpoint.
+    // --- Reranker live state (P1) ---
+    // The old (#93) handler flipped `cross_encoder_reranking` to false
+    // when the neural model fell back to lexical. The honesty patch
+    // additionally surfaces the runtime variant in `reranker_active`.
+    caps.features.reranker_active = match reranker {
+        Some(ce) if ce.is_neural() => RerankerMode::Neural,
+        Some(_) => {
+            // Lexical fallback — neural download or load failed.
+            caps.features.cross_encoder_reranking = false;
+            caps.models.cross_encoder = "lexical-fallback (neural download failed)".to_string();
+            RerankerMode::LexicalFallback
+        }
+        None => RerankerMode::Off,
+    };
+
+    // --- Embedder live state (P1, S18) ---
+    caps.features.embedder_loaded = embedder_loaded;
+    caps.features.recall_mode_active = compute_recall_mode(tier_config, embedder_loaded);
+
+    // --- HNSW eviction surface (P3, G2) ---
+    // Mirror the per-process HNSW eviction counters into the capabilities
+    // surface so a `memory_capabilities` poll can tell operators whether
+    // the index is currently shedding embeddings. Same values surfaced in
+    // `memory_stats.index_evictions_total`.
+    caps.hnsw.evictions_total = crate::hnsw::index_evictions_total();
+    caps.hnsw.evicted_recently = crate::hnsw::evicted_recently(60);
+
+    // --- Live DB-count overlays ---
     if let Some(c) = conn {
         if let Ok(n) = db::count_active_governance_rules(c) {
             caps.permissions.active_rules = n;
@@ -1358,7 +1531,34 @@ pub(crate) fn handle_capabilities_with_conn(
         }
     }
 
-    serde_json::to_value(caps).map_err(|e| e.to_string())
+    // --- Schema selection ---
+    match accept {
+        CapabilitiesAccept::V2 => serde_json::to_value(caps).map_err(|e| e.to_string()),
+        CapabilitiesAccept::V1 => serde_json::to_value(caps.to_v1()).map_err(|e| e.to_string()),
+    }
+}
+
+/// Compute the live `recall_mode_active` tag from the configured tier
+/// and the runtime embedder-loaded signal. P1 honesty patch.
+///
+/// - Tier configured no embedder (keyword tier) → `Disabled`.
+/// - Tier configured an embedder and it loaded → `Hybrid`.
+/// - Tier configured an embedder but it did not load → `Degraded`.
+/// - (Reserved) `KeywordOnly` is returned only when the daemon has an
+///   embedder configured but the operator explicitly disabled hybrid
+///   blending — not possible in v0.6.3.1, so unreachable today.
+fn compute_recall_mode(
+    tier_config: &TierConfig,
+    embedder_loaded: bool,
+) -> crate::config::RecallMode {
+    use crate::config::RecallMode;
+    if tier_config.embedding_model.is_none() {
+        RecallMode::Disabled
+    } else if embedder_loaded {
+        RecallMode::Hybrid
+    } else {
+        RecallMode::Degraded
+    }
 }
 
 fn handle_expand_query(llm: Option<&OllamaClient>, params: &Value) -> Result<Value, String> {
@@ -1825,6 +2025,7 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
 
 fn handle_delete(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     vector_index: Option<&VectorIndex>,
     mcp_client: Option<&str>,
@@ -1841,6 +2042,18 @@ fn handle_delete(
     let Some(target) = target else {
         return Err("memory not found".into());
     };
+
+    // P5 (G9): snapshot fields the dispatcher needs BEFORE delete frees
+    // the row. The dispatch itself is fire-and-forget after the DELETE
+    // commits, but the payload is built from this owned snapshot.
+    let snapshot_namespace = target.namespace.clone();
+    let snapshot_title = target.title.clone();
+    let snapshot_tier = target.tier.as_str().to_string();
+    let snapshot_owner: Option<String> = target
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     // Task 1.9: governance enforcement (delete-side).
     {
@@ -1885,6 +2098,22 @@ fn handle_delete(
         if let Some(idx) = vector_index {
             idx.remove(&target.id);
         }
+        // P5 (G9): fire `memory_delete` webhook AFTER the row is gone
+        // (best-effort, fire-and-forget — same pattern as memory_store).
+        let details = serde_json::to_value(crate::subscriptions::DeleteEventDetails {
+            title: snapshot_title,
+            tier: snapshot_tier,
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            conn,
+            "memory_delete",
+            &target.id,
+            &snapshot_namespace,
+            snapshot_owner.as_deref(),
+            db_path,
+            details,
+        );
         Ok(json!({"deleted": true}))
     } else {
         Err("memory not found".into())
@@ -1893,6 +2122,7 @@ fn handle_delete(
 
 fn handle_promote(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     mcp_client: Option<&str>,
 ) -> Result<Value, String> {
@@ -1908,6 +2138,13 @@ fn handle_promote(
         return Err("memory not found".into());
     };
     let resolved_id = target.id.clone();
+    // P5 (G9): snapshot fields needed for the post-success webhook.
+    let snapshot_namespace = target.namespace.clone();
+    let snapshot_owner: Option<String> = target
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     // Task 1.9: governance enforcement (promote-side).
     {
@@ -1958,6 +2195,25 @@ fn handle_promote(
         validate::validate_namespace(to_ns).map_err(|e| e.to_string())?;
         let clone_id =
             db::promote_to_namespace(conn, &resolved_id, to_ns).map_err(|e| e.to_string())?;
+        // P5 (G9): fire `memory_promote` webhook for vertical mode AFTER
+        // the clone commits. memory_id = source id (subscribers can
+        // distinguish via `mode` and `clone_id` in the details block).
+        let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
+            mode: "vertical".to_string(),
+            tier: None,
+            to_namespace: Some(to_ns.to_string()),
+            clone_id: Some(clone_id.clone()),
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            conn,
+            "memory_promote",
+            &resolved_id,
+            &snapshot_namespace,
+            snapshot_owner.as_deref(),
+            db_path,
+            details,
+        );
         return Ok(json!({
             "promoted": true,
             "mode": "vertical",
@@ -1985,6 +2241,24 @@ fn handle_promote(
     if !found {
         return Err("memory not found".into());
     }
+    // P5 (G9): fire `memory_promote` webhook for the default tier-upgrade
+    // path AFTER the update commits.
+    let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
+        mode: "tier".to_string(),
+        tier: Some("long".to_string()),
+        to_namespace: None,
+        clone_id: None,
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_promote",
+        &resolved_id,
+        &snapshot_namespace,
+        snapshot_owner.as_deref(),
+        db_path,
+        details,
+    );
     Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": "long"}))
 }
 
@@ -2136,7 +2410,11 @@ fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Stri
     }
 }
 
-fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_link(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    params: &Value,
+) -> Result<Value, String> {
     let source_id = params["source_id"]
         .as_str()
         .ok_or("source_id is required")?;
@@ -2147,6 +2425,38 @@ fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
     db::create_link(conn, source_id, target_id, relation).map_err(|e| e.to_string())?;
+
+    // P5 (G9): fire `memory_link_created` webhook AFTER the link is
+    // persisted. Resolve the source memory to populate `namespace` /
+    // `agent_id` for the dispatch envelope; if it's somehow gone (race
+    // with delete) fall back to "global"/None and let the webhook
+    // reflect the link metadata only.
+    let (event_namespace, event_agent_id) = match db::get(conn, source_id) {
+        Ok(Some(mem)) => {
+            let owner = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (mem.namespace, owner)
+        }
+        _ => ("global".to_string(), None),
+    };
+    let details = serde_json::to_value(crate::subscriptions::LinkCreatedEventDetails {
+        target_id: target_id.to_string(),
+        relation: relation.to_string(),
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_link_created",
+        source_id,
+        &event_namespace,
+        event_agent_id.as_deref(),
+        db_path,
+        details,
+    );
+
     Ok(
         json!({"linked": true, "source_id": source_id, "target_id": target_id, "relation": relation}),
     )
@@ -2161,6 +2471,7 @@ fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value
 
 fn handle_consolidate(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     llm: Option<&OllamaClient>,
     embedder: Option<&Embedder>,
@@ -2281,6 +2592,25 @@ fn handle_consolidate(
             new_id
         ));
     }
+
+    // P5 (G9): fire `memory_consolidated` webhook AFTER db::consolidate
+    // commits the new memory. memory_id = the new consolidated id; the
+    // details block carries the source ids that were merged.
+    let details = serde_json::to_value(crate::subscriptions::ConsolidatedEventDetails {
+        source_ids: ids.clone(),
+        source_count: ids.len(),
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_consolidated",
+        &new_id,
+        namespace,
+        Some(&consolidator_agent_id),
+        db_path,
+        details,
+    );
+
     Ok(result)
 }
 
@@ -2697,6 +3027,17 @@ pub(crate) fn handle_subscribe(
     let created_by =
         crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
 
+    // P5 (G9): optional structured per-event-type opt-in. Callers pass
+    // `event_types: ["memory_store", "memory_link_created"]` to scope a
+    // subscription to a narrow event subset. When omitted, the legacy
+    // `events` (comma-separated / `*`) field governs — preserves
+    // backward compatibility for pre-P5 subscribers.
+    let event_types: Option<Vec<String>> = params["event_types"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    });
+
     // Require the caller to be a registered agent (#301 item 4).
     // MCP stdio is single-tenant per process, but the same tool set is
     // exposed on the HTTP daemon where a caller might not be attested.
@@ -2725,18 +3066,23 @@ pub(crate) fn handle_subscribe(
             namespace_filter,
             agent_filter,
             created_by: Some(&created_by),
+            event_types: event_types.as_deref(),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    Ok(json!({
+    let mut response = json!({
         "id": id,
         "url": url,
         "events": events,
         "namespace_filter": namespace_filter,
         "agent_filter": agent_filter,
         "created_by": created_by,
-    }))
+    });
+    if let Some(et) = &event_types {
+        response["event_types"] = json!(et);
+    }
+    Ok(response)
 }
 
 pub(crate) fn handle_unsubscribe(
@@ -3036,8 +3382,10 @@ fn handle_request(
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
                 "memory_kg_invalidate" => handle_kg_invalidate(conn, arguments),
                 "memory_kg_query" => handle_kg_query(conn, arguments),
-                "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
-                "memory_promote" => handle_promote(conn, arguments, mcp_client),
+                "memory_delete" => {
+                    handle_delete(conn, db_path, arguments, vector_index, mcp_client)
+                }
+                "memory_promote" => handle_promote(conn, db_path, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
                 "memory_pending_approve" => handle_pending_approve(conn, arguments, mcp_client),
                 "memory_pending_reject" => handle_pending_reject(conn, arguments, mcp_client),
@@ -3045,17 +3393,33 @@ fn handle_request(
                 "memory_stats" => handle_stats(conn, db_path),
                 "memory_update" => handle_update(conn, arguments, embedder, vector_index),
                 "memory_get" => handle_get(conn, arguments),
-                "memory_link" => handle_link(conn, arguments),
+                "memory_link" => handle_link(conn, db_path, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
-                "memory_consolidate" => {
-                    handle_consolidate(conn, arguments, llm, embedder, vector_index, mcp_client)
-                }
-                "memory_capabilities" => handle_capabilities_with_conn(
-                    tier_config,
-                    reranker,
-                    embedder.is_some(),
-                    Some(conn),
+                "memory_consolidate" => handle_consolidate(
+                    conn,
+                    db_path,
+                    arguments,
+                    llm,
+                    embedder,
+                    vector_index,
+                    mcp_client,
                 ),
+                "memory_capabilities" => {
+                    // P1 honesty patch: optional `accept` argument lets MCP
+                    // clients opt into the legacy v1 shape, mirroring the
+                    // HTTP `Accept-Capabilities` header.
+                    let accept = arguments
+                        .get("accept")
+                        .and_then(Value::as_str)
+                        .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
+                    handle_capabilities_with_conn(
+                        tier_config,
+                        reranker,
+                        embedder.is_some(),
+                        Some(conn),
+                        accept,
+                    )
+                }
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
                 "memory_detect_contradiction" => handle_detect_contradiction(conn, llm, arguments),
@@ -4193,14 +4557,30 @@ mod tests {
     }
 
     #[test]
-    fn handle_recall_error_budget_tokens_zero() {
+    fn handle_recall_budget_tokens_zero_returns_empty() {
+        // Phase P6 (R1): budget_tokens=0 is now a valid request — the
+        // user explicitly asked for zero context. Returns an empty
+        // memories array with meta.budget_overflow=false (the user
+        // didn't overflow anything, they asked for nothing). Supersedes
+        // the v0.6.3 Ultrareview #348 hard-reject of 0.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-        let req = make_tools_call("memory_recall", json!({"context": "x", "budget_tokens": 0}));
+        let req = make_tools_call(
+            "memory_recall",
+            json!({"context": "x", "budget_tokens": 0, "format": "json"}),
+        );
         let resp = invoke_handle_request(&conn, &req);
-        let result = resp.result.unwrap();
-        assert_eq!(result["isError"], true);
-        let msg = result["content"][0]["text"].as_str().unwrap();
-        assert!(msg.contains("budget_tokens"));
+        assert!(resp.error.is_none(), "budget_tokens=0 must not error");
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["count"], 0, "budget_tokens=0 returns zero memories");
+        assert_eq!(val["budget_tokens"], 0);
+        assert_eq!(val["tokens_used"], 0);
+        assert_eq!(val["meta"]["budget_overflow"], false);
+        assert_eq!(val["meta"]["budget_tokens_used"], 0);
+        assert_eq!(val["meta"]["budget_tokens_remaining"], 0);
     }
 
     #[test]
@@ -4437,8 +4817,10 @@ mod tests {
         assert!(val["features"].is_object());
     }
 
-    /// v0.6.3 (capabilities schema v2 — arch-enhancement-spec §7).
+    /// v0.6.3.1 (capabilities schema v2 — P1 honesty patch).
     /// Every new top-level block is present with the expected shape.
+    /// Dropped fields (`rule_summary`, `by_event`, `subscribers`,
+    /// `default_timeout_seconds`) must be absent from v2 output.
     #[test]
     fn mcp_capabilities_v2_schema_includes_all_blocks() {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
@@ -4452,40 +4834,70 @@ mod tests {
 
         assert_eq!(val["schema_version"], "2", "schema_version bumped to 2");
 
-        // permissions block
+        // permissions block — `mode` flipped from "ask" to "advisory"
+        // (P1 honesty patch: no enforcement gate exists pre-P4).
         assert!(val["permissions"].is_object(), "permissions block present");
-        assert!(val["permissions"]["mode"].is_string());
-        assert_eq!(val["permissions"]["mode"], "ask");
+        assert_eq!(val["permissions"]["mode"], "advisory");
         assert!(val["permissions"]["active_rules"].is_number());
-        assert!(val["permissions"]["rule_summary"].is_array());
+        assert!(
+            val["permissions"].get("rule_summary").is_none(),
+            "v2 drops rule_summary (no per-rule serializer)"
+        );
+        // v0.6.3.1 (P4, audit G1): inheritance posture must be reported
+        // as "enforced" so consumers can distinguish a fixed deployment
+        // from a pre-fix one (which historically returned "display_only").
+        assert_eq!(val["permissions"]["inheritance"], "enforced");
 
-        // hooks block
+        // hooks block — `by_event` dropped (no event registry).
         assert!(val["hooks"].is_object(), "hooks block present");
         assert!(val["hooks"]["registered_count"].is_number());
-        assert!(val["hooks"]["by_event"].is_object());
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 drops hooks.by_event (no event registry)"
+        );
 
-        // compaction block — pre-v0.8 reports zero-state
+        // compaction block — planned-feature shape (P1 honesty patch).
         assert!(val["compaction"].is_object(), "compaction block present");
+        assert_eq!(val["compaction"]["planned"], true);
         assert_eq!(val["compaction"]["enabled"], false);
-        assert!(val["compaction"]["interval_minutes"].is_null());
-        assert!(val["compaction"]["last_run_at"].is_null());
-        assert!(val["compaction"]["last_run_stats"].is_null());
+        assert_eq!(val["compaction"]["version"], "v0.8+");
+        assert!(val["compaction"].get("interval_minutes").is_none());
+        assert!(val["compaction"].get("last_run_at").is_none());
+        assert!(val["compaction"].get("last_run_stats").is_none());
 
-        // approval block
+        // approval block — `subscribers` and `default_timeout_seconds`
+        // dropped (no subscription API, no sweeper).
         assert!(val["approval"].is_object(), "approval block present");
-        assert!(val["approval"]["subscribers"].is_number());
         assert!(val["approval"]["pending_requests"].is_number());
-        assert_eq!(val["approval"]["default_timeout_seconds"], 30);
+        assert!(
+            val["approval"].get("subscribers").is_none(),
+            "v2 drops approval.subscribers (no subscription API)"
+        );
+        assert!(
+            val["approval"].get("default_timeout_seconds").is_none(),
+            "v2 drops approval.default_timeout_seconds (no sweeper)"
+        );
 
-        // transcripts block — pre-v0.7 reports zero-state
+        // transcripts block — planned-feature shape (P1 honesty patch).
         assert!(val["transcripts"].is_object(), "transcripts block present");
+        assert_eq!(val["transcripts"]["planned"], true);
         assert_eq!(val["transcripts"]["enabled"], false);
-        assert_eq!(val["transcripts"]["total_count"], 0);
-        assert_eq!(val["transcripts"]["total_size_mb"], 0);
+        assert_eq!(val["transcripts"]["version"], "v0.7+");
+
+        // memory_reflection: planned-feature object (was bool in v1).
+        assert_eq!(val["features"]["memory_reflection"]["planned"], true);
+        assert_eq!(val["features"]["memory_reflection"]["enabled"], false);
+
+        // Live runtime overlays: keyword-tier daemon with no embedder
+        // and no reranker → disabled / off.
+        assert_eq!(val["features"]["recall_mode_active"], "disabled");
+        assert_eq!(val["features"]["reranker_active"], "off");
     }
 
-    /// v0.6.3 (capabilities schema v2). Old clients reading the v1 paths
-    /// must continue to find them at the same top-level keys.
+    /// v0.6.3.1 (P1 honesty patch). Default v2 response keeps the legacy
+    /// top-level keys (`tier`, `version`, `features`, `models`) so old
+    /// path-readers don't break, even though `memory_reflection` was
+    /// reshaped into an object.
     #[test]
     fn mcp_capabilities_v2_backwards_compatible() {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
@@ -4497,19 +4909,48 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
 
-        // v1 fields preserved at the same paths
+        // v1 top-level keys preserved at the same paths
         assert!(val["tier"].is_string(), "v1: tier preserved");
         assert!(val["version"].is_string(), "v1: version preserved");
         assert!(val["features"].is_object(), "v1: features preserved");
         assert!(val["models"].is_object(), "v1: models preserved");
 
-        // Specifically, well-known v1 sub-fields still resolve.
+        // Well-known v1 sub-fields still resolve.
         assert!(val["features"]["keyword_search"].is_boolean());
         assert!(val["features"]["semantic_search"].is_boolean());
         assert!(val["features"]["embedder_loaded"].is_boolean());
         assert!(val["models"]["embedding"].is_string());
         assert!(val["models"]["llm"].is_string());
         assert!(val["models"]["cross_encoder"].is_string());
+    }
+
+    /// P1 honesty patch: explicit `accept = "v1"` returns the legacy
+    /// shape (no `schema_version`, `memory_reflection` is a bool, no
+    /// v2-only blocks).
+    #[test]
+    fn mcp_capabilities_accept_v1_returns_legacy_shape() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_capabilities", json!({"accept": "v1"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+
+        // v1 has no schema_version
+        assert!(val.get("schema_version").is_none());
+        // v2-only blocks are absent
+        assert!(val.get("permissions").is_none());
+        assert!(val.get("hooks").is_none());
+        assert!(val.get("compaction").is_none());
+        assert!(val.get("approval").is_none());
+        assert!(val.get("transcripts").is_none());
+        // v1 features.memory_reflection is a bool (not the v2 object)
+        assert!(val["features"]["memory_reflection"].is_boolean());
+        // v1 features carry no recall_mode_active / reranker_active
+        assert!(val["features"].get("recall_mode_active").is_none());
+        assert!(val["features"].get("reranker_active").is_none());
     }
 
     /// v0.6.3 (capabilities schema v2). `approval.pending_requests`
