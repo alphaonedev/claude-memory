@@ -613,13 +613,21 @@ impl ApproverType {
 /// (stored in `metadata.governance`).
 ///
 /// Default policy when a standard has no `metadata.governance`:
-/// `{ write: Any, promote: Any, delete: Owner, approver: Human }`.
+/// `{ write: Any, promote: Any, delete: Owner, approver: Human, inherit: true }`.
 ///
 /// v0.6.2 (S34 defensive): `promote`, `delete`, and `approver` carry
 /// `#[serde(default)]` so partial-policy payloads (a common shape for
 /// operator CLIs / test harnesses that only care about `write`) round-trip
 /// instead of 400-ing out on missing fields. `write` remains required —
 /// it's the core knob a policy is attempting to set.
+///
+/// v0.6.3.1 (P4, audit G1): `inherit` controls whether parent-namespace
+/// policies bubble up. Default `true` matches the architecture page T2
+/// promise of "Hierarchical policy inheritance (default at `org/`,
+/// overridable at `org/team/`)". Setting `inherit: false` on a child
+/// stops the leaf-first walk in `resolve_governance_policy`, providing
+/// an explicit opt-out path for scoped overrides (e.g. an audit
+/// sandbox under a fully-governed parent).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernancePolicy {
     pub write: GovernanceLevel,
@@ -629,6 +637,14 @@ pub struct GovernancePolicy {
     pub delete: GovernanceLevel,
     #[serde(default = "default_approver")]
     pub approver: ApproverType,
+    /// v0.6.3.1 (P4, G1): when `true` (default), missing policy at a
+    /// child namespace falls through to the parent in the chain. When
+    /// `false`, the walk stops at this level — child operations are
+    /// gated by THIS policy and parents are not consulted. Backfilled
+    /// to `true` on existing rows by migration `0012_governance_inherit`
+    /// to preserve the architecturally-promised semantics.
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -643,6 +659,12 @@ fn default_approver() -> ApproverType {
     ApproverType::Human
 }
 
+/// v0.6.3.1 (P4): default for `GovernancePolicy::inherit`. Inheritance
+/// is the documented default — see architecture page T2 and audit G1.
+fn default_inherit() -> bool {
+    true
+}
+
 impl Default for GovernancePolicy {
     fn default() -> Self {
         Self {
@@ -650,6 +672,7 @@ impl Default for GovernancePolicy {
             promote: default_promote_level(),
             delete: default_delete_level(),
             approver: default_approver(),
+            inherit: default_inherit(),
         }
     }
 }
@@ -994,6 +1017,32 @@ mod tests {
         assert_eq!(p.promote, GovernanceLevel::Any);
         assert_eq!(p.delete, GovernanceLevel::Owner);
         assert_eq!(p.approver, ApproverType::Human);
+        // v0.6.3.1 (P4, G1): inheritance is the documented default. Existing
+        // rows are backfilled to true by migration 0012; new rows that omit
+        // the field deserialize as true via #[serde(default)].
+        assert!(p.inherit);
+    }
+
+    #[test]
+    fn governance_inherit_field_defaults_true_on_partial_payload() {
+        // P4 (G1): a partial-policy payload that omits `inherit` must
+        // default to true so legacy callers don't accidentally opt out
+        // of parent inheritance the moment they write a child policy.
+        let json = r#"{"write":"approve"}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.write, GovernanceLevel::Approve);
+        assert!(p.inherit, "missing `inherit` must deserialize as true");
+    }
+
+    #[test]
+    fn governance_inherit_field_explicit_false_round_trip() {
+        // P4 (G1): when an operator explicitly opts a subtree out of
+        // inheritance, the false value must round-trip and serialize.
+        let json = r#"{"write":"any","inherit":false}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert!(!p.inherit);
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["inherit"], false);
     }
 
     #[test]
@@ -1041,6 +1090,7 @@ mod tests {
             promote: GovernanceLevel::Approve,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("maintainer".to_string()),
+            inherit: true,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();

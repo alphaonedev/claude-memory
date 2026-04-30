@@ -521,6 +521,7 @@ mod tests {
             promote: GovernanceLevel::Any,
             delete: GovernanceLevel::Approve,
             approver: ApproverType::Human,
+            inherit: true,
         };
         let conn = db::open(&db).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

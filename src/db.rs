@@ -170,7 +170,8 @@ CREATE TABLE IF NOT EXISTS schema_version (
 );
 ";
 
-const CURRENT_SCHEMA_VERSION: i64 = 16;
+// v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
+const CURRENT_SCHEMA_VERSION: i64 = 17;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -223,6 +224,10 @@ fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
 }
 
 const MIGRATION_V15_SQLITE: &str = include_str!("../migrations/sqlite/0010_v063_hierarchy_kg.sql");
+// v0.6.3.1 (P4, audit G1): backfill `metadata.governance.inherit = true`
+// on existing policies so downstream readers and SQL-side dashboards
+// see a consistent shape after upgrade. Idempotent.
+const MIGRATION_V17_SQLITE: &str = include_str!("../migrations/sqlite/0012_governance_inherit.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -579,6 +584,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             // peers' text_pattern_ops index is part of the same migration
             // generation.
             // No DDL needed for SQLite — index already prefix-friendly.
+        }
+
+        if version < 17 {
+            // v0.6.3.1 (P4, audit G1): backfill `metadata.governance.inherit = true`
+            // on existing namespace standards so the inheritance-enforcement
+            // patch (resolve_governance_policy walking the chain leaf-first)
+            // sees an explicit, physically-present field on legacy rows.
+            // The field deserializes as `true` via #[serde(default)] either
+            // way; the backfill keeps replication payloads, JSON-extract
+            // dashboards, and operator inspect output consistent. Idempotent.
+            conn.execute_batch(MIGRATION_V17_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -3744,20 +3760,156 @@ pub fn clear_namespace_standard(conn: &Connection, namespace: &str) -> Result<bo
 // Task 1.9 — governance enforcement + pending_actions CRUD
 // ---------------------------------------------------------------------------
 
-/// Resolve the explicit governance policy for a namespace from its standard
-/// memory's `metadata.governance`. Returns `None` when no policy is set —
-/// enforcement is **opt-in**, so namespaces without explicit policy skip
-/// every governance check (historical behavior preserved). The "default
-/// policy" (`{ write: Any, promote: Any, delete: Owner, approver: Human }`)
-/// is surfaced by `get_standard` for display purposes only; it does not
-/// gate operations.
-pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
+/// Build the namespace inheritance chain in **top-down** order
+/// (`["*", root, ..., leaf]`). Mirrors and replaces the historical
+/// `mcp::build_namespace_chain` so non-MCP call sites (db-layer
+/// governance enforcement, HTTP handlers, future hook pipelines) can
+/// reuse the same walk.
+///
+/// Properties (preserved from the prior MCP-only implementation):
+/// - cycle-safe (visited set + bounded by `MAX_EXPLICIT_DEPTH = 8`)
+/// - includes the global standard `*` as the most-general entry
+/// - prepends explicit `namespace_meta.parent_namespace` ancestors
+///   before the `/`-derived hierarchy, supporting flat→hierarchical
+///   linking (e.g. legacy `ai-memory` → `ai-memory-mcp`)
+///
+/// The MCP layer's display path consumes this top-down. The governance
+/// resolver in [`resolve_governance_policy`] reverses it for a
+/// leaf-first walk (most-specific wins).
+#[must_use]
+pub fn build_namespace_chain(conn: &Connection, namespace: &str) -> Vec<String> {
+    const MAX_EXPLICIT_DEPTH: usize = 8;
+    let mut chain: Vec<String> = Vec::new();
+
+    if namespace == "*" {
+        chain.push("*".to_string());
+        return chain;
+    }
+
+    // Always start with the global standard — most general.
+    chain.push("*".to_string());
+
+    // 1. /-derived ancestors. `namespace_ancestors` returns most-specific-first;
+    //    reverse for top-down (root ancestor first, then namespace itself last).
+    let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
+        .into_iter()
+        .rev()
+        .collect();
+
+    // 2. If the ROOTmost of the /-chain has an explicit `namespace_meta` parent,
+    //    prepend that chain (bounded by MAX_EXPLICIT_DEPTH + cycle-safe).
+    //    Supports legacy flat namespaces (e.g. `ai-memory` → `ai-memory-mcp`).
+    if let Some(root) = hierarchy_chain.first().cloned() {
+        let mut explicit_above: Vec<String> = Vec::new();
+        let mut current = root;
+        for _ in 0..MAX_EXPLICIT_DEPTH {
+            match get_namespace_parent(conn, &current) {
+                Some(p)
+                    if p != "*"
+                        && !explicit_above.contains(&p)
+                        && !hierarchy_chain.contains(&p) =>
+                {
+                    explicit_above.push(p.clone());
+                    current = p;
+                }
+                _ => break,
+            }
+        }
+        // `explicit_above` is [immediate-explicit-parent, grandparent, ...];
+        // reverse to prepend in top-down order.
+        for p in explicit_above.into_iter().rev() {
+            chain.push(p);
+        }
+    }
+
+    // 3. Append the /-derived chain (top-down).
+    for entry in hierarchy_chain.drain(..) {
+        if !chain.contains(&entry) {
+            chain.push(entry);
+        }
+    }
+
+    chain
+}
+
+/// Read the explicit governance policy attached to a single namespace's
+/// standard memory. Does **not** walk the inheritance chain — callers
+/// that want hierarchical resolution should use
+/// [`resolve_governance_policy`] instead.
+fn read_namespace_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
     let standard_id = get_namespace_standard(conn, namespace).ok()??;
     let mem = get(conn, &standard_id).ok()??;
     match GovernancePolicy::from_metadata(&mem.metadata) {
         Some(Ok(p)) => Some(p),
         _ => None,
     }
+}
+
+/// Resolve the governance policy that gates actions in `namespace`.
+///
+/// v0.6.3.1 (P4, audit G1): walks the inheritance chain leaf-first and
+/// returns the most-specific policy. This closes the audit's
+/// highest-severity finding — prior to this fix the resolver consulted
+/// only the leaf, which left children of governed parents (e.g.
+/// `alphaone/secure/team-a` under an `Approve` policy at
+/// `alphaone/secure`) **completely ungoverned** despite the
+/// architecture page T2 promising "Hierarchical policy inheritance
+/// (default at `org/`, overridable at `org/team/`)".
+///
+/// **Walk semantics** (carefully — easy to get subtly wrong):
+///   1. Build the chain via [`build_namespace_chain`] (top-down) and
+///      reverse it so we walk leaf → root. The leaf is the namespace
+///      we were asked about; the root is the global `*` standard.
+///   2. At each level `k`, look up the policy attached to that
+///      namespace's standard memory.
+///      - If a policy **exists**, it is the most-specific match seen
+///        so far. Return it immediately. ("Most specific wins.")
+///      - If a policy **also says `inherit: false`**, this is already
+///        the same return path — we never reach the parent because
+///        we already returned.
+///   3. If level `k` has **no policy at all**, keep walking — this is
+///      the implicit-inherit branch (no policy means "I don't override
+///      my parent").
+///   4. If we walk off the top of the chain without finding a policy,
+///      return `None` (enforcement remains opt-in for namespaces with
+///      no governance configured anywhere in the chain).
+///
+/// **Where does `inherit: false` actually do work?** When the most-
+/// specific policy we hit on the walk has `inherit: false`. That
+/// policy is returned (same return point as the inherit=true case),
+/// so its rules govern the action; the false flag is what
+/// **conceptually stops** the walk above it, but the implementation
+/// stops the walk simply by virtue of having found a policy. The flag
+/// matters most as a documented contract surfaced to operators: "a
+/// policy here authoritatively replaces, not extends, what's above."
+/// The flag also flows through the queued-pending-action approver
+/// resolution so consensus/agent rules don't accidentally re-walk to
+/// a parent.
+///
+/// Cycle-safety is inherited from `build_namespace_chain`
+/// (`MAX_EXPLICIT_DEPTH = 8` + visited set). No new cache is
+/// introduced — profile-driven optimization is a v0.7 item.
+pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
+    // build_namespace_chain returns top-down (`["*", root, ..., leaf]`).
+    // Governance resolution wants leaf-first (most specific first), so
+    // we reverse before walking.
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        // Most-specific match wins. Returning immediately here means
+        // an explicit policy at the leaf (or any descendant level
+        // with a policy) authoritatively overrides anything above —
+        // which is precisely the inherit=false semantic, applied
+        // implicitly. The inherit=false flag is preserved on the
+        // returned policy so callers (e.g. the pending_action
+        // approver resolver) don't accidentally re-walk to a parent.
+        if let Some(policy) = read_namespace_policy(conn, &level) {
+            return Some(policy);
+        }
+        // Implicit branch: no policy at this level → keep walking
+        // toward the root. This is the "default inherit" behavior
+        // that closes G1.
+    }
+    None
 }
 
 /// Return true if `agent_id` matches a registered agent in `_agents`.

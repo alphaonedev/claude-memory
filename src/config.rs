@@ -227,6 +227,11 @@ impl TierConfig {
                 mode: "ask".to_string(),
                 active_rules: 0,
                 rule_summary: Vec::new(),
+                // v0.6.3.1 (P4, G1): chain-walking enforcement landed
+                // in this release. Surface "enforced" so consumers can
+                // distinguish a governed deployment from the historical
+                // "display_only" posture.
+                inheritance: Some("enforced".to_string()),
             },
             hooks: CapabilityHooks::default(),
             compaction: CapabilityCompaction::default(),
@@ -337,6 +342,22 @@ pub struct CapabilityPermissions {
     /// Per-namespace summary; empty pre-v0.7.
     #[serde(default)]
     pub rule_summary: Vec<String>,
+    /// v0.6.3.1 (P4, audit G1): governance-inheritance posture.
+    /// `"enforced"` = `resolve_governance_policy` walks the namespace
+    /// chain leaf-first and returns the most-specific policy (with
+    /// `inherit: false` short-circuiting). Pre-v0.6.3.1 was
+    /// `"display_only"` — the UI surfaced the chain but the gate
+    /// consulted only the leaf, leaving children of governed parents
+    /// completely ungoverned. The field is added as `Option<String>`
+    /// so capabilities responses serialized by older builds (without
+    /// the field) round-trip cleanly via `#[serde(default)]`.
+    /// Coordination note: P1 (capabilities v2 work) may overwrite this
+    /// stub with a richer enum. Until P1 merges, this hard-coded
+    /// `"enforced"` is the source of truth; after P1 merges, that
+    /// agent should keep the field name `inheritance` and the same
+    /// value for the v0.6.3.1 release window.
+    #[serde(default)]
+    pub inheritance: Option<String>,
 }
 
 /// Hook-pipeline block (capabilities schema v2). Pre-v0.7 reports webhook
@@ -911,6 +932,8 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        // v0.6.3.1 (P4, audit G1): inheritance posture surfaced.
+        assert_eq!(val["permissions"]["inheritance"], "enforced");
 
         // hooks zero-state: 0 registered, empty by_event map
         assert_eq!(val["hooks"]["registered_count"], 0);

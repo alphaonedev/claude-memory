@@ -475,12 +475,13 @@ fn tool_definitions() -> Value {
                         "parent": {"type": "string", "description": "Optional parent namespace to inherit standards from (rule layering)"},
                         "governance": {
                             "type": "object",
-                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types.",
+                            "description": "Task 1.8 governance policy. Stored in metadata.governance on the standard memory. Consumed by Task 1.9 enforcement + 1.10 approver types. v0.6.3.1 (P4, G1): adds `inherit` flag controlling parent-namespace policy bubbling.",
                             "properties": {
                                 "write":    {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "promote":  {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
                                 "delete":   {"type": "string", "enum": ["any", "registered", "owner", "approve"]},
-                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"}
+                                "approver": {"description": "ApproverType: \"human\" | {\"agent\": \"<id>\"} | {\"consensus\": <n>}"},
+                                "inherit":  {"type": "boolean", "default": true, "description": "v0.6.3.1 (P4, G1): when true (default), missing policy at this namespace falls through to parent in the chain. Set false to opt this subtree out of parent inheritance."}
                             }
                         }
                     },
@@ -1051,59 +1052,15 @@ fn handle_store(
 ///
 /// Returned vector is top-down: `[*, org, unit, team, agent]` for a
 /// 4-level hierarchical namespace. Cycle-safe and bounded.
+/// Display-side wrapper around [`db::build_namespace_chain`].
+///
+/// v0.6.3.1 (P4, audit G1): the chain walker moved into `db.rs` so the
+/// governance enforcement gate could share a single canonical
+/// implementation with the recall/standard injection paths. This thin
+/// shim keeps existing call sites compiling without re-routing every
+/// invocation through `db::`.
 fn build_namespace_chain(conn: &rusqlite::Connection, namespace: &str) -> Vec<String> {
-    const MAX_EXPLICIT_DEPTH: usize = 8;
-    let mut chain: Vec<String> = Vec::new();
-
-    if namespace == "*" {
-        chain.push("*".to_string());
-        return chain;
-    }
-
-    // Always start with the global standard — most general.
-    chain.push("*".to_string());
-
-    // 1. /-derived ancestors. `namespace_ancestors` returns most-specific-first;
-    //    reverse for top-down (root ancestor first, then namespace itself last).
-    let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
-        .into_iter()
-        .rev()
-        .collect();
-
-    // 2. If the ROOTmost of the /-chain has an explicit `namespace_meta` parent,
-    //    prepend that chain (bounded by MAX_EXPLICIT_DEPTH + cycle-safe).
-    //    Supports legacy flat namespaces (e.g. `ai-memory` → `ai-memory-mcp`).
-    if let Some(root) = hierarchy_chain.first().cloned() {
-        let mut explicit_above: Vec<String> = Vec::new();
-        let mut current = root;
-        for _ in 0..MAX_EXPLICIT_DEPTH {
-            match db::get_namespace_parent(conn, &current) {
-                Some(p)
-                    if p != "*"
-                        && !explicit_above.contains(&p)
-                        && !hierarchy_chain.contains(&p) =>
-                {
-                    explicit_above.push(p.clone());
-                    current = p;
-                }
-                _ => break,
-            }
-        }
-        // `explicit_above` is [immediate-explicit-parent, grandparent, ...];
-        // reverse to prepend in top-down order.
-        for p in explicit_above.into_iter().rev() {
-            chain.push(p);
-        }
-    }
-
-    // 3. Append the /-derived chain (top-down).
-    for entry in hierarchy_chain.drain(..) {
-        if !chain.contains(&entry) {
-            chain.push(entry);
-        }
-    }
-
-    chain
+    db::build_namespace_chain(conn, namespace)
 }
 
 /// Inject namespace standards into a `recall/session_start` response.
@@ -4458,6 +4415,11 @@ mod tests {
         assert_eq!(val["permissions"]["mode"], "ask");
         assert!(val["permissions"]["active_rules"].is_number());
         assert!(val["permissions"]["rule_summary"].is_array());
+        // v0.6.3.1 (P4, audit G1): inheritance posture must be reported
+        // as "enforced" so consumers can distinguish a fixed deployment
+        // from a pre-fix one (which historically returned "display_only"
+        // implicitly via doc — pre-v2 had no field at all).
+        assert_eq!(val["permissions"]["inheritance"], "enforced");
 
         // hooks block
         assert!(val["hooks"].is_object(), "hooks block present");
