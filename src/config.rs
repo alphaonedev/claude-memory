@@ -494,12 +494,42 @@ pub struct CapabilityPermissions {
 /// Hook-pipeline block (capabilities schema v2). Pre-v0.7 reports webhook
 /// subscriptions as the closest analogue. The full hook pipeline lands in
 /// v0.7 Bucket 0 (arch-enhancement-spec §2).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CapabilityHooks {
     /// Number of registered hook subscribers (proxy: webhook subscriptions).
     pub registered_count: usize,
     // P1 honesty patch: `by_event` was always an empty map — no event
     // registry exists. Dropped from the v2 wire schema.
+    /// v0.6.3.1 P5 (G9): canonical list of webhook event types the
+    /// daemon emits. Integrators pin the `subscribe(event_types: …)`
+    /// filter against these strings. Always populated so downstream
+    /// callers do not have to handle a missing field.
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: Vec<String>,
+}
+
+impl Default for CapabilityHooks {
+    fn default() -> Self {
+        Self {
+            registered_count: 0,
+            webhook_events: default_webhook_events(),
+        }
+    }
+}
+
+/// Default webhook events list — kept in sync with
+/// `crate::subscriptions::WEBHOOK_EVENT_TYPES`. The constant lives in
+/// `subscriptions.rs` (the surface that uses it at runtime); this
+/// helper exists so `serde(default = …)` and `CapabilityHooks::default`
+/// can fill the field without a cross-module dep on `subscriptions`.
+fn default_webhook_events() -> Vec<String> {
+    vec![
+        "memory_store".to_string(),
+        "memory_promote".to_string(),
+        "memory_delete".to_string(),
+        "memory_link_created".to_string(),
+        "memory_consolidated".to_string(),
+    ]
 }
 
 /// Compaction block (capabilities schema v2). v0.8 Pillar 2.5 work —
@@ -1227,6 +1257,30 @@ mod tests {
             val["hooks"].get("by_event").is_none(),
             "v2 honesty patch drops `hooks.by_event` (no event registry)"
         );
+
+        // hooks zero-state: 0 registered, by_event dropped (P1 honesty)
+        assert_eq!(val["hooks"]["registered_count"], 0);
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 drops hooks.by_event (no event registry)"
+        );
+        // P5 (G9): webhook_events must always surface the canonical
+        // five lifecycle events so integrators can pin a subscribe
+        // filter against them.
+        let events = val["hooks"]["webhook_events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        for expected in [
+            "memory_store",
+            "memory_promote",
+            "memory_delete",
+            "memory_link_created",
+            "memory_consolidated",
+        ] {
+            assert!(
+                events.iter().any(|v| v.as_str() == Some(expected)),
+                "webhook_events missing {expected}"
+            );
+        }
 
         // compaction zero-state: planned, not enabled, optional fields omitted
         assert_eq!(val["compaction"]["planned"], true);

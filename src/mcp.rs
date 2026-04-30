@@ -2002,6 +2002,7 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
 
 fn handle_delete(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     vector_index: Option<&VectorIndex>,
     mcp_client: Option<&str>,
@@ -2018,6 +2019,18 @@ fn handle_delete(
     let Some(target) = target else {
         return Err("memory not found".into());
     };
+
+    // P5 (G9): snapshot fields the dispatcher needs BEFORE delete frees
+    // the row. The dispatch itself is fire-and-forget after the DELETE
+    // commits, but the payload is built from this owned snapshot.
+    let snapshot_namespace = target.namespace.clone();
+    let snapshot_title = target.title.clone();
+    let snapshot_tier = target.tier.as_str().to_string();
+    let snapshot_owner: Option<String> = target
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     // Task 1.9: governance enforcement (delete-side).
     {
@@ -2062,6 +2075,22 @@ fn handle_delete(
         if let Some(idx) = vector_index {
             idx.remove(&target.id);
         }
+        // P5 (G9): fire `memory_delete` webhook AFTER the row is gone
+        // (best-effort, fire-and-forget — same pattern as memory_store).
+        let details = serde_json::to_value(crate::subscriptions::DeleteEventDetails {
+            title: snapshot_title,
+            tier: snapshot_tier,
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            conn,
+            "memory_delete",
+            &target.id,
+            &snapshot_namespace,
+            snapshot_owner.as_deref(),
+            db_path,
+            details,
+        );
         Ok(json!({"deleted": true}))
     } else {
         Err("memory not found".into())
@@ -2070,6 +2099,7 @@ fn handle_delete(
 
 fn handle_promote(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     mcp_client: Option<&str>,
 ) -> Result<Value, String> {
@@ -2085,6 +2115,13 @@ fn handle_promote(
         return Err("memory not found".into());
     };
     let resolved_id = target.id.clone();
+    // P5 (G9): snapshot fields needed for the post-success webhook.
+    let snapshot_namespace = target.namespace.clone();
+    let snapshot_owner: Option<String> = target
+        .metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
 
     // Task 1.9: governance enforcement (promote-side).
     {
@@ -2135,6 +2172,25 @@ fn handle_promote(
         validate::validate_namespace(to_ns).map_err(|e| e.to_string())?;
         let clone_id =
             db::promote_to_namespace(conn, &resolved_id, to_ns).map_err(|e| e.to_string())?;
+        // P5 (G9): fire `memory_promote` webhook for vertical mode AFTER
+        // the clone commits. memory_id = source id (subscribers can
+        // distinguish via `mode` and `clone_id` in the details block).
+        let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
+            mode: "vertical".to_string(),
+            tier: None,
+            to_namespace: Some(to_ns.to_string()),
+            clone_id: Some(clone_id.clone()),
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            conn,
+            "memory_promote",
+            &resolved_id,
+            &snapshot_namespace,
+            snapshot_owner.as_deref(),
+            db_path,
+            details,
+        );
         return Ok(json!({
             "promoted": true,
             "mode": "vertical",
@@ -2162,6 +2218,24 @@ fn handle_promote(
     if !found {
         return Err("memory not found".into());
     }
+    // P5 (G9): fire `memory_promote` webhook for the default tier-upgrade
+    // path AFTER the update commits.
+    let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
+        mode: "tier".to_string(),
+        tier: Some("long".to_string()),
+        to_namespace: None,
+        clone_id: None,
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_promote",
+        &resolved_id,
+        &snapshot_namespace,
+        snapshot_owner.as_deref(),
+        db_path,
+        details,
+    );
     Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": "long"}))
 }
 
@@ -2313,7 +2387,11 @@ fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Stri
     }
 }
 
-fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_link(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    params: &Value,
+) -> Result<Value, String> {
     let source_id = params["source_id"]
         .as_str()
         .ok_or("source_id is required")?;
@@ -2324,6 +2402,38 @@ fn handle_link(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
     db::create_link(conn, source_id, target_id, relation).map_err(|e| e.to_string())?;
+
+    // P5 (G9): fire `memory_link_created` webhook AFTER the link is
+    // persisted. Resolve the source memory to populate `namespace` /
+    // `agent_id` for the dispatch envelope; if it's somehow gone (race
+    // with delete) fall back to "global"/None and let the webhook
+    // reflect the link metadata only.
+    let (event_namespace, event_agent_id) = match db::get(conn, source_id) {
+        Ok(Some(mem)) => {
+            let owner = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (mem.namespace, owner)
+        }
+        _ => ("global".to_string(), None),
+    };
+    let details = serde_json::to_value(crate::subscriptions::LinkCreatedEventDetails {
+        target_id: target_id.to_string(),
+        relation: relation.to_string(),
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_link_created",
+        source_id,
+        &event_namespace,
+        event_agent_id.as_deref(),
+        db_path,
+        details,
+    );
+
     Ok(
         json!({"linked": true, "source_id": source_id, "target_id": target_id, "relation": relation}),
     )
@@ -2338,6 +2448,7 @@ fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value
 
 fn handle_consolidate(
     conn: &rusqlite::Connection,
+    db_path: &Path,
     params: &Value,
     llm: Option<&OllamaClient>,
     embedder: Option<&Embedder>,
@@ -2458,6 +2569,25 @@ fn handle_consolidate(
             new_id
         ));
     }
+
+    // P5 (G9): fire `memory_consolidated` webhook AFTER db::consolidate
+    // commits the new memory. memory_id = the new consolidated id; the
+    // details block carries the source ids that were merged.
+    let details = serde_json::to_value(crate::subscriptions::ConsolidatedEventDetails {
+        source_ids: ids.clone(),
+        source_count: ids.len(),
+    })
+    .ok();
+    crate::subscriptions::dispatch_event_with_details(
+        conn,
+        "memory_consolidated",
+        &new_id,
+        namespace,
+        Some(&consolidator_agent_id),
+        db_path,
+        details,
+    );
+
     Ok(result)
 }
 
@@ -2874,6 +3004,17 @@ pub(crate) fn handle_subscribe(
     let created_by =
         crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
 
+    // P5 (G9): optional structured per-event-type opt-in. Callers pass
+    // `event_types: ["memory_store", "memory_link_created"]` to scope a
+    // subscription to a narrow event subset. When omitted, the legacy
+    // `events` (comma-separated / `*`) field governs — preserves
+    // backward compatibility for pre-P5 subscribers.
+    let event_types: Option<Vec<String>> = params["event_types"].as_array().map(|arr| {
+        arr.iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect()
+    });
+
     // Require the caller to be a registered agent (#301 item 4).
     // MCP stdio is single-tenant per process, but the same tool set is
     // exposed on the HTTP daemon where a caller might not be attested.
@@ -2902,18 +3043,23 @@ pub(crate) fn handle_subscribe(
             namespace_filter,
             agent_filter,
             created_by: Some(&created_by),
+            event_types: event_types.as_deref(),
         },
     )
     .map_err(|e| e.to_string())?;
 
-    Ok(json!({
+    let mut response = json!({
         "id": id,
         "url": url,
         "events": events,
         "namespace_filter": namespace_filter,
         "agent_filter": agent_filter,
         "created_by": created_by,
-    }))
+    });
+    if let Some(et) = &event_types {
+        response["event_types"] = json!(et);
+    }
+    Ok(response)
 }
 
 pub(crate) fn handle_unsubscribe(
@@ -3213,8 +3359,10 @@ fn handle_request(
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
                 "memory_kg_invalidate" => handle_kg_invalidate(conn, arguments),
                 "memory_kg_query" => handle_kg_query(conn, arguments),
-                "memory_delete" => handle_delete(conn, arguments, vector_index, mcp_client),
-                "memory_promote" => handle_promote(conn, arguments, mcp_client),
+                "memory_delete" => {
+                    handle_delete(conn, db_path, arguments, vector_index, mcp_client)
+                }
+                "memory_promote" => handle_promote(conn, db_path, arguments, mcp_client),
                 "memory_pending_list" => handle_pending_list(conn, arguments),
                 "memory_pending_approve" => handle_pending_approve(conn, arguments, mcp_client),
                 "memory_pending_reject" => handle_pending_reject(conn, arguments, mcp_client),
@@ -3222,11 +3370,17 @@ fn handle_request(
                 "memory_stats" => handle_stats(conn, db_path),
                 "memory_update" => handle_update(conn, arguments, embedder, vector_index),
                 "memory_get" => handle_get(conn, arguments),
-                "memory_link" => handle_link(conn, arguments),
+                "memory_link" => handle_link(conn, db_path, arguments),
                 "memory_get_links" => handle_get_links(conn, arguments),
-                "memory_consolidate" => {
-                    handle_consolidate(conn, arguments, llm, embedder, vector_index, mcp_client)
-                }
+                "memory_consolidate" => handle_consolidate(
+                    conn,
+                    db_path,
+                    arguments,
+                    llm,
+                    embedder,
+                    vector_index,
+                    mcp_client,
+                ),
                 "memory_capabilities" => {
                     // P1 honesty patch: optional `accept` argument lets MCP
                     // clients opt into the legacy v1 shape, mirroring the

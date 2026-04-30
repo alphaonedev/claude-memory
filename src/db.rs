@@ -173,7 +173,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
 // v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
 // v18 = v0.6.3.1 (P2, audit G4/G5/G13) data-integrity hardening:
 //       embedding_dim guard, archive lossless, magic-byte header.
-const CURRENT_SCHEMA_VERSION: i64 = 18;
+// v19 = v0.6.3.1 (P5, audit G9) webhook event-types column +
+//       per-subscriber filter.
+const CURRENT_SCHEMA_VERSION: i64 = 19;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -235,6 +237,11 @@ const MIGRATION_V17_SQLITE: &str = include_str!("../migrations/sqlite/0012_gover
 // the SQL file holds idempotent backfills + indexes.
 const MIGRATION_V18_SQLITE: &str =
     include_str!("../migrations/sqlite/0011_v0631_data_integrity.sql");
+// v0.6.3.1 (P5, audit G9): webhook event-types column + per-subscriber
+// filter index. ADD COLUMN done inline (SQLite has no `ADD COLUMN IF NOT
+// EXISTS`); SQL file holds the idempotent index batch.
+const MIGRATION_V19_SQLITE: &str =
+    include_str!("../migrations/sqlite/0013_webhook_event_types.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -667,6 +674,28 @@ fn migrate(conn: &Connection) -> Result<()> {
 
             // Backfill + indexes — UPDATE/INDEX statements are idempotent.
             conn.execute_batch(MIGRATION_V18_SQLITE)?;
+        }
+
+        if version < 19 {
+            // v0.6.3.1 P5 / G9 — webhook event coverage. Adds an
+            // `event_types` JSON-encoded array column to `subscriptions`
+            // so callers can opt into a narrow, structured event filter
+            // (e.g. `["memory_store", "memory_link_created"]`). The legacy
+            // comma-separated `events` column stays as the canonical
+            // matcher at dispatch time; new structured callers populate
+            // BOTH so existing dispatch code keeps working unchanged.
+            //
+            // Backward compat: existing rows keep `events = '*'` and have
+            // `event_types = NULL` — the matcher continues to treat them
+            // as all-events subscribers.
+            let has_event_types = conn
+                .prepare("SELECT event_types FROM subscriptions LIMIT 0")
+                .is_ok();
+            if !has_event_types {
+                conn.execute("ALTER TABLE subscriptions ADD COLUMN event_types TEXT", [])?;
+            }
+            // Idempotent index from the migration file.
+            conn.execute_batch(MIGRATION_V19_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
