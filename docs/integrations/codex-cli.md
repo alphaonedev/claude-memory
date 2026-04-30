@@ -14,20 +14,20 @@ Save as `~/.local/bin/codex-with-memory` and make it executable:
 ```bash
 #!/usr/bin/env bash
 # Wraps `codex` with ai-memory boot context on the system message.
+# (Recipe shown in bash for clarity; PR-6 of issue #487 ships an
+# `ai-memory wrap codex` Rust subcommand with identical semantics that
+# works on Windows / Docker / Kubernetes without a shell wrapper.)
 set -euo pipefail
 
 BOOT_CONTEXT=$(ai-memory boot --quiet --no-header --format text --limit 10 || true)
 
 # Append boot context to the system message via Codex's --system flag (or
-# OPENAI_CLI_SYSTEM env var, depending on which Codex CLI you're running).
+# OPENAI_CLI_SYSTEM env var, depending on which Codex CLI you are running).
 if [[ -n "$BOOT_CONTEXT" ]]; then
-  exec codex --system "$(cat <<EOF
-You have access to ai-memory. Recent context follows; reference it when
-relevant to the user's request.
+  PREAMBLE="You have access to ai-memory. Recent context follows; reference it when relevant to the request."
+  exec codex --system "${PREAMBLE}
 
-$BOOT_CONTEXT
-EOF
-)" "$@"
+${BOOT_CONTEXT}" "$@"
 else
   exec codex "$@"
 fi
