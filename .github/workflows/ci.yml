@@ -619,17 +619,20 @@ jobs:
           # `tee` form masked that failure since `tee` always exits 0.
           cargo llvm-cov report --summary-only | tee coverage/summary.txt
 
-      # v0.6.3 coverage gate — fail-under 92% lines.
-      # Locks in the v0.6.3 baseline of 93.08% with a 1% absorb buffer so
+      # v0.6.3.1 coverage gate — fail-under 93% lines.
+      # Bumped from 92 → 93 after the cli/sync.rs + reranker.rs uplift
+      # work landed on release/v0.6.3.1-coverage-uplift-sync-reranker
+      # (cli/sync.rs 75.00% → ~96%, reranker.rs 79.25% → ~95%, total
+      # 93.08% → ≥93.50%). The 1%-absorb-buffer convention is retained:
       # routine churn doesn't trip the gate but a regression of >1% does.
       # Per-module floors for hot modules (handlers, db, federation, mcp,
       # governance) are tracked in the v0.7 assertion table; this is the
       # total-line floor.
-      - name: Enforce coverage floor (≥92% lines)
+      - name: Enforce coverage floor (≥93% lines)
         env:
           AI_MEMORY_NO_CONFIG: "1"
         run: |
-          cargo llvm-cov report --fail-under-lines 92
+          cargo llvm-cov report --fail-under-lines 93
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v5
