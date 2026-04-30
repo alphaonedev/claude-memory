@@ -1325,9 +1325,8 @@ Successive alphas will be tagged at each track completion (A/B/C/D per
 
 ### Added
 
-- Ubuntu PPA: `sudo add-apt-repository ppa:jbridger2021/ppa && sudo apt install ai-memory`
 - Fedora COPR: `sudo dnf copr enable alpha-one-ai/ai-memory && sudo dnf install ai-memory`
-- CI workflows for automated PPA and COPR uploads on tag push
+- CI workflow for automated COPR upload on tag push
 - debian/ packaging directory (control, rules, changelog, copyright)
 - RPM spec file (ai-memory.spec) for COPR builds
 - OpenClaw as 9th supported AI platform across all docs
