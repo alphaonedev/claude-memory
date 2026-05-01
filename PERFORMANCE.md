@@ -41,6 +41,12 @@ are advisory targets.
 | `curator cycle` (1k memories) | < 60 s | < 120 s | *[advisory]* Background |
 | `federation ack` (W=2 quorum) | < 2 s | < 5 s | *[advisory]* Multi-machine |
 
+> **See also:** `docs/performance.html` publishes a complementary,
+> per-feature-tier view (keyword / semantic / autonomous) of these
+> budgets — equal-or-tighter targets stratified by which capabilities
+> are loaded. Both surfaces are kept in agreement; this file is the
+> canonical aggregate contract that the `bench.yml` CI guard reads.
+
 ## CI Guard Threshold
 
 The `bench.yml` workflow (Stream F) runs `ai-memory bench` on every
