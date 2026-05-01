@@ -120,6 +120,10 @@ Status codes you'll commonly encounter:
 }
 ```
 
+`tier` is one of `"short"` | `"mid"` | `"long"` (see `Tier` enum in
+`src/models.rs:10`). `last_accessed_at` and `expires_at` are omitted
+from the JSON when not set — they are NOT serialized as `null`.
+
 Fields marked in `metadata` are preserved across update / upsert /
 sync / consolidate.
 
