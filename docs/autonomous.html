@@ -254,7 +254,7 @@ footer a{color:var(--text-muted)}
         <div class="feats">
           <span class="on">▸ all of Smart</span>
           <span class="on">▸ cross_encoder_reranking</span>
-          <span class="on">▸ memory_reflection</span>
+          <span class="on">▸ memory_reflection (planned, v0.7+)</span>
           <span class="on">▸ session_start (LLM-driven)</span>
         </div>
       </div>
@@ -318,7 +318,7 @@ footer a{color:var(--text-muted)}
     </div>
 
     <div class="feature au">
-      <div class="feature-head"><span class="feature-name">memory_reflection</span><span class="feature-need au">Autonomous tier</span></div>
+      <div class="feature-head"><span class="feature-name">cross_encoder_reranking</span><span class="feature-need au">Autonomous tier</span></div>
       <div class="feature-desc">Cross-encoder reranker scores top-K recall results against the query, reordering for precision. Where keyword + vector recall return a candidate set, the cross-encoder is the final pass that puts the best match first. Adds ~50ms to a recall but materially improves top-1 quality.</div>
       <div class="snip"><span class="cm">// Implicit — automatically applied during memory_recall when:
 //   1. Autonomous tier is configured, AND
@@ -388,7 +388,7 @@ EOF
 <span class="ok">$</span> ai-memory capabilities
 <span class="ok">→ "tier": "autonomous"</span>
 <span class="ok">→ "features": { "auto_tag": true, "auto_consolidation": true,
-                  "memory_reflection": true, "embedder_loaded": true }</span></div>
+                  "cross_encoder_reranking": true, "embedder_loaded": true }</span></div>
     <p class="lede" style="margin-top:1rem">From this point on, the autonomous MCP tools are live. Wire them into your AI client (Claude Code, Cursor, Codex, Continue, etc.) — see <a href="integrations.html" style="color:var(--p1)">integrations atlas</a>.</p>
   </div>
 </section>

@@ -712,7 +712,7 @@ Report the active feature tier, loaded models, and available capabilities of the
     "auto_tagging": false,
     "contradiction_detection": false,
     "cross_encoder_reranking": false,
-    "memory_reflection": false
+    "cross_encoder_reranking": false
   },
   "models": {
     "embedding": "all-MiniLM-L6-v2",

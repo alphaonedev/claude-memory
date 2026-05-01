@@ -360,7 +360,7 @@ export error: tar archive write failed</span>
       <div class="when">embedding write failure</div>
       <div class="what">A memory was stored but its vector wasn't indexed</div>
       <span class="grep">grep 'failed to store embedding for' daemon.log</span>
-      <span class="meaning">The memory is persisted; FTS5 covers it. Semantic recall will miss it until <code>memory_reindex</code> rebuilds the HNSW.</span>
+      <span class="meaning">The memory is persisted; FTS5 covers it. Semantic recall will miss it until the HNSW index rebuilds (automatic at the 200-entry overflow threshold, or on daemon restart).</span>
     </div>
 
     <div class="recipe">

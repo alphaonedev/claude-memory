@@ -169,24 +169,25 @@ footer a{color:var(--text-muted)}
     <span class="eyebrow">Public p95 budgets</span>
     <h2 style="font-family:var(--font-sans);font-size:1.75rem">The numbers, committed to source.</h2>
     <p class="lede">Every operation has a target p95 latency budget on a reference machine (Apple M2, 8GB free RAM, SQLite). PRs that regress beyond a configurable threshold fail the bench CI gate. v0.7's Apache AGE work will extend this with KG-query budgets; v0.8 adds task-queue p95.</p>
+    <p class="lede" style="font-size:.95rem;color:var(--text-dim)">Rows tagged <em>[advisory]</em> are published targets without a matching bench in <code>src/bench.rs</code> yet (Stream E follow-up — embedder-bound, background-job, or federation paths). Unmarked rows are exercised by <code>ai-memory bench</code> on every PR. <code>PERFORMANCE.md</code> is the canonical budget contract.</p>
     <table class="budget-table">
       <thead><tr><th>Operation</th><th>Tier</th><th style="text-align:right">p95 budget</th><th>Notes</th></tr></thead>
       <tbody>
         <tr><td class="op">memory_store</td><td>keyword</td><td class="num">≤ 5 ms</td><td>FTS5 only · single-row insert</td></tr>
-        <tr><td class="op">memory_store</td><td>semantic</td><td class="num">≤ 25 ms</td><td>+ MiniLM embedding (384d)</td></tr>
-        <tr><td class="op">memory_store</td><td>autonomous</td><td class="num">≤ 60 ms</td><td>+ nomic embedding (768d)</td></tr>
-        <tr><td class="op">memory_get</td><td>any</td><td class="num">≤ 2 ms</td><td>indexed PK lookup + access bump</td></tr>
+        <tr><td class="op">memory_store</td><td>semantic</td><td class="num">≤ 25 ms</td><td><em>[advisory]</em> + MiniLM embedding (384d)</td></tr>
+        <tr><td class="op">memory_store</td><td>autonomous</td><td class="num">≤ 60 ms</td><td><em>[advisory]</em> + nomic embedding (768d)</td></tr>
+        <tr><td class="op">memory_get</td><td>any</td><td class="num">≤ 2 ms</td><td><em>[advisory]</em> indexed PK lookup + access bump</td></tr>
         <tr><td class="op">memory_search</td><td>keyword</td><td class="num">≤ 8 ms</td><td>FTS5 query, top-20</td></tr>
-        <tr><td class="op">memory_recall</td><td>semantic</td><td class="num">≤ 35 ms</td><td>FTS5 70% + HNSW 30% fusion</td></tr>
-        <tr><td class="op">memory_recall</td><td>autonomous</td><td class="num">≤ 90 ms</td><td>+ cross-encoder rerank (top-100→top-10)</td></tr>
-        <tr><td class="op">memory_link</td><td>any</td><td class="num">≤ 4 ms</td><td>FK insert + idempotency check</td></tr>
-        <tr><td class="op">memory_promote</td><td>any</td><td class="num">≤ 8 ms</td><td>+ governance verdict</td></tr>
-        <tr><td class="op">memory_consolidate</td><td>smart</td><td class="num warn">≤ 1500 ms</td><td>LLM-bound · Gemma 4 E2B</td></tr>
+        <tr><td class="op">memory_recall</td><td>semantic</td><td class="num">≤ 35 ms</td><td><em>[advisory]</em> FTS5 70% + HNSW 30% fusion</td></tr>
+        <tr><td class="op">memory_recall</td><td>autonomous</td><td class="num">≤ 90 ms</td><td><em>[advisory]</em> + cross-encoder rerank (top-100→top-10)</td></tr>
+        <tr><td class="op">memory_link</td><td>any</td><td class="num">≤ 4 ms</td><td><em>[advisory]</em> FK insert + idempotency check</td></tr>
+        <tr><td class="op">memory_promote</td><td>any</td><td class="num">≤ 8 ms</td><td><em>[advisory]</em> + governance verdict</td></tr>
+        <tr><td class="op">memory_consolidate</td><td>smart</td><td class="num warn">≤ 1500 ms</td><td><em>[advisory]</em> LLM-bound · Gemma 4 E2B</td></tr>
         <tr><td class="op">memory_kg_query</td><td>any</td><td class="num">≤ 50 ms</td><td>recursive CTE · depth 3 · &lt; 1k edges</td></tr>
-        <tr><td class="op">memory_get_taxonomy</td><td>any</td><td class="num">≤ 30 ms</td><td>tree walk · default depth 8 · limit 1000</td></tr>
-        <tr><td class="op">memory_archive_purge</td><td>any</td><td class="num">≤ 200 ms</td><td>per 1000 archived rows</td></tr>
-        <tr><td class="op">sync_push (per row)</td><td>any</td><td class="num">≤ 15 ms</td><td>peer-to-peer · TLS 1.3</td></tr>
-        <tr><td class="op">bulk_create</td><td>any</td><td class="num">≤ 2000 ms</td><td>100 rows + fanout · concurrent post W12</td></tr>
+        <tr><td class="op">memory_get_taxonomy</td><td>any</td><td class="num">≤ 30 ms</td><td><em>[advisory]</em> tree walk · default depth 8 · limit 1000</td></tr>
+        <tr><td class="op">memory_archive_purge</td><td>any</td><td class="num">≤ 200 ms</td><td><em>[advisory]</em> per 1000 archived rows</td></tr>
+        <tr><td class="op">sync_push (per row)</td><td>any</td><td class="num">≤ 15 ms</td><td><em>[advisory]</em> peer-to-peer · TLS 1.3</td></tr>
+        <tr><td class="op">bulk_create</td><td>any</td><td class="num">≤ 2000 ms</td><td><em>[advisory]</em> 100 rows + fanout · concurrent post W12</td></tr>
       </tbody>
     </table>
     <p class="lede" style="margin-top:1rem"><em>Reference machine: Apple M2, 16GB RAM, macOS 14, SQLite default settings, single-process daemon. Numbers degrade gracefully on lower-spec hardware; budgets are headroom-aware. Live numbers under <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/PERFORMANCE.md" style="color:var(--p1)">PERFORMANCE.md</a>.</em></p>
