@@ -85,6 +85,8 @@ authoritative for its topic; this page is just the map.
 
 - **[ADR-0001-quorum-replication.md](ADR-0001-quorum-replication.md)** —
   W-of-N quorum write model + chaos-testing methodology.
+- **[RECURSION-PHILOSOPHY.md](RECURSION-PHILOSOPHY.md)** — recursion lens
+  on `ROADMAP2.md` milestones; descriptive, not prescriptive. Not a roadmap.
 
 ## SDKs
 
