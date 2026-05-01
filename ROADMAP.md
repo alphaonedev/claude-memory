@@ -3,7 +3,7 @@
 > **AI endpoint memory.** Every AI agent gets persistent, synced memory — the same way every network endpoint gets an IP address. A primitive, not a product.
 
 > Single repo: `alphaonedev/ai-memory-mcp`
-> Current production version: **v0.5.4.4** (2026-04-13)
+> Current production version: **v0.6.3.1** (2026-04-27)
 > License: Apache-2.0 | Trademark: ai-memory(TM) USPTO Serial No. 99761257
 > Execution model: **AI-built, human-vetted**
 

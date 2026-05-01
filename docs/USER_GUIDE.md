@@ -46,7 +46,7 @@ Below is an example for **Claude Code** (user scope: merge `mcpServers` into `~/
 
 ### How It Works
 
-With MCP configured, your AI client gains 21 memory tools:
+With MCP configured, your AI client gains 43 memory tools (highlights below; see [API_REFERENCE.md](API_REFERENCE.md) for the full reference):
 
 - **memory_store** -- Store new knowledge (auto-deduplicates by title+namespace, reports contradictions)
 - **memory_recall** -- Recall relevant memories for the current context (supports `until` date filter)
@@ -239,6 +239,8 @@ Search memories by exact keyword match with AND semantics (all terms must match)
 | `namespace` | string | No | -- | Filter by namespace |
 | `tier` | string | No | -- | Filter by tier: `"short"`, `"mid"`, or `"long"` |
 | `limit` | integer (max 200) | No | `20` | Maximum results |
+| `agent_id` | string | No | -- | Filter by `metadata.agent_id` (exact match) |
+| `as_agent` | string | No | -- | Querying agent for scope-based visibility filtering (Task 1.5) |
 | `format` | string | No | `"toon_compact"` | Response format: `"json"`, `"toon"`, or `"toon_compact"` |
 
 **Example request:**
@@ -352,6 +354,7 @@ Promote a memory to long-term (permanent). Clears the expiry timestamp.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `id` | string | Yes | -- | Memory ID to promote |
+| `to_namespace` | string | No | -- | Clone to ancestor namespace (Task 1.7; preserves original) |
 
 **Example request:**
 
@@ -463,6 +466,7 @@ Update an existing memory by ID. Only provided fields are changed -- omitted fie
 | `priority` | integer (1-10) | No | -- | New priority |
 | `confidence` | number (0.0-1.0) | No | -- | New confidence |
 | `expires_at` | string | No | -- | Expiry timestamp (RFC 3339), or null to clear |
+| `metadata` | object | No | -- | Arbitrary JSON metadata (replaces existing) |
 
 **Example request:**
 
@@ -712,7 +716,7 @@ Report the active feature tier, loaded models, and available capabilities of the
     "auto_tagging": false,
     "contradiction_detection": false,
     "cross_encoder_reranking": false,
-    "memory_reflection": false
+    "cross_encoder_reranking": false
   },
   "models": {
     "embedding": "all-MiniLM-L6-v2",
@@ -987,8 +991,8 @@ carries `count` (memories at exactly this namespace) and
 
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
-| `prefix` | string | No | -- | Restrict the walk to namespaces under this prefix (e.g. `"alphaone/engineering"`) |
-| `depth` | integer (1-10) | No | `5` | Maximum tree depth from the root or prefix |
+| `namespace_prefix` | string | No | -- | Restrict the walk to namespaces under this prefix (e.g. `"alphaone/engineering"`) |
+| `depth` | integer (0-8) | No | `8` | Maximum tree depth from the root or prefix |
 | `limit` | integer (1-10000) | No | `1000` | Maximum nodes to return (response includes `truncated: true` if exceeded) |
 
 **Example response envelope:**

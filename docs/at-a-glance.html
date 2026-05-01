@@ -1158,7 +1158,7 @@ footer.site-foot a { color: var(--text-muted); }
 
       <g>
         <rect class="stage-box" x="390" y="240" width="160" height="60" rx="8"/>
-        <text class="stage-text" x="470" y="265" text-anchor="middle">memory_resolve</text>
+        <text class="stage-text" x="470" y="265" text-anchor="middle">memory_link</text>
         <text class="stage-label" x="470" y="285" text-anchor="middle">SUPERSEDED</text>
         <text x="470" y="320" fill="#999" font-size="11" text-anchor="middle">valid_until set</text>
         <text x="470" y="333" fill="#666" font-size="10" text-anchor="middle">history preserved</text>
@@ -1195,7 +1195,7 @@ footer.site-foot a { color: var(--text-muted); }
     </svg>
 
     <div class="callout">
-      <strong>Reversibility is the rule, not the exception.</strong> Every destructive operation has an undo path. Archive instead of delete. Supersede instead of overwrite. The only hard delete is <code>memory_purge_archive --older-than &lt;days&gt;</code>, and that fires governance approval.
+      <strong>Reversibility is the rule, not the exception.</strong> Every destructive operation has an undo path. Archive instead of delete. Supersede instead of overwrite. The only hard delete is <code>memory_archive_purge --older-than-days &lt;N&gt;</code>, and that fires governance approval.
     </div>
   </div>
 </section>
@@ -2161,7 +2161,7 @@ footer.site-foot a { color: var(--text-muted); }
 
 <footer class="site-foot">
   <div>
-    Apache 2.0 · <a href="https://github.com/alphaonedev/ai-memory-mcp">github.com/alphaonedev/ai-memory-mcp</a> · ai-memory-mcp <strong style="color:var(--text)">v0.6.3-rc1</strong> · Built with the AI NHI by <a href="https://alphaonedev.com">AlphaOne LLC</a>
+    Apache 2.0 · <a href="https://github.com/alphaonedev/ai-memory-mcp">github.com/alphaonedev/ai-memory-mcp</a> · ai-memory-mcp <strong style="color:var(--text)">v0.6.3.1</strong> · Built with the AI NHI by <a href="https://alphaonedev.com">AlphaOne LLC</a>
   </div>
   <div style="margin-top:.5rem; font-size:.75rem;">
     All measurements on Apple M4 / 32 GB / NVMe SSD · numbers from <code>cargo llvm-cov --features sal --no-fail-fast --json</code>

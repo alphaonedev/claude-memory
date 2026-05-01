@@ -120,6 +120,10 @@ Status codes you'll commonly encounter:
 }
 ```
 
+`tier` is one of `"short"` | `"mid"` | `"long"` (see `Tier` enum in
+`src/models.rs:10`). `last_accessed_at` and `expires_at` are omitted
+from the JSON when not set — they are NOT serialized as `null`.
+
 Fields marked in `metadata` are preserved across update / upsert /
 sync / consolidate.
 
@@ -181,11 +185,16 @@ last GC).
   "confidence": 0.9,
   "source": "api",
   "ttl_secs": 604800,
+  "expires_at": "2026-05-08T10:30:00Z",
   "metadata": {"custom": "data"},
   "agent_id": "alice",
   "scope": "private"
 }
 ```
+
+`ttl_secs` is HTTP-only — the MCP `memory_store` tool exposes
+`expires_at` instead (also accepted on this HTTP endpoint). See the
+HTTP ↔ MCP parameter coverage table at the bottom of this document.
 
 - **201 Created** with `{ "id": "...", "tier": "mid", "namespace": "...", "title": "...", "agent_id": "..." }`.
 - **202 Accepted** (governance pending) with `{ "status": "pending", "pending_id": "...", "action": "store" }`.
@@ -277,6 +286,14 @@ Read-only FTS5 keyword search. Same filter params as list, plus `q`
 ```json
 { "results": [ … ], "count": 3, "query": "urgent deadline" }
 ```
+
+> **Note (HTTP ↔ MCP parity):** The MCP `memory_recall`,
+> `memory_search`, and `memory_list` tools accept an optional `format`
+> parameter (`json` | `toon` | `toon_compact`). The HTTP endpoints do
+> not yet expose `format`; HTTP responses are always JSON. The MCP
+> `memory_recall` tool also accepts a `context_tokens` array (v0.6.0.0
+> contextual recall — recent conversation tokens biasing the query
+> embedding at 70/30) that the HTTP body does not surface.
 
 ## Lifecycle
 
@@ -509,17 +526,66 @@ link_created_at ASC`.
 { "namespaces": [{"name":"global","count":50},{"name":"project-x","count":30}] }
 ```
 
+### `GET /api/v1/namespaces/{ns}/standard` — get namespace standard
+
+Query: `inherit` (boolean, default `false`). When `true`, returns the
+full N-level resolved chain (global `*` → ancestors → namespace) instead
+of the single namespace's standard.
+
+```json
+{ "namespace": "engineering/auth", "standards": [ … ], "chain": ["*","engineering","engineering/auth"], "count": 3 }
+```
+
+Returns 200 with `count: 0` and an empty `standards` array when no
+standard is set. Equivalent MCP tool: `memory_namespace_get_standard`
+(`src/mcp.rs:576`).
+
+### `POST /api/v1/namespaces/{ns}/standard` — set namespace standard
+
+Body: `{ "id": "<memory-id>", "parent": "<optional-parent-namespace>", "governance": { … } }`.
+`governance` accepts `write` / `promote` / `delete` (each `any` |
+`registered` | `owner` | `approve`), `approver` (ApproverType), and
+`inherit` (boolean, default `true`). Equivalent MCP tool:
+`memory_namespace_set_standard` (`src/mcp.rs:552`).
+
+### `DELETE /api/v1/namespaces/{ns}/standard` — clear namespace standard
+
+Removes the namespace's pinned standard (the standard memory itself is
+not deleted; only the `namespace_meta.standard_id` link). Equivalent
+MCP tool: `memory_namespace_clear_standard` (`src/mcp.rs:588`).
+
 ## Archive
 
-### `GET /api/v1/archive`
+### `GET /api/v1/archive` — list archived memories
 
 Query: `namespace`, `limit` (default 50, max 1000), `offset`.
 
-### `POST /api/v1/archive/{id}/restore`
+```json
+{ "memories": [ … ], "count": 24 }
+```
 
-### `DELETE /api/v1/archive?older_than_days=30`
+Equivalent MCP tool: `memory_archive_list` (`src/mcp.rs:489`).
 
-### `GET /api/v1/archive/stats`
+### `POST /api/v1/archive/{id}/restore` — restore archived memory
+
+Path param: `id` (archived memory id). On success the row is removed
+from `archived_memories` and re-inserted into `memories` with
+`original_tier` and `original_expires_at` re-applied where present.
+Equivalent MCP tool: `memory_archive_restore` (`src/mcp.rs:501`).
+
+### `DELETE /api/v1/archive?older_than_days=30` — purge archived memories
+
+Query: `older_than_days` (optional). Without the query param, all
+archived rows are eligible. Returns `{"purged": N}`. Equivalent MCP
+tool: `memory_archive_purge` (`src/mcp.rs:512`).
+
+### `GET /api/v1/archive/stats` — archive counters
+
+```json
+{ "total": 24, "by_namespace": [{"namespace":"global","count":18}, … ] }
+```
+
+Equivalent MCP tool: `memory_archive_stats` (`src/mcp.rs:522`).
 
 ## Agents + governance
 
@@ -536,18 +602,27 @@ Query: `namespace`, `limit` (default 50, max 1000), `offset`.
 
 Returns `{"agents":[…],"count":N}`.
 
-### `GET /api/v1/pending`
+### `GET /api/v1/pending` — list pending governance actions
 
 Query: `status=pending|approved|rejected`, `limit` (default 100, max 1000).
 
-### `POST /api/v1/pending/{id}/approve`
+```json
+{ "pending": [ { "id": "…", "action_type": "store", "namespace": "…", "status": "pending", "approvals": [ … ] } ], "count": 3 }
+```
 
-200 if consensus reached (and governed action executed). 202 if still
-collecting approvers.
+Equivalent MCP tool: `memory_pending_list` (`src/mcp.rs:599`).
 
-### `POST /api/v1/pending/{id}/reject`
+### `POST /api/v1/pending/{id}/approve` — approve pending action
 
-200 with `{"rejected":true,"id":"…","decided_by":"alice"}`.
+Path param: `id`. Stamps `decided_by` with the caller's `X-Agent-Id`.
+200 if consensus reached (and the governed action is executed). 202 if
+still collecting approvers. Equivalent MCP tool: `memory_pending_approve`
+(`src/mcp.rs:610`).
+
+### `POST /api/v1/pending/{id}/reject` — reject pending action
+
+Path param: `id`. Returns `{"rejected":true,"id":"…","decided_by":"alice"}`.
+Equivalent MCP tool: `memory_pending_reject` (`src/mcp.rs:621`).
 
 ## Sync / federation
 
@@ -588,11 +663,27 @@ original `metadata.agent_id` into `metadata.imported_from_agent_id`.
 
 ## Webhooks (v0.6.0.0)
 
-Three endpoints under `/api/v1/` — create them via MCP tools or (when
-wired) the REST surface. See the MCP reference for authoritative
-definitions: `memory_subscribe`, `memory_unsubscribe`,
-`memory_list_subscriptions`. Dispatch is SSRF-hardened (rejects
+Three endpoints under `/api/v1/subscriptions` — create them via MCP
+tools or the REST surface. Dispatch is SSRF-hardened (rejects
 private-range IPs; requires `https://` unless loopback).
+
+### `POST /api/v1/subscriptions` — register webhook
+
+Body: `{ "url": "https://…", "events": ["memory_store", …], "secret": "<shared-secret>", "namespace_filter": "…", "agent_filter": "…" }`.
+Stores `secret` as a SHA-256 hash for HMAC signing of dispatched
+events. Returns the new subscription `id`. Equivalent MCP tool:
+`memory_subscribe` (`src/mcp.rs:680`).
+
+### `DELETE /api/v1/subscriptions?id=<id>` — unregister webhook
+
+Returns `{"deleted": true}`. Equivalent MCP tool: `memory_unsubscribe`
+(`src/mcp.rs:695`).
+
+### `GET /api/v1/subscriptions` — list subscriptions
+
+Returns `{"subscriptions":[…],"count":N}`. Each entry includes `url`,
+`events`, `created_at`, `dispatch_count`, `failure_count`. Equivalent
+MCP tool: `memory_list_subscriptions` (`src/mcp.rs:706`).
 
 ## Federation (v0.7, opt-in via `--quorum-writes`)
 
@@ -629,6 +720,27 @@ curl 'http://127.0.0.1:9077/api/v1/sync/since?since=2026-04-01T00:00:00Z&limit=1
 # Prometheus scrape
 curl http://127.0.0.1:9077/metrics
 ```
+
+## HTTP ↔ MCP parameter coverage
+
+A small set of parameters are surfaced by only one transport. The MCP
+tool schema in `src/mcp.rs::tool_definitions()` is authoritative for
+the MCP surface; the HTTP body / query types in `src/models.rs` and
+the route handlers in `src/handlers.rs` are authoritative for HTTP.
+
+| Tool | Param | HTTP | MCP | Notes |
+|---|---|---|---|---|
+| `memory_store` | `ttl_secs` | ✓ | ✗ | HTTP-only; the MCP tool exposes `expires_at` (also accepted by HTTP). |
+| `memory_store` | `expires_at` | ✓ | (via `update`) | HTTP body accepts; documented in the `POST /api/v1/memories` example. |
+| `memory_recall` | `format` | ✗ | ✓ | MCP-only; HTTP responses are always JSON. |
+| `memory_recall` | `context_tokens` | ✗ | ✓ | MCP-only (v0.6.0.0 contextual recall). |
+| `memory_search` | `format` | ✗ | ✓ | MCP-only. |
+| `memory_list` | `format` | ✗ | ✓ | MCP-only. |
+
+These gaps are intentional for v0.6.3.1 and tracked for parity
+follow-up — they are NOT drift in the doc surface, just transport-level
+surface-area differences captured here so operators don't re-derive
+them.
 
 ## See also
 
