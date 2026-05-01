@@ -144,7 +144,7 @@ Source: `src/daemon_runtime.rs:96–125`.
 | `--agent-id <ID>` | `AI_MEMORY_AGENT_ID` | (synthesized) |
 | `--db-passphrase-file <PATH>` | (sets `AI_MEMORY_DB_PASSPHRASE`) | — |
 
-### 3.2 Subcommand inventory (38 top-level)
+### 3.2 Subcommand inventory (40 top-level)
 Source: `src/daemon_runtime.rs:127–259` and `src/cli/*.rs`.
 
 `serve`, `mcp`, `store`, `update`, `recall`, `search`, `get`, `list`, `delete`, `promote`, `forget`, `link`, `consolidate`, `gc`, `stats`, `namespaces`, `export`, `import`, `resolve`, `shell`, `sync`, `sync-daemon`, `auto-consolidate`, `completions`, `man`, `mine`, `archive`, `agents`, `pending`, `backup`, `restore`, `curator`, `bench`, `migrate` (gated `--features sal`), `doctor`, `boot`, `install`, `wrap`, `logs`, `audit`.
