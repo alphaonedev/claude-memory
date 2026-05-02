@@ -13,6 +13,7 @@
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
 [![Tests](https://img.shields.io/badge/tests-1%2C886_%E2%80%A2_93.84%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
+[![v0.6.3.1 A2A](https://img.shields.io/badge/v0.6.3.1_a2a-testing_in_flight-ffd700?logo=githubpages)](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)
 [![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
 [![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()

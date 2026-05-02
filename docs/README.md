@@ -12,7 +12,8 @@
 **v0.6.3** cleared the a2a-gate certification bar: three consecutive full-testbook green runs across three agent frameworks and three transport modes — **324 passing scenarios**, zero partial greens.
 
 **📦 [Release v0.6.3.1](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3.1)** ·
-**📊 [A2A gate evidence](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)** ·
+**🟢 [v0.6.3.1 a2a campaign — testing in flight](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)** ·
+**📊 [A2A gate (umbrella spec)](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)** ·
 **🚢 [Ship gate](https://alphaonedev.github.io/ai-memory-ship-gate/)** ·
 **📖 [AI-NHI insights](https://alphaonedev.github.io/ai-memory-ai2ai-gate/insights/)** ·
 **🐳 [Reproduce locally](https://alphaonedev.github.io/ai-memory-ai2ai-gate/local-docker-mesh/)**
