@@ -11,7 +11,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-1%2C809_%E2%80%A2_93.08%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Tests](https://img.shields.io/badge/tests-1%2C886_%E2%80%A2_93.84%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
 [![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
 [![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
@@ -85,7 +85,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **OpenClaw** | MCP stdio | JSON (`mcp.servers` in config) | Fully supported |
 | **Any MCP client** | MCP stdio or HTTP | Varies | Universal |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (42 endpoints on localhost) and the **CLI** (26 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (50 endpoints on localhost) and the **CLI** (40 subcommands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -499,7 +499,7 @@ It runs as an MCP (Model Context Protocol) tool server -- a background process t
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, ai-memory also exposes a full HTTP REST API (42 endpoints on port 9077) and a complete CLI (26 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (50 endpoints on port 9077) and a complete CLI (40 subcommands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
@@ -549,7 +549,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (42 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **1,809 tests** (1,600 lib + 209 integration) -- 93.08% line coverage (gate ≥92%). All numbers frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); per-release detail on the [test-hub v0.6.3 evidence](https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/).
+- **1,886 lib tests + 49+ integration tests** -- 93.84% line coverage (gate ≥93%, buffer +0.84pp; v0.6.3.1). v0.6.3 baseline numbers (1,809 / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 metrics in the release notes.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
@@ -755,7 +755,7 @@ These 43 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## HTTP API
 
-42 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
+50 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
 > **Security:** The HTTP server binds to 127.0.0.1 with no authentication and permissive CORS. Do not expose to the network without a reverse proxy with authentication.
 
@@ -790,7 +790,7 @@ These 43 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## CLI Commands
 
-26 commands. Run `ai-memory <command> --help` for details on any command.
+40 subcommands. Run `ai-memory <command> --help` for details on any command.
 
 | Command | Description |
 |---------|-------------|

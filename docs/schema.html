@@ -162,11 +162,11 @@ footer a{color:var(--text-muted)}
 
 <section class="hero">
   <h1>The schema, table by table.</h1>
-  <p class="tagline">Every SQLite table ai-memory creates, every column, every index, every foreign key. Postgres mirror via the SAL adapter (<code>--features sal</code>). Schema version: <strong>v15</strong>.</p>
+  <p class="tagline">Every SQLite table ai-memory creates, every column, every index, every foreign key. Postgres mirror via the SAL adapter (<code>--features sal</code>). Schema version: <strong>v19</strong> (Patch 1; ladder v15→v17→v18→v19 is automatic on first run).</p>
   <div class="pills">
     <span class="pill">9 tables</span>
     <span class="pill">15+ indexes</span>
-    <span class="pill">v15 schema</span>
+    <span class="pill">v19 schema</span>
     <span class="pill">SQLite + Postgres mirror</span>
   </div>
 </section>
@@ -364,7 +364,7 @@ footer a{color:var(--text-muted)}
       <div class="tbl-desc">Single-row table. Tracks current schema version. Daemon checks at startup; runs forward migrations idempotently. Current version: <strong>15</strong> (Stream B hierarchy + KG additions).</div>
       <table class="cols">
         <tbody>
-          <tr><td class="col">version</td><td class="type">INTEGER NOT NULL</td><td class="note">Currently 15. Bumped only on additive migrations.</td></tr>
+          <tr><td class="col">version</td><td class="type">INTEGER NOT NULL</td><td class="note">Currently 19 (Patch 1). Bumped only on additive migrations. Migration ladder v15→v17→v18→v19 runs automatically at daemon start.</td></tr>
         </tbody>
       </table>
     </div>
@@ -504,7 +504,7 @@ footer a{color:var(--text-muted)}
   <div class="container">
     <span class="eyebrow">Migrations</span>
     <h2 style="font-family:var(--font-sans);font-size:1.75rem">Schema is versioned. Migrations are idempotent.</h2>
-    <p class="lede">Every schema change is a forward migration applied at daemon startup. Idempotent so re-runs are safe. v15 was the v0.6.3 Stream B addition. Older versions are inline in <code>db.rs::migrate</code>; v15 is the first extracted to <code>migrations/sqlite/0010_v063_hierarchy_kg.sql</code>.</p>
+    <p class="lede">Every schema change is a forward migration applied at daemon startup. Idempotent so re-runs are safe. v15 was the v0.6.3 Stream B addition (KG temporal-validity columns + entity_aliases). v0.6.3.1 added the v17/v18/v19 ladder: v17 adds governance.inherit backfill (`migrations/sqlite/0012_governance_inherit.sql`), v18 adds embedding_dim guard + archive lossless (`0011_v0631_data_integrity.sql`), v19 adds webhook event_types column + index (`0013_webhook_event_types.sql`). Older versions (≤ v14) remain inline in <code>db.rs::migrate</code>.</p>
 
     <div class="tbl t-meta">
       <div class="tbl-head">

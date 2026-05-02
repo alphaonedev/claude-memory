@@ -150,7 +150,7 @@ Every level of the hierarchy has a governance model: who can store, who can prom
 
 | Task | Sessions | Deliverable |
 |------|:--------:|-------------|
-| Context-budget-aware recall | 1-2 | `budget_tokens` parameter — return as many memories as fit in N tokens. **No competitor has this.** LLMs have finite context windows. "Give me the most relevant memories that fit in 4K tokens" is the killer feature. |
+| Context-budget-aware recall | ✅ shipped (v0.6.3.1 R1) | `budget_tokens` parameter — return as many memories as fit in N tokens. **No competitor has this.** LLMs have finite context windows. "Give me the most relevant memories that fit in 4K tokens" is the killer feature. v0.6.3.1 ships cl100k_base BPE tokenization on the survivors. |
 | Hierarchy-aware recall | 0.5 | Recall automatically includes memories from the agent's level + all ancestor namespaces. An agent in `alphaone/engineering/platform` gets platform memories + engineering policies + org standards in one recall. |
 
 ---
@@ -227,7 +227,7 @@ ai-memory stops being reactive and becomes **self-improving.**
 | Background curator daemon | 1-2 | `ai-memory curator` — runs periodically. Auto-consolidates related memories, detects contradictions proactively, suggests promotions/demotions. Uses existing Ollama integration. |
 | Auto-extraction | 2 | Watch conversations (via MCP hooks) and auto-store facts, decisions, and corrections. Auto-stored memories get confidence < 1.0, human-stored get 1.0. |
 | Consensus memory | 1 | When multiple agents store conflicting facts, use confidence + agent count to determine truth. If 4 of 5 agents agree, confidence is 0.95. |
-| Memory health dashboard | 0.5 | `ai-memory doctor` — fragmentation, stale memories, unresolved contradictions, sync lag. |
+| Memory health dashboard | ✅ shipped (v0.6.3.1 R7) | `ai-memory doctor` — 7-section severity-tagged dashboard (Storage / Index / Recall / Governance / Sync / Webhook / Capabilities). Fragmentation, stale memories, unresolved contradictions, sync lag. JSON mode. Exit codes 0/1/2 for healthy/warning/critical. |
 
 ---
 
@@ -252,8 +252,8 @@ For agent teams that need a central sync point. SQLite remains the default for i
 | Task | Sessions | Deliverable |
 |------|:--------:|-------------|
 | API stability guarantee | 1 | Freeze all MCP tools, HTTP endpoints, CLI commands — semver contract |
-| Plugin SDK (TypeScript) | 1-2 | `@alphaone/ai-memory` npm package |
-| Plugin SDK (Python) | 1-2 | `ai-memory-sdk` PyPI package |
+| ~~Plugin SDK (TypeScript)~~ | **FORMALLY CUT** | MCP is the SDK. See `ROADMAP2.md` §10 for the rationale. |
+| ~~Plugin SDK (Python)~~ | **FORMALLY CUT** | MCP is the SDK. See `ROADMAP2.md` §10 for the rationale. |
 | Memory portability spec | 1 | Export format as a published specification. If ai-memory dies in 10 years, users can read their data with any tool. |
 | Security audit | 1 | Full code review, fuzzing, dependency audit |
 | TOON v2 | 0.5 | Schema inference compression, target 85%+ token reduction |
