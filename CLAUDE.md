@@ -84,9 +84,9 @@ Reverting to the brew-managed binary: `brew link --overwrite ai-memory`.
 
 **ai-memory** is a Rust-based persistent memory system exposing three interfaces over a shared SQLite database layer:
 
-1. **MCP Server** (`src/mcp.rs`) — stdio JSON-RPC 2.0 with 23 tools + 2 prompts
-2. **HTTP API** (`src/handlers.rs`) — Axum REST server on port 9077, 24 endpoints at `/api/v1/`
-3. **CLI** (`src/main.rs`) — clap-based, 26 commands with optional `--json` output
+1. **MCP Server** (`src/mcp.rs`) — stdio JSON-RPC 2.0 with 43 tools + 2 prompts
+2. **HTTP API** (`src/handlers.rs`) — Axum REST server on port 9077, 50 endpoints at `/api/v1/`
+3. **CLI** (`src/main.rs`) — clap-based, 40 subcommands with optional `--json` output
 
 All three interfaces share the same database (`src/db.rs`) and validation (`src/validate.rs`) layers. Shared state is `Arc<Mutex<(Connection, PathBuf, ResolvedTtl, bool)>>` — a single SQLite connection protected by a mutex. Lock contention is the bottleneck under concurrent HTTP + MCP load.
 

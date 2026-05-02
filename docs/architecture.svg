@@ -91,15 +91,15 @@
   <g class="fade2">
     <rect x="90" y="140" width="160" height="60" class="card-green"/>
     <text x="170" y="164" text-anchor="middle" class="title">MCP Server</text>
-    <text x="170" y="181" text-anchor="middle" class="subtitle">stdio · JSON-RPC · 21 tools</text>
+    <text x="170" y="181" text-anchor="middle" class="subtitle">stdio · JSON-RPC · 43 tools</text>
 
     <rect x="345" y="140" width="160" height="60" class="card-green"/>
     <text x="425" y="164" text-anchor="middle" class="title">HTTP API</text>
-    <text x="425" y="181" text-anchor="middle" class="subtitle">REST · 42 endpoints · :9077</text>
+    <text x="425" y="181" text-anchor="middle" class="subtitle">REST · 50 endpoints · :9077</text>
 
     <rect x="600" y="140" width="160" height="60" class="card-green"/>
     <text x="680" y="164" text-anchor="middle" class="title">CLI</text>
-    <text x="680" y="181" text-anchor="middle" class="subtitle">26 commands · scriptable</text>
+    <text x="680" y="181" text-anchor="middle" class="subtitle">40 commands · scriptable</text>
   </g>
 
   <!-- Flow lines down to validation -->
@@ -130,7 +130,7 @@
     <!-- DB -->
     <text x="220" y="355" text-anchor="middle" class="title">SQLite + FTS5</text>
     <text x="220" y="372" text-anchor="middle" class="subtitle">WAL mode · 3 tables</text>
-    <text x="220" y="398" text-anchor="middle" class="subtitle">db.rs · schema v4</text>
+    <text x="220" y="398" text-anchor="middle" class="subtitle">db.rs · schema v19</text>
 
     <!-- Divider -->
     <line x1="330" y1="340" x2="330" y2="400" class="line" style="opacity:0.3"/>

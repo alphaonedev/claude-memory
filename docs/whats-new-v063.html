@@ -2,18 +2,20 @@
   Copyright 2026 AlphaOne LLC
   SPDX-License-Identifier: Apache-2.0
 
-  What's New in v0.6.3 — release-spotlight page covering Streams A-F,
-  the W3-W12 coverage campaign, the SSRF security finding+fix, and
-  the v0.6.3.1 capabilities-extension queued patch. Companion to
-  at-a-glance.html.
+  What's New page — primary surface for v0.6.3.1 (current release,
+  shipped 2026-04-30) plus the v0.6.3 GA baseline (Streams A-F, the
+  W3-W12 coverage campaign, the SSRF security finding+fix). The
+  Patch 1 section at the top covers the seven new CLI surfaces, the
+  schema v15→v19 ladder, the 17-integration matrix, and the 5
+  distribution channels. Companion to at-a-glance.html.
 -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>What's New in v0.6.3 — Structured Memory + Performance</title>
-<meta name="description" content="v0.6.3 release highlights: hierarchical namespaces, temporal-validity knowledge graph, published performance budgets, 93.08% test coverage, 1,809 tests (1,600 lib + 209 integration), 2 SSRF defects fixed.">
+<title>What's New in v0.6.3 / v0.6.3.1 — The Never-Lose-Context Release</title>
+<meta name="description" content="v0.6.3.1 release highlights: 7 new CLI surfaces (boot, install, wrap, logs, audit, doctor, bench), schema v19 (ladder v15→v17→v18→v19), 1,886 lib tests + 49+ integration at 93.84% line coverage, 17 documented integrations across 10 platforms, 5 distribution channels. Builds on v0.6.3's three pillars (hierarchy, knowledge graph, performance budgets).">
 <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/whats-new-v063.html">
 <style>
 :root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--warn:#ffb86b;--bad:#ff6b9d;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
@@ -121,10 +123,10 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
 
 <nav class="topnav">
   <div class="inner">
-    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ What's New v0.6.3</span></a>
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ What's New v0.6.3 / v0.6.3.1</span></a>
     <div class="right">
       <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
-      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3 / v0.6.3.1</a>
       <div class="menu">
         <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
@@ -192,26 +194,57 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
 </nav>
 
 <section class="hero">
-  <div class="badge">v0.6.3-rc1 · TAGGED 2026-04-26</div>
-  <h1>Structured Memory<br>+ Performance.</h1>
-  <p class="subtitle">The grand-slam release. Three pillars shipped in one focused 4-week sprint: hierarchical namespace tree, temporal-validity knowledge graph, and CI-enforced sub-100ms performance budgets.</p>
+  <div class="badge">v0.6.3.1 · SHIPPED 2026-04-30</div>
+  <h1>Never Lose<br>Context.</h1>
+  <p class="subtitle">The current release. v0.6.3 shipped the three-pillar grand slam — hierarchy, knowledge graph, performance budgets. v0.6.3.1 (Patch 1) ships 16 PRs resolving issue #487: cold-start AI sessions auto-load memory context. Schema v19, seven new CLI surfaces, 17 documented integrations.</p>
   <div class="meta">
-    <span>56.7% → <strong style="color:var(--good)">93.08%</strong> coverage</span>
+    <span>93.08% → <strong style="color:var(--good)">93.84%</strong> coverage</span>
     <span style="opacity:.4">·</span>
-    <span><strong style="color:var(--text)">1,809</strong> tests passing</span>
+    <span><strong style="color:var(--text)">1,886</strong> lib tests + 49+ integration</span>
     <span style="opacity:.4">·</span>
-    <span><strong style="color:var(--text)">26</strong> closers · <strong style="color:var(--text)">9</strong> waves</span>
+    <span>schema <strong style="color:var(--text)">v15 → v19</strong></span>
     <span style="opacity:.4">·</span>
-    <span><strong style="color:var(--bad)">2</strong> SSRF defects fixed</span>
+    <span><strong style="color:var(--text)">17</strong> integrations · <strong style="color:var(--text)">10</strong> platforms · <strong style="color:var(--text)">5</strong> channels</span>
+  </div>
+</section>
+
+<!-- =============== PATCH 1 (v0.6.3.1) — NEVER-LOSE-CONTEXT ============== -->
+<section id="patch1" style="background:linear-gradient(135deg,rgba(110,231,255,0.04),rgba(200,162,255,0.04))">
+  <div class="container">
+    <span class="eyebrow">Patch 1 · v0.6.3.1 · Shipped 2026-04-30</span>
+    <h2>What v0.6.3.1 ships.</h2>
+    <p class="lede">Patch 1 closes <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/487" style="color:var(--p1)">issue #487</a> — every AI session now starts memory-aware. 16 PRs land seven new CLI surfaces, the v15→v19 schema ladder, and the integration matrix that gets ai-memory into Claude / Cursor / Codex / Cline / Continue / Windsurf / OpenClaw / Aider / Gemini / Cody and 7 more — all with one command.</p>
+
+    <div class="tile-grid">
+      <div class="tile p1"><div class="tile-label">New CLI surface</div><div class="tile-num" style="font-size:1.4rem">ai-memory boot</div><div class="tile-sub" style="margin-top:.5rem">Universal session-boot primitive. 5-field diagnostic manifest. 4 status variants (<code>ok</code> / <code>info-fallback</code> / <code>info-empty</code> / <code>warn</code>) — never silent. <code>text</code> / <code>json</code> / <code>toon</code> output.</div></div>
+      <div class="tile p1"><div class="tile-label">New CLI surface</div><div class="tile-num" style="font-size:1.4rem">ai-memory install</div><div class="tile-sub" style="margin-top:.5rem">6 targets: <code>claude-code</code>, <code>openclaw</code>, <code>cursor</code>, <code>cline</code>, <code>continue</code>, <code>windsurf</code>. Idempotent marker block, <code>--dry-run</code> default with unified-diff, <code>--apply</code> opt-in, <code>--uninstall</code> round-trip.</div></div>
+      <div class="tile p1"><div class="tile-label">New CLI surface</div><div class="tile-num" style="font-size:1.4rem">ai-memory wrap</div><div class="tile-sub" style="margin-top:.5rem">Cross-platform Rust replacement for shell glue. Strategies: <code>SystemFlag</code> / <code>SystemEnv</code> / <code>MessageFile</code> / <code>Auto</code>. Same binary on macOS / Linux / Windows / Docker / Kubernetes.</div></div>
+      <div class="tile p2"><div class="tile-label">New CLI surface</div><div class="tile-num" style="font-size:1.4rem">ai-memory logs</div><div class="tile-sub" style="margin-top:.5rem">Operational logging CLI. <code>tail</code> / <code>cat</code> / <code>archive</code> / <code>purge</code> with <code>--since</code> / <code>--until</code> / <code>--level</code> / <code>--namespace</code> / <code>--actor</code> filters. Default-OFF (privacy).</div></div>
+      <div class="tile p2"><div class="tile-label">New CLI surface</div><div class="tile-num" style="font-size:1.4rem">ai-memory audit verify</div><div class="tile-sub" style="margin-top:.5rem">Walks the hash-chained audit log. Exit <code>0</code> on integrity, <code>2</code> on tamper detection. Append-only at the OS level (<code>chattr +a</code> / <code>fs_chflags UF_APPEND</code>).</div></div>
+      <div class="tile p2"><div class="tile-label">Hardened</div><div class="tile-num" style="font-size:1.4rem">ai-memory doctor</div><div class="tile-sub" style="margin-top:.5rem">7-section health dashboard: Storage / Index / Recall / Governance / Sync / Webhook / Capabilities. Severity-tagged. JSON mode. Exit codes <code>0</code>/<code>1</code>/<code>2</code>.</div></div>
+      <div class="tile p3"><div class="tile-label">Schema</div><div class="tile-num">v19</div><div class="tile-sub" style="margin-top:.5rem">Ladder v15→v17→v18→v19 runs automatically at first start. v17: governance.inherit backfill. v18: embedding_dim guard + archive lossless. v19: subscriptions.event_types.</div></div>
+      <div class="tile p3"><div class="tile-label">Integrations documented</div><div class="tile-num">17</div><div class="tile-sub" style="margin-top:.5rem">3 categories: hook-capable (Claude Code) · MCP+rules (Cursor, Cline, Continue, Windsurf, OpenClaw, Goose, Zed, Roo-Code) · programmatic (Codex CLI, Claude SDK, OpenAI Apps/Assistants/Responses, Grok, Gemini, Aider, Cody, Hermes/Llama/Mistral/Qwen via LM Studio/Ollama/vLLM).</div></div>
+      <div class="tile p3"><div class="tile-label">Platforms documented</div><div class="tile-num">10</div><div class="tile-sub" style="margin-top:.5rem">macOS (Apple Silicon + Intel), Linux glibc x86_64 + aarch64, Linux musl (Alpine), Windows native (10/11), WSL2, Docker, Kubernetes, ARM Linux, Commercial Unix (best-effort), Embedded Linux (best-effort).</div></div>
+      <div class="tile good"><div class="tile-label">Distribution channels (verified live)</div><div class="tile-num">5</div><div class="tile-sub" style="margin-top:.5rem">GitHub Release (11 assets), Homebrew tap, ghcr.io, Fedora COPR (build #10412670), crates.io. crates.io anchor at <code>0.6.3+patch.1</code> (SemVer build metadata; crates.io rejects 4-segment versions).</div></div>
+      <div class="tile good"><div class="tile-label">Tests (v0.6.3.1)</div><div class="tile-num">1,886</div><div class="tile-sub" style="margin-top:.5rem">+281 from v0.6.3 baseline (1,605). Plus 49+ integration tests. E2E smoke 7/7 PASS via the audit phase. Zero ignored.</div></div>
+      <div class="tile good"><div class="tile-label">Coverage (v0.6.3.1)</div><div class="tile-num">93.84<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub" style="margin-top:.5rem">Line coverage. Gate ≥ 93%, buffer +0.84pp. <code>cargo llvm-cov --features sal --no-fail-fast --fail-under-lines 93</code>.</div></div>
+      <div class="tile" style="border-top:3px solid var(--warn)"><div class="tile-label">Known issue</div><div class="tile-num" style="font-size:1.4rem;color:var(--warn)">#507</div><div class="tile-sub" style="margin-top:.5rem">config.toml <code>db</code> field does not expand <code>~</code> to <code>$HOME</code>. Workaround: use absolute path. Fix scheduled for v0.6.3.2. CLI flag <code>--db</code> already expands correctly.</div></div>
+    </div>
+
+    <div style="margin-top:2.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem">
+      <strong>One-command setup for Claude Code:</strong>
+      <pre style="font-family:var(--font-mono);font-size:.9rem;background:var(--bg-code);padding:.85rem 1rem;margin-top:.6rem;border-radius:6px;color:var(--good);white-space:pre">brew install ai-memory && ai-memory install claude-code --apply</pre>
+      <p style="margin-top:.85rem;font-size:.85rem">Restart Claude Code. Every fresh session now starts memory-aware. Run <code>ai-memory boot</code> from any shell to see the diagnostic manifest. For other agents, see the per-host recipes in <a href="https://github.com/alphaonedev/ai-memory-mcp/tree/main/docs/integrations" style="color:var(--p1)">docs/integrations/</a>.</p>
+    </div>
   </div>
 </section>
 
 <!-- =============== THE THREE PILLARS, EXPANDED =============== -->
 <section id="streams">
   <div class="container">
-    <span class="eyebrow">6 Engineering Streams</span>
+    <span class="eyebrow">6 Engineering Streams (v0.6.3 GA baseline)</span>
     <h2>Streams A–F. Six teams. One release.</h2>
-    <p class="lede">v0.6.3 was scoped as six work-streams, each independently shippable but compounding when released together. All six landed; campaign closed at 93.08% line coverage.</p>
+    <p class="lede">The v0.6.3 GA was scoped as six work-streams, each independently shippable but compounding when released together. All six landed; campaign closed at 93.08% line coverage / 1,809 tests. v0.6.3.1 (Patch 1, see above) builds on this baseline, raising coverage to 93.84% and adding the seven CLI surfaces.</p>
 
     <div class="streams-grid">
       <div class="stream A">
@@ -309,9 +342,9 @@ footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-d
 <!-- =============== COVERAGE CAMPAIGN =============== -->
 <section id="coverage-campaign">
   <div class="container">
-    <span class="eyebrow">W3-W12 Coverage Campaign</span>
-    <h2>56.7% → 93.08% in 9 waves.</h2>
-    <p class="lede">After streams A-F shipped, a parallel-agent coverage campaign drove ai-memory from 56.7% line coverage to 93.08% across nine waves. 26 closers in total. ~1,200 net new tests. Two production SSRF defects discovered + fixed during the work.</p>
+    <span class="eyebrow">W3-W12 Coverage Campaign (v0.6.3 GA baseline)</span>
+    <h2>56.7% → 93.08% in 9 waves; v0.6.3.1 raised it to 93.84%.</h2>
+    <p class="lede">After streams A-F shipped for v0.6.3, a parallel-agent coverage campaign drove ai-memory from 56.7% line coverage to 93.08% across nine waves. 26 closers in total. ~1,200 net new tests. Two production SSRF defects discovered + fixed during the work. v0.6.3.1 added 281 net new lib tests on top of this baseline (final: 1,886 lib + 49+ integration), raising line coverage to 93.84%.</p>
 
     <div class="waves-track">
       <div class="waves-row">
@@ -425,7 +458,7 @@ fn is_private(ip: IpAddr) -> bool {
 
     <div style="background:var(--bg-card);border:1px solid var(--good);border-radius:12px;padding:1.5rem;margin-top:2rem">
       <strong style="color:var(--good)">No outstanding security defects post-campaign.</strong>
-      <p style="margin-top:.5rem">The SSRF fixes shipped with rc1. Both <code>#[ignore]</code> tests are un-ignored and passing. <strong>Zero ignored tests across the whole 1,809-test suite (1,600 lib + 209 integration).</strong>
+      <p style="margin-top:.5rem">The SSRF fixes shipped with rc1. Both <code>#[ignore]</code> tests are un-ignored and passing. <strong>Zero ignored tests in the v0.6.3 1,809-test baseline; the v0.6.3.1 suite stands at 1,886 lib + 49+ integration tests, also zero ignored.</strong>
     </p>
     </div>
   </div>
@@ -436,21 +469,21 @@ fn is_private(ip: IpAddr) -> bool {
   <div class="container">
     <span class="eyebrow">By the Numbers</span>
     <h2>Every quantitative claim, sourced.</h2>
-    <p class="lede">All numbers from the v0.6.3 W12 consolidated coverage measurement (canonical command in CAMPAIGN-FINAL-METRICS.md). Hardware: Apple M4 / 32 GB / NVMe SSD.</p>
+    <p class="lede">v0.6.3.1 numbers are from the release notes (published 2026-04-30). v0.6.3 GA baseline numbers are from the W12 consolidated coverage measurement and remain frozen on the <a href="evidence.html" style="color:var(--p1)">evidence page</a>. Hardware: Apple M4 / 32 GB / NVMe SSD.</p>
 
     <div class="tile-grid">
-      <div class="tile p1"><div class="tile-label">Line coverage</div><div class="tile-num">93.08<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">42,894 / 46,099 lines (release-cut 93.05%)</div></div>
-      <div class="tile p1"><div class="tile-label">Region coverage</div><div class="tile-num">93.11<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">73,150 / 78,564 regions</div></div>
-      <div class="tile p1"><div class="tile-label">Function coverage</div><div class="tile-num">92.55<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">3,527 / 3,811 functions</div></div>
-      <div class="tile good"><div class="tile-label">Tests passing</div><div class="tile-num">1,809</div><div class="tile-sub">1,600 lib + 209 integration · 0 failed · 0 ignored</div></div>
-      <div class="tile good"><div class="tile-label">Net new tests</div><div class="tile-num">~1,200</div><div class="tile-sub">across W3-W12</div></div>
-      <div class="tile p2"><div class="tile-label">Closers dispatched</div><div class="tile-num">26</div><div class="tile-sub">across 9 waves</div></div>
+      <div class="tile p1"><div class="tile-label">Line coverage (v0.6.3.1)</div><div class="tile-num">93.84<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">gate ≥ 93%, buffer +0.84pp · v0.6.3 baseline 93.08%</div></div>
+      <div class="tile p1"><div class="tile-label">Region coverage (v0.6.3 baseline)</div><div class="tile-num">93.11<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">73,150 / 78,564 regions</div></div>
+      <div class="tile p1"><div class="tile-label">Function coverage (v0.6.3 baseline)</div><div class="tile-num">92.55<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">3,527 / 3,811 functions</div></div>
+      <div class="tile good"><div class="tile-label">Lib tests (v0.6.3.1)</div><div class="tile-num">1,886</div><div class="tile-sub">+281 from v0.6.3 baseline (1,605) · 0 ignored</div></div>
+      <div class="tile good"><div class="tile-label">Integration tests (v0.6.3.1)</div><div class="tile-num">49+</div><div class="tile-sub">boot primitive contract + recipe + lifecycle + dispatch · E2E 7/7 PASS</div></div>
+      <div class="tile p2"><div class="tile-label">Net new tests (W3-W12 baseline)</div><div class="tile-num">~1,200</div><div class="tile-sub">across the v0.6.3 coverage campaign</div></div>
+      <div class="tile p2"><div class="tile-label">Closers dispatched (W3-W12)</div><div class="tile-num">26</div><div class="tile-sub">across 9 waves</div></div>
       <div class="tile p2"><div class="tile-label">main.rs reduction</div><div class="tile-num">98.3<span style="font-size:1rem;color:var(--text-dim)">%</span></div><div class="tile-sub">4,511 → 75 lines</div></div>
-      <div class="tile p3"><div class="tile-label">Session-start p95</div><div class="tile-num">42<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 100 ms</div></div>
-      <div class="tile p3"><div class="tile-label">Recall p95 hot</div><div class="tile-num">18<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 50 ms</div></div>
-      <div class="tile p3"><div class="tile-label">Federation ack p99</div><div class="tile-num">850<span style="font-size:1rem;color:var(--text-dim)">ms</span></div><div class="tile-sub">budget &lt; 2 s</div></div>
-      <div class="tile"><div class="tile-label">Modules at 100%</div><div class="tile-num">7</div><div class="tile-sub">main · errors · color · ...</div></div>
-      <div class="tile"><div class="tile-label">SSRF fixed</div><div class="tile-num">2</div><div class="tile-sub">found + fixed pre-tag</div></div>
+      <div class="tile p3"><div class="tile-label">Schema (v0.6.3.1)</div><div class="tile-num">v19</div><div class="tile-sub">ladder v15→v17→v18→v19 automatic on first run</div></div>
+      <div class="tile p3"><div class="tile-label">MCP tools / HTTP / CLI</div><div class="tile-num" style="font-size:1.4rem">43 / 50 / 40</div><div class="tile-sub">tools / endpoints / subcommands · 133 ops total</div></div>
+      <div class="tile p3"><div class="tile-label">Integrations · Platforms · Channels</div><div class="tile-num" style="font-size:1.4rem">17 / 10 / 5</div><div class="tile-sub">documented in v0.6.3.1 release notes</div></div>
+      <div class="tile good"><div class="tile-label">SSRF fixed (v0.6.3 W11)</div><div class="tile-num">2</div><div class="tile-sub">found + fixed pre-tag · zero outstanding</div></div>
     </div>
   </div>
 </section>
@@ -459,32 +492,35 @@ fn is_private(ip: IpAddr) -> bool {
 <section id="upgrade">
   <div class="container">
     <span class="eyebrow">Upgrading</span>
-    <h2>v0.6.2 → v0.6.3 in one command.</h2>
-    <p class="lede">SQLite migration is idempotent. The schema-v15 migration runs at first daemon start. Existing flat namespaces become single-segment hierarchical paths losslessly. Postgres backend has a manual procedure documented in MIGRATION-v0.6.2-to-v0.6.3.md.</p>
+    <h2>v0.6.2 / v0.6.3 / v0.6.3+patch.x → v0.6.3.1 in one command.</h2>
+    <p class="lede">SQLite migration is idempotent. The schema ladder v15→v17→v18→v19 runs automatically at first daemon start. Existing flat namespaces become single-segment hierarchical paths losslessly. Postgres backend has a manual procedure documented in <code>MIGRATION-v0.6.3-to-v0.6.3.1.md</code>.</p>
 
     <div style="background:var(--bg-code);border:1px solid var(--border);border-radius:12px;padding:1.5rem;font-family:var(--font-mono);font-size:.85rem;line-height:1.7;color:var(--text)">
-<span style="color:var(--text-dim)"># Homebrew</span><br>
-brew upgrade ai-memory<br><br>
-<span style="color:var(--text-dim)"># cargo</span><br>
+<span style="color:var(--text-dim)"># Homebrew tap (recommended)</span><br>
+brew install alphaonedev/tap/ai-memory     <span style="color:var(--text-dim)"># first-time install</span><br>
+brew upgrade ai-memory                     <span style="color:var(--text-dim)"># subsequent upgrades</span><br><br>
+<span style="color:var(--text-dim)"># cargo (any Rust target)</span><br>
 cargo install ai-memory --force<br><br>
-<span style="color:var(--text-dim)"># APT (Debian/Ubuntu)</span><br>
-sudo apt update &amp;&amp; sudo apt install --only-upgrade ai-memory<br><br>
-<span style="color:var(--text-dim)"># DNF/YUM (Fedora/RHEL)</span><br>
-sudo dnf upgrade ai-memory<br><br>
+<span style="color:var(--text-dim)"># Docker (ghcr.io)</span><br>
+docker pull ghcr.io/alphaonedev/ai-memory:0.6.3.1<br><br>
+<span style="color:var(--text-dim)"># Fedora COPR</span><br>
+sudo dnf copr enable alpha-one-ai/ai-memory &amp;&amp; sudo dnf install ai-memory<br><br>
 <span style="color:var(--text-dim)"># Verify</span><br>
-ai-memory --version <span style="color:var(--p1)"># → ai-memory 0.6.3-rc1</span>
+ai-memory --version <span style="color:var(--p1)"># → ai-memory 0.6.3+patch.1   (release tag: v0.6.3.1)</span>
     </div>
 
     <div style="background:var(--bg-card);border:1px solid var(--border-hl);border-radius:12px;padding:1.5rem;margin-top:1.5rem">
-      <strong>What happens at first start:</strong>
+      <strong>What happens at first start (schema ladder v15 → v19):</strong>
       <ol style="color:var(--text-muted);margin-top:.6rem;padding-left:1.5rem;font-size:.9rem">
-        <li>Daemon detects schema version &lt; 15</li>
-        <li>Runs migrations/sqlite/0010_v063_hierarchy_kg.sql idempotently</li>
-        <li>Backfills <code>memory_links.valid_from</code> from source memory's <code>created_at</code></li>
-        <li>Adds entity_aliases table</li>
-        <li>Bumps schema_version to 15</li>
+        <li>Daemon detects schema version &lt; 19</li>
+        <li>Runs <code>migrations/sqlite/0010_v063_hierarchy_kg.sql</code> (v15: KG temporal-validity columns + entity_aliases)</li>
+        <li>Runs <code>migrations/sqlite/0012_governance_inherit.sql</code> (v17: governance.inherit backfill)</li>
+        <li>Runs <code>migrations/sqlite/0011_v0631_data_integrity.sql</code> (v18: embedding_dim guard + archive lossless)</li>
+        <li>Runs <code>migrations/sqlite/0013_webhook_event_types.sql</code> (v19: subscriptions.event_types column + index)</li>
+        <li>Bumps <code>schema_version</code> to 19</li>
         <li>Existing memories untouched. Existing recall continues to work.</li>
       </ol>
+      <p style="margin-top:.85rem;font-size:.85rem"><strong style="color:var(--warn)">Known issue (#507):</strong> if your <code>~/.config/ai-memory/config.toml</code> has a tilde-prefixed <code>db</code> path (<code>db = "~/..."</code>), CLI subcommands can't expand it; the MCP server is unaffected. Workaround: switch to an absolute path until v0.6.3.2.</p>
     </div>
   </div>
 </section>
@@ -493,28 +529,28 @@ ai-memory --version <span style="color:var(--p1)"># → ai-memory 0.6.3-rc1</spa
 <section id="next">
   <div class="container">
     <span class="eyebrow">Coming Next</span>
-    <h2>v0.6.3.1 patch and v0.7 charter.</h2>
+    <h2>v0.6.3.2 (patch fix) and v0.7 (major).</h2>
 
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem">
-      <div class="tile p1" style="grid-column:span 1">
-        <div class="tile-label">Patch · within days</div>
-        <div class="tile-num" style="font-size:1.4rem">v0.6.3.1</div>
-        <div class="tile-sub" style="margin-top:.65rem">Capabilities Extension · <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/457" style="color:var(--p1)">#457</a><br>schema_version=2 reports hooks, permissions, compaction status, approval subscribers.</div>
+      <div class="tile" style="grid-column:span 1;border-top:3px solid var(--warn)">
+        <div class="tile-label">Patch · scheduled</div>
+        <div class="tile-num" style="font-size:1.4rem">v0.6.3.2</div>
+        <div class="tile-sub" style="margin-top:.65rem">Fix #507 — config.toml <code>db</code> field tilde-expansion. CLI flag <code>--db</code> already expands; only the config-file path is affected. Tracked at <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/507" style="color:var(--warn)">#507</a>. Not blocking the v0.6.3.1 ship-gate.</div>
       </div>
       <div class="tile p2" style="grid-column:span 1">
         <div class="tile-label">Major · End Q2 2026</div>
         <div class="tile-num" style="font-size:1.4rem">v0.7</div>
-        <div class="tile-sub" style="margin-top:.65rem">Trust + A2A Maturity · 4 buckets<br>Hook Pipeline · Ed25519 attest · Apache AGE · A2A maturity + per-agent quotas.</div>
+        <div class="tile-sub" style="margin-top:.65rem">Trust + A2A Maturity · 4 buckets<br>Hook Pipeline · Ed25519 attest · Apache AGE · A2A maturity + per-agent quotas. Cleans up <code>memory_reflection</code> capabilities theater (planned-vs-shipped honesty).</div>
       </div>
     </div>
 
-    <p style="margin-top:1.5rem;color:var(--text-muted)">See <a href="at-a-glance.html#roadmap" style="color:var(--p1)">at-a-glance.html roadmap</a> or the <a href="https://github.com/alphaonedev/ai-memory-mcp-dev/blob/develop/ROADMAP.md" style="color:var(--p1)">public ROADMAP.md</a>.</p>
+    <p style="margin-top:1.5rem;color:var(--text-muted)">See <a href="at-a-glance.html#roadmap" style="color:var(--p1)">at-a-glance.html roadmap</a> or the <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/ROADMAP.md" style="color:var(--p1)">public ROADMAP.md</a>.</p>
   </div>
 </section>
 
 <footer>
   <div class="container">
-    <p>v0.6.3-rc1 tagged 2026-04-26 · <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3-rc1" style="color:var(--text-muted)">GitHub release</a> · <a href="./" style="color:var(--text-muted)">main</a></p>
+    <p>v0.6.3.1 tagged 2026-04-30 · <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3.1" style="color:var(--text-muted)">GitHub release</a> · v0.6.3 GA tagged 2026-04-27 · <a href="./" style="color:var(--text-muted)">main</a></p>
   </div>
 </footer>
 

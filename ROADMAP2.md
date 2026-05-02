@@ -5,7 +5,7 @@
 > **Supersedes:** the prior `ROADMAP.md` (Phase 0–6, drafted at v0.5.4.4) and the 2026-04-29 charter-set roadmap. Where they conflict, this document wins.
 > **Trademark:** ai-memory™ — USPTO Serial No. 99761257
 > **License:** Apache 2.0 — permanent, non-revocable, non-relicenseable.
-> **Production version at write time:** v0.6.3 (shipped 2026-04-27).
+> **Production version at write time:** v0.6.3.1 (shipped 2026-04-30; this audit's text dates 2026-04-29 use "v0.6.3" inline because Patch 1 had not yet shipped at the time of writing — the contract has since landed and §7.2 is now SHIPPED).
 
 ---
 
@@ -60,14 +60,14 @@ This is the floor every plan below builds on. Numbers are sourced from the publi
 
 | Metric | Result | Source |
 |---|---|---|
-| Library tests passing | 1,600 / 1,600 | evidence.html |
-| Total tests (lib + integration) | 1,809 | evidence.html |
-| Line coverage | **93.08%** (gate ≥92%) | evidence.html |
-| Region coverage | 93.11% | release notes |
-| Function coverage | 92.55% | release notes |
-| Modules ≥ 90% coverage | 39 of 47 (7 at 100%) | release notes |
+| Library tests passing (v0.6.3.1) | 1,886 / 1,886 (was 1,600 on v0.6.3) | release notes |
+| Total tests (lib + integration, v0.6.3.1) | 1,886 lib + 49+ integration | release notes |
+| Line coverage (v0.6.3.1) | **93.84%** (gate ≥93%, buffer +0.84pp) | release notes |
+| Region coverage (v0.6.3 baseline) | 93.11% | evidence.html |
+| Function coverage (v0.6.3 baseline) | 92.55% | evidence.html |
+| Modules ≥ 90% coverage (v0.6.3 baseline) | 39 of 47 (7 at 100%) | evidence.html |
 | Platform CI matrix | ubuntu-latest, macos-latest, windows-latest | evidence.html |
-| Schema version | v15 (temporal-validity migration) | evidence.html |
+| Schema version (v0.6.3.1) | v19 (was v15 on v0.6.3; ladder v15→v17→v18→v19) | release notes |
 
 ### 4.2 Ship-gate (4 phases on 4-node DigitalOcean)
 
@@ -233,7 +233,7 @@ The `ROADMAP.md` (Phase 0–6, drafted at v0.5.4.4) made commitments that did no
 | Hierarchical namespace paths, visibility prefixes, vertical promote | 1b | ✅ shipped | done |
 | **N-level rule inheritance** | 1b | ⚠️ display only — gate uses leaf only | **G1 fix in v0.7 Bucket 3** |
 | Governance metadata, roles, approval workflow, approver types | 1c | ✅ shipped | done |
-| **`budget_tokens` parameter for context-budget-aware recall** | 1d | ❌ MIA | **R1 — recover in v0.6.3.1** |
+| **`budget_tokens` parameter for context-budget-aware recall** | 1d | ✅ shipped (v0.6.3.1 R1, with cl100k_base BPE tokenization) | done |
 | Hierarchy-aware recall (auto-include ancestors) | 1d | ✅ shipped (FTS expansion) | done |
 | `memory_graph_query` (multi-hop) | 2 | ✅ shipped as `memory_kg_query` | done |
 | **`memory_find_paths` (A→B path discovery)** | 2 | ❌ MIA | **R2 — recover in v0.7 Bucket 2 alongside AGE** |
@@ -244,7 +244,7 @@ The `ROADMAP.md` (Phase 0–6, drafted at v0.5.4.4) made commitments that did no
 | Background curator daemon | 4 | ⚠️ code in `autonomy.rs`/`curator.rs` but no standalone CLI surface | **R4 — surface as `ai-memory curator` daemon in v0.8 Pillar 2.5** |
 | **Auto-extraction from conversations** | 4 | ❌ MIA | **R5 — recover in v0.7 Bucket 1.7 as `pre_store` hook on transcripts** |
 | **Consensus memory** (4-of-5 → confidence 0.95) | 4 | ❌ MIA (Approval has Consensus(N) for *write authorization*, not *truth determination*) | **R6 — recover in v0.8 Pillar 3** |
-| **`ai-memory doctor` health dashboard** | 4 | ❌ MIA | **R7 — recover in v0.6.3.1** |
+| **`ai-memory doctor` health dashboard** | 4 | ✅ shipped (v0.6.3.1 R7, 7-section severity-tagged dashboard) | done |
 | PostgreSQL + pgvector hub, hub-spoke topology, migration CLI | 5 | ✅ shipped (Postgres SAL adapter; AGE planned for v0.7) | done |
 | API stability guarantee | 6 | pending v1.0 | v1.0 |
 | **Plugin SDK Python + TypeScript** | 6 | ❌ explicitly cut | **stays cut — MCP is the SDK** |
@@ -262,7 +262,7 @@ The grand-slam. Six streams (A: hierarchy taxonomy · B: schema v15 with tempora
 
 Status: **done**. See §4 for evidence.
 
-### 7.2 v0.6.3.1 — Honesty Patch + Recovered Commitments + Doc Currency — Q2 2026 (~4 weeks)
+### 7.2 v0.6.3.1 — Honesty Patch + Recovered Commitments + Doc Currency — SHIPPED 2026-04-30
 
 Existing scope: **Capabilities v2 + Memory Portability Spec v1**. (LongMemEval already shipped at v0.6.3 — replaced with reranker-variant disclosure.)
 
@@ -614,7 +614,7 @@ If any of these commitments are ever broken, OSS users have the right to fork th
 
 ## 16. Net
 
-ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15.
+ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms.
 
 The audit found 22 distinct gaps. None block the published v0.6.3 claims. One (G1 — namespace-inheritance enforcement) is a security-shaped bug that gets a cutline-protected slot in v0.7 Bucket 3. Eight are capabilities-JSON theater that v0.6.3.1 Capabilities v2 makes honest. The remaining thirteen distribute cleanly across v0.6.3.1 / v0.7 / v0.8 / v0.9 / v1.0.
 

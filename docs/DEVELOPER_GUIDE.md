@@ -6,14 +6,14 @@
 
 1. **MCP tool server** -- stdio JSON-RPC server exposing 43 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
-3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 42 endpoints (completely AI-agnostic)
+3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 50 endpoints (completely AI-agnostic)
 
 **Key architectural features:** Zero token cost (no context loaded until recall), TOON compact default response format (79% smaller than JSON), MCP prompts capability (`recall-first` behavioral rules + `memory-workflow` reference card), 4 feature tiers with optional local LLMs via Ollama, true dedup on title+namespace, 6-factor recall scoring with score field in responses.
 
 All three interfaces share the same database layer (`db.rs`) and validation layer (`validate.rs`). The daemon adds automatic garbage collection (every 30 minutes) and graceful shutdown with WAL checkpointing.
 
 ```
-main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (26 commands)
+main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (40 subcommands)
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
@@ -47,13 +47,13 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 ### `src/main.rs`
 
 - `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`)
-- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive` (26 commands)
+- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `SyncDaemon`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive`, `Agents`, `Pending`, `Backup`, `Restore`, `Curator`, `Bench`, `Migrate` (gated `--features sal`), `Doctor`, `Boot`, `Install`, `Wrap`, `Logs`, `Audit` — 40 subcommands total in v0.6.3.1.
 - `StoreArgs` includes `--expires-at` and `--ttl-secs` flags for custom expiration
 - `UpdateArgs` includes `--expires-at` flag for setting expiration on existing memories
 - `ListArgs` includes `--offset` flag for pagination
 - `auto_namespace()` -- detects namespace from git remote URL or directory name
 - `human_age()` -- formats ISO timestamps as "2h ago", "3d ago" for CLI output
-- `serve()` -- starts the Axum server with all routes (42 endpoints including `POST /memories/{id}/promote` and 4 archive endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
+- `serve()` -- starts the Axum server with all routes (50 endpoints including `POST /memories/{id}/promote`, the 4 archive endpoints, the namespace-standard endpoints, and the webhook subscription endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
 - `cmd_*()` functions -- one per CLI command, each opens the DB directly
 
 ### `src/models.rs`
@@ -515,7 +515,7 @@ Base URL: `http://127.0.0.1:9077/api/v1`
 
 All responses are JSON. Error responses include `{"error": "message"}`. Database errors are sanitized -- clients receive `"Internal server error"` instead of raw SQLite error details.
 
-The HTTP API exposes **42 endpoints** (canonical count on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
+The HTTP API exposes **50 endpoints** in v0.6.3.1 (canonical count from `src/lib.rs:68-194` Router builder; v0.6.3 baseline of 42 is frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
 
 ### Health Check
 
@@ -786,7 +786,7 @@ Global flags:
 
 ### `serve`
 
-Start the HTTP daemon (42 endpoints).
+Start the HTTP daemon (50 endpoints).
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
@@ -1007,7 +1007,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **1,600 lib tests at 93.08% coverage** as of v0.6.3 — canonical numbers are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); per-release detail on the [test-hub v0.6.3 evidence](https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/). Modules each carry their own unit-test suite; integration tests live under `tests/`.
+The project has **1,886 lib tests + 49+ integration tests at 93.84% line coverage** as of v0.6.3.1 (was 1,600 lib / 93.08% on v0.6.3). v0.6.3 baseline numbers are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 deltas are documented in the release notes. Modules each carry their own unit-test suite; integration tests live under `tests/`.
 
 ```bash
 # Run all tests

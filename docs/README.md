@@ -2,7 +2,7 @@
 
 <div align="center">
 
-## 🎯 Current stable release · **v0.6.3.1** · A2A-CERTIFIED · 1,600 lib tests · 93.08% cov
+## 🎯 Current stable release · **v0.6.3.1** · A2A-CERTIFIED · 1,886 lib tests + 49+ integration · 93.84% line coverage
 
 [![Release](https://img.shields.io/badge/release-v0.6.3.1-brightgreen?logo=github)](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3.1)
 [![A2A Gate](https://img.shields.io/badge/A2A_gate-9%2F9_green-brightgreen)](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)
