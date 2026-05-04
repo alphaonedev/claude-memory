@@ -36,6 +36,7 @@ pub mod mine;
 pub mod models;
 pub mod replication;
 pub mod reranker;
+pub mod sizes;
 pub mod subscriptions;
 pub mod tls;
 pub mod toon;

@@ -153,7 +153,7 @@ fn audit_emit_for_mcp_dispatch(
 const TOOLS_VERSION: &str = "2026-04-26";
 
 #[allow(clippy::too_many_lines)]
-fn tool_definitions() -> Value {
+pub(crate) fn tool_definitions() -> Value {
     json!({
         "toolsVersion": TOOLS_VERSION,
         "tools": [
