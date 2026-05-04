@@ -79,7 +79,72 @@ pub enum Family {
     Other,
 }
 
+/// Tool names that are loaded in every profile, regardless of which
+/// families it includes. v0.6.4 reserves `memory_capabilities` as the
+/// always-on bootstrap so the runtime-discovery dance works out of the
+/// box on `--profile core`. Per RFC S27 and the v0.6.4-002 acceptance
+/// criteria.
+pub const ALWAYS_ON_TOOLS: &[&str] = &["memory_capabilities"];
+
 impl Family {
+    /// Lookup the family that owns a given tool name. Source-anchored
+    /// at `src/mcp.rs::tool_definitions()` 2026-05-04. Every name listed
+    /// in the v0.6.3.1 baseline is covered; `None` means the tool is
+    /// either unknown to this enumeration or moved out of bounds (which
+    /// should make `tool_definitions_returns_43_tools` red and force a
+    /// reconciliation).
+    #[must_use]
+    pub fn for_tool(name: &str) -> Option<Self> {
+        match name {
+            // core (5)
+            "memory_store" | "memory_recall" | "memory_list" | "memory_get" | "memory_search" => {
+                Some(Self::Core)
+            }
+            // lifecycle (5)
+            "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
+            | "memory_promote" => Some(Self::Lifecycle),
+            // graph (8)
+            "memory_kg_query"
+            | "memory_kg_timeline"
+            | "memory_kg_invalidate"
+            | "memory_link"
+            | "memory_get_links"
+            | "memory_entity_register"
+            | "memory_entity_get_by_alias"
+            | "memory_get_taxonomy" => Some(Self::Graph),
+            // governance (8)
+            "memory_pending_list"
+            | "memory_pending_approve"
+            | "memory_pending_reject"
+            | "memory_namespace_set_standard"
+            | "memory_namespace_get_standard"
+            | "memory_namespace_clear_standard"
+            | "memory_subscribe"
+            | "memory_unsubscribe" => Some(Self::Governance),
+            // power (6)
+            "memory_consolidate"
+            | "memory_detect_contradiction"
+            | "memory_check_duplicate"
+            | "memory_auto_tag"
+            | "memory_expand_query"
+            | "memory_inbox" => Some(Self::Power),
+            // meta (5)
+            "memory_capabilities"
+            | "memory_agent_register"
+            | "memory_agent_list"
+            | "memory_session_start"
+            | "memory_stats" => Some(Self::Meta),
+            // archive (4)
+            "memory_archive_list"
+            | "memory_archive_purge"
+            | "memory_archive_restore"
+            | "memory_archive_stats" => Some(Self::Archive),
+            // other (2)
+            "memory_list_subscriptions" | "memory_notify" => Some(Self::Other),
+            _ => None,
+        }
+    }
+
     /// Lowercase canonical name as used in CLI/env/config.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -220,6 +285,18 @@ impl Profile {
     #[must_use]
     pub fn expected_tool_count(&self) -> usize {
         self.families.iter().map(|f| f.expected_tool_count()).sum()
+    }
+
+    /// `true` if a tool with this name is loaded under this profile.
+    /// Treats every name in [`ALWAYS_ON_TOOLS`] as loaded regardless of
+    /// the family map (per RFC S27 — `memory_capabilities` is the
+    /// bootstrap tool for runtime discovery).
+    #[must_use]
+    pub fn loads(&self, tool_name: &str) -> bool {
+        if ALWAYS_ON_TOOLS.contains(&tool_name) {
+            return true;
+        }
+        Family::for_tool(tool_name).is_some_and(|f| self.includes(f))
     }
 
     /// Parse a profile name. Accepts the named profiles plus
@@ -540,5 +617,127 @@ mod tests {
     #[test]
     fn default_is_core() {
         assert_eq!(Profile::default(), Profile::core());
+    }
+
+    // ---------- Tool name → family / loads ----------
+
+    #[test]
+    fn family_for_tool_resolves_every_baseline_name() {
+        // Source-anchored at src/mcp.rs::tool_definitions() — if any
+        // tool here is missing from `for_tool`, the family map is
+        // out of sync and `--profile <family>` would silently miss it.
+        let baseline = [
+            // core
+            "memory_store",
+            "memory_recall",
+            "memory_list",
+            "memory_get",
+            "memory_search",
+            // lifecycle
+            "memory_update",
+            "memory_delete",
+            "memory_forget",
+            "memory_gc",
+            "memory_promote",
+            // graph
+            "memory_kg_query",
+            "memory_kg_timeline",
+            "memory_kg_invalidate",
+            "memory_link",
+            "memory_get_links",
+            "memory_entity_register",
+            "memory_entity_get_by_alias",
+            "memory_get_taxonomy",
+            // governance
+            "memory_pending_list",
+            "memory_pending_approve",
+            "memory_pending_reject",
+            "memory_namespace_set_standard",
+            "memory_namespace_get_standard",
+            "memory_namespace_clear_standard",
+            "memory_subscribe",
+            "memory_unsubscribe",
+            // power
+            "memory_consolidate",
+            "memory_detect_contradiction",
+            "memory_check_duplicate",
+            "memory_auto_tag",
+            "memory_expand_query",
+            "memory_inbox",
+            // meta
+            "memory_capabilities",
+            "memory_agent_register",
+            "memory_agent_list",
+            "memory_session_start",
+            "memory_stats",
+            // archive
+            "memory_archive_list",
+            "memory_archive_purge",
+            "memory_archive_restore",
+            "memory_archive_stats",
+            // other
+            "memory_list_subscriptions",
+            "memory_notify",
+        ];
+        assert_eq!(baseline.len(), 43, "baseline list itself must be 43");
+        for name in baseline {
+            assert!(
+                Family::for_tool(name).is_some(),
+                "Family::for_tool({name}) returned None — update the family map"
+            );
+        }
+    }
+
+    #[test]
+    fn family_for_tool_returns_none_for_unknown() {
+        assert!(Family::for_tool("memory_does_not_exist").is_none());
+        assert!(Family::for_tool("").is_none());
+    }
+
+    #[test]
+    fn loads_includes_core_tools_under_core_profile() {
+        let p = Profile::core();
+        assert!(p.loads("memory_store"));
+        assert!(p.loads("memory_recall"));
+        assert!(!p.loads("memory_kg_query"));
+        // memory_capabilities is always-on bootstrap.
+        assert!(p.loads("memory_capabilities"));
+    }
+
+    #[test]
+    fn loads_full_profile_includes_every_tool() {
+        let p = Profile::full();
+        // Every tool in the baseline must load under full.
+        for name in [
+            "memory_store",
+            "memory_kg_query",
+            "memory_consolidate",
+            "memory_archive_list",
+            "memory_notify",
+            "memory_capabilities",
+        ] {
+            assert!(p.loads(name), "full profile should load {name}");
+        }
+    }
+
+    #[test]
+    fn loads_unknown_tool_returns_false() {
+        let p = Profile::full();
+        assert!(!p.loads("memory_does_not_exist"));
+    }
+
+    #[test]
+    fn always_on_tools_loaded_in_every_profile() {
+        for p in [
+            Profile::core(),
+            Profile::graph(),
+            Profile::admin(),
+            Profile::power(),
+            Profile::full(),
+        ] {
+            for name in ALWAYS_ON_TOOLS {
+                assert!(p.loads(name), "{name} must load in every profile");
+            }
+        }
     }
 }

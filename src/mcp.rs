@@ -152,6 +152,24 @@ fn audit_emit_for_mcp_dispatch(
 /// and does NOT require a bump. Ultrareview #351.
 const TOOLS_VERSION: &str = "2026-04-26";
 
+/// v0.6.4-002 — Filter `tool_definitions()` down to the tools loaded
+/// under `profile`. Tools whose family is not in the profile's family
+/// list are dropped from `tools[]`. `memory_capabilities` and any
+/// other [`crate::profile::ALWAYS_ON_TOOLS`] are kept regardless of
+/// profile so the runtime-discovery dance still works on
+/// `--profile core`.
+pub(crate) fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
+    let mut defs = tool_definitions();
+    if let Some(arr) = defs.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        arr.retain(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| profile.loads(name))
+        });
+    }
+    defs
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn tool_definitions() -> Value {
     json!({
@@ -3393,6 +3411,7 @@ pub(crate) fn handle_session_start(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -3407,6 +3426,7 @@ fn handle_request(
     archive_on_gc: bool,
     autonomous_hooks: bool,
     mcp_client: Option<&str>,
+    profile: &crate::profile::Profile,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -3432,7 +3452,7 @@ fn handle_request(
             }),
         ),
         "notifications/initialized" | "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, tool_definitions()),
+        "tools/list" => ok_response(id, tool_definitions_for_profile(profile)),
         "prompts/list" => ok_response(id, prompt_definitions()),
         "prompts/get" => {
             let prompt_name = match req.params["name"].as_str() {
@@ -3449,6 +3469,32 @@ fn handle_request(
                 Some(name) if !name.is_empty() => name,
                 _ => return err_response(id, -32602, "missing or empty tool name".into()),
             };
+
+            // v0.6.4-002 (RFC S28) — reject calls to tools that are not
+            // loaded under the active profile. The error message names
+            // the profile that would load the tool, so a confused agent
+            // can self-correct via `--profile <hint>` or use
+            // `memory_capabilities --include-schema family=<f>` to opt in
+            // at runtime (Track C, v0.6.4-006).
+            if !profile.loads(tool_name) {
+                let owning_family = crate::profile::Family::for_tool(tool_name);
+                let hint = match owning_family {
+                    Some(f) => format!(
+                        "tool '{tool_name}' is in family '{}' which is not loaded under \
+                         the active profile. Restart with `--profile <name>` or \
+                         `--profile core,{}` to load it, or call `memory_capabilities \
+                         --include-schema family={}` to expand at runtime.",
+                        f.name(),
+                        f.name(),
+                        f.name()
+                    ),
+                    None => format!(
+                        "tool '{tool_name}' is not registered in this build. Call \
+                         `memory_capabilities` to see available tools."
+                    ),
+                };
+                return err_response(id, -32601, hint);
+            }
 
             // Pillar 3 / Stream E — emit a structured tracing span around
             // every MCP tool dispatch so production observability can
@@ -3918,6 +3964,7 @@ pub fn run_mcp_server(
             archive_on_gc,
             autonomous_hooks,
             mcp_client_name.as_deref(),
+            profile,
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -3945,6 +3992,82 @@ mod tests {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 43);
+    }
+
+    /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
+    /// registers exactly 5 family tools + 1 always-on bootstrap
+    /// (memory_capabilities) = 6 visible tools. `--profile full`
+    /// registers all 43.
+    #[test]
+    fn tool_definitions_for_profile_core_registers_5_plus_capabilities() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
+        let tools = defs["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        // Exactly the 5 core tools + memory_capabilities bootstrap.
+        assert_eq!(
+            tools.len(),
+            6,
+            "core profile should register 5 core tools + memory_capabilities; got {names:?}"
+        );
+        for required in [
+            "memory_store",
+            "memory_recall",
+            "memory_list",
+            "memory_get",
+            "memory_search",
+            "memory_capabilities",
+        ] {
+            assert!(
+                names.contains(&required),
+                "core profile missing {required}; got {names:?}"
+            );
+        }
+        // None of the non-core tools should leak through.
+        for excluded in [
+            "memory_kg_query",
+            "memory_consolidate",
+            "memory_archive_list",
+            "memory_subscribe",
+            "memory_promote",
+        ] {
+            assert!(
+                !names.contains(&excluded),
+                "core profile leaked {excluded}; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_definitions_for_profile_full_registers_43() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
+        let tools = defs["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            43,
+            "full profile must reproduce v0.6.3 surface 1:1"
+        );
+    }
+
+    #[test]
+    fn tool_definitions_for_profile_graph_registers_thirteen_plus_capabilities() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
+        let tools = defs["tools"].as_array().unwrap();
+        // 5 core + 8 graph + 1 always-on capabilities = 14 (capabilities
+        // is in meta but loaded as bootstrap; without it we'd have 13).
+        assert_eq!(
+            tools.len(),
+            14,
+            "graph profile = core(5) + graph(8) + capabilities-bootstrap(1)"
+        );
+    }
+
+    /// RFC §S30: custom comma-list `core,graph` registers union.
+    #[test]
+    fn tool_definitions_for_profile_custom_core_comma_graph_registers_union() {
+        let p = crate::profile::Profile::parse("core,graph").unwrap();
+        let defs = tool_definitions_for_profile(&p);
+        let tools = defs["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14, "core,graph = 5 + 8 + capabilities");
     }
 
     #[test]
@@ -4200,6 +4323,7 @@ mod tests {
                 true,
                 false,
                 None,
+                &crate::profile::Profile::full(),
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -4250,6 +4374,7 @@ mod tests {
                 true,
                 false,
                 None,
+                &crate::profile::Profile::full(),
             );
             // Handler errs are returned as ok_response with isError=true,
             // not RpcError, by design (the JSON-RPC layer is reserved for
@@ -4526,6 +4651,7 @@ mod tests {
                 true,
                 false,
                 None,
+                &crate::profile::Profile::full(),
             );
             assert!(
                 resp.error.is_none(),
@@ -4562,6 +4688,7 @@ mod tests {
                     true,
                     false,
                     None,
+                    &crate::profile::Profile::full(),
                 );
 
                 // Missing required args should produce an error response (handler returns Err)
@@ -4615,6 +4742,7 @@ mod tests {
             true,
             false,
             None,
+            &crate::profile::Profile::full(),
         )
     }
 
