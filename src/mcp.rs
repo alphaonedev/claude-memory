@@ -152,6 +152,118 @@ fn audit_emit_for_mcp_dispatch(
 /// and does NOT require a bump. Ultrareview #351.
 const TOOLS_VERSION: &str = "2026-04-26";
 
+/// v0.6.4-006 — Build the `families` overview included in the v2
+/// `memory_capabilities` response. Each entry carries:
+///
+/// - `name` — family identifier (`core`, `graph`, …)
+/// - `tool_count` — expected tool count per the family map
+/// - `loaded` — whether the family is loaded under the active profile
+/// - `tools` — the canonical tool-name list for that family
+///
+/// This is the v0.6.4 NHI runtime-discovery surface: an agent reading
+/// the response sees which families are reachable AND can decide which
+/// to opt into (via `memory_capabilities --include-schema family=<f>`)
+/// without restarting the MCP server.
+pub(crate) fn families_overview(profile: &crate::profile::Profile) -> Value {
+    use crate::profile::Family;
+    let defs = tool_definitions();
+    let all_tools = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let entries: Vec<Value> = Family::all()
+        .iter()
+        .map(|fam| {
+            let tools_in_family: Vec<&str> = all_tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                .filter(|n| Family::for_tool(n) == Some(*fam))
+                .collect();
+            json!({
+                "name": fam.name(),
+                "tool_count": tools_in_family.len(),
+                "loaded": profile.includes(*fam),
+                "tools": tools_in_family,
+            })
+        })
+        .collect();
+    json!({
+        "schema_version": "v0.6.4-families-1",
+        "always_on": crate::profile::ALWAYS_ON_TOOLS,
+        "families": entries,
+    })
+}
+
+/// v0.6.4-006 — Handle `memory_capabilities` invocations that pass a
+/// `family=<name>` parameter. When `include_schema=false` (default),
+/// returns the canonical tool-name list. When `include_schema=true`,
+/// returns the full MCP-style tool definitions for each tool — the
+/// caller (an NHI agent or a host like Claude Code's deferred-tools
+/// path) can register them at runtime without restarting the server.
+///
+/// Errors:
+/// - Unknown family → returns `Err` with a diagnostic listing valid
+///   family names.
+/// - Empty family name → returns `Err` ("must specify a family name").
+pub(crate) fn handle_capabilities_family(
+    family_name: &str,
+    include_schema: bool,
+    profile: &crate::profile::Profile,
+) -> Result<Value, String> {
+    use crate::profile::Family;
+    if family_name.is_empty() {
+        return Err("memory_capabilities: 'family' must not be empty".to_string());
+    }
+    let family = Family::all()
+        .iter()
+        .find(|f| f.name() == family_name)
+        .copied()
+        .ok_or_else(|| {
+            let valid: Vec<&str> = Family::all().iter().map(|f| f.name()).collect();
+            format!(
+                "unknown family '{family_name}'. Valid families: {}.",
+                valid.join(", ")
+            )
+        })?;
+
+    let defs = tool_definitions();
+    let all_tools = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let in_family: Vec<Value> = all_tools
+        .into_iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .and_then(Family::for_tool)
+                == Some(family)
+        })
+        .collect();
+
+    if include_schema {
+        Ok(json!({
+            "schema_version": "v0.6.4-family-schemas-1",
+            "family": family.name(),
+            "loaded_under_active_profile": profile.includes(family),
+            "tools": in_family,
+        }))
+    } else {
+        let names: Vec<&str> = in_family
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        Ok(json!({
+            "schema_version": "v0.6.4-family-list-1",
+            "family": family.name(),
+            "loaded_under_active_profile": profile.includes(family),
+            "tools": names,
+        }))
+    }
+}
+
 /// v0.6.4-002 — Filter `tool_definitions()` down to the tools loaded
 /// under `profile`. Tools whose family is not in the profile's family
 /// list are dropped from `tools[]`. `memory_capabilities` and any
@@ -456,7 +568,7 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1.",
+                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1. v0.6.4 — pass family=<name> to enumerate that family's tools; add include_schema=true to retrieve full schemas inline (NHI runtime-expansion path).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -465,6 +577,16 @@ pub(crate) fn tool_definitions() -> Value {
                             "enum": ["v1", "v2"],
                             "default": "v2",
                             "description": "Capabilities-schema version. v2 is the honest, runtime-overlaid shape (default). v1 returns the legacy pre-v0.6.3.1 shape for backward compat."
+                        },
+                        "family": {
+                            "type": "string",
+                            "enum": ["core", "lifecycle", "graph", "governance", "power", "meta", "archive", "other"],
+                            "description": "v0.6.4 — when set, returns the tool list (or full schemas with include_schema=true) for that family instead of the global capabilities document. Used by NHI agents to opt into a tool family at runtime without restarting the MCP server."
+                        },
+                        "include_schema": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "v0.6.4 — when true, return full MCP-style tool definitions for each tool in the requested family. Requires family=<name>."
                         }
                     }
                 }
@@ -3570,20 +3692,44 @@ fn handle_request(
                     mcp_client,
                 ),
                 "memory_capabilities" => {
-                    // P1 honesty patch: optional `accept` argument lets MCP
-                    // clients opt into the legacy v1 shape, mirroring the
-                    // HTTP `Accept-Capabilities` header.
-                    let accept = arguments
-                        .get("accept")
-                        .and_then(Value::as_str)
-                        .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
-                    handle_capabilities_with_conn(
-                        tier_config,
-                        reranker,
-                        embedder.is_some(),
-                        Some(conn),
-                        accept,
-                    )
+                    // v0.6.4-006 — runtime expansion via family enumeration.
+                    // When `family` is set, route to the family-listing path
+                    // and short-circuit the global capabilities document.
+                    if let Some(fam_name) = arguments.get("family").and_then(Value::as_str) {
+                        let include_schema = arguments
+                            .get("include_schema")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        handle_capabilities_family(fam_name, include_schema, profile)
+                    } else {
+                        // P1 honesty patch: optional `accept` argument lets MCP
+                        // clients opt into the legacy v1 shape, mirroring the
+                        // HTTP `Accept-Capabilities` header.
+                        let accept = arguments
+                            .get("accept")
+                            .and_then(Value::as_str)
+                            .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
+                        // v0.6.4-006 — when no family is requested, augment
+                        // the v2 response with a top-level `families` field
+                        // describing the family taxonomy and which families
+                        // the active profile loads. Backward-compat: v1
+                        // shape never gets the families overlay.
+                        let result = handle_capabilities_with_conn(
+                            tier_config,
+                            reranker,
+                            embedder.is_some(),
+                            Some(conn),
+                            accept,
+                        );
+                        result.map(|mut value| {
+                            if matches!(accept, CapabilitiesAccept::V2) {
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert("families".to_string(), families_overview(profile));
+                                }
+                            }
+                            value
+                        })
+                    }
                 }
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
@@ -4068,6 +4214,71 @@ mod tests {
         let defs = tool_definitions_for_profile(&p);
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 14, "core,graph = 5 + 8 + capabilities");
+    }
+
+    // ---- v0.6.4-006 — capabilities family enum + include_schema ----
+
+    #[test]
+    fn families_overview_lists_all_eight_with_correct_loaded_flags() {
+        let p = crate::profile::Profile::core();
+        let v = families_overview(&p);
+        let families = v["families"].as_array().unwrap();
+        assert_eq!(families.len(), 8, "all eight families must appear");
+
+        let core_row = families.iter().find(|r| r["name"] == "core").unwrap();
+        assert_eq!(core_row["loaded"], true);
+        assert_eq!(core_row["tool_count"], 5);
+        let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
+        assert_eq!(graph_row["loaded"], false);
+        assert_eq!(graph_row["tool_count"], 8);
+
+        let always_on = v["always_on"].as_array().unwrap();
+        assert_eq!(always_on.len(), 1);
+        assert_eq!(always_on[0], "memory_capabilities");
+    }
+
+    #[test]
+    fn handle_capabilities_family_lists_tool_names() {
+        let p = crate::profile::Profile::core();
+        let v = handle_capabilities_family("graph", false, &p).unwrap();
+        assert_eq!(v["family"], "graph");
+        assert_eq!(v["loaded_under_active_profile"], false);
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        // Spot-check known graph tool present.
+        assert!(tools.iter().any(|t| t == "memory_kg_query"));
+    }
+
+    #[test]
+    fn handle_capabilities_family_include_schema_returns_full_definitions() {
+        let p = crate::profile::Profile::core();
+        let v = handle_capabilities_family("graph", true, &p).unwrap();
+        assert_eq!(v["family"], "graph");
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        // Each row must carry the full MCP tool definition shape.
+        for tool in tools {
+            assert!(tool.get("name").is_some(), "missing name");
+            assert!(tool.get("description").is_some(), "missing description");
+            assert!(tool.get("inputSchema").is_some(), "missing inputSchema");
+        }
+    }
+
+    #[test]
+    fn handle_capabilities_family_unknown_returns_diagnostic_err() {
+        let p = crate::profile::Profile::core();
+        let err = handle_capabilities_family("xyz", false, &p).unwrap_err();
+        assert!(err.contains("xyz"));
+        assert!(err.contains("Valid families"));
+        assert!(err.contains("core"));
+        assert!(err.contains("graph"));
+    }
+
+    #[test]
+    fn handle_capabilities_family_empty_name_errors() {
+        let p = crate::profile::Profile::core();
+        let err = handle_capabilities_family("", false, &p).unwrap_err();
+        assert!(err.contains("must not be empty"));
     }
 
     #[test]
