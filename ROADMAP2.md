@@ -214,6 +214,28 @@ A six-agent parallel audit of every line covering storage, recall, tool surface,
 | G15 | Stats live-counted (no cache) — fine at 152 entries; profile at scale | Defer | watch only |
 | G16 | Schema migration v16 is no-op for SQLite (alignment with Postgres) | Doc | doc fix |
 
+### 5.6 Behavioral findings — agent-side evidence (added 2026-05-04)
+
+The substrate audit in §5.1–§5.4 covers what the code does. **Behavioral evidence covers what working agents on top of the substrate do** — different evidence stream, complementary findings, agent-experience focus.
+
+The first systematic instrument in this category is the [v0.6.3.1 OpenClaw behavioral assessment](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/nhi/openclaw-behavioral-v0.6.3.1/): 52 probes across 8 phases (qualitative awareness / recall@k / cross-session ablation / Byzantine peer trust calibration / tool surface discovery / RoadMap recommendations / soft-restart / hard-restart context recovery), three independent OpenClaw 2026.5.x agents on `xai/grok-4.3`, MCP-mounted ai-memory v0.6.3.1 on a 4-node local-docker mesh.
+
+**Headline measurements (perfect across three measures):** recall@1 = 1.000 over 18 trials. Cross-session durability = 1.000 over 3 trials (token-keyed write-α / read-β-fresh). Byzantine peer trust calibration = 1.000 over 3 trials.
+
+**Headline finding (the gap):** Phase 9 organic-no-cue recovery = 0/1. Without an explicit cue ("memory_recall on namespace=...") agents do **not** reach for `memory_recall` to recover prior context after a session reset. They confabulate from the agent runtime's bootstrap activity. Cued recovery succeeds 100%. **Cue language gates the agent's decision to invoke memory tools, not data availability.**
+
+**Three-agent unanimous RoadMap signals (Phase 7).** Three agents independently named the same top-3 capability gaps after running concrete tasks on top of ai-memory:
+
+| Issue | Gap | Disposition |
+|---|---|---|
+| [#517](https://github.com/alphaonedev/ai-memory-mcp/issues/517) | Auto-suggest `memory_link` during/after `memory_store` (manual linking is the biggest workflow friction in KG reasoning + multi-agent collab) | v0.6.4 Track G-AX (lightweight, response-field), v0.7 Bucket 0 R3 (full daemon-mode hook) |
+| [#518](https://github.com/alphaonedev/ai-memory-mcp/issues/518) | Session-aware `memory_recall` defaults + auto-cue on session start (closes the Phase 9 organic-no-cue failure case) | v0.6.4 Track G-AX |
+| [#519](https://github.com/alphaonedev/ai-memory-mcp/issues/519) | Proactive conflict detection inside `memory_store` with merge suggestions (post-hoc `memory_detect_contradiction` is too slow per all three agents) | v0.6.4 Track G-AX |
+
+All three issues are filed against milestone v0.6.4 (#7), labelled `v0.6.4-candidate`. Each carries an honest demote-to-v0.6.4.1 path so the sprint manager can rebalance Wed standup if Tracks A–F consume the budget.
+
+The behavioral assessment is now a recurring instrument — future releases will run the same 8-phase suite (or its v0.7 successor with attested identity probes added) to track delta over time.
+
 ### 5.5 Public-surface lag (not a code bug, an ops bug)
 
 | Surface | Stale state | Action |
@@ -307,6 +329,37 @@ Keep: Capabilities v2 honesty, R1 (`budget_tokens`), G4 (embedding_dim integrity
 Defer: G5/G6/G9, R7 (doctor), TOON wire format polish.
 
 **Effort:** ~17 sessions on top of original Cap v2 scope. Realistic: 4 weeks.
+
+### 7.2.5 v0.6.4 — Cross-harness token economics + NHI guardrails phase 1 — Mon 2026-05-04 → Fri 2026-05-08 (5 dev days)
+
+**Code-name:** `quiet-tools`. **Sprint authorized 2026-05-02; ships Fri 2026-05-08; public announce Mon 2026-05-11.**
+
+The release where ai-memory stops being a token hog. Default tool surface collapses 42 → 5; expansion is opt-in via discovery; observability surfaces the cost; NHI guardrails phase 1 (allowlist + audit log) gates the expansion path.
+
+**Why this release exists.** Boris Cherny's published 90-day instrumentation (May 2026) quantified that 73% of Claude Code tokens go to nine waste patterns. ai-memory is the **#1 contributor to Pattern 6** (just-in-case tool defs) on every coding-agent harness except Claude Code's deferred-tool path: ~25,200 input tokens per request just for tool schemas, ~$570/year per heavy user, ~$0.076 per request. On Codex / Grok CLI / Gemini CLI / stock Claude Desktop, ai-memory is dominating the input prefix. Without v0.6.4, ai-memory inherits the "AI token hog" reputation just as those harnesses adopt at scale.
+
+**Scope (16 issues + 3 stretch).** Tracks A–G + Track G-AX:
+
+- **A (Mon) Mechanism** — `--profile` CLI flag + `AI_MEMORY_PROFILE` env + `[mcp].profile` config, family-scoped tool registration filter, `core` (5 tools) as new default with `--profile full` opt-out.
+- **B (Mon) Observability** — `ai-memory doctor --tokens` + static schema-size table (build-time) for cost queryable without running.
+- **C (Tue) Discovery** — `memory_capabilities` extension (family enumeration + `--include-schema`), TS + Py SDK `requireProfile()` with `ProfileNotLoaded`.
+- **D (Wed) NHI guardrails phase 1** — per-agent allowlist (config-driven, `agent_id`-keyed, default = `core`), capability-expansion audit log.
+- **E (Wed) Cross-harness install** — install profiles for claude-code, claude-desktop, codex, grok-cli, gemini-cli (all default `core`).
+- **F (Thu) Cert + benchmarks** — A2A scenarios S25–S32 added to v0.6.4 cert cell, cross-harness token-cost benchmark (static + 1 live spot-check per harness), backward-compat verification (`--profile full` matches v0.6.3 baseline 1:1).
+- **G (Fri) Docs + release** — README, ADMIN_GUIDE, migration guide, release notes, CHANGELOG, tag, brew tap.
+- **G-AX (Wed–Thu, stretch — demote to v0.6.4.1 if scope hot)** — three agent-experience refinements landed from the [v0.6.3.1 OpenClaw behavioral assessment](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/nhi/openclaw-behavioral-v0.6.3.1/) (52 probes, 3-agent unanimous P7 RoadMap signals):
+  - **G1 #517** — auto-suggest `memory_link` during/after `memory_store` (`linked_candidates[]` response field; HNSW similarity at write time).
+  - **G2 #518** — session-aware `memory_recall` defaults via `agents.defaults.recall_scope` + session-start auto-cue (closes the "organic-no-cue" recovery failure observed in Phase 9 of the assessment).
+  - **G3 #519** — proactive conflict detection inside `memory_store` with `merge_strategy` suggestions (replace / link.supersedes / link.contradicts / consolidate).
+
+**Success metrics (measured Mon 2026-05-11).** Token-def cost on Codex/Grok/Gemini drops ≥85% (target 87%). `core` profile covers ≥95% of agent traffic without escalation. `memory_capabilities --include-schema` becomes the canonical NHI expansion path. Zero regressions in v0.6.3 cert matrix when `--profile full` set.
+
+**Source charter:** [`docs/v0.6.4/v0.6.4-roadmap.md`](docs/v0.6.4/v0.6.4-roadmap.md) (16-issue list, daily schedule, risk register). NHI execution prompts: [`docs/v0.6.4/v0.6.4-nhi-prompts.md`](docs/v0.6.4/v0.6.4-nhi-prompts.md). Design: [`docs/v0.6.4/rfc-default-tool-surface-collapse.md`](docs/v0.6.4/rfc-default-tool-surface-collapse.md).
+
+**Relationship to other releases:**
+- Independent of v0.6.3.1 (Honesty Patch). Both can ship in parallel.
+- Track G-AX overlaps with **v0.7 Bucket 0 R3** (auto-link inference as `post_store` daemon-mode hook) — v0.6.4-G1 is the lightweight first-mover (additive response field, ~3 days); v0.7 R3 is the full daemon-mode integration (~3 sessions). Backward-compatible upgrade path; v0.7 R3 obsoletes the v0.6.4 scaffold but doesn't remove it.
+- **NHI guardrails phase 2** (rate limits, attestation-tier gating) lands in v0.7 Bucket 3, builds on the audit-log substrate from v0.6.4-009.
 
 ### 7.3 v0.7 — Trust + A2A Maturity — Q2 2026 (June target)
 
