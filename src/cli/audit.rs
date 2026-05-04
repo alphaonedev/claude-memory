@@ -898,4 +898,119 @@ mod tests {
         assert!(s.contains("audit verify OK"), "got: {s}");
         assert!(s.contains("3 line(s) verified"));
     }
+
+    // ---- v0.6.4-009 — `audit show` SQLite audit_log subcommand ----
+
+    fn show_args(json: bool, agent_id: Option<&str>) -> ShowArgs {
+        ShowArgs {
+            capability_expansions: false,
+            agent_id: agent_id.map(str::to_string),
+            limit: 50,
+            json,
+        }
+    }
+
+    fn cfg_for_db(p: &std::path::Path) -> AppConfig {
+        AppConfig {
+            db: Some(p.to_string_lossy().into_owned()),
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn audit_show_emits_no_rows_message_on_empty_table() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = cfg_for_db(tmp.path());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_show(&show_args(false, None), &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("audit_log: no rows"), "got: {s}");
+    }
+
+    #[test]
+    fn audit_show_renders_grant_and_deny_rows_in_text_format() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = cfg_for_db(tmp.path());
+        let conn = crate::db::open(tmp.path()).unwrap();
+        crate::db::record_capability_expansion(&conn, Some("alice"), "graph", true, None);
+        crate::db::record_capability_expansion(&conn, Some("bob"), "power", false, None);
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_show(&show_args(false, None), &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("ALLOW"), "missing ALLOW header in: {s}");
+        assert!(s.contains("DENY"), "missing DENY header in: {s}");
+        assert!(s.contains("alice"));
+        assert!(s.contains("bob"));
+        assert!(s.contains("graph"));
+        assert!(s.contains("power"));
+    }
+
+    #[test]
+    fn audit_show_emits_valid_json_when_flag_set() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = cfg_for_db(tmp.path());
+        let conn = crate::db::open(tmp.path()).unwrap();
+        crate::db::record_capability_expansion(&conn, Some("alice"), "graph", true, None);
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_show(&show_args(true, None), &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s).expect("--json must emit valid JSON");
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["agent_id"], "alice");
+        assert_eq!(arr[0]["requested_family"], "graph");
+        assert_eq!(arr[0]["granted"], true);
+        assert_eq!(arr[0]["event_type"], "capability_expansion");
+    }
+
+    #[test]
+    fn audit_show_filters_by_agent_id() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = cfg_for_db(tmp.path());
+        let conn = crate::db::open(tmp.path()).unwrap();
+        crate::db::record_capability_expansion(&conn, Some("alice"), "graph", true, None);
+        crate::db::record_capability_expansion(&conn, Some("bob"), "power", false, None);
+        drop(conn);
+
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let exit = run_show(&show_args(true, Some("alice")), &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        let v: serde_json::Value = serde_json::from_str(s).unwrap();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 1, "filter should leave only alice rows");
+        assert_eq!(arr[0]["agent_id"], "alice");
+    }
+
+    #[test]
+    fn audit_run_dispatches_to_show_arm() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let cfg = cfg_for_db(tmp.path());
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+        let args = AuditArgs {
+            action: AuditAction::Show(show_args(false, None)),
+            audit_dir: None,
+        };
+        let exit = run(args, &cfg, &mut out).unwrap();
+        assert_eq!(exit, 0);
+        let s = std::str::from_utf8(&stdout).unwrap();
+        assert!(s.contains("audit_log"), "got: {s}");
+    }
 }
