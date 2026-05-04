@@ -1176,6 +1176,94 @@ pub struct McpConfig {
     /// `full`, or a comma-separated custom list (e.g.,
     /// `core,graph,archive`). Default `core` (v0.6.4 default flip).
     pub profile: Option<String>,
+
+    /// v0.6.4-008 — per-agent capability allowlist. Maps an agent_id
+    /// pattern to the families that agent may request via
+    /// `memory_capabilities --include-schema family=<f>`. Patterns
+    /// resolve to a Vec<String> (the family names). The wildcard
+    /// pattern `"*"` is the default for agents not otherwise listed.
+    /// When the entire allowlist is absent (`mcp.allowlist = None`),
+    /// the gate is disabled — every caller may expand any family
+    /// (Tier-1 single-process semantics, profile flag rules).
+    ///
+    /// Example config.toml:
+    /// ```toml
+    /// [mcp.allowlist]
+    /// "alice" = ["core", "graph"]
+    /// "bob"   = ["full"]
+    /// "*"     = ["core"]
+    /// ```
+    pub allowlist: Option<std::collections::HashMap<String, Vec<String>>>,
+}
+
+impl McpConfig {
+    /// v0.6.4-008 — resolve the allowlist decision for an agent
+    /// requesting a family.
+    ///
+    /// Returns:
+    /// - `AllowlistDecision::Disabled` if the entire allowlist is
+    ///   absent (Tier-1 default — gate is off).
+    /// - `AllowlistDecision::Allow` if a matching pattern includes
+    ///   the requested family (or `"full"`).
+    /// - `AllowlistDecision::Deny` if a pattern matches but does
+    ///   not list the family.
+    /// - `AllowlistDecision::Deny` if no pattern matches and there
+    ///   is no `"*"` wildcard.
+    ///
+    /// Pattern matching: exact match wins; otherwise the wildcard
+    /// `"*"` is consulted. Multiple-pattern precedence follows
+    /// longest-prefix order with stable tie-break by config order
+    /// (since `HashMap` is unordered, we sort by key length
+    /// descending for the comparison).
+    #[must_use]
+    pub fn allowlist_decision(&self, agent_id: Option<&str>, family: &str) -> AllowlistDecision {
+        let table = match self.allowlist.as_ref() {
+            Some(t) if !t.is_empty() => t,
+            _ => return AllowlistDecision::Disabled,
+        };
+        // Tier-1: no agent_id → only the wildcard rule applies. Same
+        // restrictive default as for an unknown agent.
+        let aid = agent_id.unwrap_or("");
+        // Exact match first.
+        if let Some(families) = table.get(aid) {
+            return decide(families, family);
+        }
+        // Longest-prefix match next (excluding `"*"`).
+        let mut keys: Vec<&String> = table
+            .keys()
+            .filter(|k| k.as_str() != "*" && aid.starts_with(k.as_str()))
+            .collect();
+        keys.sort_by_key(|k| std::cmp::Reverse(k.len()));
+        if let Some(k) = keys.first() {
+            if let Some(families) = table.get(*k) {
+                return decide(families, family);
+            }
+        }
+        // Wildcard fallback.
+        if let Some(families) = table.get("*") {
+            return decide(families, family);
+        }
+        AllowlistDecision::Deny
+    }
+}
+
+fn decide(families: &[String], requested: &str) -> AllowlistDecision {
+    if families.iter().any(|f| f == "full" || f == requested) {
+        AllowlistDecision::Allow
+    } else {
+        AllowlistDecision::Deny
+    }
+}
+
+/// v0.6.4-008 — outcome of an allowlist check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AllowlistDecision {
+    /// Allowlist is not configured; no gate.
+    Disabled,
+    /// Pattern match grants access to the requested family.
+    Allow,
+    /// Pattern match denies (or no pattern matched).
+    Deny,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1997,6 +2085,7 @@ legacy_scoring = false
         let cfg = AppConfig {
             mcp: Some(McpConfig {
                 profile: Some("graph".to_string()),
+                allowlist: None,
             }),
             ..AppConfig::default()
         };
@@ -2038,6 +2127,125 @@ legacy_scoring = false
             cfg.effective_profile(Some("Core")),
             Err(crate::profile::ProfileParseError::CaseMismatch(_))
         ));
+    }
+
+    // ---- v0.6.4-008 — `[mcp.allowlist]` resolution tests.
+
+    fn allowlist_table(rows: &[(&str, &[&str])]) -> McpConfig {
+        let mut map = std::collections::HashMap::new();
+        for (k, v) in rows {
+            map.insert(
+                (*k).to_string(),
+                v.iter().map(|s| (*s).to_string()).collect(),
+            );
+        }
+        McpConfig {
+            profile: None,
+            allowlist: Some(map),
+        }
+    }
+
+    #[test]
+    fn allowlist_disabled_when_table_absent() {
+        let cfg = McpConfig::default();
+        assert_eq!(
+            cfg.allowlist_decision(Some("alice"), "graph"),
+            AllowlistDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn allowlist_disabled_when_table_empty() {
+        let cfg = McpConfig {
+            profile: None,
+            allowlist: Some(std::collections::HashMap::new()),
+        };
+        assert_eq!(
+            cfg.allowlist_decision(Some("alice"), "graph"),
+            AllowlistDecision::Disabled
+        );
+    }
+
+    #[test]
+    fn allowlist_exact_match_grants_or_denies_per_family_set() {
+        let cfg = allowlist_table(&[("alice", &["core", "graph"]), ("*", &["core"])]);
+        assert_eq!(
+            cfg.allowlist_decision(Some("alice"), "graph"),
+            AllowlistDecision::Allow
+        );
+        assert_eq!(
+            cfg.allowlist_decision(Some("alice"), "power"),
+            AllowlistDecision::Deny
+        );
+    }
+
+    #[test]
+    fn allowlist_full_grants_every_family() {
+        let cfg = allowlist_table(&[("bob", &["full"])]);
+        assert_eq!(
+            cfg.allowlist_decision(Some("bob"), "graph"),
+            AllowlistDecision::Allow
+        );
+        assert_eq!(
+            cfg.allowlist_decision(Some("bob"), "archive"),
+            AllowlistDecision::Allow
+        );
+    }
+
+    #[test]
+    fn allowlist_wildcard_default_for_unknown_agents() {
+        let cfg = allowlist_table(&[("alice", &["full"]), ("*", &["core"])]);
+        assert_eq!(
+            cfg.allowlist_decision(Some("eve"), "core"),
+            AllowlistDecision::Allow
+        );
+        assert_eq!(
+            cfg.allowlist_decision(Some("eve"), "graph"),
+            AllowlistDecision::Deny
+        );
+    }
+
+    #[test]
+    fn allowlist_default_deny_when_no_wildcard() {
+        let cfg = allowlist_table(&[("alice", &["full"])]);
+        assert_eq!(
+            cfg.allowlist_decision(Some("eve"), "core"),
+            AllowlistDecision::Deny
+        );
+    }
+
+    #[test]
+    fn allowlist_longest_prefix_match_wins() {
+        let cfg = allowlist_table(&[
+            ("ai:", &["core"]),
+            ("ai:claude-code", &["full"]),
+            ("*", &["core"]),
+        ]);
+        // The longer prefix takes precedence over the shorter one.
+        assert_eq!(
+            cfg.allowlist_decision(Some("ai:claude-code@host"), "graph"),
+            AllowlistDecision::Allow
+        );
+        // Shorter prefix still works for other ai:* agents.
+        assert_eq!(
+            cfg.allowlist_decision(Some("ai:codex@host"), "graph"),
+            AllowlistDecision::Deny
+        );
+    }
+
+    #[test]
+    fn allowlist_no_agent_id_uses_wildcard() {
+        // Tier-1 / anonymous: no agent_id provided → only the wildcard
+        // rule is consulted.
+        let cfg = allowlist_table(&[("alice", &["full"]), ("*", &["core"])]);
+        assert_eq!(
+            cfg.allowlist_decision(None, "core"),
+            AllowlistDecision::Allow
+        );
+        assert_eq!(
+            cfg.allowlist_decision(None, "graph"),
+            AllowlistDecision::Deny
+        );
     }
 
     #[test]

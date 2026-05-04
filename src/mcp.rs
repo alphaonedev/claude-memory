@@ -202,14 +202,22 @@ pub(crate) fn families_overview(profile: &crate::profile::Profile) -> Value {
 /// caller (an NHI agent or a host like Claude Code's deferred-tools
 /// path) can register them at runtime without restarting the server.
 ///
+/// v0.6.4-008 — when `include_schema=true` AND the daemon's
+/// `[mcp.allowlist]` is configured, the requesting `agent_id` must be
+/// permitted by the allowlist for the requested family. Permissive
+/// (no-allowlist) default preserves Tier-1 single-process behavior —
+/// operators opt into the gate by writing the table.
+///
 /// Errors:
-/// - Unknown family → returns `Err` with a diagnostic listing valid
-///   family names.
-/// - Empty family name → returns `Err` ("must specify a family name").
+/// - Unknown family → `Err` with diagnostic listing valid families.
+/// - Empty family name → `Err`.
+/// - Allowlist deny → `Err` with structured reason.
 pub(crate) fn handle_capabilities_family(
     family_name: &str,
     include_schema: bool,
     profile: &crate::profile::Profile,
+    allowlist_cfg: Option<&crate::config::McpConfig>,
+    agent_id: Option<&str>,
 ) -> Result<Value, String> {
     use crate::profile::Family;
     if family_name.is_empty() {
@@ -226,6 +234,23 @@ pub(crate) fn handle_capabilities_family(
                 valid.join(", ")
             )
         })?;
+
+    // v0.6.4-008 — allowlist gate, only on the runtime-expansion path.
+    if include_schema && let Some(mcp_cfg) = allowlist_cfg {
+        use crate::config::AllowlistDecision;
+        match mcp_cfg.allowlist_decision(agent_id, family.name()) {
+            AllowlistDecision::Disabled | AllowlistDecision::Allow => {}
+            AllowlistDecision::Deny => {
+                return Err(format!(
+                    "agent '{}' is not permitted to expand family '{}' under \
+                     [mcp.allowlist]. Ask an operator to add a matching rule \
+                     to config.toml or pass an allowed agent_id.",
+                    agent_id.unwrap_or("<anonymous>"),
+                    family.name()
+                ));
+            }
+        }
+    }
 
     let defs = tool_definitions();
     let all_tools = defs
@@ -3549,6 +3574,7 @@ fn handle_request(
     autonomous_hooks: bool,
     mcp_client: Option<&str>,
     profile: &crate::profile::Profile,
+    mcp_config: Option<&crate::config::McpConfig>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -3700,7 +3726,22 @@ fn handle_request(
                             .get("include_schema")
                             .and_then(Value::as_bool)
                             .unwrap_or(false);
-                        handle_capabilities_family(fam_name, include_schema, profile)
+                        // v0.6.4-008 — agent_id resolution for the
+                        // allowlist gate. Caller's explicit
+                        // `arguments.agent_id` wins; otherwise fall
+                        // back to the MCP `clientInfo.name` captured
+                        // at initialize time.
+                        let aid = arguments
+                            .get("agent_id")
+                            .and_then(Value::as_str)
+                            .or(mcp_client);
+                        handle_capabilities_family(
+                            fam_name,
+                            include_schema,
+                            profile,
+                            mcp_config,
+                            aid,
+                        )
                     } else {
                         // P1 honesty patch: optional `accept` argument lets MCP
                         // clients opt into the legacy v1 shape, mirroring the
@@ -4111,6 +4152,7 @@ pub fn run_mcp_server(
             autonomous_hooks,
             mcp_client_name.as_deref(),
             profile,
+            app_config.mcp.as_ref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -4240,7 +4282,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_lists_tool_names() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", false, &p).unwrap();
+        let v = handle_capabilities_family("graph", false, &p, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
@@ -4252,7 +4294,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_include_schema_returns_full_definitions() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", true, &p).unwrap();
+        let v = handle_capabilities_family("graph", true, &p, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 8);
@@ -4267,7 +4309,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_unknown_returns_diagnostic_err() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("xyz", false, &p).unwrap_err();
+        let err = handle_capabilities_family("xyz", false, &p, None, None).unwrap_err();
         assert!(err.contains("xyz"));
         assert!(err.contains("Valid families"));
         assert!(err.contains("core"));
@@ -4277,7 +4319,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_empty_name_errors() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("", false, &p).unwrap_err();
+        let err = handle_capabilities_family("", false, &p, None, None).unwrap_err();
         assert!(err.contains("must not be empty"));
     }
 
@@ -4535,6 +4577,7 @@ mod tests {
                 false,
                 None,
                 &crate::profile::Profile::full(),
+                None,
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -4586,6 +4629,7 @@ mod tests {
                 false,
                 None,
                 &crate::profile::Profile::full(),
+                None,
             );
             // Handler errs are returned as ok_response with isError=true,
             // not RpcError, by design (the JSON-RPC layer is reserved for
@@ -4863,6 +4907,7 @@ mod tests {
                 false,
                 None,
                 &crate::profile::Profile::full(),
+                None,
             );
             assert!(
                 resp.error.is_none(),
@@ -4900,6 +4945,7 @@ mod tests {
                     false,
                     None,
                     &crate::profile::Profile::full(),
+                    None,
                 );
 
                 // Missing required args should produce an error response (handler returns Err)
@@ -4954,6 +5000,7 @@ mod tests {
             false,
             None,
             &crate::profile::Profile::full(),
+            None,
         )
     }
 
