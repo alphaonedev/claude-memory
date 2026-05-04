@@ -14,15 +14,17 @@
 [![Tests](https://img.shields.io/badge/tests-1%2C886_%E2%80%A2_93.84%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
 [![v0.6.3.1 A2A](https://img.shields.io/badge/v0.6.3.1_a2a-testing_in_flight-ffd700?logo=githubpages)](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)
-[![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
+[![MCP](https://img.shields.io/badge/MCP-5_default_%E2%80%A2_43_full-blueviolet)]()
 [![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
-**One binary, four operational modes** (v0.6.3). The `ai-memory` Rust binary (tokio + axum) can run any of these in isolation or simultaneously, sharing a single SQLite database:
+**v0.6.4 (`quiet-tools`)** — the MCP server now ships with a **5-tool default surface** (`memory_store`, `memory_recall`, `memory_list`, `memory_get`, `memory_search`) plus the always-on `memory_capabilities` bootstrap. The other 38 tools remain reachable via `--profile graph|admin|power|full` or runtime expansion through `memory_capabilities --include-schema family=<name>`. Eager-loading harnesses (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI) drop ~4,700 input tokens of tool schemas per request — a **76.4% reduction** measured against `cl100k_base` BPE. To preserve v0.6.3 behavior 1:1, run `ai-memory mcp --profile full`. See `docs/MIGRATION_v0.6.4.md`.
 
-1. **stdio MCP server** -- 43 native tools over JSON-RPC. Reactive: answers per turn. `ai-memory mcp`
+**One binary, four operational modes** (v0.6.4). The `ai-memory` Rust binary (tokio + axum) can run any of these in isolation or simultaneously, sharing a single SQLite database:
+
+1. **stdio MCP server** -- 43 native tools over JSON-RPC. Default `--profile core` advertises 5 + always-on `memory_capabilities`. `ai-memory mcp` / `ai-memory mcp --profile full`
 2. **HTTP / mTLS daemon** -- 42 REST endpoints on `127.0.0.1:9077`, TLS + optional mTLS allowlist + API-key auth, background GC loop. `ai-memory serve`
 3. **Autonomous curator daemon** -- self-scheduling loop (default 1h cadence) that auto-tags, surfaces contradictions across namespace siblings, consolidates near-duplicates, and adjusts priority by access pattern. Every action goes to a rollback log; destructive ops can be gated behind a governance approval flow. `ai-memory curator --daemon`
 4. **Sync daemon** -- quorum-based peer federation across instances. W-of-N writes (default majority), vector-clock CRDT-lite merge, mTLS allowlist between peers. `ai-memory sync-daemon`

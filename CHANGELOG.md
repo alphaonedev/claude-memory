@@ -5,7 +5,10 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — v0.6.4 — `quiet-tools`
+## [v0.6.4] — 2026-05-08 — `quiet-tools`
+
+**Headline:** ai-memory v0.6.4 ships 5 tools by default, not 43. Saves ~4,700 input tokens per request on Codex / Grok / Gemini / Claude-Desktop (76.4% reduction, measured against `cl100k_base`). Run `ai-memory mcp --profile full` to keep v0.6.3 behavior 1:1. See `RELEASE_NOTES_v0.6.4.md` and `docs/MIGRATION_v0.6.4.md`.
+
 
 ### Breaking
 

@@ -57,7 +57,7 @@ from ai_memory.profile import (
 )
 from ai_memory.webhooks import verify_webhook_signature
 
-__version__ = "0.6.0-alpha.0"
+__version__ = "0.6.4"
 
 __all__ = [
     "AgentRegistration",
