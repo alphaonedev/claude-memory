@@ -168,6 +168,26 @@ END;
 CREATE TABLE IF NOT EXISTS schema_version (
     version INTEGER NOT NULL
 );
+
+-- v0.6.4-009 — capability-expansion audit log (NHI guardrails phase 1).
+-- Mirrors migrations/sqlite/0014_v064_audit_log.sql so a fresh DB
+-- bootstrap that bypasses the migration ladder still ends up with the
+-- table present.
+CREATE TABLE IF NOT EXISTS audit_log (
+    id                 TEXT PRIMARY KEY,
+    agent_id           TEXT,
+    event_type         TEXT NOT NULL,
+    requested_family   TEXT,
+    granted            INTEGER NOT NULL,
+    attestation_tier   TEXT,
+    timestamp          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_agent_id
+    ON audit_log (agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp
+    ON audit_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
+    ON audit_log (event_type);
 ";
 
 // v17 = v0.6.3.1 (P4, audit G1) governance.inherit backfill.
@@ -175,7 +195,9 @@ CREATE TABLE IF NOT EXISTS schema_version (
 //       embedding_dim guard, archive lossless, magic-byte header.
 // v19 = v0.6.3.1 (P5, audit G9) webhook event-types column +
 //       per-subscriber filter.
-const CURRENT_SCHEMA_VERSION: i64 = 19;
+// v20 = v0.6.4-009 (NHI guardrails phase 1) capability-expansion
+//       audit_log table.
+const CURRENT_SCHEMA_VERSION: i64 = 20;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -242,6 +264,9 @@ const MIGRATION_V18_SQLITE: &str =
 // EXISTS`); SQL file holds the idempotent index batch.
 const MIGRATION_V19_SQLITE: &str =
     include_str!("../migrations/sqlite/0013_webhook_event_types.sql");
+// v0.6.4-009: capability-expansion audit log table. CREATE TABLE IF NOT
+// EXISTS + indexes — fully idempotent.
+const MIGRATION_V20_SQLITE: &str = include_str!("../migrations/sqlite/0014_v064_audit_log.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -696,6 +721,10 @@ fn migrate(conn: &Connection) -> Result<()> {
             }
             // Idempotent index from the migration file.
             conn.execute_batch(MIGRATION_V19_SQLITE)?;
+        }
+        if version < 20 {
+            // v0.6.4-009 — fully idempotent (CREATE TABLE IF NOT EXISTS).
+            conn.execute_batch(MIGRATION_V20_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -5200,6 +5229,104 @@ pub fn doctor_webhook_delivery_totals(conn: &Connection) -> Result<(u64, u64)> {
 /// # Errors
 ///
 /// Returns `Err` only on hard SQLite failures.
+// ---------------------------------------------------------------------
+// v0.6.4-009 — capability-expansion audit log
+// ---------------------------------------------------------------------
+
+/// Single audit_log row (capability-expansion shape — extensible).
+#[derive(Debug, Clone)]
+pub struct CapabilityExpansionRow {
+    pub id: String,
+    pub agent_id: Option<String>,
+    pub event_type: String,
+    pub requested_family: Option<String>,
+    pub granted: bool,
+    pub attestation_tier: Option<String>,
+    pub timestamp: String,
+}
+
+/// Record a capability-expansion attempt. Used by
+/// `handle_capabilities_family` after the allowlist decision is made.
+/// Records BOTH grant and deny outcomes so operators can see attempted
+/// access patterns even when the gate refused.
+///
+/// `granted=true` means the agent received the schemas; `granted=false`
+/// means the agent was denied or the family was unknown.
+///
+/// Best-effort: a failed insert (e.g., disk full) is logged via tracing
+/// but does not propagate the error to the caller — the audit trail
+/// must never block the actual call.
+pub fn record_capability_expansion(
+    conn: &Connection,
+    agent_id: Option<&str>,
+    family: &str,
+    granted: bool,
+    attestation_tier: Option<&str>,
+) {
+    let id = uuid::Uuid::new_v4().to_string();
+    let now = Utc::now().to_rfc3339();
+    let result = conn.execute(
+        "INSERT INTO audit_log (id, agent_id, event_type, requested_family, \
+         granted, attestation_tier, timestamp) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        rusqlite::params![
+            id,
+            agent_id,
+            "capability_expansion",
+            family,
+            i32::from(granted),
+            attestation_tier,
+            now,
+        ],
+    );
+    if let Err(e) = result {
+        tracing::warn!(
+            "audit_log insert failed (capability_expansion / agent={:?} / family={}): {e}",
+            agent_id,
+            family,
+        );
+    }
+}
+
+/// List recent capability-expansion rows, newest first. `limit` clamps
+/// the row count.
+pub fn list_capability_expansions(
+    conn: &Connection,
+    limit: usize,
+    agent_filter: Option<&str>,
+) -> Result<Vec<CapabilityExpansionRow>> {
+    let n = (limit.min(10_000)) as i64;
+    let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<CapabilityExpansionRow> {
+        Ok(CapabilityExpansionRow {
+            id: r.get(0)?,
+            agent_id: r.get(1)?,
+            event_type: r.get(2)?,
+            requested_family: r.get(3)?,
+            granted: r.get::<_, i64>(4)? != 0,
+            attestation_tier: r.get(5)?,
+            timestamp: r.get(6)?,
+        })
+    };
+    if let Some(a) = agent_filter {
+        let mut stmt = conn.prepare(
+            "SELECT id, agent_id, event_type, requested_family, granted, \
+             attestation_tier, timestamp FROM audit_log \
+             WHERE event_type = 'capability_expansion' AND agent_id = ?1 \
+             ORDER BY timestamp DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![a, n], map_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, agent_id, event_type, requested_family, granted, \
+             attestation_tier, timestamp FROM audit_log \
+             WHERE event_type = 'capability_expansion' \
+             ORDER BY timestamp DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![n], map_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+}
+
 pub fn doctor_max_sync_skew_secs(conn: &Connection) -> Result<Option<i64>> {
     let mut stmt = match conn.prepare(
         "SELECT last_seen_at, last_pulled_at FROM sync_state WHERE last_pulled_at IS NOT NULL",
@@ -8359,5 +8486,73 @@ mod tests {
         let conn = test_db();
         let skew = doctor_max_sync_skew_secs(&conn).unwrap();
         assert_eq!(skew, None);
+    }
+
+    // ---- v0.6.4-009 — capability-expansion audit log ----
+
+    #[test]
+    fn audit_log_record_and_list_grant_and_deny() {
+        let conn = test_db();
+        record_capability_expansion(&conn, Some("alice"), "graph", true, None);
+        record_capability_expansion(&conn, Some("bob"), "power", false, None);
+        let rows = list_capability_expansions(&conn, 50, None).unwrap();
+        assert_eq!(rows.len(), 2);
+        // Newest first.
+        assert!(rows[0].timestamp >= rows[1].timestamp);
+        let grant_row = rows
+            .iter()
+            .find(|r| r.agent_id.as_deref() == Some("alice"))
+            .unwrap();
+        assert!(grant_row.granted);
+        assert_eq!(grant_row.requested_family.as_deref(), Some("graph"));
+        let deny_row = rows
+            .iter()
+            .find(|r| r.agent_id.as_deref() == Some("bob"))
+            .unwrap();
+        assert!(!deny_row.granted);
+        assert_eq!(deny_row.requested_family.as_deref(), Some("power"));
+    }
+
+    #[test]
+    fn audit_log_filter_by_agent() {
+        let conn = test_db();
+        record_capability_expansion(&conn, Some("alice"), "graph", true, None);
+        record_capability_expansion(&conn, Some("bob"), "power", false, None);
+        let alice = list_capability_expansions(&conn, 50, Some("alice")).unwrap();
+        assert_eq!(alice.len(), 1);
+        assert_eq!(alice[0].agent_id.as_deref(), Some("alice"));
+        let none_match = list_capability_expansions(&conn, 50, Some("nobody")).unwrap();
+        assert!(none_match.is_empty());
+    }
+
+    #[test]
+    fn audit_log_anonymous_caller() {
+        let conn = test_db();
+        record_capability_expansion(&conn, None, "core", true, None);
+        let rows = list_capability_expansions(&conn, 50, None).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].agent_id.is_none());
+    }
+
+    #[test]
+    fn audit_log_migration_idempotent_on_re_open() {
+        // Open the DB twice in succession; the audit_log CREATE TABLE
+        // IF NOT EXISTS path must not error.
+        let p = tempfile::NamedTempFile::new().unwrap();
+        let p = p.path().to_path_buf();
+        let _ = open(&p).unwrap();
+        let conn = open(&p).unwrap();
+        // And the indexes are present.
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name LIKE 'idx_audit_log_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cnt, 3,
+            "expected 3 audit_log indexes (agent_id, ts, event_type)"
+        );
     }
 }

@@ -218,6 +218,7 @@ pub(crate) fn handle_capabilities_family(
     profile: &crate::profile::Profile,
     allowlist_cfg: Option<&crate::config::McpConfig>,
     agent_id: Option<&str>,
+    audit_conn: Option<&rusqlite::Connection>,
 ) -> Result<Value, String> {
     use crate::profile::Family;
     if family_name.is_empty() {
@@ -241,6 +242,17 @@ pub(crate) fn handle_capabilities_family(
         match mcp_cfg.allowlist_decision(agent_id, family.name()) {
             AllowlistDecision::Disabled | AllowlistDecision::Allow => {}
             AllowlistDecision::Deny => {
+                // v0.6.4-009 — record the deny so operators can see
+                // attempted-but-blocked expansion patterns.
+                if let Some(conn) = audit_conn {
+                    crate::db::record_capability_expansion(
+                        conn,
+                        agent_id,
+                        family.name(),
+                        false,
+                        None,
+                    );
+                }
                 return Err(format!(
                     "agent '{}' is not permitted to expand family '{}' under \
                      [mcp.allowlist]. Ask an operator to add a matching rule \
@@ -250,6 +262,13 @@ pub(crate) fn handle_capabilities_family(
                 ));
             }
         }
+    }
+
+    // v0.6.4-009 — record the grant on the include_schema=true path.
+    // Lightweight name-list calls are not audited (they're informational
+    // only — no schema material released).
+    if include_schema && let Some(conn) = audit_conn {
+        crate::db::record_capability_expansion(conn, agent_id, family.name(), true, None);
     }
 
     let defs = tool_definitions();
@@ -3741,6 +3760,7 @@ fn handle_request(
                             profile,
                             mcp_config,
                             aid,
+                            Some(conn),
                         )
                     } else {
                         // P1 honesty patch: optional `accept` argument lets MCP
@@ -4282,7 +4302,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_lists_tool_names() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", false, &p, None, None).unwrap();
+        let v = handle_capabilities_family("graph", false, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
@@ -4294,7 +4314,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_include_schema_returns_full_definitions() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", true, &p, None, None).unwrap();
+        let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 8);
@@ -4309,7 +4329,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_unknown_returns_diagnostic_err() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("xyz", false, &p, None, None).unwrap_err();
+        let err = handle_capabilities_family("xyz", false, &p, None, None, None).unwrap_err();
         assert!(err.contains("xyz"));
         assert!(err.contains("Valid families"));
         assert!(err.contains("core"));
@@ -4319,7 +4339,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_empty_name_errors() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("", false, &p, None, None).unwrap_err();
+        let err = handle_capabilities_family("", false, &p, None, None, None).unwrap_err();
         assert!(err.contains("must not be empty"));
     }
 

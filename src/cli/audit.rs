@@ -46,6 +46,29 @@ pub enum AuditAction {
     Tail(TailArgs),
     /// Print the resolved audit log path.
     Path,
+    /// v0.6.4-009 — list rows from the in-DB `audit_log` table
+    /// (capability expansions, future event types). Reads the SQLite
+    /// audit_log table; orthogonal to the file-based hash-chained
+    /// trail surfaced by `tail` / `verify`.
+    Show(ShowArgs),
+}
+
+#[derive(Args)]
+pub struct ShowArgs {
+    /// Restrict to capability-expansion events (today the only event
+    /// type written to audit_log; reserves the option for future
+    /// event types).
+    #[arg(long)]
+    pub capability_expansions: bool,
+    /// Filter by exact agent_id match.
+    #[arg(long, value_name = "AGENT_ID")]
+    pub agent_id: Option<String>,
+    /// Maximum rows to return (default 50, max 10000).
+    #[arg(long, default_value_t = 50)]
+    pub limit: usize,
+    /// Emit JSON instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Args)]
@@ -89,7 +112,56 @@ pub fn run(args: AuditArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> 
         AuditAction::Verify(v) => run_verify(&v, audit_dir.as_deref(), app_config, out),
         AuditAction::Tail(t) => run_tail(&t, audit_dir.as_deref(), app_config, out),
         AuditAction::Path => run_path(audit_dir.as_deref(), app_config, out),
+        AuditAction::Show(s) => run_show(&s, app_config, out),
     }
+}
+
+/// v0.6.4-009 — print rows from the `audit_log` SQLite table.
+fn run_show(args: &ShowArgs, app_config: &AppConfig, out: &mut CliOutput<'_>) -> Result<i32> {
+    let db_path = app_config.effective_db(std::path::Path::new("ai-memory.db"));
+    let conn = crate::db::open(&db_path)?;
+    let rows = crate::db::list_capability_expansions(&conn, args.limit, args.agent_id.as_deref())?;
+    if args.json {
+        let payload: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "id": r.id,
+                    "agent_id": r.agent_id,
+                    "event_type": r.event_type,
+                    "requested_family": r.requested_family,
+                    "granted": r.granted,
+                    "attestation_tier": r.attestation_tier,
+                    "timestamp": r.timestamp,
+                })
+            })
+            .collect();
+        writeln!(out.stdout, "{}", serde_json::to_string_pretty(&payload)?)?;
+        return Ok(0);
+    }
+    if rows.is_empty() {
+        writeln!(out.stdout, "audit_log: no rows")?;
+        return Ok(0);
+    }
+    writeln!(
+        out.stdout,
+        "{:<25} {:<7} {:<12} {:<32} {:<6}",
+        "timestamp", "granted", "family", "agent_id", "event"
+    )?;
+    for r in &rows {
+        let aid = r.agent_id.as_deref().unwrap_or("<anonymous>");
+        let fam = r.requested_family.as_deref().unwrap_or("-");
+        writeln!(
+            out.stdout,
+            "{:<25} {:<7} {:<12} {:<32} {:<6}",
+            r.timestamp,
+            if r.granted { "ALLOW" } else { "DENY" },
+            fam,
+            aid,
+            r.event_type
+        )?;
+    }
+    Ok(0)
 }
 
 /// Resolve the audit log path honouring (in order): explicit per-subcommand
