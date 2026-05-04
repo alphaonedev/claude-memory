@@ -128,6 +128,166 @@ pub struct DoctorArgs {
     pub fail_on_warn: bool,
 }
 
+/// v0.6.4-004 — Args for `ai-memory doctor --tokens`. Routes to
+/// [`run_tokens`] instead of the regular health pass.
+#[derive(Debug, Default)]
+pub struct TokensArgs {
+    /// Emit structured JSON instead of human-readable.
+    pub json: bool,
+    /// Dump the full per-tool size table (implies `json`).
+    pub raw_table: bool,
+    /// Hypothetical profile to evaluate (defaults to `core` —
+    /// the v0.6.4 default).
+    pub profile: Option<String>,
+}
+
+/// v0.6.4-004 — token-cost report.
+///
+/// Walks `crate::sizes::tool_sizes()`, groups by family via
+/// `crate::profile::Family::for_tool`, rolls up per-profile totals,
+/// and emits either a human-readable table or a JSON document.
+///
+/// Returns 0 on success. Errors when the `--profile` flag is malformed
+/// (the doctor's job is to surface the same diagnostic the MCP server
+/// would, not to crash with a stack trace) — those exit code 2.
+pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
+    use crate::profile::{Family, Profile};
+    use crate::sizes;
+
+    // Resolve the hypothetical profile. Default to `core` since that
+    // is what v0.6.4 ships and what the operator wants to see savings
+    // *against*.
+    let profile = match Profile::parse(args.profile.as_deref().unwrap_or("core")) {
+        Ok(p) => p,
+        Err(e) => {
+            writeln!(out.stderr, "ai-memory doctor --tokens: {e}")?;
+            return Ok(2);
+        }
+    };
+
+    let table = sizes::tool_sizes();
+    let full_total: usize = table.iter().map(|t| t.total_tokens).sum();
+    let active_total: usize = table
+        .iter()
+        .filter(|t| profile.loads(&t.name))
+        .map(|t| t.total_tokens)
+        .sum();
+    let savings = full_total.saturating_sub(active_total);
+    let pct = if full_total == 0 {
+        0.0
+    } else {
+        (f64::from(u32::try_from(savings).unwrap_or(u32::MAX))
+            / f64::from(u32::try_from(full_total).unwrap_or(u32::MAX)))
+            * 100.0
+    };
+
+    // Per-family rollup. Includes "always-on" pseudo bucket for tools
+    // that load regardless of profile (today: just memory_capabilities).
+    let mut family_totals: Vec<(String, usize, usize)> = Family::all()
+        .iter()
+        .map(|f| {
+            let mut tool_count = 0usize;
+            let mut sum = 0usize;
+            for entry in table {
+                if Family::for_tool(&entry.name) == Some(*f) {
+                    tool_count += 1;
+                    sum += entry.total_tokens;
+                }
+            }
+            (f.name().to_string(), tool_count, sum)
+        })
+        .collect();
+    family_totals.sort_by_key(|(_, _, sum)| std::cmp::Reverse(*sum));
+
+    if args.json || args.raw_table {
+        // Always include the full per-tool table when --raw-table is
+        // set; --json gives the rolled-up view.
+        let payload = serde_json::json!({
+            "schema_version": "v0.6.4-tokens-1",
+            "tokenizer": "cl100k_base",
+            "active_profile": profile.families().iter().map(|f| f.name()).collect::<Vec<_>>(),
+            "active_total_tokens": active_total,
+            "full_profile_total_tokens": full_total,
+            "savings_tokens": savings,
+            "savings_pct": format!("{pct:.1}"),
+            "families": family_totals.iter().map(|(name, count, sum)| {
+                // Resolve family enum from the name to ask whether
+                // it is loaded under the active profile.
+                let fam = Family::all()
+                    .iter()
+                    .find(|f| f.name() == name)
+                    .copied()
+                    .unwrap_or(Family::Other);
+                serde_json::json!({
+                    "name": name,
+                    "tool_count": count,
+                    "tokens": sum,
+                    "loaded": profile.includes(fam),
+                })
+            }).collect::<Vec<_>>(),
+            "tools": if args.raw_table {
+                serde_json::Value::Array(
+                    table.iter().map(|t| serde_json::json!({
+                        "name": t.name,
+                        "tokens": t.total_tokens,
+                        "family": Family::for_tool(&t.name).map(|f| f.name()),
+                        "loaded_under_active_profile": profile.loads(&t.name),
+                    })).collect()
+                )
+            } else {
+                serde_json::Value::Null
+            },
+        });
+        writeln!(out.stdout, "{}", serde_json::to_string_pretty(&payload)?)?;
+        return Ok(0);
+    }
+
+    // Human-readable.
+    writeln!(out.stdout, "ai-memory doctor --tokens")?;
+    writeln!(
+        out.stdout,
+        "  Tokenizer: cl100k_base (Claude / GPT input accounting)"
+    )?;
+    writeln!(
+        out.stdout,
+        "  Active profile: {}",
+        profile
+            .families()
+            .iter()
+            .map(|f| f.name())
+            .collect::<Vec<_>>()
+            .join(",")
+    )?;
+    writeln!(out.stdout)?;
+    writeln!(out.stdout, "  Tool surface cost:")?;
+    writeln!(
+        out.stdout,
+        "    Active ({:>2} tools loaded): {:>6} tokens",
+        table.iter().filter(|t| profile.loads(&t.name)).count(),
+        active_total
+    )?;
+    writeln!(
+        out.stdout,
+        "    Full   ({:>2} tools loaded): {:>6} tokens",
+        table.len(),
+        full_total
+    )?;
+    writeln!(
+        out.stdout,
+        "    Savings vs full:           {:>6} tokens ({pct:.1}%)",
+        savings
+    )?;
+    writeln!(out.stdout)?;
+    writeln!(out.stdout, "  Per-family breakdown (sorted by total cost):")?;
+    for (name, count, sum) in &family_totals {
+        writeln!(
+            out.stdout,
+            "    {name:<12} {count:>2} tools  {sum:>6} tokens",
+        )?;
+    }
+    Ok(0)
+}
+
 /// Entry point. Returns the process exit code as a `i32` (0/1/2). The
 /// caller (daemon_runtime) must `std::process::exit(code)` after the WAL
 /// checkpoint has been skipped (doctor never writes).
@@ -1731,6 +1891,107 @@ mod tests {
         assert!(
             err.contains("HTTP 500"),
             "expected HTTP 500 message, got {err}"
+        );
+    }
+
+    // ---- v0.6.4-004 — `--tokens` reporter ----
+
+    fn run_tokens_capture(args: TokensArgs) -> (i32, String, String) {
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let exit;
+        {
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            exit = run_tokens(args, &mut out).expect("run_tokens");
+        }
+        (
+            exit,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    }
+
+    #[test]
+    fn run_tokens_human_default_profile_is_core() {
+        let (exit, stdout, _stderr) = run_tokens_capture(TokensArgs::default());
+        assert_eq!(exit, 0);
+        assert!(
+            stdout.contains("Active profile: core"),
+            "default profile should be core; got: {stdout}"
+        );
+        assert!(
+            stdout.contains("Full   (43 tools loaded)"),
+            "report should include full-profile baseline"
+        );
+        assert!(
+            stdout.contains("Tokenizer: cl100k_base"),
+            "report should call out the tokenizer"
+        );
+    }
+
+    #[test]
+    fn run_tokens_json_emits_structured_payload() {
+        let args = TokensArgs {
+            json: true,
+            raw_table: false,
+            profile: Some("graph".to_string()),
+        };
+        let (exit, stdout, _) = run_tokens_capture(args);
+        assert_eq!(exit, 0);
+        let v: serde_json::Value =
+            serde_json::from_str(&stdout).expect("--json must emit valid JSON");
+        assert_eq!(v["schema_version"], "v0.6.4-tokens-1");
+        assert_eq!(v["tokenizer"], "cl100k_base");
+        assert_eq!(v["full_profile_total_tokens"].as_u64().unwrap(), 6_037);
+        assert!(v["active_total_tokens"].as_u64().unwrap() > 0);
+        // graph profile loads core + graph; both flags true on those rows.
+        let families = v["families"].as_array().unwrap();
+        let core_row = families.iter().find(|r| r["name"] == "core").unwrap();
+        assert_eq!(core_row["loaded"], true);
+        let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
+        assert_eq!(graph_row["loaded"], true);
+        let archive_row = families.iter().find(|r| r["name"] == "archive").unwrap();
+        assert_eq!(archive_row["loaded"], false);
+    }
+
+    #[test]
+    fn run_tokens_raw_table_includes_per_tool_rows() {
+        let args = TokensArgs {
+            json: false,
+            raw_table: true,
+            profile: None,
+        };
+        let (exit, stdout, _) = run_tokens_capture(args);
+        assert_eq!(exit, 0);
+        let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            43,
+            "raw_table must include all 43 baseline tools"
+        );
+        // memory_store is in core and must be loaded under the default
+        // (core) profile.
+        let store = tools
+            .iter()
+            .find(|t| t["name"] == "memory_store")
+            .expect("memory_store row");
+        assert_eq!(store["family"], "core");
+        assert_eq!(store["loaded_under_active_profile"], true);
+    }
+
+    #[test]
+    fn run_tokens_invalid_profile_exits_2_with_diagnostic() {
+        let args = TokensArgs {
+            json: false,
+            raw_table: false,
+            profile: Some("Core".to_string()),
+        };
+        let (exit, _stdout, stderr) = run_tokens_capture(args);
+        assert_eq!(exit, 2, "malformed profile must exit 2");
+        assert!(
+            stderr.contains("case-sensitive lowercase"),
+            "diagnostic should mention case rule; got: {stderr}"
         );
     }
 }

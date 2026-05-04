@@ -284,6 +284,23 @@ pub struct DoctorCliArgs {
     /// this flag, warnings keep exit 0; criticals always exit 2.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// v0.6.4-004 — print per-tool, per-family, and per-profile token
+    /// costs (`cl100k_base`) instead of the regular health report.
+    /// Combined with `--json` returns a structured payload for CI.
+    /// Combined with `--profile <name>` reports the cost under that
+    /// hypothetical profile in addition to the active default.
+    #[arg(long)]
+    pub tokens: bool,
+    /// v0.6.4-004 — when used with `--tokens`, evaluate cost under this
+    /// hypothetical profile. Defaults to `core` (the v0.6.4 default).
+    /// Accepts the same vocabulary as `ai-memory mcp --profile`.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+    /// v0.6.4-004 — dump the full per-tool size table as JSON. Implies
+    /// `--tokens`. Used by CI and benchmarks to capture the source-of-
+    /// truth size data without parsing the rendered report.
+    #[arg(long)]
+    pub raw_table: bool,
 }
 
 #[derive(Args)]
@@ -726,6 +743,26 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             // panics when dropped on a tokio runtime thread, so the
             // entire doctor pass runs inside `spawn_blocking`.
             let db_path_doctor = db_path.clone();
+            // v0.6.4-004 — `--tokens` (and its alias `--raw-table`) bypass
+            // the regular health pass. Routes to a dedicated tokens
+            // reporter that consumes `crate::sizes::tool_sizes()` and
+            // `crate::profile::Family::for_tool` to roll up cost.
+            if a.tokens || a.raw_table {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                let exit = cli::doctor::run_tokens(
+                    cli::doctor::TokensArgs {
+                        json: a.json,
+                        raw_table: a.raw_table,
+                        profile: a.profile,
+                    },
+                    &mut out,
+                )?;
+                std::process::exit(exit);
+            }
             let args = cli::doctor::DoctorArgs {
                 remote: a.remote,
                 json: a.json,
