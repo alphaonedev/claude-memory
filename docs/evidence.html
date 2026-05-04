@@ -1,0 +1,319 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  CANONICAL EVIDENCE PAGE — single source of truth for ai-memory public claims.
+
+  Every site, README, roadmap, sales doc, and architecture page must source its
+  numbers from this page (or from the upstream test-hub release evidence that
+  this page cites). No other public page should invent its own numbers.
+
+  Numbers below are FROZEN for the named release. To update, you must:
+    1. Cut a new release tag.
+    2. Run the full test/coverage matrix on test-hub.
+    3. Update this page first, then sweep all references in /docs/ and README.md.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Evidence — frozen public claims for v0.6.3</title>
+<meta name="description" content="Canonical evidence page for ai-memory v0.6.3. Frozen test count, coverage, MCP tool count, HTTP endpoint count, CLI command count, federation status, and certification status. Single source of truth — every other public page sources its numbers from here.">
+<meta name="theme-color" content="#0d1117">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/evidence.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1100px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.65;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--p1);text-decoration:none}a:hover{text-decoration:underline}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px;color:var(--p2)}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}
+h2{font-size:1.6rem;margin:2rem 0 .5rem;font-family:var(--font-mono)}
+h3{font-size:1.05rem;margin:1.25rem 0 .35rem}
+p{color:var(--text-muted);margin-bottom:.85rem}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;align-items:center;justify-content:space-between;max-width:1280px;margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;align-items:center;flex-wrap:wrap}
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn,.topnav .menu:hover .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+
+.hero{padding:3.5rem 1.5rem 2rem;text-align:center;border-bottom:1px solid var(--border);background:radial-gradient(ellipse at center,rgba(110,231,255,.06),transparent 60%)}
+.hero h1{font-size:clamp(1.8rem,4vw,2.6rem);line-height:1.15;margin-bottom:.85rem}
+.hero .lead{color:var(--text-muted);max-width:780px;margin:0 auto;font-size:1rem}
+.frozen-badge{display:inline-block;background:rgba(110,231,255,.12);border:1px solid var(--p1);color:var(--p1);font-family:var(--font-mono);font-size:.75rem;padding:.3rem .8rem;border-radius:4px;letter-spacing:.05em;margin-bottom:1rem}
+
+section{padding:2.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+
+.facts{width:100%;border-collapse:collapse;font-family:var(--font-mono);font-size:.9rem;margin:1rem 0}
+.facts th{text-align:left;padding:.65rem .9rem;background:var(--bg-elev);color:var(--text);font-weight:600;border-bottom:1px solid var(--border-hl);font-size:.78rem;letter-spacing:.05em;text-transform:uppercase}
+.facts td{padding:.65rem .9rem;border-bottom:1px solid var(--border);vertical-align:top}
+.facts tr:hover td{background:var(--bg-card)}
+.facts .num{color:var(--good);font-weight:600;white-space:nowrap}
+.facts .src{color:var(--text-dim);font-size:.78rem}
+.facts .src a{color:var(--text-muted)}
+
+.status-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin-top:1rem}
+.status-card{background:var(--bg-card);border:1px solid var(--border);border-left:3px solid var(--p1);border-radius:6px;padding:1rem 1.2rem}
+.status-card.beta{border-left-color:var(--p2)}
+.status-card.experimental{border-left-color:var(--gold)}
+.status-card.production{border-left-color:var(--good)}
+.status-card.unsupported{border-left-color:var(--bad)}
+.status-card h3{font-family:var(--font-mono);font-size:.95rem;margin-bottom:.4rem;color:var(--text)}
+.status-card .tag{display:inline-block;font-family:var(--font-mono);font-size:.7rem;padding:.15em .55em;border-radius:4px;margin-right:.4em;letter-spacing:.05em;text-transform:uppercase}
+.status-card.production .tag{background:rgba(110,231,255,.12);color:var(--p1);border:1px solid #2a6571}
+.status-card.beta .tag{background:rgba(255,184,107,.12);color:var(--p2);border:1px solid #7a5328}
+.status-card.experimental .tag{background:rgba(255,215,0,.12);color:var(--gold);border:1px solid #6a5e10}
+.status-card.unsupported .tag{background:rgba(255,107,157,.12);color:var(--bad);border:1px solid #7a3251}
+.status-card p{font-size:.85rem;margin-bottom:0;color:var(--text-muted)}
+
+.callout{background:var(--bg-card);border:1px solid var(--border-hl);border-left:3px solid var(--p2);border-radius:6px;padding:1rem 1.25rem;margin:1.5rem 0}
+.callout strong{color:var(--text)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Evidence</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html" class="current">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <span class="frozen-badge">FROZEN · v0.6.3 · 2026-04-24</span>
+    <h1>The single source of truth.</h1>
+    <p class="lead">
+      Every public page about ai-memory — README, marketing site, roadmap, architecture pages, sales decks — must source its numbers from this page or from the upstream test-hub evidence it cites.
+      No other page invents its own counts. If a number on another page disagrees with this page, this page is correct and the other is a bug — please <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/new">file an issue</a>.
+    </p>
+    <div style="display:flex;justify-content:center;gap:.75rem;flex-wrap:wrap;margin-top:1.75rem">
+      <a href="https://alphaonedev.github.io/ai-memory-test-hub/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--p1);color:var(--p1);background:rgba(110,231,255,.06);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;font-weight:600;text-decoration:none">🧪 Live test-hub →</a>
+      <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--p2);color:var(--p2);background:rgba(255,184,107,.06);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;font-weight:600;text-decoration:none">📊 v0.6.3 release evidence →</a>
+      <a href="https://alphaonedev.github.io/ai-memory-ship-gate/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--text-muted);color:var(--text-muted);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;text-decoration:none">🚢 ship-gate</a>
+      <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/" style="display:inline-block;padding:.65rem 1.25rem;border:1px solid var(--text-muted);color:var(--text-muted);border-radius:6px;font-family:var(--font-mono);font-size:.9rem;text-decoration:none">🤝 A2A-gate</a>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Frozen facts · v0.6.3</span>
+    <h2>The numbers.</h2>
+    <p>All values below are taken from the v0.6.3 release evidence published on the test-hub, or counted directly from the v0.6.3 source tree. Source links accompany each row.</p>
+    <table class="facts">
+      <thead>
+        <tr><th>Field</th><th>Value</th><th>Source of truth</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>Current release</td><td class="num">v0.6.3</td><td class="src">git tag <code>v0.6.3</code> on <a href="https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3">main</a> · cut 2026-04-24</td></tr>
+        <tr><td>Test count (total)</td><td class="num">1,809</td><td class="src">1,600 lib (cargo test --lib) + 209 integration (cargo test --tests). Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> — "1 600/1 600 lib tests pass" plus integration suite</td></tr>
+        <tr><td>Test count (lib only)</td><td class="num">1,600</td><td class="src">Library tests only — Tier 1 PASS row, "1 600/1 600 lib tests pass"</td></tr>
+        <tr><td>Test coverage</td><td class="num">93.08%</td><td class="src">Tier 1 row of the <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence page</a> · cargo llvm-cov · gate ≥92% · release-cut measurement was 93.05% (within rounding of most-recent 93.08%)</td></tr>
+        <tr><td>MCP tools (unique)</td><td class="num">43</td><td class="src">Counted from <code>tool_definitions()</code> in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/mcp.rs">src/mcp.rs</a></td></tr>
+        <tr><td>HTTP endpoints (unique routes)</td><td class="num">42</td><td class="src">Counted from <code>.route(...)</code> calls across <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/handlers.rs">handlers.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/federation.rs">federation.rs</a> + <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/lib.rs">lib.rs</a></td></tr>
+        <tr><td>CLI commands</td><td class="num">26</td><td class="src">Counted from the <code>Command</code> enum + dispatch in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/main.rs">src/main.rs</a></td></tr>
+        <tr><td>CI matrix platforms</td><td class="num">3</td><td class="src">ubuntu-latest · macos-latest · windows-latest — see <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/.github/workflows/ci.yml"><code>.github/workflows/ci.yml</code></a></td></tr>
+        <tr><td>LongMemEval Recall@5</td><td class="num">97.8%</td><td class="src">489/500 questions · ICLR 2025 benchmark · pure SQLite FTS5+BM25 · zero cloud — see <a href="performance.html">performance.html</a></td></tr>
+        <tr><td>Schema version</td><td class="num">v15</td><td class="src">v0.6.3 KG temporal-validity migration · see <a href="schema.html">schema.html</a></td></tr>
+      </tbody>
+    </table>
+    <div class="callout">
+      <strong>Note on test-count framing.</strong> Public materials should lead with the <strong>1,809 total tests</strong> figure (1,600 lib + 209 integration); the 1,600 lib-only number remains exposed as the test-hub Tier 1 row "1 600/1 600 lib tests pass" for procurement teams who want to see library-test isolation. Older pages may reference 191 tests (~v0.6.0 era) — those are stale and should be replaced. The 1,898 figure from a raw <code>grep #[test]</code> includes attributes inside <code>#[cfg(test)]</code> guards that are not always compiled, plus benchmark scaffolding — it is <em>not</em> the canonical test-pass count.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Maturity</span>
+    <h2>What is production-ready, what is not.</h2>
+    <p>This is where conflicting maturity signals on other pages get resolved. Use these labels — and only these labels — when describing capability maturity in any public material.</p>
+    <div class="status-grid">
+
+      <div class="status-card production">
+        <span class="tag">Production-ready</span>
+        <h3>Single-node operation</h3>
+        <p>One ai-memory instance, one consumer. SQLite + WAL + FTS5 + HNSW. No network, no peers. Used in production by the project team daily. T1 + T2 of the architectures matrix.</p>
+      </div>
+
+      <div class="status-card production">
+        <span class="tag">Production-ready</span>
+        <h3>Hybrid recall (FTS5 + semantic)</h3>
+        <p>Adaptive blend, cross-encoder rerank, recency decay, tier boost. 97.8% Recall@5 on LongMemEval (ICLR 2025).</p>
+      </div>
+
+      <div class="status-card production">
+        <span class="tag">Production-ready</span>
+        <h3>MCP + HTTP + CLI surface</h3>
+        <p>43 MCP tools, 42 HTTP routes, 26 CLI commands. Stable contract. 1,809 tests passing (1,600 lib + 209 integration) at 93.08% line coverage. Used by Claude Code, Codex, Cursor, Windsurf, Continue.dev, Grok, OpenClaw, Hermes, and Llama integrations today.</p>
+      </div>
+
+      <div class="status-card production">
+        <span class="tag">Production-ready</span>
+        <h3>Per-namespace governance</h3>
+        <p>Allow / Deny / Pending policies; pending-approval queue; scope-visibility filter; immutable agent_id provenance. v0.6.2+ stable.</p>
+      </div>
+
+      <div class="status-card beta">
+        <span class="tag">Beta</span>
+        <h3>Federation — quorum writes (W-of-N)</h3>
+        <p>Code shipped in v0.6.3: 10 broadcast functions, ack tracker, vector-clock catchup, mTLS fingerprint allowlist. Used in T3 (multi-node cluster) tests on the ship-gate. <strong>Not yet recommended for self-driving production fleets without an operator-on-call.</strong> See <a href="architectures-t3.html">T3 architecture</a> for what's wired and what's not.</p>
+      </div>
+
+      <div class="status-card experimental">
+        <span class="tag">Experimental</span>
+        <h3>Postgres + pgvector backend</h3>
+        <p><code>sal-postgres</code> Cargo feature flag in v0.6.3. Schema-parity fixes shipping #294-#297. <strong>GA target: v0.7.</strong> Not for production until v0.7 ships.</p>
+      </div>
+
+      <div class="status-card experimental">
+        <span class="tag">Experimental</span>
+        <h3>Smart / Autonomous tier (Ollama LLM)</h3>
+        <p>Query expansion, auto-tagging, contradiction detection, cross-encoder reranking via Ollama (Gemma 4 e2b/e4b). Functional and tested but performance/quality varies by host hardware. Production use should pin model versions and run baseline recall regressions.</p>
+      </div>
+
+      <div class="status-card unsupported">
+        <span class="tag">Unsupported (today)</span>
+        <h3>Cryptographic agent attestation</h3>
+        <p>The <code>memory_links.signature</code> field is <em>reserved</em> in schema v15 but not signed/verified by the binary today. <code>agent_id</code> today is <em>claimed</em>, not <em>attested</em>. Do not make security decisions on <code>agent_id</code> alone. Attestation lands in v0.7.</p>
+      </div>
+
+      <div class="status-card unsupported">
+        <span class="tag">Unsupported (today)</span>
+        <h3>Multi-region distributed consensus</h3>
+        <p>No Raft, no Paxos, no global gossip/DHT. Tier 5 ("global hive") of the architectures matrix is <em>vision</em> — v1.0+ horizon. Don't deploy ai-memory across regions today expecting strong consistency.</p>
+      </div>
+
+    </div>
+
+    <div class="callout">
+      <strong>Reconciling the "is not a distributed system" claim in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/ADMIN_GUIDE.md">ADMIN_GUIDE.md</a>.</strong>
+      The admin guide is correct in spirit and historically lagged the v0.6.3 federation work. The accurate v0.6.3 framing is:
+      <strong>ai-memory is a single-machine primitive that ships beta-quality federation primitives (quorum writes, mTLS peer mesh, vector-clock catchup) for opt-in multi-node clusters (T3).</strong>
+      It is not a distributed database. It does not provide strong consistency, distributed consensus, or self-healing global state. Operators choosing to run a federated cluster today must accept beta-quality replication and own their consistency guarantees at the application layer.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Certification</span>
+    <h2>Current certification status.</h2>
+    <p>ai-memory v0.6.3 holds the following internal certifications. External (third-party) audits and compliance attestations are <strong>not yet held</strong> for any release; do not represent ai-memory as SOC 2, ISO 27001, FedRAMP, or HIPAA-compliant.</p>
+    <table class="facts">
+      <thead><tr><th>Certification</th><th>Status</th><th>Authority</th></tr></thead>
+      <tbody>
+        <tr><td>A2A-Certified (internal)</td><td class="num">Yes</td><td class="src"><a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A gate</a> · v0.6.2 + v0.6.3</td></tr>
+        <tr><td>Ship-Gate (internal)</td><td class="num">Yes</td><td class="src"><a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship gate</a> · 9/9 cert + 5/5 channels green at v0.6.2 cut</td></tr>
+        <tr><td>SOC 2</td><td class="num">No</td><td class="src">No third-party audit. Do not represent.</td></tr>
+        <tr><td>ISO 27001</td><td class="num">No</td><td class="src">No third-party audit. Do not represent.</td></tr>
+        <tr><td>FedRAMP</td><td class="num">No</td><td class="src">No authorization. Do not represent.</td></tr>
+        <tr><td>HIPAA</td><td class="num">No</td><td class="src">No BAA. Do not represent.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Authoring rule</span>
+    <h2>How to keep this page canonical.</h2>
+    <ol style="color:var(--text-muted);padding-left:1.5rem;line-height:1.8">
+      <li>Cut a release tag.</li>
+      <li>Run the full ship-gate matrix; publish a release evidence page at <code>test-hub/releases/vX.Y.Z/</code>.</li>
+      <li>Update <code>docs/evidence.html</code> first — the hero <code>FROZEN</code> badge, every row of the facts table, and every status card whose maturity has changed.</li>
+      <li>Sweep all references: <code>grep -rE "(191|1,?[0-9]{3})\s*test|9[0-9]\.[0-9]+%\s*coverage|v0\.6\.[0-9]" docs/ README.md</code> — every match either updates to the new canonical number or replaces with a link to <code>evidence.html</code>.</li>
+      <li>Open one PR for the sweep. Block release until it merges.</li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+</footer>
+
+</body>
+</html>

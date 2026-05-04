@@ -1,5 +1,27 @@
 # ai-memory Documentation
 
+<div align="center">
+
+## 🎯 Current stable release · **v0.6.3.1** · A2A-CERTIFIED · 1,886 lib tests + 49+ integration · 93.84% line coverage
+
+[![Release](https://img.shields.io/badge/release-v0.6.3.1-brightgreen?logo=github)](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3.1)
+[![A2A Gate](https://img.shields.io/badge/A2A_gate-9%2F9_green-brightgreen)](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)
+[![Ship Gate](https://img.shields.io/badge/ship_gate-green-brightgreen)](https://alphaonedev.github.io/ai-memory-ship-gate/)
+[![crates.io](https://img.shields.io/crates/v/ai-memory)](https://crates.io/crates/ai-memory)
+
+**v0.6.3** cleared the a2a-gate certification bar: three consecutive full-testbook green runs across three agent frameworks and three transport modes — **324 passing scenarios**, zero partial greens.
+
+**📦 [Release v0.6.3.1](https://github.com/alphaonedev/ai-memory-mcp/releases/tag/v0.6.3.1)** ·
+**🟢 [v0.6.3.1 a2a campaign — testing in flight](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)** ·
+**📊 [A2A gate (umbrella spec)](https://alphaonedev.github.io/ai-memory-ai2ai-gate/)** ·
+**🚢 [Ship gate](https://alphaonedev.github.io/ai-memory-ship-gate/)** ·
+**📖 [AI-NHI insights](https://alphaonedev.github.io/ai-memory-ai2ai-gate/insights/)** ·
+**🐳 [Reproduce locally](https://alphaonedev.github.io/ai-memory-ai2ai-gate/local-docker-mesh/)**
+
+</div>
+
+---
+
 Navigation hub for the `docs/` directory. Every doc below is
 authoritative for its topic; this page is just the map.
 
@@ -64,11 +86,6 @@ authoritative for its topic; this page is just the map.
 
 - **[ADR-0001-quorum-replication.md](ADR-0001-quorum-replication.md)** —
   W-of-N quorum write model + chaos-testing methodology.
-- **[PHASE-1.md](PHASE-1.md)** — upcoming memory schema / hierarchy
-  changes, governance roadmap.
-- **[ROADMAP-ladybug.md](ROADMAP-ladybug.md)** — LadybugDB as a
-  v0.7.1+ SAL adapter (deliberately not a 100% transition). Phased
-  plan with a benchmark-gated promotion decision.
 
 ## SDKs
 

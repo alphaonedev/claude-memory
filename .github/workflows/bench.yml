@@ -1,0 +1,89 @@
+# Pillar 3 / Stream F — performance budget CI guard.
+#
+# Runs `ai-memory bench` on every pull request and trunk push so the
+# p95 budgets published in `PERFORMANCE.md` stay enforced. The bench
+# binary exits non-zero when any operation's measured p95 exceeds its
+# target by more than the published 10% tolerance, which fails the
+# workflow.
+#
+# Reference hardware per `PERFORMANCE.md` is GitHub-hosted Linux
+# x86_64 (`ubuntu-latest`). The macOS / Windows correctness checks
+# already live in `ci.yml`; this workflow is single-runner on purpose.
+
+name: Bench
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**"]
+    # Bench is advisory (not in required-status-checks). Trigger-level
+    # paths-ignore is safe here and saves a full release build (~6-8 min)
+    # on every docs-only PR.
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  push:
+    branches: [main, develop, "release/**"]
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: ai-memory bench (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --bin ai-memory
+
+      - name: Run bench (gate)
+        run: |
+          set +e
+          target/release/ai-memory bench | tee bench-table.txt
+          rc=${PIPESTATUS[0]}
+          set -e
+          {
+            echo '## ai-memory bench'
+            echo ''
+            echo '`ai-memory bench` runs the canonical workload from '
+            echo '[`src/bench.rs`](../blob/${{ github.sha }}/src/bench.rs) '
+            echo 'against the budgets published in '
+            echo '[`PERFORMANCE.md`](../blob/${{ github.sha }}/PERFORMANCE.md). '
+            echo 'Fails the build when any p95 exceeds its target by >10%.'
+            echo ''
+            echo '```'
+            cat bench-table.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
+      - name: Run bench (JSON for artifact)
+        if: always()
+        run: target/release/ai-memory bench --json > bench-results.json || true
+
+      - name: Upload bench artifact
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: bench-results
+          path: |
+            bench-results.json
+            bench-table.txt
+          if-no-files-found: warn

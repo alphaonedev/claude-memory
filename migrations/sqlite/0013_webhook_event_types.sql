@@ -1,0 +1,35 @@
+-- v0.6.3.1 P5 / G9 — webhook event coverage.
+--
+-- Pre-P5 the `subscriptions.events` column already held a comma-
+-- separated whitelist (`memory_store,memory_delete` / `*` for all).
+-- That was sufficient when only `memory_store` actually fired. P5
+-- wires `dispatch_event` into the four other lifecycle handlers
+-- (`memory_promote`, `memory_delete`, `memory_link_created`,
+-- `memory_consolidated`).
+--
+-- This migration adds `event_types` as a JSON-encoded array column —
+-- it is the structured representation that the new HTTP / MCP
+-- subscribe surfaces accept. The legacy `events` column stays as the
+-- canonical filter at dispatch time (so existing subscribers and the
+-- existing dispatch code keep working unchanged); when callers POST
+-- a structured `event_types: [...]` array we mirror it back into the
+-- comma-separated `events` column so the matcher continues to do one
+-- thing.
+--
+-- Backward compat:
+--   - rows with NULL `event_types` retain `events = '*'` (all events) —
+--     existing subscribers default to every new event type without any
+--     migration on their side.
+--   - new subscribers can omit `event_types` for the same all-events
+--     behaviour, or pass an explicit list to opt into narrow coverage.
+--
+-- NOTE: ALTER TABLE ADD COLUMN is performed at the Rust layer
+-- (db.rs::migrate version<17 block) with a column-existence check,
+-- since SQLite cannot use IF NOT EXISTS for column additions.
+
+-- Idempotent index on event_types so list_subscriptions can skip rows
+-- that have an explicit (non-NULL) opt-in list whenever a future
+-- optimisation wants to scope the match by event. The current dispatch
+-- path filters in memory because subscription counts are small.
+CREATE INDEX IF NOT EXISTS idx_subscriptions_event_types
+    ON subscriptions (event_types);

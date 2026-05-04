@@ -1,0 +1,7 @@
+# Authorised mTLS peers (test fixture — not real fingerprints)
+# Generated 2026-04-26 by Closer T4
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+# Second cluster
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+# trailing full-line comment

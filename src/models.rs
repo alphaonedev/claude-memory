@@ -118,6 +118,13 @@ pub struct CreateMemory {
     /// unset, treated as `private` by the query layer.
     #[serde(default)]
     pub scope: Option<String>,
+    /// v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already
+    /// exists. One of `error` | `merge` | `version`. When unset, the
+    /// daemon defaults to `error` for HTTP callers (HTTP is not legacy
+    /// like MCP v1; clients that want the legacy silent-merge contract
+    /// must opt in explicitly).
+    #[serde(default)]
+    pub on_conflict: Option<String>,
 }
 
 fn default_tier() -> Tier {
@@ -285,6 +292,80 @@ pub struct Stats {
     pub expiring_soon: usize,
     pub links_count: usize,
     pub db_size_bytes: u64,
+    /// v0.6.3.1 P2 (G4) — count of rows whose stored `embedding_dim`
+    /// disagrees with the BLOB length (or whose column is missing while
+    /// a BLOB exists). 0 on a fresh database; non-zero indicates legacy
+    /// rows the operator should re-embed. Consumed by the P7 doctor.
+    #[serde(default)]
+    pub dim_violations: u64,
+    /// v0.6.3.1 (P3, G2): cumulative HNSW oldest-eviction count since this
+    /// process started. Non-zero indicates the in-memory vector index has
+    /// hit its `MAX_ENTRIES` cap and silently dropped older embeddings —
+    /// recall quality may have degraded for evicted ids. Process-local
+    /// (not persisted) because the index itself is process-local.
+    #[serde(default)]
+    pub index_evictions_total: u64,
+}
+
+/// v0.6.3.1 (P3): per-request observability for the recall pipeline.
+///
+/// Surfaces *which* recall path actually ran, *which* reranker was active,
+/// the candidate pool sizes coming out of FTS and HNSW (before fusion), and
+/// the blend weight applied to the semantic component. Always present in
+/// `memory_recall` responses; older clients ignore unknown fields per the
+/// JSON-RPC convention.
+///
+/// Closes G2/G8/G11 from the v0.6.3 audit by making every silent-degrade
+/// path observable at request time. The capabilities surface (P1) reports
+/// the same state at startup; this struct is the per-call mirror.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecallMeta {
+    /// Which recall path executed.
+    /// - `"hybrid"` — embedder + FTS, blended (G11 happy path).
+    /// - `"keyword_only"` — embedder unavailable or query-embed failed,
+    ///   keyword-only recall served (G11 silent-degrade now visible).
+    pub recall_mode: String,
+    /// Which reranker scored the final ordering.
+    /// - `"neural"` — BERT cross-encoder (autonomous tier, model loaded).
+    /// - `"lexical"` — Jaccard/TF-IDF/bigram fallback (G8 silent-degrade
+    ///   now visible).
+    /// - `"none"` — reranking disabled at this tier.
+    pub reranker_used: String,
+    /// Candidate-pool sizes coming out of each retrieval stage *before*
+    /// fusion. Useful for spotting empty-FTS or empty-HNSW degradations.
+    pub candidate_counts: CandidateCounts,
+    /// Semantic blend weight applied during fusion. `0.0` for
+    /// `keyword_only` mode; otherwise the average semantic weight across
+    /// the returned candidates (varies 0.50→0.15 with content length).
+    pub blend_weight: f64,
+}
+
+/// v0.6.3.1 (P3): retrieval-stage candidate counts feeding `RecallMeta`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CandidateCounts {
+    /// Number of candidates retrieved by FTS5 keyword scoring.
+    pub fts: usize,
+    /// Number of candidates retrieved by HNSW (or linear-scan fallback)
+    /// semantic search. `0` in keyword-only mode.
+    pub hnsw: usize,
+}
+
+/// v0.6.3.1 (P3): internal telemetry returned alongside recall results.
+///
+/// Plumbed from `db::recall_hybrid_with_telemetry` /
+/// `db::recall_with_telemetry` up to `mcp::handle_recall`, which uses it
+/// to populate `RecallMeta`. Not serialized — `RecallMeta` is the public
+/// shape.
+#[derive(Debug, Clone, Default)]
+pub struct RecallTelemetry {
+    /// Candidates returned by the FTS5 stage before fusion.
+    pub fts_candidates: usize,
+    /// Candidates returned by the HNSW (or linear-scan fallback) stage
+    /// before fusion. `0` for keyword-only recall.
+    pub hnsw_candidates: usize,
+    /// Average semantic blend weight applied across the returned set.
+    /// `0.0` for keyword-only recall.
+    pub blend_weight_avg: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -299,8 +380,149 @@ pub struct NamespaceCount {
     pub count: usize,
 }
 
+/// One node of the hierarchical namespace tree returned by
+/// `memory_get_taxonomy` (Pillar 1 / Stream A).
+///
+/// `count` is the number of memories at *exactly* this namespace;
+/// `subtree_count` is the count of memories at this node plus every
+/// descendant the depth limit allowed us to expand. Children are sorted
+/// alphabetically by `name` so callers get a stable rendering order.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaxonomyNode {
+    /// Full namespace path of this node. Empty string for the synthetic
+    /// root when no `namespace_prefix` is supplied.
+    pub namespace: String,
+    /// Last `/`-delimited segment of `namespace` (display label). Empty
+    /// for the synthetic root.
+    pub name: String,
+    /// Memories whose namespace equals this node's `namespace`.
+    pub count: usize,
+    /// Memories at this node plus all descendants visible within the
+    /// requested `depth`. Memories beneath the depth cutoff still
+    /// contribute to the `subtree_count` of the boundary ancestor.
+    pub subtree_count: usize,
+    /// Direct child nodes, sorted alphabetically by `name`.
+    pub children: Vec<TaxonomyNode>,
+}
+
+/// Result envelope returned by `db::get_taxonomy`.
+///
+/// `total_count` is the global memory count for the prefix (independent
+/// of `depth`/`limit` truncation) so callers can render an honest
+/// "X memories in N namespaces" header even when the tree was
+/// truncated. `truncated` is set when the `limit` parameter forced us
+/// to drop input rows when assembling the tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct Taxonomy {
+    pub tree: TaxonomyNode,
+    pub total_count: usize,
+    pub truncated: bool,
+}
+
+/// One nearest-neighbor result from a `memory_check_duplicate` lookup
+/// (Pillar 2 / Stream D). `similarity` is the cosine similarity in
+/// `[-1.0, 1.0]`, rounded to three decimals at the response layer.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateMatch {
+    pub id: String,
+    pub title: String,
+    pub namespace: String,
+    pub similarity: f32,
+}
+
+/// Result envelope returned by `db::check_duplicate`.
+///
+/// `is_duplicate` is `nearest.similarity >= threshold`. `nearest` is
+/// `None` only when the candidate pool is empty (no embedded, live
+/// memories matched the namespace filter). When `is_duplicate` is true,
+/// `nearest.id` doubles as the suggested merge target — we surface it
+/// under that name in the JSON response so the contract stays explicit.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateCheck {
+    pub is_duplicate: bool,
+    pub threshold: f32,
+    pub nearest: Option<DuplicateMatch>,
+    pub candidates_scanned: usize,
+}
+
 /// Namespace reserved for agent registrations (Task 1.3).
 pub const AGENTS_NAMESPACE: &str = "_agents";
+
+/// Tag stamped on entity-typed memories so `(title, namespace)` can be
+/// shared across regular memories and entities without ambiguity (Pillar
+/// 2 / Stream B).
+pub const ENTITY_TAG: &str = "entity";
+
+/// Marker written to `metadata.kind` on entity-typed memories. The
+/// db layer keys entity lookups off this field so the alias resolver
+/// never returns a regular memory that happens to share a title with an
+/// entity registered later.
+pub const ENTITY_KIND: &str = "entity";
+
+/// Resolved entity record returned by `db::entity_get_by_alias` and
+/// embedded in the `db::entity_register` response (Pillar 2 / Stream B).
+/// `aliases` is the full alias set for the entity, ordered by
+/// `created_at ASC, alias ASC` for stable display.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRecord {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+}
+
+/// Outcome of `db::entity_register`. `created` is `true` when a new
+/// entity memory was inserted, `false` when an existing entity was
+/// reused (idempotent re-registration that just merged new aliases into
+/// the existing record).
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRegistration {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+    pub created: bool,
+}
+
+/// Single row returned by `db::kg_timeline` (Pillar 2 / Stream C).
+///
+/// Captures one outbound assertion from a source memory: the
+/// `target_id` and its `relation`, the temporal-validity window
+/// (`valid_from` / `valid_until`), the agent that observed it
+/// (`observed_by`), and the target's display fields (`title`,
+/// `target_namespace`) for caller convenience. `valid_from` is the
+/// authoritative ordering key — events with NULL `valid_from` are
+/// excluded from the timeline by the query.
+#[derive(Debug, Clone, Serialize)]
+pub struct KgTimelineEvent {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_from: String,
+    pub valid_until: Option<String>,
+    pub observed_by: Option<String>,
+    pub title: String,
+    pub target_namespace: String,
+}
+
+/// One node returned by `db::kg_query` (Pillar 2 / Stream C —
+/// `memory_kg_query`). Each node represents a memory reachable from the
+/// query's source through one outbound link, carrying the link's
+/// temporal-validity columns plus the target memory's display fields and
+/// the traversal path. `depth` is the actual number of hops from the
+/// source (1..=`KG_QUERY_MAX_SUPPORTED_DEPTH`); `path` is the
+/// `src->mid->target` chain as discovered by the recursive CTE.
+#[derive(Debug, Clone, Serialize)]
+pub struct KgQueryNode {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub observed_by: Option<String>,
+    pub title: String,
+    pub target_namespace: String,
+    pub depth: usize,
+    pub path: String,
+}
 
 // ---------------------------------------------------------------------------
 // Task 1.9 — Governance Enforcement
@@ -472,13 +694,21 @@ impl ApproverType {
 /// (stored in `metadata.governance`).
 ///
 /// Default policy when a standard has no `metadata.governance`:
-/// `{ write: Any, promote: Any, delete: Owner, approver: Human }`.
+/// `{ write: Any, promote: Any, delete: Owner, approver: Human, inherit: true }`.
 ///
 /// v0.6.2 (S34 defensive): `promote`, `delete`, and `approver` carry
 /// `#[serde(default)]` so partial-policy payloads (a common shape for
 /// operator CLIs / test harnesses that only care about `write`) round-trip
 /// instead of 400-ing out on missing fields. `write` remains required —
 /// it's the core knob a policy is attempting to set.
+///
+/// v0.6.3.1 (P4, audit G1): `inherit` controls whether parent-namespace
+/// policies bubble up. Default `true` matches the architecture page T2
+/// promise of "Hierarchical policy inheritance (default at `org/`,
+/// overridable at `org/team/`)". Setting `inherit: false` on a child
+/// stops the leaf-first walk in `resolve_governance_policy`, providing
+/// an explicit opt-out path for scoped overrides (e.g. an audit
+/// sandbox under a fully-governed parent).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GovernancePolicy {
     pub write: GovernanceLevel,
@@ -488,6 +718,14 @@ pub struct GovernancePolicy {
     pub delete: GovernanceLevel,
     #[serde(default = "default_approver")]
     pub approver: ApproverType,
+    /// v0.6.3.1 (P4, G1): when `true` (default), missing policy at a
+    /// child namespace falls through to the parent in the chain. When
+    /// `false`, the walk stops at this level — child operations are
+    /// gated by THIS policy and parents are not consulted. Backfilled
+    /// to `true` on existing rows by migration `0012_governance_inherit`
+    /// to preserve the architecturally-promised semantics.
+    #[serde(default = "default_inherit")]
+    pub inherit: bool,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -502,6 +740,12 @@ fn default_approver() -> ApproverType {
     ApproverType::Human
 }
 
+/// v0.6.3.1 (P4): default for `GovernancePolicy::inherit`. Inheritance
+/// is the documented default — see architecture page T2 and audit G1.
+fn default_inherit() -> bool {
+    true
+}
+
 impl Default for GovernancePolicy {
     fn default() -> Self {
         Self {
@@ -509,6 +753,7 @@ impl Default for GovernancePolicy {
             promote: default_promote_level(),
             delete: default_delete_level(),
             approver: default_approver(),
+            inherit: default_inherit(),
         }
     }
 }
@@ -853,6 +1098,32 @@ mod tests {
         assert_eq!(p.promote, GovernanceLevel::Any);
         assert_eq!(p.delete, GovernanceLevel::Owner);
         assert_eq!(p.approver, ApproverType::Human);
+        // v0.6.3.1 (P4, G1): inheritance is the documented default. Existing
+        // rows are backfilled to true by migration 0012; new rows that omit
+        // the field deserialize as true via #[serde(default)].
+        assert!(p.inherit);
+    }
+
+    #[test]
+    fn governance_inherit_field_defaults_true_on_partial_payload() {
+        // P4 (G1): a partial-policy payload that omits `inherit` must
+        // default to true so legacy callers don't accidentally opt out
+        // of parent inheritance the moment they write a child policy.
+        let json = r#"{"write":"approve"}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert_eq!(p.write, GovernanceLevel::Approve);
+        assert!(p.inherit, "missing `inherit` must deserialize as true");
+    }
+
+    #[test]
+    fn governance_inherit_field_explicit_false_round_trip() {
+        // P4 (G1): when an operator explicitly opts a subtree out of
+        // inheritance, the false value must round-trip and serialize.
+        let json = r#"{"write":"any","inherit":false}"#;
+        let p: GovernancePolicy = serde_json::from_str(json).unwrap();
+        assert!(!p.inherit);
+        let back = serde_json::to_value(&p).unwrap();
+        assert_eq!(back["inherit"], false);
     }
 
     #[test]
@@ -900,6 +1171,7 @@ mod tests {
             promote: GovernanceLevel::Approve,
             delete: GovernanceLevel::Owner,
             approver: ApproverType::Agent("maintainer".to_string()),
+            inherit: true,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();
@@ -983,5 +1255,135 @@ mod tests {
         assert_eq!(ApproverType::Human.kind(), "human");
         assert_eq!(ApproverType::Agent("a".into()).kind(), "agent");
         assert_eq!(ApproverType::Consensus(3).kind(), "consensus");
+    }
+
+    // -----------------------------------------------------------------
+    // W12-H — additional small-module pinning
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn default_metadata_is_empty_object() {
+        let v = default_metadata();
+        assert!(v.is_object());
+        assert!(v.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn governed_action_as_str_pinned() {
+        assert_eq!(GovernedAction::Store.as_str(), "store");
+        assert_eq!(GovernedAction::Delete.as_str(), "delete");
+        assert_eq!(GovernedAction::Promote.as_str(), "promote");
+    }
+
+    #[test]
+    fn governance_decision_equality() {
+        assert_eq!(GovernanceDecision::Allow, GovernanceDecision::Allow);
+        assert_ne!(
+            GovernanceDecision::Deny("a".into()),
+            GovernanceDecision::Deny("b".into()),
+        );
+        assert_eq!(
+            GovernanceDecision::Pending("p1".into()),
+            GovernanceDecision::Pending("p1".into())
+        );
+    }
+
+    #[test]
+    fn vector_clock_observe_monotonic() {
+        let mut vc = VectorClock::default();
+        vc.observe("peer-a", "2026-04-01T00:00:00+00:00");
+        vc.observe("peer-a", "2026-05-01T00:00:00+00:00");
+        // Older never overwrites newer.
+        vc.observe("peer-a", "2026-03-01T00:00:00+00:00");
+        assert_eq!(vc.latest_from("peer-a"), Some("2026-05-01T00:00:00+00:00"));
+    }
+
+    #[test]
+    fn vector_clock_latest_from_unknown_is_none() {
+        let vc = VectorClock::default();
+        assert!(vc.latest_from("never-seen").is_none());
+    }
+
+    #[test]
+    fn vector_clock_serde_roundtrip() {
+        let mut vc = VectorClock::default();
+        vc.observe("p1", "2026-04-01T00:00:00+00:00");
+        vc.observe("p2", "2026-04-02T00:00:00+00:00");
+        let json = serde_json::to_string(&vc).unwrap();
+        let back: VectorClock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.entries.len(), 2);
+        assert_eq!(back, vc);
+    }
+
+    #[test]
+    fn namespace_parent_with_trailing_slash() {
+        // "a/" splits to parent="a" and tail="". The function returns the
+        // parent regardless of whether the final segment is empty.
+        assert_eq!(namespace_parent("a/"), Some("a".to_string()));
+    }
+
+    #[test]
+    fn namespace_depth_skips_empty_segments() {
+        // Multiple slashes do not inflate the depth count.
+        assert_eq!(namespace_depth("a//b"), 2);
+        assert_eq!(namespace_depth("/a"), 1);
+        assert_eq!(namespace_depth("a/"), 1);
+    }
+
+    #[test]
+    fn namespace_ancestors_two_levels() {
+        // Two-level namespace produces self + parent.
+        assert_eq!(
+            namespace_ancestors("a/b"),
+            vec!["a/b".to_string(), "a".to_string()]
+        );
+    }
+
+    #[test]
+    fn memory_serde_roundtrip_minimal() {
+        let m = Memory {
+            id: "abc".into(),
+            tier: Tier::Mid,
+            namespace: "global".into(),
+            title: "t".into(),
+            content: "c".into(),
+            tags: vec!["x".into()],
+            priority: 5,
+            confidence: 0.9,
+            source: "api".into(),
+            access_count: 0,
+            created_at: "2026-04-01T00:00:00+00:00".into(),
+            updated_at: "2026-04-01T00:00:00+00:00".into(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: default_metadata(),
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        let back: Memory = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, m.id);
+        assert_eq!(back.tier, Tier::Mid);
+    }
+
+    #[test]
+    fn approver_type_kind_for_each_variant() {
+        // Hits all three discriminant arms. Mirrors the existing test but
+        // ensures we cover a Consensus(0) which is the lower edge.
+        assert_eq!(ApproverType::Human.kind(), "human");
+        assert_eq!(ApproverType::Agent(String::new()).kind(), "agent");
+        assert_eq!(ApproverType::Consensus(0).kind(), "consensus");
+    }
+
+    #[test]
+    fn governance_partial_policy_with_approver() {
+        // Partial policy with `approver` set and other fields defaulted.
+        let json = serde_json::json!({
+            "write": "owner",
+            "approver": {"agent": "alice"}
+        });
+        let parsed: GovernancePolicy = serde_json::from_value(json).expect("parses");
+        assert_eq!(parsed.write, GovernanceLevel::Owner);
+        assert_eq!(parsed.approver, ApproverType::Agent("alice".to_string()));
+        assert_eq!(parsed.promote, GovernanceLevel::Any);
+        assert_eq!(parsed.delete, GovernanceLevel::Owner);
     }
 }

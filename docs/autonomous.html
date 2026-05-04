@@ -1,0 +1,403 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Autonomous-tier features atlas — LLM-powered intelligence (Gemma 4 + Ollama).
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Autonomous — agent intelligence powered by Gemma 4</title>
+<meta name="description" content="ai-memory v0.6.3.1 autonomous features. Auto-tagging, auto-consolidation, query expansion, contradiction detection, memory reflection, session start. All powered by Google's open-source Gemma 4 served via Ollama. Local-first, no SaaS, no API keys.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/autonomous.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--google:#4285f4;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(66,133,244,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.thanks{background:linear-gradient(135deg,rgba(66,133,244,0.08),rgba(110,231,255,0.04));border:1px solid rgba(66,133,244,0.4);border-radius:14px;padding:2rem;margin-bottom:2rem}
+.thanks .lbl{font-family:var(--font-mono);font-size:.72rem;color:var(--google);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.5rem}
+.thanks h3{font-size:1.4rem;margin-bottom:.75rem;color:var(--text)}
+.thanks p{color:var(--text-muted);font-size:.95rem;line-height:1.7}
+.thanks .credits{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:.85rem;margin-top:1.25rem}
+.thanks .credit{padding:.85rem 1rem;background:var(--bg-elev);border:1px solid var(--border);border-radius:8px}
+.thanks .credit .name{font-family:var(--font-mono);font-size:.85rem;color:var(--text);font-weight:700}
+.thanks .credit .by{font-size:.78rem;color:var(--text-muted);margin-top:.3rem}
+.thanks .credit a{color:var(--p1)}
+
+.tier-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:2rem}
+.tier{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem 1.5rem;position:relative;overflow:hidden}
+.tier::before{content:"";position:absolute;top:0;left:0;right:0;height:3px}
+.tier.kw::before{background:var(--text-dim)}
+.tier.sm::before{background:var(--p2)}
+.tier.smart::before{background:var(--p3)}
+.tier.au::before{background:var(--google)}
+.tier .nm{font-family:var(--font-mono);font-size:1.1rem;font-weight:700;margin-bottom:.4rem}
+.tier.kw .nm{color:var(--text-dim)}
+.tier.sm .nm{color:var(--p2)}
+.tier.smart .nm{color:var(--p3)}
+.tier.au .nm{color:var(--google)}
+.tier .ram{font-family:var(--font-mono);font-size:.78rem;color:var(--text-dim);margin-bottom:.6rem}
+.tier .desc{color:var(--text-muted);font-size:.85rem;line-height:1.45;margin-bottom:.6rem}
+.tier .feats{font-family:var(--font-mono);font-size:.74rem;color:var(--text-muted)}
+.tier .feats span{display:block;padding:.2rem 0}
+.tier .feats span.on{color:var(--good)}
+.tier .feats span.off{color:var(--text-dim);text-decoration:line-through}
+
+.feature{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.25rem;position:relative;overflow:hidden}
+.feature::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p3)}
+.feature.smart::before{background:var(--p3)}
+.feature.au::before{background:var(--google)}
+.feature-head{display:flex;align-items:baseline;gap:1rem;flex-wrap:wrap;margin-bottom:.5rem}
+.feature-name{font-family:var(--font-mono);font-size:1.15rem;font-weight:700;color:var(--text)}
+.feature-need{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);padding:.15em .55em;border:1px solid var(--border-hl);border-radius:4px}
+.feature-need.smart{color:var(--p3);border-color:rgba(200,162,255,0.4)}
+.feature-need.au{color:var(--google);border-color:rgba(66,133,244,0.5)}
+.feature-desc{color:var(--text-muted);font-size:.92rem;margin-bottom:1rem}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--gold)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+.snip .num{color:var(--p1)}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Autonomous</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html" class="current">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Autonomous-tier intelligence.</h1>
+  <p class="tagline">Auto-tagging. Auto-consolidation. Query expansion. Contradiction detection. Memory reflection. Six features that turn ai-memory from a store into an agent — every one local, every one running on Google's open-source Gemma 4 via Ollama. <strong>No SaaS. No API keys. No content leaving the host.</strong></p>
+  <div class="pills">
+    <span class="pill">Gemma 4 E2B / E4B</span>
+    <span class="pill">Ollama-served</span>
+    <span class="pill">on-device</span>
+    <span class="pill">no telemetry</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <div class="thanks">
+      <div class="lbl">▸ Thanks</div>
+      <h3 style="color:var(--google)">Powered by Gemma 4 — open-sourced by Google.</h3>
+      <p>Every autonomous feature on this page is made possible by <strong>Google's Gemma 4 family</strong>, released under an open weights license. Gemma 4 Effective 2B (~1 GB Q4) and Gemma 4 Effective 4B (~2.3 GB Q4) are the two models ai-memory targets — small enough to run locally on a laptop, capable enough to drive real agent reasoning. <strong>Thank you to the Gemma team and to Google for choosing to ship these models open.</strong> ai-memory is materially better because of it, and the entire local-first agent ecosystem stands on this contribution.</p>
+      <div class="credits">
+        <div class="credit"><div class="name">Gemma 4 E2B</div><div class="by">~1 GB Q4 · Smart tier · Google · <a href="https://ai.google.dev/gemma">ai.google.dev/gemma</a></div></div>
+        <div class="credit"><div class="name">Gemma 4 E4B</div><div class="by">~2.3 GB Q4 · Autonomous tier · Google · <a href="https://ai.google.dev/gemma">ai.google.dev/gemma</a></div></div>
+        <div class="credit"><div class="name">Ollama</div><div class="by">Local LLM serving · MIT · <a href="https://ollama.com">ollama.com</a></div></div>
+        <div class="credit"><div class="name">nomic-embed-text</div><div class="by">Embeddings · Apache 2.0 · Nomic AI · <a href="https://www.nomic.ai/">nomic.ai</a></div></div>
+        <div class="credit"><div class="name">MiniLM-L6-v2</div><div class="by">Embeddings · Apache 2.0 · Hugging Face · <a href="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2">model card</a></div></div>
+        <div class="credit"><div class="name">cross-encoder/ms-marco</div><div class="by">Reranker · Apache 2.0 · Hugging Face · <a href="https://huggingface.co/cross-encoder/ms-marco-MiniLM-L-6-v2">model card</a></div></div>
+      </div>
+      <p style="margin-top:1.25rem;font-size:.88rem">See the <a href="credits.html">credits page</a> for the full open-source acknowledgement and license enumeration.</p>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The four feature tiers</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Pick the model size your hardware allows.</h2>
+    <p class="lede">Autonomous features unlock as the operator allocates more memory to the daemon. Keyword tier needs zero extra RAM — just FTS5. Semantic tier loads embeddings (~256 MB). Smart tier adds Gemma 4 E2B (~1 GB). Autonomous tier upgrades to Gemma 4 E4B + cross-encoder reranker (~4 GB total).</p>
+    <div class="tier-cards">
+      <div class="tier kw">
+        <div class="nm">Keyword</div>
+        <div class="ram">RAM: 0 MB extra · always available</div>
+        <div class="desc">FTS5 keyword search only. The lowest-overhead option — runs on a Raspberry Pi.</div>
+        <div class="feats">
+          <span class="on">▸ keyword_search</span>
+          <span class="off">× semantic_search</span>
+          <span class="off">× auto_tag</span>
+          <span class="off">× consolidate</span>
+          <span class="off">× contradictions</span>
+        </div>
+      </div>
+      <div class="tier sm">
+        <div class="nm">Semantic</div>
+        <div class="ram">RAM: ~256 MB · MiniLM-L6-v2</div>
+        <div class="desc">Adds 384-dim embeddings + HNSW vector index. Hybrid 70/30 recall (FTS5 + semantic).</div>
+        <div class="feats">
+          <span class="on">▸ keyword_search</span>
+          <span class="on">▸ semantic_search</span>
+          <span class="on">▸ hybrid_recall</span>
+          <span class="off">× auto_tag</span>
+          <span class="off">× consolidate</span>
+        </div>
+      </div>
+      <div class="tier smart">
+        <div class="nm">Smart</div>
+        <div class="ram">RAM: ~1 GB · nomic-embed + Gemma 4 E2B</div>
+        <div class="desc">Adds 768-dim embeddings + Google's Gemma 4 E2B for reasoning. Unlocks the LLM-driven features below.</div>
+        <div class="feats">
+          <span class="on">▸ all of Semantic</span>
+          <span class="on">▸ auto_tag</span>
+          <span class="on">▸ consolidate</span>
+          <span class="on">▸ expand_query</span>
+          <span class="on">▸ contradiction</span>
+        </div>
+      </div>
+      <div class="tier au">
+        <div class="nm">Autonomous</div>
+        <div class="ram">RAM: ~4 GB · nomic-embed + Gemma 4 E4B + cross-encoder</div>
+        <div class="desc">Top tier — Google's Gemma 4 E4B for stronger reasoning, plus cross-encoder reranking for top-k recall precision. The full agent intelligence stack.</div>
+        <div class="feats">
+          <span class="on">▸ all of Smart</span>
+          <span class="on">▸ cross_encoder_reranking</span>
+          <span class="on">▸ memory_reflection (planned, v0.7+)</span>
+          <span class="on">▸ session_start (LLM-driven)</span>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The six autonomous features</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">What Gemma 4 unlocks.</h2>
+
+    <div class="feature smart">
+      <div class="feature-head"><span class="feature-name">memory_auto_tag</span><span class="feature-need smart">Smart tier+</span></div>
+      <div class="feature-desc">LLM looks at a memory's title + content and proposes tags. New tags merge into the existing tag set (no overwrites). Operators use this to tag bulk-imported memories without writing rules.</div>
+      <div class="snip"><span class="cm">// MCP — memory_auto_tag</span>
+{<span class="key">"id"</span>: <span class="val">"550e8400-e29b-41d4-a716-446655440000"</span>}
+
+<span class="ok">→ {"id": "…", "new_tags": ["okr", "q3", "engineering"], "all_tags": ["draft", "okr", "q3", "engineering"]}</span>
+<span class="cm">// Gemma 4 reads title+content, returns 3-5 relevant tags. The new tags are
+// merged with whatever was already there.</span></div>
+    </div>
+
+    <div class="feature smart">
+      <div class="feature-head"><span class="feature-name">memory_consolidate</span><span class="feature-need smart">Smart tier+</span></div>
+      <div class="feature-desc">Bulk-collapses N memories (up to 100) into 1 derived summary. Source memories are linked to the consolidated output via <code>derived_from</code> KG relation, so provenance survives. The biological-memory analog of sleep-driven episodic-to-long-term consolidation.</div>
+      <div class="snip"><span class="cm">// MCP — memory_consolidate</span>
+{
+  <span class="key">"ids"</span>:       [<span class="val">"id-1"</span>, <span class="val">"id-2"</span>, <span class="val">"id-3"</span>, …],   <span class="cm">// 2-100 ids</span>
+  <span class="key">"title"</span>:     <span class="val">"Q3 OKR — consolidated retrospective"</span>,
+  <span class="key">"namespace"</span>: <span class="val">"alphaone/eng"</span>
+}
+
+<span class="ok">→ {"consolidated_id": "…", "summary": "<Gemma 4 generates a coherent summary>",
+   "source_count": 12, "links_created": 12}  // each source → derived_from edge</span></div>
+    </div>
+
+    <div class="feature smart">
+      <div class="feature-head"><span class="feature-name">memory_expand_query</span><span class="feature-need smart">Smart tier+</span></div>
+      <div class="feature-desc">Takes a short user query and expands it into a richer set of related terms. Used to widen recall when the literal query doesn't match enough rows. Especially useful for vague natural-language queries against a corpus that uses precise jargon.</div>
+      <div class="snip"><span class="cm">// MCP — memory_expand_query</span>
+{<span class="key">"query"</span>: <span class="val">"how do we deploy"</span>}
+
+<span class="ok">→ {"original": "how do we deploy",
+   "expanded_terms": ["deploy", "deployment", "release", "ship", "rollout",
+                       "kubernetes", "ci pipeline", "container registry"]}</span>
+<span class="cm">// Caller can then run memory_search across the expanded set.</span></div>
+    </div>
+
+    <div class="feature smart">
+      <div class="feature-head"><span class="feature-name">memory_detect_contradiction</span><span class="feature-need smart">Smart tier+</span></div>
+      <div class="feature-desc">Compares two memories and tells you if they contradict. Powers the v0.6.3 KG <code>contradicts</code> relation: when the LLM flags a contradiction, the system can auto-link the pair so future recall surfaces the conflict.</div>
+      <div class="snip"><span class="cm">// MCP — memory_detect_contradiction</span>
+{
+  <span class="key">"id_a"</span>: <span class="val">"id of the older memory"</span>,
+  <span class="key">"id_b"</span>: <span class="val">"id of the newer memory"</span>
+}
+
+<span class="ok">→ {"contradicts": true, "memory_a": {"id": "…", "title": "We use Postgres"},
+                              "memory_b": {"id": "…", "title": "We migrated to MySQL"}}</span></div>
+    </div>
+
+    <div class="feature au">
+      <div class="feature-head"><span class="feature-name">cross_encoder_reranking</span><span class="feature-need au">Autonomous tier</span></div>
+      <div class="feature-desc">Cross-encoder reranker scores top-K recall results against the query, reordering for precision. Where keyword + vector recall return a candidate set, the cross-encoder is the final pass that puts the best match first. Adds ~50ms to a recall but materially improves top-1 quality.</div>
+      <div class="snip"><span class="cm">// Implicit — automatically applied during memory_recall when:
+//   1. Autonomous tier is configured, AND
+//   2. cross-encoder model loaded successfully at startup
+//
+// Recall pipeline becomes:
+//   FTS5 70%  ⊕  HNSW 30%  →  candidate set (top-100 typical)  →
+//   Cross-encoder rerank   →  final top-K (default 10)</span></div>
+    </div>
+
+    <div class="feature au">
+      <div class="feature-head"><span class="feature-name">memory_session_start</span><span class="feature-need au">Autonomous tier (LLM-driven)</span></div>
+      <div class="feature-desc">Run at the start of an agent session. Recalls the most relevant memories given the session's stated context, optionally LLM-summarized into a session brief. The agent's "morning briefing" — pulls in the right context without explicit recall calls peppered through the prompt.</div>
+      <div class="snip"><span class="cm">// MCP — memory_session_start</span>
+{
+  <span class="key">"context"</span>:    <span class="val">"continuing the q3 OKR review thread from yesterday"</span>,
+  <span class="key">"namespace"</span>:  <span class="val">"alphaone/eng/leadership"</span>,
+  <span class="key">"as_agent"</span>:   <span class="val">"alphaone/eng/leadership/alice"</span>,
+  <span class="key">"summarize"</span>:  <span class="ok">true</span>                       <span class="cm">// LLM-generate a brief from the recall hits</span>
+}
+
+<span class="ok">→ {"recalled": [12 top memories, ranked, with budget_tokens cap respected],
+   "session_brief": "Yesterday's discussion focused on..." // Gemma 4 summary
+  }</span></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Why local matters</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Every byte stays on the host.</h2>
+    <div class="snip" style="font-family:var(--font-sans);white-space:normal;line-height:1.7">
+      <div><strong style="color:var(--good)">No content leaves your machine.</strong> Auto-tag, consolidate, expand-query, contradiction-detect — all four prompt Gemma 4 with your memory contents. Because Ollama serves Gemma locally, the contents never leave the host. No SaaS provider sees your data; no API key risks leaking it.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">No telemetry.</strong> ai-memory itself ships zero telemetry. Ollama itself ships zero telemetry. Your agent's memory operations stay between you and the daemon.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Air-gap compatible.</strong> Once Gemma 4 is pulled (one-time download), the daemon runs offline. Useful for regulated environments, classified work, or anywhere outbound network egress is restricted.</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--good)">Cost-stable.</strong> No per-token billing. The model is yours. Auto-tagging 100 000 memories costs the same in API fees as auto-tagging 0 (zero).</div>
+      <div style="margin-top:.7rem"><strong style="color:var(--google)">Made possible by Google's open-weight Gemma 4.</strong> Without Google's choice to ship Gemma open, every feature on this page would require a paid hosted API. The local-first agent ecosystem is much smaller without Gemma 4 in it.</div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Operator quick start</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">From zero to autonomous in 4 commands.</h2>
+    <div class="snip"><span class="cm"># 1. Install Ollama</span>
+<span class="ok">$</span> brew install ollama
+<span class="ok">$</span> ollama serve &amp;
+
+<span class="cm"># 2. Pull Gemma 4 (one-time, ~2.3 GB for E4B)</span>
+<span class="ok">$</span> ollama pull gemma4:e4b
+<span class="cm"># or for the smaller Smart-tier model:</span>
+<span class="ok">$</span> ollama pull gemma4:e2b
+
+<span class="cm"># 3. Configure ai-memory for autonomous tier</span>
+<span class="ok">$</span> cat &gt; ~/.config/ai-memory/config.toml &lt;&lt;EOF
+tier = <span class="val">"autonomous"</span>
+ollama_url = <span class="val">"http://localhost:11434"</span>
+cross_encoder = <span class="ok">true</span>
+EOF
+
+<span class="cm"># 4. Start the daemon</span>
+<span class="ok">$</span> ai-memory serve
+
+<span class="cm"># Verify the autonomous features came online:</span>
+<span class="ok">$</span> ai-memory capabilities
+<span class="ok">→ "tier": "autonomous"</span>
+<span class="ok">→ "features": { "auto_tag": true, "auto_consolidation": true,
+                  "cross_encoder_reranking": true, "embedder_loaded": true }</span></div>
+    <p class="lede" style="margin-top:1rem">From this point on, the autonomous MCP tools are live. Wire them into your AI client (Claude Code, Cursor, Codex, Continue, etc.) — see <a href="integrations.html" style="color:var(--p1)">integrations atlas</a>.</p>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3.1 · Apache 2.0 · LLM bridge in <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/src/llm.rs">llm.rs</a> · models served via <a href="https://ollama.com">Ollama</a></p>
+  <p style="margin-top:.7rem;color:var(--google)">▸ <strong>Thanks to Google for open-sourcing Gemma 4.</strong> The autonomous tier of ai-memory is built on the foundation Gemma provides.</p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="memory-tiers.html">Tiers</a> · <a href="credits.html">Credits</a></p>
+</footer>
+
+</body>
+</html>

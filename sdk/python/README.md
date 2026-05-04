@@ -1,6 +1,6 @@
 # ai-memory — Python SDK
 
-Typed Python client for the [ai-memory](https://github.com/AlphaOneLabs/ai-memory)
+Typed Python client for the [ai-memory](https://github.com/alphaonedev/ai-memory-mcp)
 HTTP API. Wraps the daemon's `/api/v1/` surface with sync and async clients,
 Pydantic v2 models that mirror the Rust structs, and HMAC-SHA256 webhook
 verification.

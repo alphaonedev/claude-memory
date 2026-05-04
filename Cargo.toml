@@ -1,6 +1,6 @@
 [package]
 name = "ai-memory"
-version = "0.6.2"
+version = "0.6.3+patch.1"
 edition = "2024"
 rust-version = "1.88"
 authors = ["AlphaOne LLC"]
@@ -10,6 +10,25 @@ repository = "https://github.com/alphaonedev/ai-memory-mcp"
 homepage = "https://alphaonedev.github.io/ai-memory-mcp/"
 keywords = ["mcp", "ai", "memory", "sqlite", "llm"]
 categories = ["artificial-intelligence", "command-line-utilities", "database"]
+# v0.6.5 — keep the published crate under crates.io's 10 MiB compressed
+# upload limit. v0.6.3 + v0.6.4 publishes failed silently with HTTP 503
+# from the WAF because the package was 22 MiB compressed (140 MiB
+# unpacked) — `audits/` alone was 140 MiB. We exclude everything that
+# isn't required to compile the crate. include explicitly lists what
+# stays so any new top-level directory must be opted in.
+include = [
+    "src/**/*",
+    "benches/**/*",
+    "examples/**/*",
+    "migrations/**/*",
+    "build.rs",
+    "Cargo.toml",
+    "Cargo.lock",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md",
+    "PERFORMANCE.md",
+]
 
 [dependencies]
 anyhow = "1"
@@ -24,7 +43,16 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
+# v0.6.3.1 (PR-5 / issue #487) — rolling file appender for the
+# operational logging facility. Default-OFF; opt-in via
+# `[logging] enabled = true` in config.toml. Uses the non-blocking
+# writer so file I/O never stalls a tracing call site.
+tracing-appender = "0.2"
+# v0.6.3.1 (PR-5 / issue #487) — `ai-memory logs archive` compresses
+# rotated operational logs past their retention horizon. Pure-Rust
+# bindings via the `zstd` crate.
+zstd = { version = "0.13", default-features = false }
 uuid = { version = "1", features = ["v4"] }
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 gethostname = "0.5"
@@ -61,6 +89,23 @@ toml = "0.8"
 # text/plain`). Per sprint authorization #260.
 prometheus = { version = "0.13", default-features = false }
 
+# v0.6.3.1 (P6 / R1) — deterministic context-budgeted recall. tiktoken-rs
+# exposes OpenAI's `cl100k_base` BPE which is also Anthropic's de-facto
+# context-window tokenizer for budgeting purposes. Used post-rank in
+# `memory_recall` when the caller supplies `budget_tokens`. Pure Rust,
+# no C deps; the BPE table is embedded in the crate (~1.7 MB) so the
+# tokenizer is offline-deterministic across all hosts. Per ROADMAP2.md
+# R1 ("budget_tokens recall — Letta has it, we don't, we need it").
+tiktoken-rs = "0.7"
+
+# Issue #487 PR-6 — `ai-memory wrap` uses `tempfile::NamedTempFile`
+# for the cross-platform `MessageFile` strategy (write the system
+# message to a tempfile, hand the path to the wrapped agent CLI, and
+# guarantee cleanup on parent exit). Pure-Rust, used by the production
+# wrap subcommand so it's promoted from dev-dependencies into the main
+# dep table. Same version pin as the existing dev-dep below.
+tempfile = "3"
+
 # v0.7 — Storage Abstraction Layer (SAL) deps. Gated behind the `sal`
 # feature so default builds don't pull them. `async-trait` is the
 # standard bridge for async methods on traits until stable Rust native
@@ -94,13 +139,61 @@ sqlcipher = ["rusqlite/bundled-sqlcipher-vendored-openssl"]
 # adapter. `sal-postgres` layers on the Postgres/pgvector backend.
 sal = ["dep:async-trait", "dep:bitflags", "dep:thiserror"]
 sal-postgres = ["sal", "dep:sqlx", "dep:pgvector"]
+# W11/S11b — opt-in feature for tests that pull large model weights at runtime
+# (BERT cross-encoder, MiniLM, etc.). Off by default so CI doesn't download
+# 80MB+ on every run.
+test-with-models = []
+# Issue #487 PR-3 — gated live-agent smoke tests. Off by default; enabled
+# explicitly by the local runner script (`scripts/run-session-boot-
+# lifetime-tests.sh`) when `E2E_AGENT_TESTS=1` AND the host has a `claude`
+# binary on PATH plus a real `ANTHROPIC_API_KEY`. The contract + lifecycle
+# tests under `tests/boot_*` and `tests/recipe_contract.rs` stay
+# unconditional and load-bearing; this feature is for the optional
+# end-to-end "did Claude actually see the seeded memory?" smoke.
+e2e = []
 
 [dev-dependencies]
+proptest = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
 uuid = { version = "1", features = ["v4"] }
 serde_json = "1"
 tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
+# Wave 4 (v0.6.3) — TLS test fixture generator. Pinned to an exact version
+# so cert / key / fingerprint bytes stay stable across machines (rcgen's
+# RNG is seeded but its DER encoding can shift between minor releases).
+rcgen = { version = "=0.14.7", default-features = false, features = ["pem", "ring"] }
+# W6 (v0.6.3) — re-declare tokio for tests with the `test-util` feature
+# turned on so `tokio::test(start_paused = true)` and `tokio::time::advance`
+# (used by the daemon_runtime gc/wal-checkpoint loop tests) compile. The
+# production tokio dep keeps just "full" to avoid leaking the test-util
+# surface into release binaries.
+tokio = { version = "1", features = ["full", "test-util"] }
+# W7 (v0.6.3) / I7 — binary-spawn integration tests. `assert_cmd` and
+# `predicates` are the standard pair for CLI subprocess assertions; the
+# production `reqwest` dep already has the `blocking` feature on, which
+# the `serve` integration tests use to drive the daemon over HTTP from
+# a synchronous test body.
+assert_cmd = "2"
+predicates = "3"
+# W10 (v0.6.3) — `wiremock` lets the llm.rs tests stand up an in-process
+# HTTP server speaking the Ollama API surface, so OllamaClient's blocking
+# reqwest calls can be exercised end-to-end without any network or daemon.
+# Used only by tests; never linked into the release binary.
+wiremock = "0.6"
+# `libc` for the SIGINT graceful-shutdown integration test on unix —
+# already transitively in the dep tree via tokio, declared explicitly
+# here so the test can `use libc::SIGINT` without `rustc_private` errors.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+# v0.6.3.1 (PR-5 / issue #487) — `audit::mark_append_only` invokes
+# `libc::chflags` (BSD/macOS) and the `FS_IOC_SETFLAGS` ioctl (Linux)
+# to mark the audit log as append-only at the kernel level. Best-effort
+# defense in depth; the load-bearing tamper-evidence is the per-line
+# hash chain, not the file flag.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [[bench]]
 name = "recall"

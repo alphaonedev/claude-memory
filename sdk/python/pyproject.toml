@@ -40,9 +40,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/AlphaOneLabs/ai-memory"
-Source = "https://github.com/AlphaOneLabs/ai-memory"
-Issues = "https://github.com/AlphaOneLabs/ai-memory/issues"
+Homepage = "https://github.com/alphaonedev/ai-memory-mcp"
+Source = "https://github.com/alphaonedev/ai-memory-mcp"
+Issues = "https://github.com/alphaonedev/ai-memory-mcp/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]

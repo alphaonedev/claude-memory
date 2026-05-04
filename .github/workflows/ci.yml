@@ -11,8 +11,79 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Classify the diff so docs-only PRs can short-circuit the heavy Rust
+  # matrix instead of waiting ~12 min for Windows. Required status checks
+  # are still satisfied because the matrix jobs keep their names AND
+  # complete with status SUCCESS — they just no-op on docs-only diffs.
+  classify:
+    name: Classify changes
+    runs-on: ubuntu-latest
+    outputs:
+      docs_only: ${{ steps.cls.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v5
+        with: { fetch-depth: 2 }
+      - id: cls
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            base="${{ github.event.before }}"
+          else
+            base=""
+          fi
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git rev-parse "$base" >/dev/null 2>&1; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::cannot resolve base commit ($base) — running full pipeline"
+            exit 0
+          fi
+          changed=$(git diff --name-only "$base" HEAD)
+          if [ -z "$changed" ]; then
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::no diff vs base — treating as docs-only no-op"
+            exit 0
+          fi
+          # docs-only iff every changed file matches docs/** OR *.md anywhere
+          if echo "$changed" | grep -qvE '^(docs/|.*\.md$)'; then
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::code changes detected — running full pipeline"
+          else
+            echo "docs_only=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::docs-only diff — skipping Rust pipeline"
+          fi
+          echo "--- Changed files ($(echo "$changed" | wc -l) files) ---"
+          echo "$changed"
+
+  # Fast lint job — fmt + clippy on ubuntu only. Toolchain-portable, no
+  # need to run on macOS/Windows where it just duplicates work and burns
+  # ~3 min per platform. Advisory (not in required-status-checks) so
+  # safe to skip entirely on docs-only diffs at the job level.
+  lint:
+    name: Lint (fmt + clippy)
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+
+  # Cross-platform correctness matrix. These job names are required by
+  # branch protection on main/develop/release/**, so the jobs MUST run
+  # and complete SUCCESS even on docs-only PRs. Per-step `if:` makes the
+  # heavy work skip on docs-only diffs while the job still returns green
+  # in <30 seconds.
   check:
     name: Check (${{ matrix.os }})
+    needs: classify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -21,31 +92,31 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: docs-only short-circuit
+        if: needs.classify.outputs.docs_only == 'true'
+        run: echo "::notice::docs-only PR — ${{ matrix.os }} matrix is a no-op"
+
       - name: Install Rust stable
+        if: needs.classify.outputs.docs_only != 'true'
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
-
-      - name: Check formatting
-        run: cargo fmt --check
-
-      - name: Clippy
-        run: cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic
+        if: needs.classify.outputs.docs_only != 'true'
 
       - name: Run tests
+        if: needs.classify.outputs.docs_only != 'true'
         env:
           AI_MEMORY_NO_CONFIG: "1"
         run: cargo test
 
       - name: Security audit
-        if: matrix.os == 'ubuntu-latest'
+        if: needs.classify.outputs.docs_only != 'true' && matrix.os == 'ubuntu-latest'
         run: |
           cargo install cargo-audit --locked
           cargo audit
 
       - name: Build release
+        if: needs.classify.outputs.docs_only != 'true'
         run: cargo build --release
 
   release:
@@ -148,10 +219,35 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Publish to crates.io
+      - name: Publish to crates.io (with retry)
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: cargo publish --allow-dirty || echo "::warning::crates.io publish skipped (version may already exist)"
+        # v0.6.5 — replace silent-failure `|| echo "warning"` with proper retry.
+        # crates.io's Fastly cache returns 503 + sigsci WAF rejection under
+        # transient load (v0.6.3 + v0.6.4 both hit this — silently). The
+        # `version may already exist` swallow is detected explicitly so a
+        # genuine "already published" doesn't fail the job, but everything
+        # else (5xx, network errors, oversized package) fails loudly.
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if output=$(cargo publish --allow-dirty 2>&1); then
+              echo "::notice::crates.io publish succeeded on attempt $attempt"
+              echo "$output" | tail -10
+              exit 0
+            fi
+            echo "$output" | tail -20
+            if echo "$output" | grep -q "already exists\|crate version .* is already uploaded"; then
+              echo "::notice::crates.io: version already published (idempotent no-op)"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::crates.io publish failed on attempt $attempt — retrying after 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::crates.io publish failed on all 3 attempts"
+          exit 1
 
   homebrew:
     name: Update Homebrew formula
@@ -259,6 +355,48 @@ jobs:
           git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
           git push
 
+  # v0.6.5 — Dockerfile-build smoke. Runs on EVERY push to main / develop /
+  # release/** AND on EVERY PR that touches code. Builds the Docker image;
+  # does NOT push to GHCR. Catches Dockerfile drift (missing COPY of new
+  # files referenced by include_str!, glibc mismatch from build/runtime
+  # base drift, etc.) BEFORE we cut a release tag.
+  #
+  # Retrospective: v0.6.3 added include_str! refs to migrations/sqlite/
+  # but the Dockerfile didn't COPY migrations/. v0.6.4's image built
+  # but used rust:1.94-slim (trixie, glibc 2.41) on top of bookworm
+  # runtime (glibc 2.36) — built but failed at runtime with
+  # "version GLIBC_2.39 not found". Both bugs were caught at release
+  # time, not PR time. This job closes that gap.
+  #
+  # Skipped on docs-only PRs — a Dockerfile build can't possibly differ
+  # when only /docs/ or *.md changed.
+  dockerfile-validate:
+    name: Dockerfile build (no push)
+    needs: classify
+    runs-on: ubuntu-latest
+    # Skip on tag pushes — the docker job below handles those (with push).
+    if: ${{ !startsWith(github.ref, 'refs/tags/v') && needs.classify.outputs.docs_only != 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image (validation only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ai-memory:ci-validate
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test the built image
+        run: |
+          docker run --rm ai-memory:ci-validate --version
+          docker run --rm ai-memory:ci-validate --help | head -20
+
   docker:
     name: Docker (GHCR)
     needs: check
@@ -299,68 +437,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-  ppa:
-    name: Ubuntu PPA
-    needs: check
-    # Skip pre-release tags — Launchpad PPA users get stable releases only.
-    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Install packaging tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y devscripts debhelper dput gnupg pkg-config libssl-dev build-essential
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Import GPG key
-        env:
-          GPG_PRIVATE_KEY: ${{ secrets.GPG_PRIVATE_KEY }}
-        run: |
-          printf '%s' "$GPG_PRIVATE_KEY" | gpg --batch --import
-          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
-          gpgconf --reload gpg-agent
-
-      - name: Update changelog version
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          SERIES=noble
-          sed -i "1s/(.*)/(${VERSION}-1) ${SERIES}; urgency=medium/" debian/changelog
-
-      - name: Create orig tarball
-        run: |
-          VERSION=${{ steps.version.outputs.version }}
-          cd ..
-          tar czf "ai-memory_${VERSION}.orig.tar.gz" \
-            --exclude='.git' \
-            --exclude='target' \
-            --exclude='backup' \
-            ai-memory-mcp
-          ls -la "ai-memory_${VERSION}.orig.tar.gz"
-
-      - name: Build source package
-        env:
-          DEBUILD_DPKG_BUILDPACKAGE_OPTS: "-d"
-        run: |
-          debuild -S -sa -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 --no-sign -d
-
-      - name: Sign source package
-        run: |
-          cd ..
-          debsign -k4BAA63E9957BD865FA881D1E64A81A0A19B5E324 ai-memory_${{ steps.version.outputs.version }}-1_source.changes
-
-      - name: Upload to PPA
-        run: |
-          cd ..
-          dput ppa:jbridger2021/ppa ai-memory_${{ steps.version.outputs.version }}-1_source.changes
-
   copr:
     name: Fedora COPR
     needs: release
@@ -385,6 +461,10 @@ jobs:
           sudo apt-get install -y pipx
           pipx ensurepath
           pipx install copr-cli
+          # copr-cli 2.5 ships without `rich` in its pipx venv and
+          # fails at import (ModuleNotFoundError: No module named 'rich').
+          # Inject it manually so the CLI starts.
+          pipx inject copr-cli rich
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Configure copr-cli
@@ -438,3 +518,62 @@ jobs:
       - name: Upload to COPR
         run: |
           copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
+
+  # Coverage is advisory (not in required-status-checks) so we can safely
+  # skip the whole job on docs-only PRs.
+  coverage:
+    name: Code Coverage
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy, llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      # v0.6.3 W12-CI-fix: switched from cargo-tarpaulin to cargo-llvm-cov.
+      # tarpaulin 0.32.x trips a `pulp` 0.22.2 const-eval panic
+      # (`CheckSameSize::<i8, u16>::VALID`) under its source-based
+      # instrumentation. llvm-cov uses LLVM-native source-based instrumentation
+      # which doesn't hit the bug, and matches the canonical local measurement
+      # command the coverage campaign used (93.08% headline number per
+      # docs/evidence.html).
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage report
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo llvm-cov --features sal --no-fail-fast --html --output-dir coverage -- --test-threads=2
+          # `cargo llvm-cov report` reads the saved profile data and does
+          # not accept `--features` (would error: "invalid option
+          # '--features' for subcommand 'report'"). The earlier pipe-to-
+          # `tee` form masked that failure since `tee` always exits 0.
+          cargo llvm-cov report --summary-only | tee coverage/summary.txt
+
+      # v0.6.3.1 coverage gate — fail-under 93% lines.
+      # Bumped from 92 → 93 after the cli/sync.rs + reranker.rs uplift
+      # work landed on release/v0.6.3.1-coverage-uplift-sync-reranker
+      # (cli/sync.rs 75.00% → ~96%, reranker.rs 79.25% → ~95%, total
+      # 93.08% → ≥93.50%). The 1%-absorb-buffer convention is retained:
+      # routine churn doesn't trip the gate but a regression of >1% does.
+      # Per-module floors for hot modules (handlers, db, federation, mcp,
+      # governance) are tracked in the v0.7 assertion table; this is the
+      # total-line floor.
+      - name: Enforce coverage floor (≥93% lines)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo llvm-cov report --fail-under-lines 93
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-report
+          path: coverage/

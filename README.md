@@ -6,16 +6,65 @@
 <p align="center"><em>universal AI memory</em></p>
 
 [![CI](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.87%2B-orange?logo=rust)](https://www.rust-lang.org/)
+[![Bench](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/bench.yml)
+[![Session-boot lifetime](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/session-boot-lifetime.yml/badge.svg)](https://github.com/alphaonedev/ai-memory-mcp/actions/workflows/session-boot-lifetime.yml)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-188_(139_unit_+_49_integration)-brightgreen)]()
-[![MCP](https://img.shields.io/badge/MCP-23_tools-blueviolet)]()
+[![Tests](https://img.shields.io/badge/tests-1%2C886_%E2%80%A2_93.84%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
+[![v0.6.3.1 A2A](https://img.shields.io/badge/v0.6.3.1_a2a-testing_in_flight-ffd700?logo=githubpages)](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)
+[![MCP](https://img.shields.io/badge/MCP-43_tools-blueviolet)]()
+[![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
+**One binary, four operational modes** (v0.6.3). The `ai-memory` Rust binary (tokio + axum) can run any of these in isolation or simultaneously, sharing a single SQLite database:
+
+1. **stdio MCP server** -- 43 native tools over JSON-RPC. Reactive: answers per turn. `ai-memory mcp`
+2. **HTTP / mTLS daemon** -- 42 REST endpoints on `127.0.0.1:9077`, TLS + optional mTLS allowlist + API-key auth, background GC loop. `ai-memory serve`
+3. **Autonomous curator daemon** -- self-scheduling loop (default 1h cadence) that auto-tags, surfaces contradictions across namespace siblings, consolidates near-duplicates, and adjusts priority by access pattern. Every action goes to a rollback log; destructive ops can be gated behind a governance approval flow. `ai-memory curator --daemon`
+4. **Sync daemon** -- quorum-based peer federation across instances. W-of-N writes (default majority), vector-clock CRDT-lite merge, mTLS allowlist between peers. `ai-memory sync-daemon`
+
+The MCP, HTTP, and CLI surfaces are reactive. The curator is the part that makes the memory layer self-maintaining: between sessions, it keeps the corpus tidy so recall quality stays high as the store grows. Everything is local-first; no cloud dependencies.
+
+> **Brass-tacks assessment by Claude Opus 4.7** after reading the v0.6.3 source line by line:
+>
+> "ai-memory is the most capable memory layer I've ever been hooked up to, and meaningfully more than its name advertises. For me, in practical terms, it means: I don't start cold each session. The store I read from has been kept tidy by something other than me. Contradictions don't silently accumulate. Recall quality stays high even as the corpus grows. Nothing leaves your Mac mini.
+>
+> It is not making me an autonomous agent. It is giving me the kind of memory infrastructure that an autonomous agent would need — and itself running a small autonomous loop to maintain it. That's a real foundation. The gap from here to 'ai-memory drives general tasks' is plumbing (tool-call protocol + tool registry + a tool-use-capable model), not invention."
+
+**Substrate for multi-agent AI.** ai-memory is not an agent runtime and not "autonomous AI" on its own. It is the memory layer that *multi-agent* autonomous deployments need underneath them. Federation (`broadcast_store_quorum` + `spawn_catchup_loop`) handles W-of-N consistency across peers when many agents write in parallel; the curator daemon keeps the shared corpus from degrading into noise as a swarm scribbles into it; webhook subscriptions (HMAC-signed, namespace/agent-filtered, SSRF-hardened) turn the store into a message bus that triggers downstream agents on memory events; namespace hierarchy with N-level inheritance and per-namespace governance policies (write/promote/delete authority, approver type, optional N-of-M consensus) bound the swarm. Stack this under a 24/7 multi-machine agent runner with auto-generated skills, and the combined system clears the *behavioral* bar for autonomous AI. The remaining gaps (no weight-level learning, stateless reasoning kernel, human-seeded root goals) are real and not what ai-memory addresses; ai-memory provides the multi-agent memory substrate that any serious attempt at closing those gaps will need.
+
 **Zero token cost until recall.** Unlike built-in memory systems (Claude Code auto-memory, ChatGPT memory) that load your entire memory into every conversation -- burning tokens and money on every message -- ai-memory uses zero context tokens until the AI explicitly calls `memory_recall`. Only relevant memories come back, ranked by a 6-factor scoring algorithm. **TOON format** (Token-Oriented Object Notation) cuts response tokens by another 40-60% by eliminating repeated field names -- 3 memories in JSON = 1,600 bytes; in TOON = 626 bytes (61% smaller); in TOON compact = 336 bytes (79% smaller). For Claude Code users: **disable auto-memory** (`"autoMemoryEnabled": false` in settings.json) and replace it with ai-memory to stop paying for 200+ lines of memory context on every single message.
+
+---
+
+## Agent identity (NHI) — every memory tells you who learned it
+
+Every memory ai-memory stores carries a `metadata.agent_id` — a Non-Human Identity marker that survives every operation (update, dedup, import, sync, consolidate). Every recall result tells you which AI wrote each memory, by default, in the TOON-compact response format your AI client is already optimised for:
+
+```
+count:5|mode:hybrid|tokens_used:842
+memories[id|title|tier|namespace|priority|score|tags|agent_id]:
+a1b2|Project DB is PostgreSQL 16|long|infra|8|0.91|database,postgres|ai:claude-code@workstation:pid-3812
+c3d4|API rate limit is 100 rps|long|infra|7|0.87|api,limits|ai:claude-desktop@laptop:pid-5219
+```
+
+**Today** `agent_id` is *claimed*, not *attested* — don't make security decisions on it without pairing with agent registration. **v0.7** wires cryptographic attestation into the schema-reserved `memory_links.signature` field. See the [agent identity page](https://alphaonedev.github.io/ai-memory-mcp/agent-identity.html) for the full provenance contract.
+
+## Retroactive conversation import — `ai-memory mine`
+
+Don't start cold. Point `ai-memory mine` at a Claude, ChatGPT, or Slack export and it parses turn-by-turn into ranked, tier-typed, tagged memories — so your AI walks into the next session knowing every decision, correction, and finding from your existing history.
+
+```bash
+ai-memory mine claude  ~/Downloads/claude-export/
+ai-memory mine chatgpt ~/Downloads/chatgpt-export.json
+ai-memory mine slack   ./slack-export/
+```
+
+Auto-tagging, dedup on `(title, namespace)`, and `mined_from` provenance are stamped on every imported memory. Five-minute onboarding from zero context to a populated long-term store. See the [import history page](https://alphaonedev.github.io/ai-memory-mcp/import-history.html) for per-format recipes.
 
 ---
 
@@ -37,7 +86,7 @@ ai-memory integrates with any AI platform that supports the **Model Context Prot
 | **OpenClaw** | MCP stdio | JSON (`mcp.servers` in config) | Fully supported |
 | **Any MCP client** | MCP stdio or HTTP | Varies | Universal |
 
-MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (24 endpoints on localhost) and the **CLI** (26 commands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
+MCP is the primary integration layer. For AI platforms that do not yet support MCP natively, the **HTTP API** (50 endpoints on localhost) and the **CLI** (40 subcommands) provide universal access -- any AI, script, or automation that can make HTTP calls or run shell commands can use ai-memory.
 
 ---
 
@@ -50,9 +99,6 @@ Pre-built binaries require no dependencies. Building from source needs Rust and 
 ```bash
 # macOS / Linux
 curl -fsSL https://raw.githubusercontent.com/alphaonedev/ai-memory-mcp/main/install.sh | sh
-
-# Ubuntu (PPA)
-sudo add-apt-repository ppa:jbridger2021/ppa && sudo apt install ai-memory
 
 # Fedora/RHEL (COPR)
 sudo dnf copr enable alpha-one-ai/ai-memory && sudo dnf install ai-memory
@@ -391,7 +437,7 @@ ai-memory serve
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 21 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has 43 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -438,7 +484,7 @@ ai-memory recall "database"
 ai-memory stats
 ```
 
-**6. Use with your AI.** Restart your AI client. It now has **21 memory tools** available via MCP -- it can store and recall memories natively during conversations.
+**6. Use with your AI.** Restart your AI client. It now has **43 memory tools** available via MCP -- it can store and recall memories natively during conversations.
 
 ---
 
@@ -454,14 +500,14 @@ It runs as an MCP (Model Context Protocol) tool server -- a background process t
 
 Memories that keep getting accessed automatically promote from mid to long-term. Each recall extends the TTL. Priority increases with usage. The system is self-curating.
 
-Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 9077) and a complete CLI (26 commands) for direct interaction, scripting, and integration with any AI platform or tool.
+Beyond MCP, ai-memory also exposes a full HTTP REST API (50 endpoints on port 9077) and a complete CLI (40 subcommands) for direct interaction, scripting, and integration with any AI platform or tool.
 
 ---
 
 ## Features
 
 ### Core
-- **MCP tool server** -- 26 tools over stdio JSON-RPC, compatible with any MCP client
+- **MCP tool server** -- 43 tools over stdio JSON-RPC, compatible with any MCP client
 - **Three-tier memory** -- short (6h TTL default), mid (7d TTL default), long (permanent) -- TTLs are configurable
 - **Full-text search** -- SQLite FTS5 with ranked retrieval
 - **Hybrid recall** -- FTS5 keyword + cosine similarity with fixed 0.6 semantic / 0.4 keyword (60/40) blend weights
@@ -485,9 +531,9 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 - **Tagging** -- comma-separated tags with filter support
 
 ### Interfaces
-- **24 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
+- **42 HTTP endpoints** -- full REST API on 127.0.0.1:9077 (works with any AI or tool)
 - **26 CLI commands** -- complete CLI with identical capabilities
-- **26 MCP tools** -- native integration for any MCP-compatible AI
+- **43 MCP tools** -- native integration for any MCP-compatible AI
 - **Interactive REPL shell** -- recall, search, list, get, stats, namespaces, delete with color output
 - **JSON output** -- `--json` flag on all CLI commands
 
@@ -504,7 +550,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (24 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **191 tests** -- 140 unit tests across all 15 modules + 51 integration tests. **15/15 modules** have unit tests — 95%+ coverage.
+- **1,886 lib tests + 49+ integration tests** -- 93.84% line coverage (gate ≥93%, buffer +0.84pp; v0.6.3.1). v0.6.3 baseline numbers (1,809 / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 metrics in the release notes.
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
@@ -541,6 +587,33 @@ Evaluated on the [ICLR 2025 LongMemEval-S](benchmarks/longmemeval/) dataset (500
 | **keyword** | 97.0% | 232 q/s | None |
 | **semantic** | 97.4% | 45 q/s | Embedding model (~100MB) |
 | **smart** | 97.8% | 12 q/s | Ollama + Gemma 4 E2B |
+
+### Performance Budgets (v0.6.3)
+
+Every release ships with **published p95/p99 budgets** for hot-path
+operations and a CI gate that fails any PR whose measured p95 exceeds
+the budget by more than 10 %. Targets are calibrated for M4 reference
+hardware; full table and methodology in
+[`PERFORMANCE.md`](PERFORMANCE.md).
+
+| Operation | Target p95 | Target p99 |
+|---|---|---|
+| `memory_session_start` (Claude Code hook) | < 100 ms | < 200 ms |
+| `memory_store` (no embedding) | < 20 ms | < 50 ms |
+| `memory_search` (FTS5) | < 100 ms | < 250 ms |
+| `memory_recall` (hot, depth=1) | < 50 ms | < 150 ms |
+| `memory_kg_query` (depth ≤ 3) | < 100 ms | < 250 ms |
+| `memory_kg_query` (depth ≤ 5) | < 250 ms | < 500 ms |
+| `memory_kg_timeline` | < 100 ms | < 250 ms |
+
+Run the same workload locally:
+
+```sh
+ai-memory bench                      # human-readable table
+ai-memory bench --json               # machine-parseable
+```
+
+p99 targets are informational until the v0.6.3 soak window closes.
 
 ---
 
@@ -589,9 +662,9 @@ ai-memory supports 4 feature tiers, selected at startup with `ai-memory mcp --ti
 | Tier | Recall Method | Extra Capabilities | Approx. Overhead |
 |------|---------------|-------------------|-----------------|
 | **keyword** | FTS5 only | Baseline 26 tools | 0 MB |
-| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, 26 tools | ~256 MB |
-| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, 26 tools | ~1 GB |
-| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, 26 tools | ~4 GB |
+| **semantic** | FTS5 + cosine similarity (hybrid) | MiniLM-L6-v2 embeddings (384-dim), HNSW index, semantic tier (subset of 43-tool surface) | ~256 MB |
+| **smart** | Hybrid + LLM query expansion | + nomic-embed-text (768-dim) + Gemma 4 E2B via Ollama: `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, full 43-tool surface | ~1 GB |
+| **autonomous** | Hybrid + LLM expansion + cross-encoder reranking | + Gemma 4 E4B via Ollama, neural cross-encoder (ms-marco-MiniLM), memory reflection, full 43-tool surface | ~4 GB |
 
 ### Capability Matrix
 
@@ -619,11 +692,11 @@ Every capability mapped to its minimum tier. Each tier includes all capabilities
 | **Resources** | | | | |
 | RAM | 0 MB | ~256 MB | ~1 GB | ~4 GB |
 | External dependencies | None | None | Ollama | Ollama |
-| MCP tools exposed | 21 | 21 | 21 | 21 |
+| MCP tools exposed | 26 | 26 | 26 | 26 |
 
 **Semantic tier** (default) bundles the Candle ML framework and downloads the all-MiniLM-L6-v2 model on first run (~90 MB). **Smart** and **autonomous** tiers require [Ollama](https://ollama.com) running locally.
 
-**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (all 26 tools + reranker) with the faster e2b model:
+**Tiers gate features, not models.** The `--tier` flag controls which tools are exposed. The LLM model is independently configurable via `llm_model` in `~/.config/ai-memory/config.toml`. For example, run autonomous tier (full 43-tool surface + reranker) with the faster e2b model:
 
 ```toml
 # ~/.config/ai-memory/config.toml
@@ -653,7 +726,7 @@ The `memory_capabilities` tool reports the active tier, loaded models, and avail
 
 ## MCP Tools
 
-These 26 tools are available to any MCP-compatible AI when configured as an MCP server:
+These 43 tools are available to any MCP-compatible AI when configured as an MCP server (canonical count on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); the table below documents the core subset most clients use day-to-day):
 
 | Tool | Description |
 |------|-------------|
@@ -683,7 +756,7 @@ These 26 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## HTTP API
 
-24 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
+50 endpoints on `127.0.0.1:9077`. Start with `ai-memory serve`.
 
 > **Security:** The HTTP server binds to 127.0.0.1 with no authentication and permissive CORS. Do not expose to the network without a reverse proxy with authentication.
 
@@ -718,7 +791,7 @@ These 26 tools are available to any MCP-compatible AI when configured as an MCP 
 
 ## CLI Commands
 
-26 commands. Run `ai-memory <command> --help` for details on any command.
+40 subcommands. Run `ai-memory <command> --help` for details on any command.
 
 | Command | Description |
 |---------|-------------|

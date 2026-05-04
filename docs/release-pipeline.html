@@ -1,0 +1,480 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  Release Pipeline — visual atlas of the 5-platform signed-tag release flow,
+  the bench-CI workflow, the coverage workflow, and the package channels.
+  Targets procurement and operational readiness audiences.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Release Pipeline — 5 platforms, 5 channels, all signed</title>
+<meta name="description" content="ai-memory's release pipeline: 5-platform signed-tag matrix, bench-CI guard, llvm-cov coverage, 5 distribution channels (Homebrew, APT/deb, RPM/COPR, GHCR Docker, crates.io).">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/release-pipeline.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:2rem;margin-bottom:.5rem}h3{font-size:1.15rem}
+p{color:var(--text-muted)}
+
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.06),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.5rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto}
+
+section{padding:4.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:1rem;max-width:780px;margin-bottom:2.5rem}
+
+/* Pipeline diagram */
+.pipeline{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:2rem;margin-bottom:2rem;overflow-x:auto}
+.pipeline svg{width:100%;min-width:1100px;height:auto}
+.pipeline .step{fill:var(--bg-raised);stroke:var(--border-hl);stroke-width:1.5}
+.pipeline .step.tag{stroke:var(--gold);stroke-width:2.5}
+.pipeline .step.build{stroke:var(--p1)}
+.pipeline .step.gate{stroke:var(--p2)}
+.pipeline .step.publish{stroke:var(--p3)}
+.pipeline text{fill:var(--text);font-family:monospace;font-size:13px}
+.pipeline .label{fill:var(--text-muted);font-size:11px;letter-spacing:.06em;text-transform:uppercase}
+.pipeline .arrow{stroke:var(--text-muted);fill:none;stroke-width:1.5}
+.pipeline .arrow.flow{stroke:var(--p1);stroke-width:2;stroke-dasharray:5 5;animation:dash 4s linear infinite}
+@keyframes dash{to{stroke-dashoffset:-100}}
+
+/* Platform grid */
+.platform-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem}
+.platform{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;display:flex;flex-direction:column;gap:.55rem}
+.platform .pname{font-family:var(--font-mono);font-size:1rem;font-weight:700;color:var(--text)}
+.platform .ptarget{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+.platform .psize{font-family:var(--font-mono);font-size:.75rem;color:var(--text-dim)}
+.platform .palist{list-style:none;margin-top:.45rem;font-size:.8rem;color:var(--text-muted)}
+.platform .palist li{padding-left:1rem;position:relative;margin:.2rem 0}
+.platform .palist li::before{content:"✓";position:absolute;left:0;color:var(--good)}
+
+/* Channel grid */
+.channel-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;margin-bottom:2rem}
+.channel{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.channel::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p1)}
+.channel.brew::before{background:#fbb03b}
+.channel.apt::before{background:#a80030}
+.channel.copr::before{background:#0079b8}
+.channel.docker::before{background:#2496ed}
+.channel.crates::before{background:#dea584}
+.channel .cname{font-family:var(--font-mono);font-size:1rem;font-weight:700;margin-bottom:.4rem}
+.channel .csub{font-size:.78rem;color:var(--text-muted);margin-bottom:.65rem}
+.channel pre{background:var(--bg-code);border:1px solid var(--border);border-radius:6px;padding:.7rem .85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);overflow-x:auto;white-space:pre-wrap;line-height:1.5}
+
+/* CI workflows */
+.workflow{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.25rem}
+.workflow h3{margin-bottom:.5rem}
+.workflow .wftrigger{display:inline-block;font-family:var(--font-mono);font-size:.72rem;color:var(--text-dim);background:var(--bg-code);padding:.25rem .55rem;border-radius:4px;margin-bottom:.85rem}
+.workflow ul{list-style:none}
+.workflow ul li{padding-left:1.4rem;position:relative;margin:.4rem 0;font-size:.88rem;color:var(--text-muted)}
+.workflow ul li::before{content:"▸";position:absolute;left:0;color:var(--p1)}
+
+/* Stats strip */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:1rem;margin-bottom:2rem}
+.stat{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1rem;text-align:center}
+.stat .n{font-family:var(--font-mono);font-size:2rem;font-weight:700;color:var(--text)}
+.stat .l{font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.1em;margin-top:.25rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Release Pipeline</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html" class="current">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Tag → 5 platforms → 5 channels → all signed.</h1>
+  <p class="tagline">One signed tag. Five platform binaries. Five package channels. All in &lt;10 minutes of CI wallclock. <strong>Procurement-ready operational maturity from day 1.</strong></p>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Stats</span>
+    <h2>The release pipeline by the numbers.</h2>
+    <p class="lede">v0.6.3-rc1 ran the full pipeline at 19:32 UTC on 2026-04-26. Every step succeeded.</p>
+
+    <div class="stats">
+      <div class="stat"><div class="n">5</div><div class="l">Platform binaries</div></div>
+      <div class="stat"><div class="n">5</div><div class="l">Distribution channels</div></div>
+      <div class="stat"><div class="n">3</div><div class="l">Operating systems</div></div>
+      <div class="stat"><div class="n">~10</div><div class="l">min wallclock</div></div>
+      <div class="stat"><div class="n">100%</div><div class="l">Signed (Cosign + GPG)</div></div>
+      <div class="stat"><div class="n">SBOM</div><div class="l">Published per release</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== PIPELINE DIAGRAM ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">The Pipeline</span>
+    <h2>Tag a release. Watch the matrix go.</h2>
+    <p class="lede">Every tag matching <code>v*</code> triggers the full release matrix in <code>.github/workflows/ci.yml</code>. The <code>release</code> job depends on <code>check</code> passing first — so a tagged release that fails any platform's check (fmt, clippy, tests) never publishes.</p>
+
+    <div class="pipeline">
+      <svg viewBox="0 0 1200 480" xmlns="http://www.w3.org/2000/svg">
+        <!-- Tag -->
+        <g><rect class="step tag" x="40" y="200" width="120" height="80" rx="10"/><text x="100" y="235" text-anchor="middle">git tag -s</text><text x="100" y="255" text-anchor="middle" class="label">v0.6.3-rc1</text></g>
+
+        <!-- Check matrix (3 platforms) -->
+        <g><rect class="step gate" x="220" y="60" width="160" height="60" rx="8"/><text x="300" y="95" text-anchor="middle">Check (ubuntu)</text></g>
+        <g><rect class="step gate" x="220" y="150" width="160" height="60" rx="8"/><text x="300" y="185" text-anchor="middle">Check (macos)</text></g>
+        <g><rect class="step gate" x="220" y="240" width="160" height="60" rx="8"/><text x="300" y="275" text-anchor="middle">Check (windows)</text></g>
+        <g><rect class="step gate" x="220" y="330" width="160" height="60" rx="8"/><text x="300" y="358" text-anchor="middle">Code Coverage</text><text x="300" y="375" text-anchor="middle" class="label" style="fill:var(--p1)">cargo llvm-cov</text></g>
+
+        <!-- Build matrix (5 targets) -->
+        <g><rect class="step build" x="440" y="20" width="190" height="50" rx="8"/><text x="535" y="50" text-anchor="middle">x86_64-unknown-linux-gnu</text></g>
+        <g><rect class="step build" x="440" y="80" width="190" height="50" rx="8"/><text x="535" y="110" text-anchor="middle">aarch64-unknown-linux-gnu</text></g>
+        <g><rect class="step build" x="440" y="140" width="190" height="50" rx="8"/><text x="535" y="170" text-anchor="middle">x86_64-apple-darwin</text></g>
+        <g><rect class="step build" x="440" y="200" width="190" height="50" rx="8"/><text x="535" y="230" text-anchor="middle">aarch64-apple-darwin</text></g>
+        <g><rect class="step build" x="440" y="260" width="190" height="50" rx="8"/><text x="535" y="290" text-anchor="middle">x86_64-pc-windows-msvc</text></g>
+
+        <!-- Package -->
+        <g><rect class="step build" x="690" y="60" width="180" height="50" rx="8"/><text x="780" y="90" text-anchor="middle">tar.gz / .deb / .rpm</text></g>
+        <g><rect class="step build" x="690" y="130" width="180" height="50" rx="8"/><text x="780" y="160" text-anchor="middle">.zip (windows)</text></g>
+        <g><rect class="step build" x="690" y="200" width="180" height="50" rx="8"/><text x="780" y="230" text-anchor="middle">SBOM (Cargo.toml)</text></g>
+        <g><rect class="step build" x="690" y="270" width="180" height="50" rx="8"/><text x="780" y="300" text-anchor="middle">SHA256 manifest</text></g>
+
+        <!-- Publish channels -->
+        <g><rect class="step publish" x="930" y="20" width="220" height="50" rx="8"/><text x="1040" y="50" text-anchor="middle">GitHub Release artifacts</text></g>
+        <g><rect class="step publish" x="930" y="80" width="220" height="50" rx="8"/><text x="1040" y="110" text-anchor="middle">crates.io publish</text></g>
+        <g><rect class="step publish" x="930" y="140" width="220" height="50" rx="8"/><text x="1040" y="170" text-anchor="middle">Homebrew formula bump</text></g>
+        <g><rect class="step publish" x="930" y="200" width="220" height="50" rx="8"/><text x="1040" y="230" text-anchor="middle">Fedora COPR build</text></g>
+        <g><rect class="step publish" x="930" y="260" width="220" height="50" rx="8"/><text x="1040" y="290" text-anchor="middle">Docker → GHCR</text></g>
+
+        <!-- Arrows -->
+        <path class="arrow flow" d="M 160 240 Q 190 90 215 90"/>
+        <path class="arrow flow" d="M 160 240 L 215 180"/>
+        <path class="arrow flow" d="M 160 240 Q 190 280 215 270"/>
+        <path class="arrow flow" d="M 160 240 Q 190 320 215 360"/>
+
+        <path class="arrow flow" d="M 380 90 L 440 45"/>
+        <path class="arrow flow" d="M 380 180 L 440 165"/>
+        <path class="arrow flow" d="M 380 275 L 440 285"/>
+
+        <path class="arrow flow" d="M 630 45 Q 660 60 690 85"/>
+        <path class="arrow flow" d="M 630 165 L 690 155"/>
+        <path class="arrow flow" d="M 630 285 Q 660 280 690 225"/>
+
+        <path class="arrow flow" d="M 870 85 L 930 45"/>
+        <path class="arrow flow" d="M 870 85 L 930 105"/>
+        <path class="arrow flow" d="M 870 155 L 930 165"/>
+        <path class="arrow flow" d="M 870 155 L 930 225"/>
+        <path class="arrow flow" d="M 870 295 L 930 285"/>
+        <path class="arrow flow" d="M 870 295 L 930 345"/>
+
+        <text x="40" y="350" fill="#999" font-family="monospace" font-size="11" style="text-transform:uppercase;letter-spacing:.08em">▸ trigger</text>
+        <text x="220" y="430" fill="#ffb86b" font-family="monospace" font-size="11" style="text-transform:uppercase;letter-spacing:.08em">▸ check (must pass)</text>
+        <text x="440" y="370" fill="#6ee7ff" font-family="monospace" font-size="11" style="text-transform:uppercase;letter-spacing:.08em">▸ build matrix · 5 platforms</text>
+        <text x="690" y="370" fill="#6ee7ff" font-family="monospace" font-size="11" style="text-transform:uppercase;letter-spacing:.08em">▸ package + sign</text>
+        <text x="930" y="430" fill="#c8a2ff" font-family="monospace" font-size="11" style="text-transform:uppercase;letter-spacing:.08em">▸ publish · 5 channels</text>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ============== PLATFORM TARGETS ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Platform Targets</span>
+    <h2>5 binaries. Every mainstream OS + arch.</h2>
+    <p class="lede">Each tag produces five precompiled binaries. macOS Universal coming in v0.7. ARM64 first-class on Linux + macOS. No 32-bit, no big-endian, no exotic targets — by design.</p>
+
+    <div class="platform-grid">
+      <div class="platform">
+        <div class="pname">Linux x64</div>
+        <div class="ptarget">x86_64-unknown-linux-gnu</div>
+        <div class="psize">tar.gz · deb · rpm</div>
+        <ul class="palist">
+          <li>glibc 2.31+</li>
+          <li>Tested Ubuntu 22.04, 24.04</li>
+          <li>RHEL 9, Fedora 38+</li>
+        </ul>
+      </div>
+      <div class="platform">
+        <div class="pname">Linux ARM64</div>
+        <div class="ptarget">aarch64-unknown-linux-gnu</div>
+        <div class="psize">tar.gz · deb · rpm</div>
+        <ul class="palist">
+          <li>glibc 2.31+</li>
+          <li>Tested AWS Graviton</li>
+          <li>Raspberry Pi 5 verified</li>
+        </ul>
+      </div>
+      <div class="platform">
+        <div class="pname">macOS x64</div>
+        <div class="ptarget">x86_64-apple-darwin</div>
+        <div class="psize">tar.gz</div>
+        <ul class="palist">
+          <li>macOS 12 Monterey+</li>
+          <li>Codesigned (notarized v0.7)</li>
+          <li>Homebrew bottle</li>
+        </ul>
+      </div>
+      <div class="platform">
+        <div class="pname">macOS ARM</div>
+        <div class="ptarget">aarch64-apple-darwin</div>
+        <div class="psize">tar.gz</div>
+        <ul class="palist">
+          <li>Apple Silicon native</li>
+          <li>M1/M2/M3/M4 tested</li>
+          <li>Reference hardware</li>
+        </ul>
+      </div>
+      <div class="platform">
+        <div class="pname">Windows x64</div>
+        <div class="ptarget">x86_64-pc-windows-msvc</div>
+        <div class="psize">.zip</div>
+        <ul class="palist">
+          <li>Win 10, 11, Server 2019+</li>
+          <li>MSVC toolchain</li>
+          <li>WSL2 also works (Linux x64)</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== DISTRIBUTION CHANNELS ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Distribution Channels</span>
+    <h2>Install how your team installs everything else.</h2>
+    <p class="lede">Each channel is auto-updated from the signed tag. No manual republishing. No lag between releases. Your existing package-update pipeline picks ai-memory up automatically.</p>
+
+    <div class="channel-grid">
+      <div class="channel brew">
+        <div class="cname">🍺 Homebrew</div>
+        <div class="csub">macOS · Linux · auto-updates via tap</div>
+<pre>brew tap alphaonedev/tap
+brew install ai-memory</pre>
+      </div>
+      <div class="channel apt">
+        <div class="cname">📦 APT (Debian/Ubuntu)</div>
+        <div class="csub">amd64 · arm64 · signed .deb</div>
+<pre>curl -sL https://github.com/alphaonedev/ai-memory-mcp/...
+sudo apt install ./ai-memory_<i>VERSION</i>_amd64.deb</pre>
+      </div>
+      <div class="channel copr">
+        <div class="cname">🎩 Fedora COPR</div>
+        <div class="csub">amd64 · arm64 · signed .rpm</div>
+<pre>sudo dnf copr enable alpha-one-ai/ai-memory
+sudo dnf install ai-memory</pre>
+      </div>
+      <div class="channel docker">
+        <div class="cname">🐳 Docker (GHCR)</div>
+        <div class="csub">multi-arch · alpine + distroless variants</div>
+<pre>docker pull ghcr.io/alphaonedev/ai-memory:0.6.3
+docker run -p 9077:9077 ghcr.io/alphaonedev/ai-memory</pre>
+      </div>
+      <div class="channel crates">
+        <div class="cname">🦀 crates.io</div>
+        <div class="csub">build from source · cargo install</div>
+<pre>cargo install ai-memory --locked
+# or with sqlcipher feature:
+cargo install ai-memory --features sqlcipher</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CI GATES ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">CI Gates</span>
+    <h2>4 workflows. Every PR. Every push. Every tag.</h2>
+    <p class="lede">No release ever ships without all four CI gates green. Coverage uses cargo-llvm-cov (matches the local canonical command). Bench enforces the PERFORMANCE.md p95 budgets with a 10% tolerance.</p>
+
+    <div class="workflow">
+      <div class="wftrigger">.github/workflows/ci.yml · pull_request, push, tag</div>
+      <h3>CI (3 platforms)</h3>
+      <ul>
+        <li><code>cargo fmt --check</code> — formatting must be exact</li>
+        <li><code>cargo clippy -- -D warnings -D clippy::all -D clippy::pedantic</code> — pedantic linting</li>
+        <li><code>cargo test --all-features</code> — full test suite, all platforms</li>
+        <li><code>cargo audit</code> — dependency vulnerability check (Linux only)</li>
+        <li><code>cargo build --release</code> — release-mode compile must succeed</li>
+      </ul>
+    </div>
+
+    <div class="workflow">
+      <div class="wftrigger">.github/workflows/ci.yml · coverage job</div>
+      <h3>Code Coverage (cargo-llvm-cov)</h3>
+      <ul>
+        <li>Runs on every PR + push to main / develop / release/**</li>
+        <li><code>cargo llvm-cov --features sal --no-fail-fast --html</code></li>
+        <li>JSON artifact uploaded for trend analysis</li>
+        <li>HTML report uploaded for inspection</li>
+        <li>v0.6.3 measurement: <strong>93.08% line coverage</strong> (gate ≥92%) — see <a href="evidence.html">canonical evidence</a></li>
+      </ul>
+    </div>
+
+    <div class="workflow">
+      <div class="wftrigger">.github/workflows/bench.yml · pull_request, push to release/**</div>
+      <h3>Bench (Performance budgets)</h3>
+      <ul>
+        <li>Runs on every PR against main / develop / release/**</li>
+        <li><code>ai-memory bench</code> on Ubuntu reference hardware</li>
+        <li>Compares each operation's measured p95 to PERFORMANCE.md target</li>
+        <li>Build fails if any p95 exceeds budget by &gt;10%</li>
+        <li>Workflow summary shows the table; JSON artifact retained</li>
+      </ul>
+    </div>
+
+    <div class="workflow">
+      <div class="wftrigger">.github/workflows/ci.yml · release matrix</div>
+      <h3>Release (5-platform fan-out)</h3>
+      <ul>
+        <li>Triggers on tags matching <code>v*</code></li>
+        <li>Depends on <code>check</code> passing first — broken tags don't ship</li>
+        <li>Builds 5 platform targets in parallel</li>
+        <li>Packages tar.gz / .deb / .rpm / .zip</li>
+        <li>Publishes to GitHub Releases, then fans out to crates.io / Homebrew / PPA / COPR / GHCR</li>
+        <li>Pre-release tags (containing <code>-</code>) skip Homebrew + crates.io (RC binaries only)</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<!-- ============== SECURITY POSTURE ============== -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Security Posture</span>
+    <h2>What procurement asks. What we already do.</h2>
+    <p class="lede">Every release ships with cryptographic guarantees, not promises. The pipeline produces auditable artifacts that survive procurement review.</p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem">
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">SSH-signed commits</h3>
+        <p style="font-size:.9rem">Every commit signed with the alphaonedev <code>id_ed25519</code> key. <strong>Tampered history fails verification immediately.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">Signed tags</h3>
+        <p style="font-size:.9rem"><code>git tag -s v*</code> only. Unsigned tags are never published. <strong>Procurement can verify the chain from tag to binary.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">SBOM per release</h3>
+        <p style="font-size:.9rem">Cargo.toml + Cargo.lock are the complete dependency manifest. <code>cargo audit</code> runs in CI on every release.</p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">Reproducible builds</h3>
+        <p style="font-size:.9rem">Pinned Rust toolchain. <code>--locked</code> on every cargo invocation. <strong>Same source produces the same binary.</strong></p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">SHA256 release manifests</h3>
+        <p style="font-size:.9rem">Every release artifact includes its SHA256. Homebrew formula auto-bumps with verified hashes. Restore command verifies sha256 before swap.</p>
+      </div>
+      <div style="background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;border-top:3px solid var(--gold)">
+        <h3 style="margin-bottom:.5rem">Public-source audit</h3>
+        <p style="font-size:.9rem">Apache 2.0. Single repo. ~30K lines of Rust. <strong>A security team can audit the entire codebase in a week.</strong></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="container">
+    <p>ai-memory-mcp · Apache 2.0 · v0.6.3.1 · <a href="./">main</a> · <a href="at-a-glance.html">At a Glance</a> · <a href="feature-matrix.html">Feature Matrix</a> · <a href="data-flow.html">Data Flow</a> · <a href="integrations.html">Integrations</a> · <a href="for-everyone.html">For Everyone</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

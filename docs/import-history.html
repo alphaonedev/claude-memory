@@ -1,0 +1,360 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Import history — bring your Claude/ChatGPT/Slack exports into ai-memory.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Import your conversation history</title>
+<meta name="description" content="Make every AI you've ever talked to remember from day one. Paste your Claude / ChatGPT / Slack export — get an instant, ranked, recallable knowledge base.">
+<meta property="og:title" content="ai-memory · Import your conversation history">
+<meta property="og:description" content="Five minutes from blank slate to ranked, recallable memory across every project context you've ever explained.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/import-history.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+pre{font-family:var(--font-mono);font-size:.82rem;background:var(--bg-code);padding:1rem 1.1rem;border-radius:8px;border:1px solid var(--border);overflow-x:auto;line-height:1.55;color:var(--text-muted);margin:1rem 0}
+pre code{padding:0;background:none;font-size:.82rem}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem;margin:1.25rem 0 .35rem}
+p{color:var(--text-muted);margin-bottom:.85rem}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(255,184,107,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+section h2{font-family:var(--font-sans);font-size:1.6rem;margin-bottom:.6rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+
+ul,ol{padding-left:1.5rem;color:var(--text-muted);font-size:.92rem;margin:.5rem 0 1rem}
+ul li,ol li{margin-bottom:.4rem}
+
+table{width:100%;border-collapse:collapse;margin:1rem 0 1.5rem;font-size:.85rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+table th,table td{padding:.65rem .85rem;text-align:left;border-bottom:1px solid var(--border)}
+table th{background:var(--bg-elev);font-family:var(--font-mono);font-size:.78rem;font-weight:600;color:var(--text);letter-spacing:.04em}
+table td{color:var(--text-muted)}
+table tr:last-child td{border-bottom:none}
+
+blockquote{border-left:4px solid var(--p2);background:rgba(255,184,107,.05);padding:1rem 1.25rem;margin:1.25rem 0;border-radius:0 8px 8px 0;color:var(--text-muted)}
+blockquote strong{color:var(--p2)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Import History</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html" class="current">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>Import your conversation history</h1>
+  <p class="tagline">Make every AI you've ever talked to remember from day one. Paste your Claude / ChatGPT / Slack export — get an instant, ranked, recallable knowledge base.</p>
+  <div class="pills">
+    <span class="pill">Claude · ChatGPT · Slack</span>
+    <span class="pill">5-minute onboarding</span>
+    <span class="pill">first-class write path</span>
+    <span class="pill">ai-memory mine</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <blockquote>
+      <strong>Five minutes to a useful agent.</strong> Export your old AI conversations, run one command, and your next agent starts with everything the last one already knew.
+    </blockquote>
+    <p><code>ai-memory mine</code> parses Claude, ChatGPT, and Slack exports into ranked, tiered, recall-ready memories. No re-typing. No copy-paste. No loss of context across model changes.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Why</span>
+    <h2>Why retroactive import matters.</h2>
+    <p>Every AI conversation you've had is a body of decisions, corrections, preferences, and small facts your future agents will need. Today, when you switch tools or start a new context window, that knowledge evaporates. <code>mine</code> ingests it into your local SQLite store — and from that moment, <em>every</em> MCP-compatible AI you talk to recalls it.</p>
+    <p>This is the fastest path from <em>"new tool, blank slate"</em> to <em>"new tool, every project context I've ever explained."</em></p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Onboarding</span>
+    <h2>Five-minute onboarding.</h2>
+<pre><code># 1. Drop your export into the working directory
+ls conversations.json   # ChatGPT export
+# or
+ls claude-export/conversations.jsonl   # Claude export
+# or
+ls slack-export.zip   # extract first → ls slack-export/
+
+# 2. Dry-run to see what will land
+ai-memory mine ./conversations.json --format chatgpt --dry-run
+
+# 3. Import for real
+ai-memory mine ./conversations.json --format chatgpt
+
+# 4. Confirm + recall
+ai-memory stats
+ai-memory recall "what database did we decide on for the analytics service"</code></pre>
+    <p>That's it. Your next agent starts with an opinion.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">What gets imported</span>
+    <h2>Each conversation becomes one memory.</h2>
+    <p>Each conversation that survives the <code>--min-messages</code> threshold (default 3) becomes one memory:</p>
+    <table>
+      <thead>
+        <tr><th>Field</th><th>Source</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>title</code></td><td>First user message, truncated</td></tr>
+        <tr><td><code>content</code></td><td>Full conversation text — alternating user/assistant turns</td></tr>
+        <tr><td><code>tier</code></td><td><code>mid</code> by default (7-day TTL, auto-promotes to <code>long</code> after 5 recalls)</td></tr>
+        <tr><td><code>namespace</code></td><td>Auto-set per format: <code>claude-export</code>, <code>chatgpt-export</code>, <code>slack-export</code></td></tr>
+        <tr><td><code>source</code></td><td><code>mine-claude</code> / <code>mine-chatgpt</code> / <code>mine-slack</code></td></tr>
+        <tr><td><code>metadata.mined_from</code></td><td>Source format tag</td></tr>
+        <tr><td><code>metadata.agent_id</code></td><td>The caller's identity (you)</td></tr>
+        <tr><td><code>created_at</code></td><td>Original conversation timestamp</td></tr>
+      </tbody>
+    </table>
+    <p>Every imported memory is <strong>fully integrated</strong> with the rest of the system: scope visibility, governance gates, recall scoring, deduplication on <code>(title, namespace)</code>, link creation, consolidation. <code>mine</code> is not a sidecar — it's a first-class write path.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Per-format recipes</span>
+    <h2>Claude export.</h2>
+    <p>Claude exports give you a <code>conversations.jsonl</code> file (one JSON object per line — one conversation per line).</p>
+    <p><strong>Where to find it:</strong></p>
+    <ol>
+      <li>Open Claude → Settings → Privacy → Export data</li>
+      <li>Wait for the email; download the zip</li>
+      <li>Inside, find <code>conversations.jsonl</code></li>
+    </ol>
+    <p><strong>Import:</strong></p>
+<pre><code># Dry run first — see what will be imported, count + sizes
+ai-memory mine ./claude-export/conversations.jsonl --format claude --dry-run
+
+# Real import, default mid-tier
+ai-memory mine ./claude-export/conversations.jsonl --format claude
+
+# Or pin everything to long-tier (no TTL) into a custom namespace
+ai-memory mine ./claude-export/conversations.jsonl \
+  --format claude \
+  --namespace personal/claude-history \
+  --tier long \
+  --min-messages 5</code></pre>
+
+    <h2 style="margin-top:2rem">ChatGPT export.</h2>
+    <p>ChatGPT exports give you a <code>conversations.json</code> file (a single JSON array of conversations).</p>
+    <p><strong>Where to find it:</strong></p>
+    <ol>
+      <li>Open ChatGPT → Settings → Data Controls → Export data</li>
+      <li>Wait for the email; download the zip</li>
+      <li>Inside, find <code>conversations.json</code></li>
+    </ol>
+    <p><strong>Import:</strong></p>
+<pre><code># Dry run
+ai-memory mine ./chatgpt-export/conversations.json --format chatgpt --dry-run
+
+# Real import
+ai-memory mine ./chatgpt-export/conversations.json --format chatgpt
+
+# Filter to substantive conversations only (10+ messages)
+ai-memory mine ./chatgpt-export/conversations.json \
+  --format chatgpt \
+  --min-messages 10 \
+  --tier long</code></pre>
+
+    <h2 style="margin-top:2rem">Slack export.</h2>
+    <p>Slack workspace exports give you a directory of per-channel <code>.json</code> files. <code>mine</code> walks the tree.</p>
+    <p><strong>Where to find it:</strong></p>
+    <ol>
+      <li>Slack → Workspace settings → Import / Export Data → Export</li>
+      <li>Pick "Standard export"; wait for the email</li>
+      <li>Download + unzip the archive</li>
+    </ol>
+    <p><strong>Import:</strong></p>
+<pre><code># Dry run on the whole export
+ai-memory mine ./slack-export/ --format slack --dry-run
+
+# Real import — narrow to a high-signal channel
+ai-memory mine ./slack-export/eng-decisions/ --format slack \
+  --namespace work/slack/eng-decisions \
+  --tier long \
+  --min-messages 4</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Flags</span>
+    <h2>Flags reference.</h2>
+    <table>
+      <thead>
+        <tr><th>Flag</th><th>Default</th><th>Meaning</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><code>--format</code>, <code>-f</code></td><td>(required)</td><td><code>claude</code>, <code>chatgpt</code>, <code>slack</code></td></tr>
+        <tr><td><code>--namespace</code>, <code>-n</code></td><td>format-specific</td><td>Override target namespace</td></tr>
+        <tr><td><code>--tier</code>, <code>-t</code></td><td><code>mid</code></td><td><code>short</code> / <code>mid</code> / <code>long</code></td></tr>
+        <tr><td><code>--min-messages</code></td><td><code>3</code></td><td>Skip conversations shorter than this</td></tr>
+        <tr><td><code>--dry-run</code></td><td><code>false</code></td><td>Print what would be imported, don't write</td></tr>
+      </tbody>
+    </table>
+    <p>The miner stamps <code>metadata.agent_id</code> to the caller's identity (see <a href="agent-identity.html" style="color:var(--p1)">Agent identity</a>) and records the original conversation timestamp on <code>created_at</code>.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">After</span>
+    <h2>After the import.</h2>
+    <p>Your imported memories are immediately part of the live recall mix:</p>
+<pre><code># Recall ranks across imported + native memories together
+ai-memory recall "kubernetes deployment strategy" --tier long
+
+# Filter to just the imported set
+ai-memory list --namespace chatgpt-export
+ai-memory list --source mine-chatgpt
+
+# Promote the standout decisions to long-tier permanently
+ai-memory promote &lt;id&gt; --tier long --priority 9
+
+# Consolidate two redundant decisions into one canonical memory
+ai-memory consolidate &lt;id1&gt; &lt;id2&gt; -T "Auth strategy — final decision"</code></pre>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Pattern</span>
+    <h2>A pattern that works.</h2>
+    <ol>
+      <li><strong>Mine your last 90 days first.</strong> Set <code>--min-messages 5</code> to skip the trivial chatter.</li>
+      <li><strong>Pin the survivors.</strong> Run <code>ai-memory recall</code> for your most common project topics; promote the top hits to long-tier.</li>
+      <li><strong>Consolidate the duplicates.</strong> Three memories about the same auth flow? <code>ai-memory consolidate</code> collapses them — and keeps the lineage in <code>metadata.consolidated_from_agents</code>.</li>
+      <li><strong>Wire your next AI.</strong> Whatever comes next — Claude, GPT, Grok, a local Llama — points at the same SQLite file and inherits everything you imported.</li>
+    </ol>
+    <p>This is the workflow Mem0 charges you SaaS pricing for. ai-memory does it locally, in one binary, in five minutes.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Next</span>
+    <h2>Where to go.</h2>
+    <ul>
+      <li>→ <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/develop/docs/QUICKSTART.md" style="color:var(--p1)">Quickstart</a> — store + recall basics</li>
+      <li>→ <a href="memory-tiers.html" style="color:var(--p1)">Memory tiers</a> — when to use short / mid / long</li>
+      <li>→ <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/develop/docs/USER_GUIDE.md" style="color:var(--p1)">Recall</a> — full scoring + ranking (in the User Guide)</li>
+      <li>→ <a href="agent-identity.html" style="color:var(--p1)">Agent identity</a> — every memory carries provenance</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3.1 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+</footer>
+
+</body>
+</html>

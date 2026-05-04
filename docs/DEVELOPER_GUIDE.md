@@ -4,20 +4,20 @@
 
 `ai-memory` is an AI-agnostic memory management system built as a single Rust binary that serves three roles:
 
-1. **MCP tool server** -- stdio JSON-RPC server exposing 21 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
+1. **MCP tool server** -- stdio JSON-RPC server exposing 43 memory tools + 2 MCP prompts for any MCP-compatible AI client (Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others)
 2. **CLI tool** -- direct SQLite operations for store, recall, search, list, etc. (completely AI-agnostic)
-3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 24 endpoints (completely AI-agnostic)
+3. **HTTP daemon** -- an Axum web server exposing the same operations as a REST API with 50 endpoints (completely AI-agnostic)
 
 **Key architectural features:** Zero token cost (no context loaded until recall), TOON compact default response format (79% smaller than JSON), MCP prompts capability (`recall-first` behavioral rules + `memory-workflow` reference card), 4 feature tiers with optional local LLMs via Ollama, true dedup on title+namespace, 6-factor recall scoring with score field in responses.
 
 All three interfaces share the same database layer (`db.rs`) and validation layer (`validate.rs`). The daemon adds automatic garbage collection (every 30 minutes) and graceful shutdown with WAL checkpointing.
 
 ```
-main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (26 commands)
+main.rs          -- CLI parsing (clap), daemon setup (axum), command dispatch (40 subcommands)
 models.rs        -- Data structures: Memory, MemoryLink, query types, constants
 handlers.rs      -- HTTP request handlers (Axum extractors + JSON responses), error sanitization
 db.rs            -- All SQLite operations: CRUD, FTS5, recall scoring, GC, migration, FTS query sanitization, transactional touch/consolidate
-mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 26 tools, notification handling
+mcp.rs           -- MCP (Model Context Protocol) server over stdio JSON-RPC, 43 tools, notification handling
 validate.rs      -- Input validation for all write paths
 errors.rs        -- Structured error types (ApiError, MemoryError), error sanitization for HTTP responses
 color.rs         -- ANSI color output for CLI (zero dependencies, auto-detects terminal)
@@ -47,13 +47,13 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 ### `src/main.rs`
 
 - `Cli` struct with `clap` derive -- defines all CLI commands and global flags (`--db`, `--json`)
-- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive` (26 commands)
+- `Command` enum -- `Serve`, `Mcp`, `Store`, `Update`, `Recall`, `Search`, `Get`, `List`, `Delete`, `Promote`, `Forget`, `Link`, `Consolidate`, `Resolve`, `Shell`, `Sync`, `SyncDaemon`, `AutoConsolidate`, `Gc`, `Stats`, `Namespaces`, `Export`, `Import`, `Completions`, `Man`, `Mine`, `Archive`, `Agents`, `Pending`, `Backup`, `Restore`, `Curator`, `Bench`, `Migrate` (gated `--features sal`), `Doctor`, `Boot`, `Install`, `Wrap`, `Logs`, `Audit` — 40 subcommands total in v0.6.3.1.
 - `StoreArgs` includes `--expires-at` and `--ttl-secs` flags for custom expiration
 - `UpdateArgs` includes `--expires-at` flag for setting expiration on existing memories
 - `ListArgs` includes `--offset` flag for pagination
 - `auto_namespace()` -- detects namespace from git remote URL or directory name
 - `human_age()` -- formats ISO timestamps as "2h ago", "3d ago" for CLI output
-- `serve()` -- starts the Axum server with all routes (24 endpoints including `POST /memories/{id}/promote` and 4 archive endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
+- `serve()` -- starts the Axum server with all routes (50 endpoints including `POST /memories/{id}/promote`, the 4 archive endpoints, the namespace-standard endpoints, and the webhook subscription endpoints), spawns GC task, handles graceful shutdown via SIGINT with WAL checkpoint
 - `cmd_*()` functions -- one per CLI command, each opens the DB directly
 
 ### `src/models.rs`
@@ -69,10 +69,10 @@ When running at the `semantic` tier or higher, ai-memory loads a HuggingFace emb
 
 ### `src/mcp.rs`
 
-The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **26 tools**.
+The MCP (Model Context Protocol) server implementation. MCP is an open standard -- this server works with any MCP-compatible AI client. Runs over stdio, processing one JSON-RPC message per line. Exposes **43 tools**.
 
 - `RpcRequest` / `RpcResponse` / `RpcError` -- JSON-RPC 2.0 types
-- `tool_definitions()` -- returns the 23 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
+- `tool_definitions()` -- returns the 43 tool schemas for `tools/list` (includes `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`)
   - `memory_recall` schema includes `until` parameter and `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`)
   - `memory_search` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
   - `memory_list` schema includes `format` parameter (enum: `"json"`, `"toon"`, `"toon_compact"`, default: `"toon_compact"`) and enforces `maximum: 200` on limit
@@ -87,7 +87,7 @@ Protocol version: `2024-11-05`. All tool responses are wrapped in MCP content bl
 
 **MCP Prompts:** The server exposes 2 prompts via `prompts/list`:
 - **recall-first** -- System prompt with 8 behavioral rules for proactive memory use. Supports an optional `namespace` argument for scoped recall.
-- **memory-workflow** -- Quick reference card for all 26 tool usage patterns.
+- **memory-workflow** -- Quick reference card for all 43 tool usage patterns.
 
 **MCP Error Codes:** The server uses standard JSON-RPC 2.0 error codes:
 - `-32700` -- Parse error (malformed JSON)
@@ -201,7 +201,66 @@ In-memory HNSW (Hierarchical Navigable Small World) vector index for approximate
 
 ### `src/toon.rs`
 
-TOON (Token-Oriented Object Notation) serializer. Converts JSON recall/search/list responses into the compact TOON wire format. The format spec is documented in the [TOON Format Specification](#toon-format-specification) section below.
+TOON (Token-Oriented Object Notation) serializer. Converts JSON recall/search/list responses into the compact TOON wire format. The format spec is documented in the [TOON Format Specification](#toon-format-specification) section below. Public API: `memories_to_toon()`, `search_to_toon()`. Compact mode emits a 6-field projection (id/tier/title/namespace/score/created_at); full mode emits the complete record.
+
+### `src/config.rs`
+
+Tier configuration system + global runtime config. Parses `~/.config/ai-memory/config.toml`, applies environment-variable overrides (`AI_MEMORY_*`), validates tier capabilities (`keyword`, `semantic`, `smart`, `autonomous`), and emits the immutable `Config` consumed by every other module. Includes `TtlConfig` (per-tier TTL + extension windows), `archive_on_gc`, embedding-model selection, Ollama URL, and feature gating that disables higher-tier code paths when the configured tier doesn't permit them.
+
+### `src/embeddings.rs`
+
+Embedding pipeline for `semantic+` tiers. Loads HuggingFace sentence-transformer models (`all-MiniLM-L6-v2` 384-dim or `nomic-embed-text-v1.5` 768-dim) on first run via `hf-hub`, runs inference via Candle, generates dense vectors at insert time, and backfills missing embeddings on first startup. Vectors are stored as BLOBs in the `memories.embedding` column. Consumed by `reranker.rs` for hybrid recall and `hnsw.rs` for approximate nearest-neighbour indexing.
+
+### `src/llm.rs`
+
+LLM integration via Ollama for query expansion, auto-tagging, and contradiction detection. Implements `OllamaClient` (HTTP via `reqwest`) and supplies the production implementation of the `AutonomyLlm` trait (see `src/autonomy.rs`). Prompts are kept short and structured to minimize token cost; failures are non-fatal — the curator and autonomy passes log and continue.
+
+### `src/mine.rs`
+
+Retroactive conversation import — bulk-imports historical Claude / ChatGPT / Slack export files into ai-memory as backfilled memories. Each conversation becomes a single memory; metadata captures `source`, `agent_id`, and timestamps from the export. Used to seed memory before live capture is available.
+
+### `src/reranker.rs`
+
+Hybrid recall algorithm. Blends the FTS5 keyword score and the embedding cosine similarity into a single ranking, applying configurable weighting and a 6-factor scoring formula (recency, priority, access count, tier weight, content match, namespace match). Returns a score field in every recall response so callers can audit ranking decisions.
+
+### `src/identity.rs`
+
+Non-Human Identity (NHI) resolution for `agent_id`. Centralises the precedence chain across CLI, MCP, and HTTP entry points so `metadata.agent_id` is uniformly populated. Public API: `resolve_agent_id()` (CLI/MCP), `resolve_http_agent_id()` (HTTP body + `X-Agent-Id` header), `preserve_agent_id()` (round-trip), `process_discriminator()` (stable per-process identifier). Default-id formats: `ai:<client>@<hostname>:pid-<pid>` (MCP), `host:<hostname>:pid-<pid>-<uuid8>` (CLI), `anonymous:req-<uuid8>` (HTTP per-request fallback). `agent_id` is a *claimed* identity, not attested.
+
+### `src/curator.rs`
+
+Autonomous curator daemon (v0.6.1). Runs a periodic sweep over stored memories, invoking `auto_tag` and `detect_contradiction` via the configured LLM and persisting results into each memory's metadata. Complements the synchronous post-store hooks (#265). Hard cap on operations per cycle (default 100); skips internal `_`-prefixed namespaces; honours include/exclude lists; dry-run mode emits a report without touching rows; LLM errors are logged but never abort a cycle. Public API: `CuratorConfig`, `CuratorReport`, `run_once()`, `run_daemon()`.
+
+### `src/autonomy.rs`
+
+Full-autonomy loop — stacks on the curator daemon. Four passes beyond auto-tag:
+
+1. **Consolidation** — find near-duplicate memories in the same namespace (Jaccard ≥ 0.55, max cluster size 8), LLM-summarise into a single canonical memory, archive originals.
+2. **Forgetting of superseded memories** — when `metadata.confirmed_contradictions` is set, demote/forget the contradicted entry.
+3. **Priority feedback** — nudge `priority` up for hot memories, down for cold ones (purely arithmetic, no LLM call).
+4. **Rollback log + self-report** — every autonomous action lands in `_curator/rollback/<ts>` (reversible) and every cycle in `_curator/reports/<ts>`.
+
+Defines the `AutonomyLlm` trait so the curator can be unit-tested without a live Ollama instance. Public API: `run_autonomy_passes()`, `persist_self_report()`, `reverse_rollback_entry()`, `RollbackEntry`, `AutonomyPassReport`.
+
+### `src/replication.rs`
+
+W-of-N quorum-write layer for the peer-mesh sync (v0.7 track C). Scaffolds the contract described in [`ADR-0001-quorum-replication.md`](ADR-0001-quorum-replication.md). The `QuorumWriter` sits ABOVE the existing sync-daemon — deployments without `--quorum-writes` keep the v0.6.0 one-way push behaviour byte-for-byte. Public API: `QuorumPolicy`, `QuorumWriter::commit`, `AckTracker`. Emits metrics: `replication_quorum_ack_total{result}`, `replication_quorum_failures_total{reason}`, `replication_clock_skew_seconds`.
+
+### `src/federation.rs`
+
+Federation autonomy — wires the quorum primitives from `replication` into the HTTP write path (v0.7 track C, PR 2 of N). When `ai-memory serve` is started with `--quorum-writes N --quorum-peers <urls>`, every successful HTTP write fans out a 1-memory `/api/v1/sync/push` POST to each peer; the write returns OK only once `W-1` peer acks land within `--quorum-timeout-ms`. Fewer acks → `503 quorum_not_met`. Public API: `FederationConfig`, `broadcast_store_quorum()`.
+
+### `src/subscriptions.rs`
+
+v0.6.0.0 webhook subscriptions. Subscribers register a URL + shared secret + event/namespace/agent filters; matching events POST an HMAC-SHA256-signed JSON payload (header `X-Ai-Memory-Signature: sha256=<hex>`) over a fire-and-forget thread. SSRF hardening: `http://` only to `127.0.0.0/8` or `localhost`; everywhere else requires `https://`; RFC1918 / RFC4193 / link-local hosts rejected unless `allow_private_networks=true`. Stored secret is SHA-256 of the plaintext (plaintext returned once at registration). Public API: `Subscription`, `NewSubscription`, `insert()`, `delete()`, `list()`, `dispatch_event()`, `validate_url()`.
+
+### `src/migrate.rs`
+
+Cross-backend migration tool — streams memories from one SAL backend to another (v0.7 track B, PR 2 of N). Gated behind `--features sal`; extended transparently by `--features sal-postgres`. Supported URLs: `sqlite:///abs/path.db`, `sqlite://./relative.db`, `postgres://user:pass@host:port/db`. CLI: `ai-memory migrate --from <url> --to <url> [--batch 1000] [--dry-run] [--namespace foo]`. Reads via `MemoryStore::list`, writes via `MemoryStore::store` with the source memory's id verbatim — adapter upsert-on-id semantics make repeated migration idempotent.
+
+### `src/metrics.rs`
+
+v0.6.0.0 Prometheus metrics, exposed at `GET /metrics` by the daemon. Minimal, non-invasive instrumentation — single global `Registry`, a handful of `IntCounter` / `IntCounterVec` / `IntGauge` / `HistogramVec` handles. Callers increment via typed helpers (`record_store(tier, ok)`, `record_recall(mode, latency_seconds)`, `record_autonomy_hook(kind, ok)`, `curator_cycle_completed(...)`) rather than poking the registry directly so a future metrics-backend swap stays internal. Public API: `Metrics` (struct), `registry()`, `render()`.
 
 ## Database Schema
 
@@ -326,8 +385,8 @@ The `config.rs` module defines 4 feature tiers that gate functionality:
 |------|-----------|-----|-----------------|
 | `keyword` | No | No | 13 base tools + `memory_capabilities` + 4 archive tools |
 | `semantic` | Yes | No | 14 base tools + `memory_capabilities` + 4 archive tools |
-| `smart` | Yes | Yes | All 26 tools |
-| `autonomous` | Yes | Yes | All 26 tools + autonomous behaviors |
+| `smart` | Yes | Yes | Full 43-tool surface |
+| `autonomous` | Yes | Yes | Full 43-tool surface + autonomous behaviors |
 
 The tier is set at startup via `ai-memory mcp --tier <tier>` and cannot be changed at runtime. The `memory_capabilities` tool reports the active tier and which features are available, allowing AI clients to adapt their behavior.
 
@@ -456,7 +515,7 @@ Base URL: `http://127.0.0.1:9077/api/v1`
 
 All responses are JSON. Error responses include `{"error": "message"}`. Database errors are sanitized -- clients receive `"Internal server error"` instead of raw SQLite error details.
 
-The HTTP API exposes **24 endpoints**.
+The HTTP API exposes **50 endpoints** in v0.6.3.1 (canonical count from `src/lib.rs:68-194` Router builder; v0.6.3 baseline of 42 is frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
 
 ### Health Check
 
@@ -727,7 +786,7 @@ Global flags:
 
 ### `serve`
 
-Start the HTTP daemon (24 endpoints).
+Start the HTTP daemon (50 endpoints).
 
 ```bash
 ai-memory serve --host 127.0.0.1 --port 9077
@@ -735,7 +794,7 @@ ai-memory serve --host 127.0.0.1 --port 9077
 
 ### `mcp`
 
-Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 26 tools.
+Run as an MCP tool server over stdio. This is the primary integration path for any MCP-compatible AI client. Exposes 43 tools.
 
 ```bash
 ai-memory mcp
@@ -948,7 +1007,7 @@ ai-memory completions fish
 
 ## Testing
 
-The project has **191 tests** total: 140 unit tests across all 15 modules + 51 integration tests in `tests/integration.rs`. **15/15 modules** have unit tests — 95%+ coverage.
+The project has **1,886 lib tests + 49+ integration tests at 93.84% line coverage** as of v0.6.3.1 (was 1,600 lib / 93.08% on v0.6.3). v0.6.3 baseline numbers are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 deltas are documented in the release notes. Modules each carry their own unit-test suite; integration tests live under `tests/`.
 
 ```bash
 # Run all tests
@@ -1054,3 +1113,54 @@ Release profile settings (from `Cargo.toml`):
 - `opt-level = 3`
 - `strip = true` (removes debug symbols)
 - `lto = "thin"` (link-time optimization)
+
+---
+
+## Working Under an Autonomous Campaign
+
+When this repository is being driven by the `campaign` Python harness
+(at `alphaonedev/agentic-mem-labs/tools/campaign/`, Apache 2.0 ©
+AlphaOne LLC), the development workflow is the same workflow described
+above plus the constraints in
+[`ENGINEERING_STANDARDS.md` §7](ENGINEERING_STANDARDS.md#7-autonomous-campaign-workflow).
+
+### Concurrent operation
+
+- A live campaign holds a designated `release/vX.Y.Z` branch as its
+  exclusive merge target. Human contributors can still open PRs against
+  `develop` (or pre-existing release branches) without conflict.
+- The campaign records every decision and PR to its ai-memory namespace
+  (named after the campaign, e.g. `campaign-v063`). To see what the
+  agent has done in the current iteration window:
+
+      ai-memory --db ~/.claude/ai-memory.db list --namespace campaign-v063
+
+- The append-only audit trail lives on a `campaign-log/vX.Y.Z` branch
+  of `agentic-mem-labs`. One markdown report per iteration:
+
+      git -C ~/agentic-mem-labs-log log --oneline campaign-log/v0.6.3
+
+### Memory namespace as the campaign's operating substrate
+
+Every campaign uses an ai-memory namespace named after the campaign.
+The namespace contains: the campaign's overview/scope/hard rules,
+approvals, code-quality standards, Engineering Standards alignment, a
+snapshot of open issues + PRs at campaign start, one summary memory per
+iteration, decisions, blockers, and "future"/deferred items.
+
+Treat the namespace as both the agent's working memory and the
+historical record. After a campaign ends, the namespace is preserved
+indefinitely (`tier = long`).
+
+### What human reviewers should focus on under a campaign
+
+PRs from `campaign/<slug>` branches into `release/vX.Y.Z` get
+`gh pr merge --squash --delete-branch` once CI is green. The agent
+self-reviews quality (clippy pedantic, fmt, tests). For human
+spot-checks: charter alignment, hard-rule compliance, test coverage,
+audit consistency on the `campaign-log/vX.Y.Z` branch.
+
+The campaign is a *complement* to human development, not a replacement.
+For everything outside the active charter — bug triage, design ADRs,
+release cuts, dependency upgrades, security response — humans still
+own the work.

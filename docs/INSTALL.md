@@ -1,6 +1,6 @@
 # Installation Guide
 
-> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others. Install the binary, configure your AI client's MCP settings, and you get 21 memory tools instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds (pre-built binary + fast internet; first semantic-tier run also downloads a ~100MB embedding model).
+> **BLUF (Bottom Line Up Front):** `ai-memory` is an AI-agnostic memory management system that works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, OpenClaw, and others. Install the binary, configure your AI client's MCP settings, and you get **43 MCP memory tools** instantly. The default `semantic` tier includes embedding-based hybrid recall out of the box. Total time: ~60 seconds (pre-built binary + fast internet; first semantic-tier run also downloads a ~100MB embedding model).
 
 ## Install in 60 Seconds (pre-built binary + fast internet)
 
@@ -29,13 +29,6 @@
    **cargo-binstall (pre-built, no compile):**
    ```bash
    cargo binstall ai-memory
-   ```
-
-   **Ubuntu (PPA — recommended):**
-   ```bash
-   sudo add-apt-repository ppa:jbridger2021/ppa
-   sudo apt update
-   sudo apt install ai-memory
    ```
 
    **Ubuntu/Debian (.deb manual install):**
@@ -100,7 +93,7 @@
 
 3. **Restart your AI client.**
 
-4. **Verify** -- you should see 21 new tools: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_update`, `memory_get`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`.
+4. **Verify** -- you should see **43 new tools** registered. Highlights: `memory_store`, `memory_recall`, `memory_search`, `memory_list`, `memory_get`, `memory_update`, `memory_delete`, `memory_promote`, `memory_forget`, `memory_stats`, `memory_link`, `memory_get_links`, `memory_consolidate`, `memory_capabilities`, `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction`, `memory_archive_list`, `memory_archive_restore`, `memory_archive_purge`, `memory_archive_stats`, `memory_check_duplicate`, `memory_entity_register`, `memory_entity_get_by_alias`, `memory_kg_query`, `memory_kg_timeline`, `memory_kg_invalidate`, `memory_get_taxonomy`, `memory_namespace_set_standard`, `memory_namespace_get_standard`, `memory_namespace_clear_standard`, `memory_pending_list`, `memory_pending_approve`, `memory_pending_reject`, `memory_agent_register`, `memory_agent_list`, `memory_notify`, `memory_inbox`, `memory_subscribe`, `memory_unsubscribe`, `memory_list_subscriptions`, `memory_session_start`, `memory_gc`. Full per-tool reference: [API_REFERENCE.md](API_REFERENCE.md).
 
 5. **Test** -- ask your AI assistant to store a memory. It should use `memory_store` automatically.
 

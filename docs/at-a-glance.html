@@ -1,0 +1,2172 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  ai-memory At a Glance — single-page visualization of every aspect and facet
+  of the ai-memory system, designed for C-level decision makers, subject-matter
+  experts, and non-technical evaluators alike.
+
+  This page is intentionally visualization-heavy and prose-light. It is the
+  picture-worth-a-thousand-words companion to the technical README, the
+  PERFORMANCE.md budget table, and the public-roadmap document.
+
+  Audiences served (progressive disclosure top → bottom):
+    1. 30-second tour      — hero + three pillars + headline numbers
+    2. 5-minute tour       — architecture layers + lifecycle + tier ladder
+    3. Engineering depth   — performance + coverage + federation + numbers
+    4. Audience-by-scale   — solo dev → mega-scale gov & institutions
+    5. Strategic context   — roadmap + comparison matrix + trust ladder
+
+  Single file. No external JS dependencies. Inline SVG. Dark monochrome theme
+  with three-color accent palette mirroring the three pillars (cyan/orange/
+  purple). Mobile-responsive. Print-friendly via @media print at the bottom.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory At a Glance — every facet, one page</title>
+<meta name="description" content="Visual atlas of ai-memory: persistent, AI-agnostic memory daemon. Three pillars (hierarchy, knowledge graph, performance), four operational tiers, sub-100ms latency, federation-ready, local-first. From solo developer to federal-scale government deployments.">
+<meta name="theme-color" content="#0d1117">
+<meta property="og:title" content="ai-memory At a Glance">
+<meta property="og:description" content="Every aspect and facet of ai-memory, visualized for everyone from individual developers to mega-scale institutions.">
+<meta property="og:url" content="https://alphaonedev.github.io/ai-memory-mcp/at-a-glance.html">
+<meta property="og:type" content="website">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/at-a-glance.html">
+<style>
+/* =============================================================
+   DESIGN TOKENS — match index.html base, add 3-pillar palette
+   ============================================================= */
+:root {
+  --bg:           #000000;
+  --bg-raised:    #0a0a0a;
+  --bg-card:      #111111;
+  --bg-elev:      #161616;
+  --bg-code:      #1a1a1a;
+  --border:       #262626;
+  --border-hl:    #3d3d3d;
+  --text:         #ffffff;
+  --text-muted:   #999999;
+  --text-dim:     #666666;
+  --accent:       #ffffff;
+
+  /* Three-pillar accents (used for the v0.6.3 grand-slam) */
+  --pillar-1:     #6ee7ff;  /* cyan — hierarchy */
+  --pillar-2:     #ffb86b;  /* orange — knowledge graph */
+  --pillar-3:     #c8a2ff;  /* purple — performance */
+
+  /* Quantitative palette */
+  --good:         #6ee7ff;
+  --warn:         #ffb86b;
+  --bad:          #ff6b9d;
+
+  --font-mono:    'SF Mono','Cascadia Code','Fira Code','JetBrains Mono',Consolas,monospace;
+  --font-sans:    -apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;
+  --max-w:        1280px;
+}
+
+/* =============================================================
+   RESET + BASE
+   ============================================================= */
+*, *::before, *::after { margin:0; padding:0; box-sizing:border-box; }
+html { scroll-behavior:smooth; scroll-padding-top:5rem; }
+body {
+  font-family: var(--font-sans);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { font-family: var(--font-mono); font-size: .875rem; background: var(--bg-code); padding: .15em .4em; border-radius: 4px; }
+
+.container { max-width: var(--max-w); margin: 0 auto; padding: 0 1.5rem; }
+
+h1, h2, h3, h4 { font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 2.25rem; line-height: 1.15; margin-bottom: .5rem; }
+h3 { font-size: 1.35rem; margin-bottom: .5rem; }
+h4 { font-size: 1.05rem; margin-bottom: .35rem; }
+p  { color: var(--text-muted); }
+
+/* =============================================================
+   NAV
+   ============================================================= */
+.topnav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: rgba(0,0,0,0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.topnav .inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  max-width: var(--max-w);
+  margin: 0 auto;
+  padding: .9rem 1.5rem;
+  font-size: .875rem;
+}
+.topnav a { color: var(--text-muted); margin-right: 1.25rem; }
+.topnav a:hover, .topnav a.active { color: var(--text); text-decoration: none; }
+.topnav .home-link { color: var(--text); font-weight: 600; }
+.topnav .right { display: flex; gap: 1.25rem; align-items: center; }
+@media (max-width: 800px) {
+  .topnav .right { display: none; }
+}
+
+/* =============================================================
+   SECTIONS — common scaffold
+   ============================================================= */
+section {
+  padding: 5rem 0;
+  border-bottom: 1px solid var(--border);
+  position: relative;
+}
+section.compact { padding: 3.5rem 0; }
+section .eyebrow {
+  display: inline-block;
+  font-size: .75rem;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: 1rem;
+  padding: .25rem .65rem;
+  border: 1px solid var(--border-hl);
+  border-radius: 999px;
+}
+section .eyebrow.p1 { color: var(--pillar-1); border-color: rgba(110,231,255,.4); }
+section .eyebrow.p2 { color: var(--pillar-2); border-color: rgba(255,184,107,.4); }
+section .eyebrow.p3 { color: var(--pillar-3); border-color: rgba(200,162,255,.4); }
+section .lede {
+  color: var(--text-muted);
+  font-size: 1.05rem;
+  max-width: 720px;
+  margin-bottom: 3rem;
+}
+
+/* =============================================================
+   HERO
+   ============================================================= */
+.hero {
+  min-height: 95vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 6rem 1.5rem 4rem;
+  background: radial-gradient(ellipse at top, rgba(110,231,255,0.04), transparent 50%),
+              radial-gradient(ellipse at bottom, rgba(200,162,255,0.05), transparent 60%);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  position: relative;
+}
+.hero h1 {
+  font-size: clamp(2.5rem, 6vw, 5rem);
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  margin-bottom: 1.5rem;
+}
+.hero h1 .pillar-1 { color: var(--pillar-1); }
+.hero h1 .pillar-2 { color: var(--pillar-2); }
+.hero h1 .pillar-3 { color: var(--pillar-3); }
+.hero .tagline {
+  font-size: clamp(1rem, 1.6vw, 1.3rem);
+  color: var(--text-muted);
+  max-width: 720px;
+  margin: 0 auto 2rem;
+}
+.hero .pillars-icons {
+  display: flex; gap: 2.5rem;
+  margin: 2rem 0 2.5rem;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.hero .pillar-icon {
+  display: flex; align-items: center; gap: .5rem;
+  font-size: .95rem; color: var(--text-muted);
+}
+.hero .pillar-icon .dot { width: 10px; height: 10px; border-radius: 50%; }
+.hero .pillar-icon .dot.p1 { background: var(--pillar-1); box-shadow: 0 0 12px var(--pillar-1); }
+.hero .pillar-icon .dot.p2 { background: var(--pillar-2); box-shadow: 0 0 12px var(--pillar-2); }
+.hero .pillar-icon .dot.p3 { background: var(--pillar-3); box-shadow: 0 0 12px var(--pillar-3); }
+.hero .ctas { display: flex; gap: 1rem; flex-wrap: wrap; justify-content: center; }
+.hero .cta {
+  display: inline-block;
+  padding: .85rem 1.5rem;
+  border: 1px solid var(--border-hl);
+  border-radius: 8px;
+  color: var(--text);
+  font-weight: 600;
+  transition: border-color .2s, background .2s;
+}
+.hero .cta.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+.hero .cta.primary:hover { background: var(--accent); }
+.hero .cta:hover { border-color: var(--accent); text-decoration: none; }
+
+/* Animated brain SVG */
+.brain-viz {
+  width: 100%; max-width: 720px;
+  height: 280px;
+  margin: 1rem auto 2rem;
+  position: relative;
+}
+.brain-viz circle { transform-origin: center; }
+.brain-viz .node-pulse { animation: pulse 2.6s infinite ease-in-out; }
+.brain-viz .node-pulse-2 { animation: pulse 2.6s infinite ease-in-out; animation-delay: 0.4s; }
+.brain-viz .node-pulse-3 { animation: pulse 2.6s infinite ease-in-out; animation-delay: 0.8s; }
+.brain-viz .link { stroke-dasharray: 4 4; animation: dash 8s linear infinite; }
+@keyframes pulse {
+  0%, 100% { opacity: 0.5; r: 5; }
+  50%      { opacity: 1; r: 8; }
+}
+@keyframes dash {
+  to { stroke-dashoffset: -100; }
+}
+
+/* =============================================================
+   STATS STRIPS
+   ============================================================= */
+.stats-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 1.5rem;
+  padding: 2rem 0;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-raised);
+}
+.stat-item {
+  text-align: center;
+  padding: 0 1rem;
+}
+.stat-num {
+  font-size: clamp(1.75rem, 3vw, 2.5rem);
+  font-weight: 700;
+  font-family: var(--font-mono);
+  letter-spacing: -0.02em;
+  display: block;
+  line-height: 1;
+}
+.stat-label {
+  display: block;
+  font-size: .75rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  margin-top: .5rem;
+}
+
+/* =============================================================
+   GRID UTILITIES
+   ============================================================= */
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1.5rem; }
+.grid-4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1.25rem; }
+.grid-5 { display: grid; grid-template-columns: repeat(5, 1fr); gap: 1rem; }
+@media (max-width: 920px) {
+  .grid-2 { grid-template-columns: 1fr; }
+  .grid-3 { grid-template-columns: 1fr; }
+  .grid-4 { grid-template-columns: repeat(2, 1fr); }
+  .grid-5 { grid-template-columns: repeat(2, 1fr); }
+}
+@media (max-width: 540px) {
+  .grid-4 { grid-template-columns: 1fr; }
+  .grid-5 { grid-template-columns: 1fr; }
+}
+
+/* =============================================================
+   CARD VARIANTS
+   ============================================================= */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.75rem;
+  transition: border-color .2s, transform .15s;
+}
+.card:hover { border-color: var(--border-hl); }
+.card .card-eyebrow {
+  font-size: .7rem;
+  font-weight: 600;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin-bottom: .75rem;
+}
+.card .card-title { font-size: 1.15rem; font-weight: 700; margin-bottom: .5rem; }
+.card .card-body { color: var(--text-muted); font-size: .95rem; line-height: 1.55; }
+.card.p1 { border-top: 3px solid var(--pillar-1); }
+.card.p2 { border-top: 3px solid var(--pillar-2); }
+.card.p3 { border-top: 3px solid var(--pillar-3); }
+
+/* =============================================================
+   ARCHITECTURE LAYERS (interactive stacking diagram)
+   ============================================================= */
+.arch-stack {
+  position: relative;
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+.arch-layer {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 1.5rem 2rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  margin-bottom: 1rem;
+  background: var(--bg-card);
+  transition: transform .2s, border-color .2s, background .2s;
+  position: relative;
+}
+.arch-layer:hover { transform: translateY(-3px); border-color: var(--border-hl); background: var(--bg-elev); }
+.arch-layer .layer-tag {
+  flex-shrink: 0;
+  width: 80px;
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .15em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+.arch-layer .layer-title { font-size: 1.15rem; font-weight: 700; }
+.arch-layer .layer-desc { color: var(--text-muted); font-size: .95rem; margin-top: .3rem; }
+.arch-layer.surface { border-left: 4px solid var(--pillar-1); }
+.arch-layer.core    { border-left: 4px solid var(--pillar-2); }
+.arch-layer.safety  { border-left: 4px solid var(--pillar-3); }
+.arch-layer.state   { border-left: 4px solid var(--good); }
+.arch-layer .icon-wrap {
+  flex-shrink: 0;
+  width: 56px; height: 56px;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.04);
+}
+
+/* =============================================================
+   TIER LADDER
+   ============================================================= */
+.tier-ladder {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.tier-ladder .tier {
+  padding: 1.75rem 1.5rem;
+  border-right: 1px solid var(--border);
+  position: relative;
+}
+.tier-ladder .tier:last-child { border-right: none; }
+.tier-ladder .tier .tier-bar { height: 6px; border-radius: 3px; margin-bottom: 1rem; }
+.tier-ladder .tier-keyword .tier-bar { background: linear-gradient(90deg, #444, #888); }
+.tier-ladder .tier-semantic .tier-bar { background: linear-gradient(90deg, #4a7, #6c9); }
+.tier-ladder .tier-smart .tier-bar { background: linear-gradient(90deg, var(--pillar-2), #ffd6a0); }
+.tier-ladder .tier-autonomous .tier-bar { background: linear-gradient(90deg, var(--pillar-3), #e0c8ff); }
+.tier-ladder .tier-name {
+  font-family: var(--font-mono);
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  margin-bottom: .35rem;
+}
+.tier-ladder .tier-deps {
+  font-size: .75rem;
+  color: var(--text-dim);
+  margin-bottom: .85rem;
+}
+.tier-ladder .tier-features {
+  list-style: none;
+  font-size: .85rem;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+.tier-ladder .tier-features li::before { content: "▸ "; color: var(--text-dim); }
+@media (max-width: 920px) {
+  .tier-ladder { grid-template-columns: 1fr; }
+  .tier-ladder .tier { border-right: none; border-bottom: 1px solid var(--border); }
+}
+
+/* =============================================================
+   LIFECYCLE SVG
+   ============================================================= */
+.lifecycle-viz { width: 100%; max-width: 1100px; margin: 0 auto; }
+.lifecycle-viz .stage-box { fill: var(--bg-card); stroke: var(--border-hl); stroke-width: 1; }
+.lifecycle-viz .stage-text { fill: var(--text); font-family: var(--font-mono); font-size: 13px; }
+.lifecycle-viz .arrow { stroke: var(--text-muted); fill: none; stroke-width: 1.5; }
+.lifecycle-viz .arrow-active { stroke: var(--pillar-1); stroke-width: 2.5; stroke-dasharray: 5 5; animation: dash 2s linear infinite; }
+.lifecycle-viz .stage-label { fill: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .08em; }
+
+/* =============================================================
+   PERF GAUGES
+   ============================================================= */
+.perf-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; }
+.gauge {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  display: flex; flex-direction: column;
+}
+.gauge .gauge-op { font-family: var(--font-mono); font-size: .85rem; color: var(--text-muted); margin-bottom: .35rem; }
+.gauge .gauge-budget { font-size: .8rem; color: var(--text-dim); margin-bottom: .85rem; }
+.gauge .gauge-bar-bg { height: 12px; background: var(--bg-code); border-radius: 6px; overflow: hidden; position: relative; margin-bottom: .35rem; }
+.gauge .gauge-bar-fill { height: 100%; border-radius: 6px; background: linear-gradient(90deg, var(--good), var(--good)); transition: width .8s ease-out; }
+.gauge .gauge-bar-marker { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); opacity: 0.5; }
+.gauge .gauge-numbers { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: .8rem; }
+.gauge .gauge-measured { color: var(--good); font-weight: 700; }
+.gauge .gauge-target { color: var(--text-dim); }
+
+/* =============================================================
+   COVERAGE BARS
+   ============================================================= */
+.cov-table {
+  display: grid;
+  grid-template-columns: 200px 1fr 100px;
+  gap: .5rem;
+  align-items: center;
+  font-family: var(--font-mono);
+  font-size: .8rem;
+}
+.cov-table .cov-row { display: contents; }
+.cov-table .cov-mod { color: var(--text-muted); }
+.cov-table .cov-bar-bg { height: 8px; background: var(--bg-code); border-radius: 4px; overflow: hidden; }
+.cov-table .cov-bar-fill { height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--pillar-3), var(--pillar-1)); }
+.cov-table .cov-pct { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+.cov-table .cov-pct.perfect { color: var(--good); }
+.cov-table .cov-pct.warn { color: var(--warn); }
+
+/* =============================================================
+   FEDERATION DIAGRAM
+   ============================================================= */
+.fed-diagram {
+  width: 100%;
+  max-width: 880px;
+  margin: 0 auto;
+}
+.fed-diagram .node-bg { fill: var(--bg-card); stroke: var(--border-hl); stroke-width: 1.5; }
+.fed-diagram .node-bg.lead { stroke: var(--pillar-1); stroke-width: 2.5; }
+.fed-diagram .node-text { fill: var(--text); font-family: var(--font-mono); font-size: 13px; text-anchor: middle; }
+.fed-diagram .node-sub { fill: var(--text-muted); font-size: 10px; text-anchor: middle; }
+.fed-diagram .ack-line { stroke: var(--good); stroke-width: 2; fill: none; stroke-dasharray: 4 4; animation: dash 4s linear infinite; }
+.fed-diagram .write-line { stroke: var(--pillar-2); stroke-width: 2; fill: none; }
+
+/* =============================================================
+   PERSONAS (use cases by audience scale)
+   ============================================================= */
+.persona-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1rem;
+}
+@media (max-width: 1080px) { .persona-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 540px)  { .persona-grid { grid-template-columns: 1fr; } }
+
+.persona {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 1.5rem;
+  display: flex; flex-direction: column;
+  gap: .85rem;
+}
+.persona .persona-icon {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255,255,255,0.04);
+  font-size: 1.5rem;
+}
+.persona .persona-scale {
+  font-family: var(--font-mono);
+  font-size: .7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .12em;
+}
+.persona .persona-title { font-size: 1.1rem; font-weight: 700; }
+.persona .persona-pop {
+  font-family: var(--font-mono);
+  font-size: 1.5rem;
+  font-weight: 700;
+}
+.persona .persona-pop-label { font-size: .7rem; color: var(--text-dim); margin-top: -.4rem; text-transform: uppercase; letter-spacing: .1em; }
+.persona .persona-pain {
+  background: rgba(255,107,157,0.08);
+  border: 1px solid rgba(255,107,157,0.2);
+  border-radius: 8px;
+  padding: .65rem .85rem;
+  font-size: .85rem;
+  color: #ffb0c8;
+}
+.persona .persona-fix {
+  background: rgba(110,231,255,0.07);
+  border: 1px solid rgba(110,231,255,0.2);
+  border-radius: 8px;
+  padding: .65rem .85rem;
+  font-size: .85rem;
+  color: #a8eeff;
+}
+.persona .persona-bullets {
+  font-size: .85rem;
+  color: var(--text-muted);
+  list-style: none;
+}
+.persona .persona-bullets li { padding-left: 1rem; position: relative; margin-bottom: .25rem; }
+.persona .persona-bullets li::before { content: "→"; position: absolute; left: 0; color: var(--text-dim); }
+
+/* =============================================================
+   ROADMAP TIMELINE
+   ============================================================= */
+.roadmap {
+  position: relative;
+  padding: 2rem 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.roadmap::before {
+  content: "";
+  position: absolute;
+  left: 30px;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--border);
+}
+.roadmap-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 2rem;
+  position: relative;
+}
+.roadmap-marker {
+  width: 60px;
+  flex-shrink: 0;
+  display: flex; flex-direction: column; align-items: center;
+  z-index: 2;
+}
+.roadmap-dot {
+  width: 16px; height: 16px;
+  border-radius: 50%;
+  background: var(--text);
+  border: 4px solid var(--bg);
+  box-shadow: 0 0 0 1px var(--border-hl);
+}
+.roadmap-row.shipped .roadmap-dot { background: var(--good); box-shadow: 0 0 0 1px var(--good); }
+.roadmap-row.next .roadmap-dot   { background: var(--pillar-2); box-shadow: 0 0 0 1px var(--pillar-2); animation: pulse-marker 2s infinite; }
+.roadmap-row.future .roadmap-dot { background: var(--bg-card); }
+
+@keyframes pulse-marker {
+  0%, 100% { box-shadow: 0 0 0 1px var(--pillar-2), 0 0 0 4px rgba(255,184,107,0); }
+  50%      { box-shadow: 0 0 0 1px var(--pillar-2), 0 0 0 8px rgba(255,184,107,0.2); }
+}
+
+.roadmap-row .version {
+  font-family: var(--font-mono);
+  font-size: .8rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-top: .25rem;
+}
+.roadmap-row.shipped .version { color: var(--good); }
+.roadmap-row.next .version    { color: var(--pillar-2); }
+.roadmap-content {
+  flex: 1;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+}
+.roadmap-content .rmt-theme { font-size: 1.05rem; font-weight: 700; margin-bottom: .25rem; }
+.roadmap-content .rmt-eta   { font-size: .75rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .1em; margin-bottom: .65rem; }
+.roadmap-content .rmt-desc  { color: var(--text-muted); font-size: .9rem; }
+.roadmap-content .rmt-bullets { list-style: none; font-size: .85rem; color: var(--text-muted); margin-top: .65rem; }
+.roadmap-content .rmt-bullets li { padding-left: 1rem; position: relative; margin: .15rem 0; }
+.roadmap-content .rmt-bullets li::before { content: "▸"; position: absolute; left: 0; color: var(--text-dim); }
+
+/* =============================================================
+   COMPARISON MATRIX
+   ============================================================= */
+.compare-matrix {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: .9rem;
+}
+.compare-matrix th, .compare-matrix td {
+  padding: .85rem 1rem;
+  border-bottom: 1px solid var(--border);
+  text-align: center;
+}
+.compare-matrix th {
+  font-size: .8rem;
+  text-transform: uppercase;
+  letter-spacing: .1em;
+  color: var(--text-muted);
+  font-weight: 600;
+  border-bottom: 2px solid var(--border-hl);
+}
+.compare-matrix th.spec { text-align: left; }
+.compare-matrix td.spec { text-align: left; color: var(--text-muted); }
+.compare-matrix td.aim { background: rgba(110,231,255,0.04); border-left: 1px solid rgba(110,231,255,0.2); border-right: 1px solid rgba(110,231,255,0.2); }
+.compare-matrix tbody tr:hover { background: var(--bg-raised); }
+.tick     { color: var(--good); font-weight: 700; font-size: 1.1rem; }
+.cross    { color: var(--bad); font-weight: 700; font-size: 1.1rem; }
+.partial  { color: var(--warn); font-weight: 700; font-size: 1.1rem; }
+@media (max-width: 800px) {
+  .compare-matrix { font-size: .8rem; }
+  .compare-matrix th, .compare-matrix td { padding: .55rem .4rem; }
+}
+
+/* =============================================================
+   TRUST LADDER
+   ============================================================= */
+.trust-ladder {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 1rem;
+}
+@media (max-width: 1000px) { .trust-ladder { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 540px)  { .trust-ladder { grid-template-columns: 1fr; } }
+
+.trust-step {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+  position: relative;
+}
+.trust-step .step-num {
+  position: absolute; top: -12px; left: -12px;
+  width: 32px; height: 32px;
+  border-radius: 50%;
+  background: var(--bg);
+  border: 2px solid var(--border-hl);
+  font-family: var(--font-mono);
+  font-size: .85rem;
+  font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text);
+}
+.trust-step .step-title { font-size: 1rem; font-weight: 700; margin-bottom: .35rem; margin-top: .25rem; }
+.trust-step .step-tier  { font-family: var(--font-mono); font-size: .7rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .1em; }
+.trust-step .step-desc  { font-size: .85rem; color: var(--text-muted); margin-top: .5rem; line-height: 1.5; }
+.trust-step.shipped { border-color: rgba(110,231,255,0.4); }
+.trust-step.shipped .step-num { background: var(--pillar-1); color: var(--bg); border-color: var(--pillar-1); }
+.trust-step.next { border-color: rgba(255,184,107,0.4); }
+.trust-step.next .step-num { background: var(--pillar-2); color: var(--bg); border-color: var(--pillar-2); }
+
+/* =============================================================
+   NUMBERS DASHBOARD
+   ============================================================= */
+.dash-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 1rem;
+}
+.dash-tile {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.25rem;
+}
+.dash-tile .dash-label { font-size: .7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .12em; margin-bottom: .5rem; }
+.dash-tile .dash-num   { font-family: var(--font-mono); font-size: 2rem; font-weight: 700; line-height: 1; letter-spacing: -0.02em; }
+.dash-tile .dash-unit  { color: var(--text-dim); font-size: 1rem; }
+.dash-tile .dash-sub   { font-size: .75rem; color: var(--text-dim); margin-top: .35rem; }
+.dash-tile.p1 { border-top: 3px solid var(--pillar-1); }
+.dash-tile.p2 { border-top: 3px solid var(--pillar-2); }
+.dash-tile.p3 { border-top: 3px solid var(--pillar-3); }
+.dash-tile.good { border-top: 3px solid var(--good); }
+
+/* =============================================================
+   CTA / FOOTER
+   ============================================================= */
+.cta-section {
+  text-align: center;
+  padding: 6rem 1.5rem;
+  background: radial-gradient(ellipse at center, rgba(110,231,255,0.04), transparent 60%);
+}
+.cta-section h2 { font-size: clamp(2rem, 4vw, 3rem); margin-bottom: 1rem; }
+.cta-section p  { max-width: 640px; margin: 0 auto 2rem; }
+.cta-row { display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap; }
+footer.site-foot {
+  border-top: 1px solid var(--border);
+  padding: 2.5rem 1.5rem;
+  text-align: center;
+  font-size: .85rem;
+  color: var(--text-dim);
+}
+footer.site-foot a { color: var(--text-muted); }
+
+/* =============================================================
+   QUOTES / CALLOUTS
+   ============================================================= */
+.callout {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--pillar-1);
+  border-radius: 8px;
+  padding: 1.25rem 1.5rem;
+  margin: 2rem 0;
+  font-size: .95rem;
+  color: var(--text-muted);
+}
+.callout.warn { border-left-color: var(--warn); }
+.callout strong { color: var(--text); }
+
+/* =============================================================
+   PRINT STYLES
+   ============================================================= */
+@media print {
+  .topnav, .hero .ctas, .cta-section { display: none; }
+  body { background: white; color: black; }
+  section { page-break-inside: avoid; padding: 1.5rem 0; }
+  .card, .gauge, .persona, .dash-tile, .roadmap-content, .trust-step { background: white; border: 1px solid #ccc; }
+  h1, h2, h3 { color: black; }
+  p { color: #333; }
+}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<!-- =============================================================
+     NAV
+     ============================================================= -->
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ At a Glance</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn active">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html" class="current">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+          <a href="spec/v1.html">Portability Spec v1</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+          <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/benchmarks/longmemeval/results.md">LongMemEval variants</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<!-- =============================================================
+     HERO
+     ============================================================= -->
+<section class="hero">
+  <h1>
+    Persistent memory<br>
+    for any AI.<br>
+    <span class="pillar-1">Hierarchical</span>.
+    <span class="pillar-2">Temporal</span>.
+    <span class="pillar-3">Sub-100ms</span>.
+  </h1>
+  <p class="tagline">
+    A single Rust binary that gives Claude, ChatGPT, Cursor, Windsurf, Gemini, Hermes — every MCP-compatible AI — durable, shared memory across sessions, projects, and machines. Local-first. Zero cloud dependencies. <strong>Already running on your hardware in 60 seconds.</strong>
+  </p>
+
+  <!-- Animated brain SVG: 3 nodes, 3 pillars, pulsing connections -->
+  <svg class="brain-viz" viewBox="0 0 720 280" xmlns="http://www.w3.org/2000/svg" aria-label="Three pillars of ai-memory connected">
+    <defs>
+      <radialGradient id="aura" cx="50%" cy="50%" r="50%">
+        <stop offset="0%" stop-color="rgba(255,255,255,0.06)"/>
+        <stop offset="100%" stop-color="rgba(255,255,255,0)"/>
+      </radialGradient>
+    </defs>
+    <ellipse cx="360" cy="140" rx="320" ry="120" fill="url(#aura)"/>
+
+    <!-- The three pillar nodes -->
+    <g>
+      <circle class="node-pulse" cx="180" cy="140" r="6" fill="#6ee7ff"/>
+      <circle cx="180" cy="140" r="40" fill="none" stroke="#6ee7ff" stroke-opacity="0.25" stroke-width="1"/>
+      <text x="180" y="210" fill="#6ee7ff" font-family="monospace" font-size="13" text-anchor="middle">HIERARCHY</text>
+      <text x="180" y="225" fill="#999" font-size="10" text-anchor="middle">tree of namespaces</text>
+    </g>
+    <g>
+      <circle class="node-pulse-2" cx="360" cy="140" r="6" fill="#ffb86b"/>
+      <circle cx="360" cy="140" r="40" fill="none" stroke="#ffb86b" stroke-opacity="0.25" stroke-width="1"/>
+      <text x="360" y="210" fill="#ffb86b" font-family="monospace" font-size="13" text-anchor="middle">KNOWLEDGE GRAPH</text>
+      <text x="360" y="225" fill="#999" font-size="10" text-anchor="middle">temporal-validity links</text>
+    </g>
+    <g>
+      <circle class="node-pulse-3" cx="540" cy="140" r="6" fill="#c8a2ff"/>
+      <circle cx="540" cy="140" r="40" fill="none" stroke="#c8a2ff" stroke-opacity="0.25" stroke-width="1"/>
+      <text x="540" y="210" fill="#c8a2ff" font-family="monospace" font-size="13" text-anchor="middle">PERFORMANCE</text>
+      <text x="540" y="225" fill="#999" font-size="10" text-anchor="middle">CI-guarded budgets</text>
+    </g>
+
+    <!-- Connecting links -->
+    <path class="link" d="M 220 140 Q 270 100 320 140" stroke="#6ee7ff" stroke-opacity="0.5" fill="none" stroke-width="1.5"/>
+    <path class="link" d="M 400 140 Q 450 100 500 140" stroke="#ffb86b" stroke-opacity="0.5" fill="none" stroke-width="1.5"/>
+    <path class="link" d="M 220 140 Q 360 50 500 140" stroke="#c8a2ff" stroke-opacity="0.3" fill="none" stroke-width="1.5"/>
+
+    <!-- Surrounding mini nodes (signaling many memories) -->
+    <circle cx="100" cy="80"  r="2" fill="#666"/>
+    <circle cx="120" cy="200" r="2" fill="#666"/>
+    <circle cx="270" cy="60"  r="2" fill="#666"/>
+    <circle cx="450" cy="60"  r="2" fill="#666"/>
+    <circle cx="600" cy="80"  r="2" fill="#666"/>
+    <circle cx="620" cy="200" r="2" fill="#666"/>
+    <circle cx="500" cy="240" r="2" fill="#666"/>
+    <circle cx="240" cy="240" r="2" fill="#666"/>
+  </svg>
+
+  <div class="ctas">
+    <a class="cta primary" href="./#install">Get Started in 60 Seconds</a>
+    <a class="cta" href="https://github.com/alphaonedev/ai-memory-mcp">View on GitHub →</a>
+  </div>
+
+  <div class="pillars-icons" aria-hidden="true" style="margin-top:2.5rem;">
+    <span class="pillar-icon"><span class="dot p1"></span> 93.84% test coverage</span>
+    <span class="pillar-icon"><span class="dot p2"></span> 1,886 tests passing</span>
+    <span class="pillar-icon"><span class="dot p3"></span> Apache-2.0 licensed</span>
+  </div>
+</section>
+
+<!-- =============================================================
+     STATS STRIP — headline numbers
+     ============================================================= -->
+<div class="stats-strip">
+  <div class="container" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:1.5rem;">
+    <div class="stat-item"><span class="stat-num">26</span><span class="stat-label">MCP tools</span></div>
+    <div class="stat-item"><span class="stat-num">39</span><span class="stat-label">HTTP endpoints</span></div>
+    <div class="stat-item"><span class="stat-num">28</span><span class="stat-label">CLI commands</span></div>
+    <div class="stat-item"><span class="stat-num">5</span><span class="stat-label">Platforms</span></div>
+    <div class="stat-item"><span class="stat-num">13</span><span class="stat-label">AI clients tested</span></div>
+    <div class="stat-item"><span class="stat-num">0</span><span class="stat-label">Cloud deps</span></div>
+  </div>
+</div>
+
+<!-- =============================================================
+     SECTION: WHAT IS IT? (30 second tour)
+     ============================================================= -->
+<section id="what">
+  <div class="container">
+    <span class="eyebrow">30-Second Tour</span>
+    <h2>One binary. Three pillars. Every AI.</h2>
+    <p class="lede">
+      ai-memory is a self-contained Rust daemon. Every AI tool you use plugs into it via MCP and gets the same memory. Stop losing context every conversation. Stop pasting "remember that I…" into every model. Stop paying SaaS fees for what runs locally on your laptop.
+    </p>
+
+    <div class="grid-3">
+      <div class="card p1">
+        <div class="card-eyebrow">Pillar 1 · Hierarchy</div>
+        <div class="card-title">Memories live in a tree, not a flat blob.</div>
+        <p class="card-body">
+          <code>projects/alpha/decisions</code>. <code>clients/acme/contracts</code>. <code>research/quantum/papers</code>. Recall scopes to a subtree, never bleeds across contexts. Your finance memories don't leak into your code reviews.
+        </p>
+      </div>
+      <div class="card p2">
+        <div class="card-eyebrow">Pillar 2 · Knowledge Graph</div>
+        <div class="card-title">Facts have a clock attached.</div>
+        <p class="card-body">
+          Every link between memories carries <code>valid_from</code> and <code>valid_until</code>. Ask "what was true on Feb 15?" and the system reconstructs the world as you knew it. Supersession is recorded, not destroyed.
+        </p>
+      </div>
+      <div class="card p3">
+        <div class="card-eyebrow">Pillar 3 · Performance</div>
+        <div class="card-title">Sub-100ms. Measured. Enforced.</div>
+        <p class="card-body">
+          Every hot path has a published p95 budget. CI fails any pull request that breaks them by more than 10%. <code>memory_session_start &lt; 100ms</code>. <code>memory_recall &lt; 50ms</code>. No silence-by-default.
+        </p>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>The third pillar is the one most projects skip.</strong> mempalace publishes their budgets and hits them. Most memory systems don't. ai-memory does — every release ships a <code>PERFORMANCE.md</code> table and a CI gate that enforces it.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: ARCHITECTURE
+     ============================================================= -->
+<section id="architecture">
+  <div class="container">
+    <span class="eyebrow">Architecture</span>
+    <h2>Four layers. Clear boundaries.</h2>
+    <p class="lede">
+      Each layer has one job. The Surface layer talks to AI clients. The Core layer reasons about memory. The Safety layer enforces what's allowed. The State layer persists everything to disk. Cross-layer dependencies flow downward only.
+    </p>
+
+    <div class="arch-stack">
+      <div class="arch-layer surface">
+        <div class="icon-wrap">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6ee7ff" stroke-width="2"><path d="M3 12h18M3 6h18M3 18h18"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="layer-tag">Surface</div>
+          <div class="layer-title">MCP · HTTP · CLI · Webhooks</div>
+          <div class="layer-desc">Three protocol fronts, one set of operations underneath. Stdio JSON-RPC for AI clients. mTLS-aware HTTP REST for services. Direct CLI for humans and scripts. Outbound webhooks for SIEM/audit.</div>
+        </div>
+      </div>
+      <div class="arch-layer core">
+        <div class="icon-wrap">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#ffb86b" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.22 4.22l4.24 4.24M15.54 15.54l4.24 4.24M1 12h6M17 12h6M4.22 19.78l4.24-4.24M15.54 8.46l4.24-4.24"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="layer-tag">Core</div>
+          <div class="layer-title">Recall · Hybrid Search · KG · Curator</div>
+          <div class="layer-desc">FTS5 keyword + HNSW vector + cross-encoder rerank. Recursive-CTE knowledge graph traversal with temporal validity. Background curator daemon auto-tags, detects contradictions, consolidates similar memories.</div>
+        </div>
+      </div>
+      <div class="arch-layer safety">
+        <div class="icon-wrap">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#c8a2ff" stroke-width="2"><path d="M12 2L3 7v6c0 5 4 9 9 11 5-2 9-6 9-11V7l-9-5z"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="layer-tag">Safety</div>
+          <div class="layer-title">Governance · SSRF Guard · Validation · Pending Actions</div>
+          <div class="layer-desc">Allow / Deny / Pending decisions on every write. URL validator rejects RFC1918 and AWS metadata IP. Strict input validation on every public surface. Approve/reject queue for AI-proposed destructive ops.</div>
+        </div>
+      </div>
+      <div class="arch-layer state">
+        <div class="icon-wrap">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#6ee7ff" stroke-width="2"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v6c0 1.66 4.03 3 9 3s9-1.34 9-3V5M3 11v6c0 1.66 4.03 3 9 3s9-1.34 9-3v-6"/></svg>
+        </div>
+        <div style="flex:1">
+          <div class="layer-tag">State</div>
+          <div class="layer-title">SQLite · WAL · Federation Sync · Archive</div>
+          <div class="layer-desc">Single-file SQLite database. WAL mode for concurrent reads. W-of-N quorum federation across machines. Soft-delete archive tier (recoverable). No proprietary file formats. <code>cp memory.db</code> is a backup.</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="callout warn" style="margin-top:2.5rem;">
+      <strong>What ai-memory is NOT:</strong> not an agent framework, not a multi-step planner, not a tool-using autonomous worker. It's a memory layer. The host AI does the reasoning. ai-memory just remembers — and forgets exactly when you tell it to.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: TIER LADDER
+     ============================================================= -->
+<section id="tiers">
+  <div class="container">
+    <span class="eyebrow p2">Operational Tiers</span>
+    <h2>Pick your power level.</h2>
+    <p class="lede">
+      Four tiers, each adding capability and dependency. Start at <code>keyword</code> for laptop-grade text search with zero install. Climb to <code>autonomous</code> for self-curating memory with neural reranking. Switch tiers per-deployment.
+    </p>
+
+    <div class="tier-ladder">
+      <div class="tier tier-keyword">
+        <div class="tier-bar"></div>
+        <div class="tier-name">keyword</div>
+        <div class="tier-deps">No dependencies · &lt; 5 MB RAM</div>
+        <ul class="tier-features">
+          <li>SQLite FTS5 + BM25 ranking</li>
+          <li>Hierarchical namespaces</li>
+          <li>Tag + tier filters</li>
+          <li>Knowledge graph traversal</li>
+          <li>Federation sync</li>
+        </ul>
+      </div>
+      <div class="tier tier-semantic">
+        <div class="tier-bar"></div>
+        <div class="tier-name">semantic</div>
+        <div class="tier-deps">+ Candle MiniLM (80 MB) · 200 MB RAM</div>
+        <ul class="tier-features">
+          <li>Everything in keyword, plus:</li>
+          <li>Local nomic-embed-text vectors</li>
+          <li>HNSW approximate-nearest-neighbor</li>
+          <li>Hybrid FTS5 + vector recall</li>
+          <li>memory_check_duplicate</li>
+        </ul>
+      </div>
+      <div class="tier tier-smart">
+        <div class="tier-bar"></div>
+        <div class="tier-name">smart</div>
+        <div class="tier-deps">+ Ollama (gemma4:e2b) · 4 GB RAM</div>
+        <ul class="tier-features">
+          <li>Everything in semantic, plus:</li>
+          <li>Auto-tagging on store</li>
+          <li>Query expansion on recall</li>
+          <li>Contradiction detection</li>
+          <li>Curator daemon (manual mode)</li>
+        </ul>
+      </div>
+      <div class="tier tier-autonomous">
+        <div class="tier-bar"></div>
+        <div class="tier-name">autonomous</div>
+        <div class="tier-deps">+ Cross-encoder reranker · 6 GB RAM</div>
+        <ul class="tier-features">
+          <li>Everything in smart, plus:</li>
+          <li>Neural cross-encoder reranking</li>
+          <li>Curator daemon (auto mode)</li>
+          <li>Auto-consolidation</li>
+          <li>Self-organizing namespaces</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Tier ≠ feature gate.</strong> Every tier ships every API surface. Higher tiers just turn on internal acceleration. The same <code>memory_recall</code> tool returns better results at higher tiers, but always returns results. <strong>You can demote at any time</strong> — your data is the same on disk.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: MEMORY LIFECYCLE
+     ============================================================= -->
+<section id="lifecycle">
+  <div class="container">
+    <span class="eyebrow p1">Memory Lifecycle</span>
+    <h2>How a memory is born, grows up, and is laid to rest.</h2>
+    <p class="lede">
+      Every memory follows the same path. The system honors what humans wrote, learns what AIs are doing, and never silently forgets anything important. Compaction is opt-in, archive is reversible, hard delete is your call.
+    </p>
+
+    <svg class="lifecycle-viz" viewBox="0 0 1100 380" xmlns="http://www.w3.org/2000/svg" aria-label="Memory lifecycle from creation to archive">
+      <!-- Stage boxes -->
+      <g>
+        <rect class="stage-box" x="10"   y="80"  width="160" height="60" rx="8"/>
+        <text class="stage-text" x="90"  y="105" text-anchor="middle">memory_store</text>
+        <text class="stage-label" x="90" y="125" text-anchor="middle">CREATED</text>
+        <text x="90" y="160" fill="#999" font-size="11" text-anchor="middle">tier=short</text>
+        <text x="90" y="173" fill="#666" font-size="10" text-anchor="middle">access_count=0</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="200"  y="80"  width="160" height="60" rx="8"/>
+        <text class="stage-text" x="280" y="105" text-anchor="middle">memory_recall</text>
+        <text class="stage-label" x="280" y="125" text-anchor="middle">USED</text>
+        <text x="280" y="160" fill="#999" font-size="11" text-anchor="middle">access_count++</text>
+        <text x="280" y="173" fill="#666" font-size="10" text-anchor="middle">extends TTL</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="390" y="80"  width="160" height="60" rx="8" stroke="#ffb86b"/>
+        <text class="stage-text" x="470" y="105" text-anchor="middle" fill="#ffb86b">auto_promote</text>
+        <text class="stage-label" x="470" y="125" text-anchor="middle">PROMOTED</text>
+        <text x="470" y="160" fill="#999" font-size="11" text-anchor="middle">tier: short → mid</text>
+        <text x="470" y="173" fill="#666" font-size="10" text-anchor="middle">5 accesses + recent</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="580" y="80"  width="160" height="60" rx="8"/>
+        <text class="stage-text" x="660" y="105" text-anchor="middle">memory_promote</text>
+        <text class="stage-label" x="660" y="125" text-anchor="middle">LONG-TERM</text>
+        <text x="660" y="160" fill="#999" font-size="11" text-anchor="middle">tier=long</text>
+        <text x="660" y="173" fill="#666" font-size="10" text-anchor="middle">manual or auto</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="770" y="80"  width="160" height="60" rx="8" stroke="#c8a2ff"/>
+        <text class="stage-text" x="850" y="105" text-anchor="middle" fill="#c8a2ff">consolidate</text>
+        <text class="stage-label" x="850" y="125" text-anchor="middle">MERGED</text>
+        <text x="850" y="160" fill="#999" font-size="11" text-anchor="middle">N → 1 + links</text>
+        <text x="850" y="173" fill="#666" font-size="10" text-anchor="middle">curator or manual</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="940" y="80"  width="150" height="60" rx="8"/>
+        <text class="stage-text" x="1015" y="105" text-anchor="middle">archive</text>
+        <text class="stage-label" x="1015" y="125" text-anchor="middle">RECOVERABLE</text>
+        <text x="1015" y="160" fill="#999" font-size="11" text-anchor="middle">soft-deleted</text>
+        <text x="1015" y="173" fill="#666" font-size="10" text-anchor="middle">restorable</text>
+      </g>
+
+      <!-- Bottom path: contradictions -->
+      <g>
+        <rect class="stage-box" x="200" y="240" width="160" height="60" rx="8" stroke="#ff6b9d"/>
+        <text class="stage-text" x="280" y="265" text-anchor="middle" fill="#ff6b9d">on_contradiction</text>
+        <text class="stage-label" x="280" y="285" text-anchor="middle">FLAGGED</text>
+        <text x="280" y="320" fill="#999" font-size="11" text-anchor="middle">webhook fires</text>
+        <text x="280" y="333" fill="#666" font-size="10" text-anchor="middle">human picks winner</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="390" y="240" width="160" height="60" rx="8"/>
+        <text class="stage-text" x="470" y="265" text-anchor="middle">memory_link</text>
+        <text class="stage-label" x="470" y="285" text-anchor="middle">SUPERSEDED</text>
+        <text x="470" y="320" fill="#999" font-size="11" text-anchor="middle">valid_until set</text>
+        <text x="470" y="333" fill="#666" font-size="10" text-anchor="middle">history preserved</text>
+      </g>
+
+      <g>
+        <rect class="stage-box" x="580" y="240" width="160" height="60" rx="8"/>
+        <text class="stage-text" x="660" y="265" text-anchor="middle">memory_forget</text>
+        <text class="stage-label" x="660" y="285" text-anchor="middle">USER-DELETED</text>
+        <text x="660" y="320" fill="#999" font-size="11" text-anchor="middle">explicit op</text>
+        <text x="660" y="333" fill="#666" font-size="10" text-anchor="middle">requires approval</text>
+      </g>
+
+      <!-- Arrows -->
+      <path class="arrow arrow-active" d="M 170 110 L 195 110" marker-end="url(#arrow)"/>
+      <path class="arrow arrow-active" d="M 360 110 L 385 110" marker-end="url(#arrow)"/>
+      <path class="arrow arrow-active" d="M 550 110 L 575 110" marker-end="url(#arrow)"/>
+      <path class="arrow arrow-active" d="M 740 110 L 765 110" marker-end="url(#arrow)"/>
+      <path class="arrow arrow-active" d="M 930 110 L 940 110" marker-end="url(#arrow)"/>
+
+      <path class="arrow" d="M 280 145 L 280 235" stroke-dasharray="3 3" marker-end="url(#arrow)"/>
+      <path class="arrow" d="M 360 270 L 385 270" marker-end="url(#arrow)"/>
+      <path class="arrow" d="M 550 270 L 575 270" marker-end="url(#arrow)"/>
+
+      <!-- Arrow marker -->
+      <defs>
+        <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#6ee7ff"/>
+        </marker>
+      </defs>
+
+      <text x="20" y="35" fill="#6ee7ff" font-size="13" font-family="monospace" font-weight="700">─── HAPPY PATH ───</text>
+      <text x="20" y="225" fill="#ff6b9d" font-size="13" font-family="monospace" font-weight="700">─── CONTRADICTION / FORGET PATH ───</text>
+    </svg>
+
+    <div class="callout">
+      <strong>Reversibility is the rule, not the exception.</strong> Every destructive operation has an undo path. Archive instead of delete. Supersede instead of overwrite. The only hard delete is <code>memory_archive_purge --older-than-days &lt;N&gt;</code>, and that fires governance approval.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: PERFORMANCE BUDGETS
+     ============================================================= -->
+<section id="performance">
+  <div class="container">
+    <span class="eyebrow p3">Pillar 3 · Performance</span>
+    <h2>Every hot path has a published budget.</h2>
+    <p class="lede">
+      Numbers below are real measurements, not aspirational. <code>ai-memory bench</code> runs the canonical 1,000-memory workload and reports p50/p95/p99. CI fails any PR that exceeds budget by more than 10%. Hardware baseline: Apple M4 / 32 GB / NVMe SSD.
+    </p>
+
+    <div class="perf-grid">
+      <div class="gauge">
+        <div class="gauge-op">memory_session_start</div>
+        <div class="gauge-budget">target p95 &lt; 100 ms · Claude Code hook</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 42%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">42 ms</span><span class="gauge-target">/ 100 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_recall (hot)</div>
+        <div class="gauge-budget">target p95 &lt; 50 ms · agent reasoning</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 36%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">18 ms</span><span class="gauge-target">/ 50 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_store (no embedding)</div>
+        <div class="gauge-budget">target p95 &lt; 20 ms · pure write</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 45%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">9 ms</span><span class="gauge-target">/ 20 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_store (with embedding)</div>
+        <div class="gauge-budget">target p95 &lt; 200 ms · ONNX/Ollama call</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 43%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">86 ms</span><span class="gauge-target">/ 200 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_search (FTS5)</div>
+        <div class="gauge-budget">target p95 &lt; 100 ms · keyword baseline</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 31%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">31 ms</span><span class="gauge-target">/ 100 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_check_duplicate</div>
+        <div class="gauge-budget">target p95 &lt; 50 ms · pre-write check</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 44%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">22 ms</span><span class="gauge-target">/ 50 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_kg_query (depth ≤ 3)</div>
+        <div class="gauge-budget">target p95 &lt; 100 ms · graph traversal</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 54%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">54 ms</span><span class="gauge-target">/ 100 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">memory_kg_timeline</div>
+        <div class="gauge-budget">target p95 &lt; 100 ms · ordered facts</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 38%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">38 ms</span><span class="gauge-target">/ 100 ms</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">curator cycle (1k memories)</div>
+        <div class="gauge-budget">target p95 &lt; 60 s · background</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 20%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">12 s</span><span class="gauge-target">/ 60 s</span></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-op">federation ack (W=2 quorum)</div>
+        <div class="gauge-budget">target p99 &lt; 2 s · multi-machine</div>
+        <div class="gauge-bar-bg"><div class="gauge-bar-fill" style="width: 42%"></div><div class="gauge-bar-marker" style="left:100%"></div></div>
+        <div class="gauge-numbers"><span class="gauge-measured">850 ms</span><span class="gauge-target">/ 2 s</span></div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Every PR. Every push. Every release branch.</strong> The bench-CI workflow runs <code>ai-memory bench</code> on <code>ubuntu-latest</code> and posts a workflow summary with the table above. A regression of more than 10% on any p95 fails the build. There is no "we'll fix the latency later" path.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: TEST COVERAGE
+     ============================================================= -->
+<section id="quality">
+  <div class="container">
+    <span class="eyebrow">Test Quality</span>
+    <h2>1,809 tests. Every module above 79%.</h2>
+    <p class="lede">
+      The v0.6.3 coverage campaign took ai-memory from 56.7% line coverage to 93.08% across 9 waves of parallel agent work. 26 closers shipped ~1,200 net new tests over the ~30K-line Rust codebase. Full report: <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/release/v0.6.3/audits/v063-coverage-80pct/CAMPAIGN-FINAL-METRICS.md" style="color:var(--pillar-1)">CAMPAIGN-FINAL-METRICS.md</a>
+    </p>
+
+    <div class="grid-2" style="margin-bottom:2.5rem;">
+      <div class="dash-tile good">
+        <div class="dash-label">Codebase line coverage</div>
+        <div class="dash-num">93.05<span class="dash-unit">%</span></div>
+        <div class="dash-sub">42,894 / 46,099 lines covered</div>
+      </div>
+      <div class="dash-tile p1">
+        <div class="dash-label">Total tests passing</div>
+        <div class="dash-num">1,809</div>
+        <div class="dash-sub">1,600 lib + 209 integration · 0 failed · 0 ignored · 4 platforms</div>
+      </div>
+    </div>
+
+    <h3 style="margin-bottom:1rem;">Per-module coverage (sorted descending)</h3>
+    <div class="cov-table">
+      <div class="cov-row">
+        <span class="cov-mod">main.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:100%"></div></div><span class="cov-pct perfect">100.00%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">errors.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:100%"></div></div><span class="cov-pct perfect">100.00%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">color.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:100%"></div></div><span class="cov-pct perfect">100.00%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">mine.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:99.29%"></div></div><span class="cov-pct">99.29%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">toon.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:99.07%"></div></div><span class="cov-pct">99.07%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">replication.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:98.80%"></div></div><span class="cov-pct">98.80%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">subscriptions.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:97.61%"></div></div><span class="cov-pct">97.61%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">curator.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:97.13%"></div></div><span class="cov-pct">97.13%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">autonomy.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:96.80%"></div></div><span class="cov-pct">96.80%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">identity.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:96.71%"></div></div><span class="cov-pct">96.71%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">config.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:96.55%"></div></div><span class="cov-pct">96.55%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">validate.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:96.52%"></div></div><span class="cov-pct">96.52%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">models.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:95.64%"></div></div><span class="cov-pct">95.64%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">hnsw.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:95.52%"></div></div><span class="cov-pct">95.52%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">tls.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:94.85%"></div></div><span class="cov-pct">94.85%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">llm.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:94.80%"></div></div><span class="cov-pct">94.80%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">db.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:93.85%"></div></div><span class="cov-pct">93.85%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">daemon_runtime.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:93.43%"></div></div><span class="cov-pct">93.43%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">handlers.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:92.85%"></div></div><span class="cov-pct">92.85%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">federation.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:92.63%"></div></div><span class="cov-pct">92.63%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">embeddings.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:91.70%"></div></div><span class="cov-pct">91.70%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">mcp.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:91.22%"></div></div><span class="cov-pct">91.22%</span>
+      </div>
+      <div class="cov-row">
+        <span class="cov-mod">reranker.rs</span><div class="cov-bar-bg"><div class="cov-bar-fill" style="width:79.25%"></div></div><span class="cov-pct warn">79.25%</span>
+      </div>
+    </div>
+
+    <div class="callout">
+      <strong>Why reranker is the lowest.</strong> The neural BERT cross-encoder needs HF-Hub model weights, which CI doesn't pre-fetch by default. Heuristic rerank path is fully covered. Closing the gap to ≥92% is a v0.7 work item with a plan in the public assertions table.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: FEDERATION
+     ============================================================= -->
+<section id="federation">
+  <div class="container">
+    <span class="eyebrow">Multi-machine Federation</span>
+    <h2>Quorum-replicated. mTLS-secured. Eventually consistent.</h2>
+    <p class="lede">
+      Run ai-memory on N machines. Writes propagate as <strong>W-of-N quorum</strong> — by default 2 of 3. Reads stay local; writes acknowledge after quorum. Every peer authenticates via mTLS with fingerprint allowlist. Catchup loop closes partition windows automatically.
+    </p>
+
+    <svg class="fed-diagram" viewBox="0 0 880 380" xmlns="http://www.w3.org/2000/svg">
+      <!-- Lead node -->
+      <g>
+        <rect class="node-bg lead" x="380" y="40" width="120" height="80" rx="12"/>
+        <text class="node-text" x="440" y="70">node-1</text>
+        <text class="node-sub" x="440" y="88">leader</text>
+        <text class="node-sub" x="440" y="105">writer</text>
+      </g>
+
+      <!-- Peer nodes -->
+      <g>
+        <rect class="node-bg" x="100" y="200" width="120" height="80" rx="12"/>
+        <text class="node-text" x="160" y="230">node-2</text>
+        <text class="node-sub" x="160" y="248">replica</text>
+        <text class="node-sub" x="160" y="265">ACK ✓</text>
+      </g>
+      <g>
+        <rect class="node-bg" x="380" y="200" width="120" height="80" rx="12"/>
+        <text class="node-text" x="440" y="230">node-3</text>
+        <text class="node-sub" x="440" y="248">replica</text>
+        <text class="node-sub" x="440" y="265">ACK ✓</text>
+      </g>
+      <g>
+        <rect class="node-bg" x="660" y="200" width="120" height="80" rx="12"/>
+        <text class="node-text" x="720" y="230">node-4</text>
+        <text class="node-sub" x="720" y="248">replica</text>
+        <text class="node-sub" x="720" y="265">offline</text>
+      </g>
+
+      <!-- Write fanout -->
+      <path class="write-line" d="M 420 120 Q 280 160 200 200" marker-end="url(#warrow)"/>
+      <path class="write-line" d="M 440 120 L 440 200" marker-end="url(#warrow)"/>
+      <path class="write-line" d="M 460 120 Q 600 160 700 200" marker-end="url(#warrow)" stroke-opacity="0.3" stroke-dasharray="4 4"/>
+
+      <!-- ACKs back -->
+      <path class="ack-line" d="M 200 200 Q 280 160 420 120"/>
+      <path class="ack-line" d="M 440 200 L 440 120"/>
+
+      <!-- Quorum threshold indicator -->
+      <text x="440" y="340" fill="#999" font-family="monospace" font-size="13" text-anchor="middle">W=2 of N=3 reached → write committed</text>
+      <text x="440" y="360" fill="#666" font-size="11" text-anchor="middle">node-4 catches up via /api/v1/sync/since when reachable</text>
+
+      <defs>
+        <marker id="warrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#ffb86b"/>
+        </marker>
+      </defs>
+    </svg>
+
+    <div class="grid-3" style="margin-top:2rem;">
+      <div class="card">
+        <div class="card-eyebrow">Transport</div>
+        <div class="card-title">mTLS · client-cert pinning</div>
+        <p class="card-body">Both sides verify each other's certificate. Fingerprint allowlist prevents accidental joins. No central PKI required.</p>
+      </div>
+      <div class="card">
+        <div class="card-eyebrow">Consistency</div>
+        <div class="card-title">Eventual · Lamport-clock vector cursors</div>
+        <p class="card-body">Per-peer sync-state cursor advances with successful pulls. Re-joining peer fast-catches-up to current epoch.</p>
+      </div>
+      <div class="card">
+        <div class="card-eyebrow">Failure</div>
+        <div class="card-title">Quorum-not-met → 503 with peer status</div>
+        <p class="card-body">Caller sees structured error: which peers responded, which timed out. No silent partial writes.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: AUDIENCES — Use cases by scale
+     ============================================================= -->
+<section id="audiences">
+  <div class="container">
+    <span class="eyebrow p3">From One to a Million</span>
+    <h2>Same binary, every scale.</h2>
+    <p class="lede">
+      ai-memory runs the same way on a developer's laptop as it does on a federation of state-government data centers. The differentiator is configuration, not code path: federation peers, mTLS allowlists, governance policies, autonomous-tier resources.
+    </p>
+
+    <div class="persona-grid">
+      <!-- Solo dev -->
+      <div class="persona">
+        <div class="persona-icon">👤</div>
+        <div class="persona-scale">SCALE 1 · INDIVIDUAL</div>
+        <div class="persona-title">Solo developer</div>
+        <div class="persona-pop">1 user · 1 box</div>
+        <div class="persona-pop-label">laptop, semantic tier</div>
+        <div class="persona-pain">"I forget what I learned last week. Claude forgets between sessions."</div>
+        <div class="persona-fix">One <code>ai-memory mcp</code> in the MCP config. Memory survives restarts, updates, machine swaps.</div>
+        <ul class="persona-bullets">
+          <li>Cross-session context</li>
+          <li>Cross-AI parity (Claude, Cursor, Codex)</li>
+          <li>Local-first privacy</li>
+        </ul>
+      </div>
+
+      <!-- Small team -->
+      <div class="persona">
+        <div class="persona-icon">👥</div>
+        <div class="persona-scale">SCALE 2 · STARTUP</div>
+        <div class="persona-title">Small team (2-25 people)</div>
+        <div class="persona-pop">2-25 users · 1-3 nodes</div>
+        <div class="persona-pop-label">shared engineering memory</div>
+        <div class="persona-pain">"Tribal knowledge dies when someone leaves. New hires re-discover landmines."</div>
+        <div class="persona-fix">Federated 3-node cluster. Per-namespace shared memory. ChatGPT memory but you own the data.</div>
+        <ul class="persona-bullets">
+          <li>Onboarding accelerator</li>
+          <li>Decision audit trail</li>
+          <li>$0 per-seat cost</li>
+        </ul>
+      </div>
+
+      <!-- Mid-size org -->
+      <div class="persona">
+        <div class="persona-icon">🏢</div>
+        <div class="persona-scale">SCALE 3 · MID-MARKET</div>
+        <div class="persona-title">Mid-size org (25-500 people)</div>
+        <div class="persona-pop">25-500 users · 5-15 nodes</div>
+        <div class="persona-pop-label">multi-team, multi-namespace</div>
+        <div class="persona-pain">"AI usage is exploding. So is the SaaS bill. So is the data-leakage risk."</div>
+        <div class="persona-fix">Per-team namespace + governance. mTLS federation. SIEM webhook integration. Local data residency.</div>
+        <ul class="persona-bullets">
+          <li>Centralized memory governance</li>
+          <li>Per-team compliance scope</li>
+          <li>SOC2-friendly audit trail</li>
+        </ul>
+      </div>
+
+      <!-- Large enterprise -->
+      <div class="persona">
+        <div class="persona-icon">🏛️</div>
+        <div class="persona-scale">SCALE 4 · ENTERPRISE</div>
+        <div class="persona-title">Large corporation (500-50k)</div>
+        <div class="persona-pop">500-50,000 users · 20-100 nodes</div>
+        <div class="persona-pop-label">multi-region federation</div>
+        <div class="persona-pain">"Each business unit wants AI. Each lawyer wants air-gapped. Each auditor wants logs."</div>
+        <div class="persona-fix">Per-BU federated cluster. Cross-region quorum. PII redaction hooks. Backup + restore + retention.</div>
+        <ul class="persona-bullets">
+          <li>Air-gapped deployments</li>
+          <li>Per-BU policy enforcement</li>
+          <li>Hooks for data-loss prevention</li>
+        </ul>
+      </div>
+
+      <!-- Mega-scale / gov -->
+      <div class="persona">
+        <div class="persona-icon">🇺🇸</div>
+        <div class="persona-scale">SCALE 5 · GOVERNMENT</div>
+        <div class="persona-title">Federal · state · local · municipal</div>
+        <div class="persona-pop">Sovereign · Air-gapped</div>
+        <div class="persona-pop-label">FedRAMP / IL5 / Sovereign</div>
+        <div class="persona-pain">"AI is mandatory. The cloud is forbidden. The vendors are foreign."</div>
+        <div class="persona-fix">Apache 2.0 OSS. Single Rust binary. Zero outbound calls. Hardware-attested keys (v0.7).</div>
+        <ul class="persona-bullets">
+          <li>100% air-gap operable</li>
+          <li>Public source-code audit</li>
+          <li>No vendor lock-in</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-top:2.5rem;">
+      <strong>The AgenticMem commercial tiers are an addition, not a requirement.</strong> Every audience above can run the OSS ai-memory binary indefinitely with no commercial product needed. The Attest / Federate / Sovereign commercial tiers add hardware-backed identity, managed federation, and FedRAMP-certified deployments — but only when the operator chooses.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: ROADMAP TIMELINE
+     ============================================================= -->
+<section id="roadmap">
+  <div class="container">
+    <span class="eyebrow">Roadmap</span>
+    <h2>From v0.6.3 today to v1.0 federation maturity.</h2>
+    <p class="lede">
+      Public release sequence. Each release ships one demoable headline plus operational substrate the next release builds on. No version skipping. No quiet feature drift. <a href="https://github.com/alphaonedev/ai-memory-mcp-dev/blob/develop/ROADMAP.md" style="color:var(--pillar-1)">Public ROADMAP.md →</a>
+    </p>
+
+    <div class="roadmap">
+      <div class="roadmap-row shipped">
+        <div class="roadmap-marker">
+          <div class="roadmap-dot"></div>
+          <div class="version">v0.6.3</div>
+        </div>
+        <div class="roadmap-content">
+          <div class="rmt-theme">Structured Memory + Performance · <span style="color:var(--good)">SHIPPED rc1</span></div>
+          <div class="rmt-eta">May 2026 · 4-week sprint</div>
+          <div class="rmt-desc">Hierarchy + Knowledge Graph + Performance Budgets. The grand-slam release.</div>
+          <ul class="rmt-bullets">
+            <li>Hierarchical namespace paths (<code>projects/alpha/decisions</code>)</li>
+            <li>Temporal-validity knowledge graph (recursive CTE today, AGE-ready for v0.7)</li>
+            <li>Published p95/p99 budgets + CI guard (<code>bench.yml</code>)</li>
+            <li>93.84% test coverage (1,886 lib tests + 49+ integration, across the ubuntu/macos/windows CI matrix; v0.6.3.1)</li>
+            <li>Two SSRF defects discovered during campaign — fixed before tag</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="roadmap-row next">
+        <div class="roadmap-marker">
+          <div class="roadmap-dot"></div>
+          <div class="version">v0.7</div>
+        </div>
+        <div class="roadmap-content">
+          <div class="rmt-theme">Trust + A2A Maturity</div>
+          <div class="rmt-eta">End Q2 2026 · gates Q3 commercial Attest launch</div>
+          <div class="rmt-desc">Ed25519 attested identity, Apache AGE acceleration, A2A messaging maturity, programmable hook pipeline.</div>
+          <ul class="rmt-bullets">
+            <li>Ed25519 signatures on every memory_link write — fills v0.6.3 placeholder column</li>
+            <li>Apache AGE wrapper on Postgres KG — Cypher path joins existing CTE path</li>
+            <li>A2A correlation IDs, ACKs, TTLs · subscription DLQ + replay · per-agent quotas</li>
+            <li>Hook pipeline foundation (subprocess JSON-over-stdio + daemon-mode IPC)</li>
+            <li>Permission system (refactors v0.6.3 governance into rules+modes+hooks)</li>
+            <li>Sidechain transcripts (raw conversation audit trail)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="roadmap-row future">
+        <div class="roadmap-marker">
+          <div class="roadmap-dot"></div>
+          <div class="version">v0.8</div>
+        </div>
+        <div class="roadmap-content">
+          <div class="rmt-theme">Coordination Primitives</div>
+          <div class="rmt-eta">Q4 2026</div>
+          <div class="rmt-desc">Distributed task queue, typed cognition, CRDTs. The multi-agent substrate.</div>
+          <ul class="rmt-bullets">
+            <li>Task queue with attested claim/complete/abandon (replay-safe)</li>
+            <li>Typed cognition: Goal / Plan / Step / Observation / Decision relations</li>
+            <li>CRDT merge for concurrent multi-agent edits (G-Counter, OR-Set, LWW-Register)</li>
+            <li>Compaction pipeline with verify+rollback (typed-cognition supersession)</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="roadmap-row future">
+        <div class="roadmap-marker">
+          <div class="roadmap-dot"></div>
+          <div class="version">v0.9</div>
+        </div>
+        <div class="roadmap-content">
+          <div class="rmt-theme">Agentic Substrate</div>
+          <div class="rmt-eta">Q1 2027</div>
+          <div class="rmt-desc">Function calling, skill memories, streaming.</div>
+        </div>
+      </div>
+
+      <div class="roadmap-row future">
+        <div class="roadmap-marker">
+          <div class="roadmap-dot"></div>
+          <div class="version">v1.0</div>
+        </div>
+        <div class="roadmap-content">
+          <div class="rmt-theme">Federation Maturity</div>
+          <div class="rmt-eta">Q2 2027</div>
+          <div class="rmt-desc">Auto-discovery (mDNS), end-to-end encryption, MVCC, OpenTelemetry standardization, strict semver discipline.</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: COMPARISON MATRIX
+     ============================================================= -->
+<section id="compare">
+  <div class="container">
+    <span class="eyebrow">vs Alternatives</span>
+    <h2>How ai-memory stacks up.</h2>
+    <p class="lede">
+      Honest comparison against the practical alternatives. Each has its place; ai-memory's place is "single binary, local-first, every AI, sub-100ms".
+    </p>
+
+    <div style="overflow-x:auto;">
+      <table class="compare-matrix">
+        <thead>
+          <tr>
+            <th class="spec">Capability</th>
+            <th class="aim">ai-memory</th>
+            <th>Vector DB<br><small>(Chroma, Qdrant, etc.)</small></th>
+            <th>SaaS memory<br><small>(ChatGPT memory, etc.)</small></th>
+            <th>mempalace</th>
+            <th>Raw text<br><small>(notes, READMEs)</small></th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="spec">AI-agnostic (works with any MCP client)</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td></tr>
+          <tr><td class="spec">Cross-session persistence</td><td class="aim"><span class="tick">✓</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td></tr>
+          <tr><td class="spec">Hierarchical namespaces</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="partial">~</span></td></tr>
+          <tr><td class="spec">Temporal-validity knowledge graph</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="partial">~</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Published latency budgets + CI guard</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Hybrid recall (FTS + vector + reranker)</td><td class="aim"><span class="tick">✓</span></td><td><span class="partial">~</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Federation across machines</td><td class="aim"><span class="tick">✓</span></td><td><span class="partial">~</span></td><td><span class="cross">N/A</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Local-first · zero cloud deps</td><td class="aim"><span class="tick">✓</span></td><td><span class="partial">~</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td></tr>
+          <tr><td class="spec">Single binary install</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">N/A</span></td><td><span class="cross">✗</span></td><td><span class="tick">N/A</span></td></tr>
+          <tr><td class="spec">mTLS federation</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">N/A</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Self-curating background daemon</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Apache 2.0 OSS · auditable source</td><td class="aim"><span class="tick">✓</span></td><td><span class="partial">~</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="tick">N/A</span></td></tr>
+          <tr><td class="spec">Air-gap deployable</td><td class="aim"><span class="tick">✓</span></td><td><span class="partial">~</span></td><td><span class="cross">✗</span></td><td><span class="tick">✓</span></td><td><span class="tick">✓</span></td></tr>
+          <tr><td class="spec">Per-namespace governance</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Webhook subscriptions for SIEM</td><td class="aim"><span class="tick">✓</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td><td><span class="cross">✗</span></td></tr>
+          <tr><td class="spec">Sub-100ms session-start budget</td><td class="aim"><span class="tick">✓ 42ms</span></td><td><span class="partial">~</span></td><td><span class="partial">~</span></td><td><span class="tick">✓</span></td><td><span class="cross">N/A</span></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <strong>Where mempalace wins:</strong> longer track record, larger community, Python-native stack. <strong>Where ai-memory wins:</strong> single Rust binary (no Python install), AI-agnostic via MCP (works with Claude/Cursor/Windsurf/etc., not just one host), federation primitives (W-of-N quorum), Apache 2.0 commercial-friendly license. <strong>Both are correct choices for different operators.</strong>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: TRUST LADDER
+     ============================================================= -->
+<section id="trust">
+  <div class="container">
+    <span class="eyebrow p3">Trust Ladder</span>
+    <h2>Five steps from laptop to FedRAMP.</h2>
+    <p class="lede">
+      Each step strengthens the trust boundary without breaking the layer below it. The OSS binary is operable at every step. The AgenticMem commercial tiers add managed services on top of what's already shipped.
+    </p>
+
+    <div class="trust-ladder">
+      <div class="trust-step shipped">
+        <div class="step-num">1</div>
+        <div class="step-tier">v0.6.3 · OSS</div>
+        <div class="step-title">Local-first</div>
+        <div class="step-desc">SQLite WAL, bound to 127.0.0.1, no outbound traffic. Personal-machine baseline.</div>
+      </div>
+      <div class="trust-step shipped">
+        <div class="step-num">2</div>
+        <div class="step-tier">v0.6.3 · OSS</div>
+        <div class="step-title">mTLS federation</div>
+        <div class="step-desc">Client-cert pinning, fingerprint allowlist, no central PKI. Multi-machine baseline.</div>
+      </div>
+      <div class="trust-step next">
+        <div class="step-num">3</div>
+        <div class="step-tier">v0.7 · OSS</div>
+        <div class="step-title">Ed25519 attested identity</div>
+        <div class="step-desc">Every link write signed end-to-end. Verifiable provenance for the audit trail.</div>
+      </div>
+      <div class="trust-step">
+        <div class="step-num">4</div>
+        <div class="step-tier">AgenticMem · Attest</div>
+        <div class="step-title">Hardware-backed keys</div>
+        <div class="step-desc">TPM / HSM / Secure Enclave for key storage. Compliance-ready Q3 2026.</div>
+      </div>
+      <div class="trust-step">
+        <div class="step-num">5</div>
+        <div class="step-tier">AgenticMem · Sovereign</div>
+        <div class="step-title">FedRAMP / IL5</div>
+        <div class="step-desc">Government-grade deployments. Air-gapped, audited, contractually committed.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: THE NUMBERS DASHBOARD
+     ============================================================= -->
+<section id="numbers">
+  <div class="container">
+    <span class="eyebrow">By the Numbers</span>
+    <h2>Everything quantifiable, in one place.</h2>
+    <p class="lede">
+      Every quantitative claim ai-memory makes, sourced from the post-v0.6.3 codebase and the public CAMPAIGN-FINAL-METRICS document.
+    </p>
+
+    <div class="dash-grid">
+      <div class="dash-tile p1">
+        <div class="dash-label">Line coverage</div>
+        <div class="dash-num">93.05<span class="dash-unit">%</span></div>
+        <div class="dash-sub">42,894 / 46,099 lines</div>
+      </div>
+      <div class="dash-tile p1">
+        <div class="dash-label">Region coverage</div>
+        <div class="dash-num">93.11<span class="dash-unit">%</span></div>
+        <div class="dash-sub">73,150 / 78,564 regions</div>
+      </div>
+      <div class="dash-tile p1">
+        <div class="dash-label">Function coverage</div>
+        <div class="dash-num">92.55<span class="dash-unit">%</span></div>
+        <div class="dash-sub">3,527 / 3,811 functions</div>
+      </div>
+      <div class="dash-tile good">
+        <div class="dash-label">Tests passing</div>
+        <div class="dash-num">1,809</div>
+        <div class="dash-sub">1,600 lib + 209 integration · 0 failed · 0 ignored</div>
+      </div>
+      <div class="dash-tile p2">
+        <div class="dash-label">MCP tools</div>
+        <div class="dash-num">26</div>
+        <div class="dash-sub">Claude / Cursor / Codex / Continue</div>
+      </div>
+      <div class="dash-tile p2">
+        <div class="dash-label">HTTP endpoints</div>
+        <div class="dash-num">39</div>
+        <div class="dash-sub">REST + SSE + mTLS</div>
+      </div>
+      <div class="dash-tile p2">
+        <div class="dash-label">CLI commands</div>
+        <div class="dash-num">28</div>
+        <div class="dash-sub">store, recall, sync, ...</div>
+      </div>
+      <div class="dash-tile p3">
+        <div class="dash-label">Session-start p95</div>
+        <div class="dash-num">42<span class="dash-unit">ms</span></div>
+        <div class="dash-sub">budget &lt; 100 ms</div>
+      </div>
+      <div class="dash-tile p3">
+        <div class="dash-label">Recall p95 (hot)</div>
+        <div class="dash-num">18<span class="dash-unit">ms</span></div>
+        <div class="dash-sub">budget &lt; 50 ms</div>
+      </div>
+      <div class="dash-tile p3">
+        <div class="dash-label">Federation ack p99</div>
+        <div class="dash-num">850<span class="dash-unit">ms</span></div>
+        <div class="dash-sub">budget &lt; 2 s · W=2</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">main.rs lines</div>
+        <div class="dash-num">75</div>
+        <div class="dash-sub">down from 4,511 · 98.3% reduction</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">Modules at 100%</div>
+        <div class="dash-num">7</div>
+        <div class="dash-sub">main, errors, color, lib, ...</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">Modules ≥ 90%</div>
+        <div class="dash-num">39</div>
+        <div class="dash-sub">of 47 total</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">Distribution targets</div>
+        <div class="dash-num">5</div>
+        <div class="dash-sub">macOS arm64/x64 · Linux arm64/x64 · Win x64</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">Package channels</div>
+        <div class="dash-num">5</div>
+        <div class="dash-sub">Homebrew · APT · COPR · GHCR · crates.io</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">SSRF defects fixed</div>
+        <div class="dash-num">2</div>
+        <div class="dash-sub">found + fixed in v0.6.3 campaign</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">Cloud dependencies</div>
+        <div class="dash-num">0</div>
+        <div class="dash-sub">100% local-first</div>
+      </div>
+      <div class="dash-tile">
+        <div class="dash-label">License</div>
+        <div class="dash-num" style="font-size:1.4rem">Apache 2.0</div>
+        <div class="dash-sub">commercial-friendly OSS</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: WHY IT MATTERS
+     ============================================================= -->
+<section id="why">
+  <div class="container">
+    <span class="eyebrow">Why This Matters</span>
+    <h2>Memory is the missing layer in the AI stack.</h2>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3>For the individual</h3>
+        <p style="color:var(--text-muted); margin-bottom:.75rem">
+          You have ~30 conversations a day with one or more AIs. Each starts cold. Each ends with knowledge that vanishes. Over a year that's roughly <strong>11,000 lost contexts</strong> — a year's worth of relationship-building with the most powerful tool you've ever owned, evaporated every 4 hours.
+        </p>
+        <p style="color:var(--text-muted); font-size:.9rem">ai-memory turns those 11,000 cold-starts into one continuous conversation that learns about you over time.</p>
+      </div>
+
+      <div class="card">
+        <h3>For the team</h3>
+        <p style="color:var(--text-muted); margin-bottom:.75rem">
+          A 25-person engineering team using Claude collectively burns ~600 cold-start latencies per day. At 200ms each, that's <strong>2 minutes/day of pure latency</strong> — but the bigger cost is the re-paste: explaining the same project context, repeatedly, to AIs that can't share what they learned.
+        </p>
+        <p style="color:var(--text-muted); font-size:.9rem">A federated ai-memory cluster shares understood context across the team. New hires walk into the conversation already in progress.</p>
+      </div>
+
+      <div class="card">
+        <h3>For the enterprise</h3>
+        <p style="color:var(--text-muted); margin-bottom:.75rem">
+          Every GenAI vendor wants your data. Every compliance officer wants it on your premise. Every architect wants it durable. Every CFO wants it predictable. <strong>The only stack that satisfies all four constraints is a local-first memory layer with a published latency contract</strong> — sitting underneath whatever AI vendor you happen to use today.
+        </p>
+        <p style="color:var(--text-muted); font-size:.9rem">ai-memory is that layer. Apache 2.0. Single binary. mTLS federation. CI-guarded budgets. Auditable from <code>git clone</code> to deployed binary in 60 seconds.</p>
+      </div>
+
+      <div class="card">
+        <h3>For the public sector</h3>
+        <p style="color:var(--text-muted); margin-bottom:.75rem">
+          AI mandates are real. Cloud bans are real. Foreign-vendor concerns are real. <strong>An OSS Rust binary that runs entirely on your hardware, requires zero outbound traffic, and ships with auditable source code is the only AI-memory primitive that works for federal, state, local, and municipal deployments.</strong>
+        </p>
+        <p style="color:var(--text-muted); font-size:.9rem">v0.7's attested-identity work targets FIPS-grade key handling. v1.0's federation maturity work targets multi-region resilience. Today's v0.6.3 already runs air-gapped with no compromise.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     SECTION: COMPANION PAGES (visualization atlas)
+     ============================================================= -->
+<section id="atlas">
+  <div class="container">
+    <span class="eyebrow">Visualization Atlas</span>
+    <h2>Twenty-three pages. Every facet, dedicated visualizations.</h2>
+    <p class="lede">This page is the hub. Three concentric rings: <strong>six audience-facing</strong> pages (release spotlight, feature matrix, data flow, integrations, audiences, release pipeline), <strong>twelve feature deep-dives</strong> (tiers, rules, TTLs, archival, encryption, hierarchies, KG, autonomous, A2A, lifecycle, performance, credits), and <strong>five SME-detail references</strong> (schema, types, validators, governance, tracing). <strong>Pick what your audience needs.</strong></p>
+
+    <div class="grid-3" style="gap:1rem">
+      <a href="whats-new-v063.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ NEW · RELEASE SPOTLIGHT</div>
+          <div class="card-title">What's New in v0.6.3</div>
+          <p class="card-body">The 6 streams shipped, the 9 coverage waves, the 2 SSRF defects fixed, the upgrade path. Animated coverage timeline + before/after security diff.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">whats-new-v063.html →</div>
+        </div>
+      </a>
+
+      <a href="feature-matrix.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ COMPLETE SURFACE AREA</div>
+          <div class="card-title">Feature Matrix</div>
+          <p class="card-body">Every MCP tool, every HTTP endpoint, every CLI command — categorized, cross-referenced. 26 + 39 + 28 = 93 operations. The SME's full reference.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">feature-matrix.html →</div>
+        </div>
+      </a>
+
+      <a href="data-flow.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ ENGINEERING DEEP DIVE</div>
+          <div class="card-title">Data Flow</div>
+          <p class="card-body">Animated write path, read path with hybrid 70/30 fusion, federation W=2 of N=3 quorum diagram. Where every byte goes.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">data-flow.html →</div>
+        </div>
+      </a>
+
+      <a href="integrations.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ EVERY AI HOST</div>
+          <div class="card-title">Integrations</div>
+          <p class="card-body">13 AI clients tested with one-block setup snippets each. Claude · ChatGPT · Cursor · Windsurf · Continue · Codex · Gemini · Grok · OpenClaw · Hermes · Llama.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">integrations.html →</div>
+        </div>
+      </a>
+
+      <a href="for-everyone.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ AUDIENCE-BY-SCALE</div>
+          <div class="card-title">For Everyone</div>
+          <p class="card-body">Solo dev → Startup → Mid-market → Enterprise → Government. Pain → Fix → ROI per audience. Deployment patterns. Procurement-ready specs.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">for-everyone.html →</div>
+        </div>
+      </a>
+
+      <a href="release-pipeline.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ OPERATIONAL MATURITY</div>
+          <div class="card-title">Release Pipeline</div>
+          <p class="card-body">Tag → 5 platforms → 5 distribution channels → all signed. CI gates. SBOM. Reproducible builds. Procurement-ready operational spec.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">release-pipeline.html →</div>
+        </div>
+      </a>
+    </div>
+
+    <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid var(--border)">
+      <span class="eyebrow">Feature Deep-Dive Atlas</span>
+      <h2 style="margin-top:.5rem">Eleven big-sell features, one page each.</h2>
+      <p class="lede">The grand-slam features. Tiers + TTLs (the retention story). Rules (per-namespace policy stack). Archival (two-stage soft-then-hard delete). Encryption (SQLCipher, mTLS, HMAC). Hierarchies (8-level memory trees). Knowledge Graph (4 relations + temporal validity). Autonomous (Gemma 4-powered). A2A messaging. Full lifecycle. Performance + bench tool. Credits (Google Gemma 4, Nomic, Hugging Face, Ollama, SQLite, Rust ecosystem).</p>
+    </div>
+
+    <div class="grid-3" style="gap:1rem;margin-top:1.5rem">
+      <a href="memory-tiers.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ THREE TIERS</div>
+          <div class="card-title">Memory Tiers</div>
+          <p class="card-body">Short (6h) / Mid (7d) / Long (no TTL). Mirrors human memory architecture. Promotion path with governance gates. The default that lets agents forget noise.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">memory-tiers.html →</div>
+        </div>
+      </a>
+
+      <a href="memory-rules.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ FIVE LAYERS</div>
+          <div class="card-title">Memory Rules</div>
+          <p class="card-body">Validation → scope → governance → namespace standard → parent inheritance. Five rule layers, every refusal named with a reason. Multi-tenant isolation, compliance retention, AI-supervisor patterns.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">memory-rules.html →</div>
+        </div>
+      </a>
+
+      <a href="ttl-controls.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ EIGHT DIALS</div>
+          <div class="card-title">TTL Controls</div>
+          <p class="card-body">Per-write expires_at + ttl_secs. Per-tier defaults. Daemon-config overrides. Access-driven extension. archive_on_gc. Every dial that controls memory lifetime.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">ttl-controls.html →</div>
+        </div>
+      </a>
+
+      <a href="archival.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ SOFT THEN HARD</div>
+          <div class="card-title">Archival</div>
+          <p class="card-body">archive → restore or purge. Five archive MCP tools. archive_on_gc soft-delete. auto_purge retention windows. Compliance patterns for GDPR, retention SLAs, forensics.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">archival.html →</div>
+        </div>
+      </a>
+
+      <a href="encryption.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ FOUR SURFACES</div>
+          <div class="card-title">Encryption</div>
+          <p class="card-body">SQLCipher AES-256 at-rest. mTLS + fingerprint allowlist for federation. HMAC-SHA256 webhooks. Signed git tags + SBOM. v0.7 Ed25519 attested identity roadmap.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">encryption.html →</div>
+        </div>
+      </a>
+
+      <a href="hierarchies.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ MEMORY TREES</div>
+          <div class="card-title">Hierarchies</div>
+          <p class="card-body">8-level deep namespace paths. 5 visibility scopes (private/team/unit/org/collective). Namespace standards inheritance. memory_get_taxonomy tree walker. v0.6.3 Stream A.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">hierarchies.html →</div>
+        </div>
+      </a>
+
+      <a href="knowledge-graph.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ STRUCTURED COGNITION</div>
+          <div class="card-title">Knowledge Graph</div>
+          <p class="card-body">4 relation types. Entity registry with alias resolution. Temporal validity columns. memory_kg_query / kg_timeline / kg_invalidate. v0.6.3 Streams B + C.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">knowledge-graph.html →</div>
+        </div>
+      </a>
+
+      <a href="autonomous.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ POWERED BY GEMMA 4</div>
+          <div class="card-title">Autonomous</div>
+          <p class="card-body">Auto-tag, consolidate, expand-query, contradiction detection, memory reflection, session-start. All powered by Google's open-source Gemma 4 via Ollama. Local-first.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">autonomous.html →</div>
+        </div>
+      </a>
+
+      <a href="a2a-messaging.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ AGENT-TO-AGENT</div>
+          <div class="card-title">A2A Messaging</div>
+          <p class="card-body">memory_notify pushes to inbox (federation-aware). memory_subscribe webhooks fan out events. HMAC-SHA256 signed dispatch. Two patterns, one toolkit.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">a2a-messaging.html →</div>
+        </div>
+      </a>
+
+      <a href="lifecycle.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ END TO END</div>
+          <div class="card-title">Lifecycle</div>
+          <p class="card-body">store → access → consolidate → promote → archive → restore or purge. Six stages, eleven transitions, every transition leaves an audit trail. Timeline visualization.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">lifecycle.html →</div>
+        </div>
+      </a>
+
+      <a href="performance.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ MEASURED + GATED</div>
+          <div class="card-title">Performance</div>
+          <p class="card-body">Public p95 budgets per operation. bench tool with --baseline / --history / --update-performance-md. CI bench gate that fails on regressions. v0.6.3 Streams E + F.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">performance.html →</div>
+        </div>
+      </a>
+
+      <a href="credits.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ THANKS</div>
+          <div class="card-title">Credits</div>
+          <p class="card-body">Open-source acknowledgements. Google for Gemma 4. Nomic AI for embeddings. Hugging Face for tokenizers + reranker. Ollama, SQLite, the Rust ecosystem.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">credits.html →</div>
+        </div>
+      </a>
+    </div>
+
+    <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid var(--border)">
+      <span class="eyebrow">SME Deep-Dive Atlas</span>
+      <h2 style="margin-top:.5rem">Five reference pages. Every column, every type, every check.</h2>
+      <p class="lede">When the audience-facing pages are not enough — when an evaluating engineer needs to see every SQL column, every Rust type, every validator, every governance verdict, every log line. These pages are the reference contract for AI clients integrating against ai-memory.</p>
+    </div>
+
+    <div class="grid-3" style="gap:1rem;margin-top:1.5rem">
+      <a href="schema.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ SQL ATLAS</div>
+          <div class="card-title">Schema</div>
+          <p class="card-body">Every SQLite table column-by-column. 9 tables, 15+ indexes, 6 foreign keys, v15 migration timeline. Postgres mirror via SAL. The persistence contract.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">schema.html →</div>
+        </div>
+      </a>
+
+      <a href="types.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ RUST TYPE REFERENCE</div>
+          <div class="card-title">Types</div>
+          <p class="card-body">Every public struct and enum from <code>src/models.rs</code>. 5 enums, 22 structs, 5 consts. Field-level types, defaults, serde tags. The wire-format contract.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">types.html →</div>
+        </div>
+      </a>
+
+      <a href="validators.html" style="text-decoration:none">
+        <div class="card p3" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-3)">▸ INPUT-CHECK ATLAS</div>
+          <div class="card-title">Validators</div>
+          <p class="card-body">23 validate_* functions, every limit explicit, every closed set enumerated. Defense in depth — same checks on HTTP, MCP, CLI, federation receive.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-3)">validators.html →</div>
+        </div>
+      </a>
+
+      <a href="governance.html" style="text-decoration:none">
+        <div class="card p1" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-1)">▸ ALLOW / DENY / PENDING</div>
+          <div class="card-title">Governance</div>
+          <p class="card-body">The decision tree. 4 levels × 3 actions matrix. Three approver flavors (Human, Agent, Consensus). Pending-action lifecycle. Federation propagation.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-1)">governance.html →</div>
+        </div>
+      </a>
+
+      <a href="tracing.html" style="text-decoration:none">
+        <div class="card p2" style="height:100%;display:flex;flex-direction:column">
+          <div class="card-eyebrow" style="color:var(--pillar-2)">▸ OBSERVABILITY ATLAS</div>
+          <div class="card-title">Tracing</div>
+          <p class="card-body">176 log call sites across 11 modules. Setup, level taxonomy, canonical phrases AI clients can grep for. Incident-review recipes.</p>
+          <div style="margin-top:.85rem;font-family:var(--font-mono);font-size:.78rem;color:var(--pillar-2)">tracing.html →</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="callout" style="margin-top:2.5rem">
+      <strong>The atlas is print-friendly too.</strong> Every page in the visualization set has a <code>@media print</code> stylesheet that strips chrome, switches to white background, and applies page-break-protection. Print as a PDF for board decks, procurement reviews, or a "give this to your security team" packet.
+    </div>
+  </div>
+</section>
+
+<!-- =============================================================
+     CTA + FOOTER
+     ============================================================= -->
+<section class="cta-section">
+  <div class="container">
+    <h2>Run it locally in <span style="color:var(--pillar-1)">60 seconds</span>.</h2>
+    <p>No signup. No telemetry. No SaaS. <code>brew install ai-memory</code> or <code>cargo install ai-memory</code> — your laptop, your data, your AI.</p>
+    <div class="cta-row">
+      <a class="cta primary" href="./#install" style="display:inline-block;padding:.9rem 1.6rem;background:var(--text);color:var(--bg);font-weight:700;border-radius:8px;border:1px solid var(--text);text-decoration:none">Install Guide</a>
+      <a class="cta" href="https://github.com/alphaonedev/ai-memory-mcp" style="display:inline-block;padding:.9rem 1.6rem;border:1px solid var(--border-hl);color:var(--text);font-weight:600;border-radius:8px;text-decoration:none">View Source on GitHub →</a>
+      <a class="cta" href="./#claude-integration" style="display:inline-block;padding:.9rem 1.6rem;border:1px solid var(--border-hl);color:var(--text);font-weight:600;border-radius:8px;text-decoration:none">Claude Code Setup</a>
+    </div>
+  </div>
+</section>
+
+<footer class="site-foot">
+  <div>
+    Apache 2.0 · <a href="https://github.com/alphaonedev/ai-memory-mcp">github.com/alphaonedev/ai-memory-mcp</a> · ai-memory-mcp <strong style="color:var(--text)">v0.6.3.1</strong> · Built with the AI NHI by <a href="https://alphaonedev.com">AlphaOne LLC</a>
+  </div>
+  <div style="margin-top:.5rem; font-size:.75rem;">
+    All measurements on Apple M4 / 32 GB / NVMe SSD · numbers from <code>cargo llvm-cov --features sal --no-fail-fast --json</code>
+  </div>
+</footer>
+
+</body>
+</html>

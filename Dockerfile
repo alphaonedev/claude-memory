@@ -1,7 +1,13 @@
 # syntax=docker/dockerfile:1
 
 # ---- Build stage ----
-FROM rust:1.94-slim AS builder
+# Pin to bookworm so the produced binary's glibc matches the runtime
+# stage (debian:bookworm-slim, glibc 2.36). Without the explicit
+# bookworm tag, rust:1.94-slim resolves to a trixie-based image
+# (glibc 2.41) and the binary fails at startup with
+# `version GLIBC_2.39 not found` — caught by the dockerfile-validate
+# CI job (PR #465 retrospective; v0.6.5 bake).
+FROM rust:1.94-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -13,6 +19,12 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY src/ src/
 COPY benches/ benches/
+# v0.6.3 added include_str! references to migration SQL files
+# (Streams A-C schema v15: migrations/sqlite/0010_v063_hierarchy_kg.sql).
+# Without the migrations/ directory in the build context, cargo build
+# fails at compile time. Pre-existing Dockerfile gap that v0.6.2 did
+# not surface (no new migrations).
+COPY migrations/ migrations/
 
 RUN cargo build --release && strip target/release/ai-memory
 

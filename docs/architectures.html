@@ -1,0 +1,446 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  ai-memory architectures — five-tier capability matrix.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Architectures — five tiers from laptop to global hive</title>
+<meta name="description" content="Five reference architectures for ai-memory — from a single agent on a laptop to a globally federated hive of millions. With honest 'today vs roadmap' markers per v0.6.3.">
+<meta property="og:title" content="ai-memory · Architectures">
+<meta property="og:description" content="Five reference architectures for ai-memory — from one agent to a global hive.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/architectures.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem;flex-wrap:wrap}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:780px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+
+/* capability badges */
+.cap-badge{display:inline-block;padding:.15em .55em;font-family:var(--font-mono);font-size:.7rem;font-weight:600;border-radius:4px;border:1px solid;letter-spacing:.04em;margin:.1em .15em}
+.cap-today{color:#6ee7ff;border-color:#2a6571;background:rgba(110,231,255,.08)}
+.cap-roadmap{color:#c8a2ff;border-color:#5a4280;background:rgba(200,162,255,.08)}
+.cap-partial{color:#ffb86b;border-color:#7a5328;background:rgba(255,184,107,.08)}
+.cap-future{color:#ff6b9d;border-color:#7a3251;background:rgba(255,107,157,.08)}
+
+/* arch tier grid */
+.arch-tier-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;margin:1.5rem 0 2.5rem}
+.arch-tier-card{display:block;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.4rem;text-decoration:none;color:var(--text);transition:border-color .15s ease,transform .15s ease;position:relative}
+.arch-tier-card:hover{border-color:var(--p1);transform:translateY(-2px)}
+.arch-tier-card .tier-id{display:inline-block;font-family:var(--font-mono);font-size:.7rem;font-weight:700;letter-spacing:.12em;color:var(--p2);background:rgba(255,184,107,.08);border:1px solid #7a5328;padding:.2em .55em;border-radius:4px;margin-bottom:.65rem}
+.arch-tier-card h3{font-family:var(--font-sans);font-size:1.15rem;font-weight:700;color:var(--text);margin-bottom:.45rem;letter-spacing:-0.01em}
+.arch-tier-card p{font-size:.88rem;color:var(--text-muted);margin-bottom:.75rem;line-height:1.5}
+.arch-tier-card .tier-scale{display:block;font-family:var(--font-mono);font-size:.68rem;color:var(--text-dim);letter-spacing:.04em;margin-bottom:.6rem}
+
+/* tier matrix table */
+.tier-matrix{width:100%;border-collapse:collapse;margin:1rem 0 2rem;font-size:.85rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.tier-matrix th,.tier-matrix td{padding:.65rem .85rem;text-align:left;border-bottom:1px solid var(--border)}
+.tier-matrix th{background:var(--bg-elev);font-family:var(--font-mono);font-size:.78rem;font-weight:600;color:var(--text);letter-spacing:.04em}
+.tier-matrix th:not(:first-child),.tier-matrix td:not(:first-child){text-align:center;width:11%}
+.tier-matrix td{color:var(--text-muted)}
+.tier-matrix tr:last-child td{border-bottom:none}
+.tier-matrix tr:hover td{background:var(--bg-elev)}
+
+/* honesty notice */
+.honesty-notice{background:rgba(110,231,255,.05);border:1px solid #2a6571;border-left:4px solid var(--p1);border-radius:8px;padding:1.1rem 1.25rem;margin:2rem 0;color:var(--text-muted);font-size:.9rem;line-height:1.6}
+.honesty-notice strong{color:var(--p1);font-family:var(--font-mono);font-size:.82rem;letter-spacing:.05em}
+
+ul,ol{padding-left:1.5rem;color:var(--text-muted);font-size:.92rem;margin:.5rem 0 1rem}
+ul li,ol li{margin-bottom:.35rem}
+section h2{font-family:var(--font-sans);font-size:1.75rem;margin-bottom:.6rem}
+section p{margin-bottom:.85rem}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Architectures</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html" class="current">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>ai-memory architectures</h1>
+  <p class="tagline">A primitive that scales from <strong>one agent</strong> on a laptop to a <strong>global hive</strong> of millions. Every tier ships either today, or sits behind a documented gap with a known roadmap. Nothing on this page is marketing fiction — every "today" claim cites code in the v0.6.3 source tree.</p>
+  <div class="pills">
+    <span class="pill">5 tiers</span>
+    <span class="pill">T1–T3 ship today</span>
+    <span class="pill">T4 partial · v0.7 GA</span>
+    <span class="pill">T5 vision · v1.0+</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The five tiers</span>
+    <h2>From single agent to global collective.</h2>
+    <p class="lede">Each tier is a deployment pattern. Each inherits everything below it. Click a card for the full diagram, narrative, and deployment recipe.</p>
+
+    <div class="arch-tier-grid">
+
+      <a href="architectures-t1.html" class="arch-tier-card">
+        <span class="tier-id">TIER 1</span>
+        <h3>Single node, single agent</h3>
+        <p>One ai-memory instance, one consumer. SQLite, no network, zero ops. The bedrock primitive.</p>
+        <span class="tier-scale">SCALE: 1 node · 1 agent · ~10⁶ memories</span>
+        <span class="cap-badge cap-today">SHIPS TODAY</span>
+      </a>
+
+      <a href="architectures-t2.html" class="arch-tier-card">
+        <span class="tier-id">TIER 2</span>
+        <h3>Single node, many agents</h3>
+        <p>One instance fanned across ~10 concurrent agents, each isolated by namespace + scope visibility, gated by per-namespace governance.</p>
+        <span class="tier-scale">SCALE: 1 node · 10 agents · namespace-isolated</span>
+        <span class="cap-badge cap-today">SHIPS TODAY</span>
+      </a>
+
+      <a href="architectures-t3.html" class="arch-tier-card">
+        <span class="tier-id">TIER 3</span>
+        <h3>Multi-node cluster</h3>
+        <p>4 nodes × 5 agents with <strong>W-of-N quorum writes</strong>, mTLS fingerprint allowlist, federated governance, vector-clock catch-up — all shipping today.</p>
+        <span class="tier-scale">SCALE: 4 nodes · 20 agents · quorum-bounded</span>
+        <span class="cap-badge cap-today">SHIPS TODAY</span>
+      </a>
+
+      <a href="architectures-t4.html" class="arch-tier-card">
+        <span class="tier-id">TIER 4</span>
+        <h3>Data-center swarm</h3>
+        <p>Multi-rack deployment with quorum writes shipping today; <strong>Postgres+pgvector backbone</strong> behind <code>sal-postgres</code> feature flag, GA targeted v0.7.</p>
+        <span class="tier-scale">SCALE: 100s nodes · 1000s agents · racked &amp; zoned</span>
+        <span class="cap-badge cap-today">CORE TODAY</span>
+        <span class="cap-badge cap-roadmap">PG GA · v0.7</span>
+      </a>
+
+      <a href="architectures-t5.html" class="arch-tier-card">
+        <span class="tier-id">TIER 5</span>
+        <h3>Global hive</h3>
+        <p>Multi-region cloud, attested agent identity, federated governance, hundreds of thousands to millions of agents acting as a unified collective.</p>
+        <span class="tier-scale">SCALE: multi-region · 10⁵–10⁶ agents · attested</span>
+        <span class="cap-badge cap-future">VISION v1.0+</span>
+      </a>
+
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Capability matrix</span>
+    <h2>What ships today vs. what's on the road.</h2>
+    <p class="lede">The honest matrix. Cell colors match the badges above.</p>
+
+    <table class="tier-matrix">
+      <thead>
+        <tr>
+          <th>Capability</th>
+          <th>T1</th>
+          <th>T2</th>
+          <th>T3</th>
+          <th>T4</th>
+          <th>T5</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>SQLite-backed store, FTS5 keyword recall</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-roadmap">→ pgvector</span></td>
+          <td><span class="cap-badge cap-roadmap">→ pgvector</span></td>
+        </tr>
+        <tr>
+          <td>Semantic recall (HNSW, MiniLM 384-dim)</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">per-node</span></td>
+          <td><span class="cap-badge cap-roadmap">shared idx</span></td>
+          <td><span class="cap-badge cap-roadmap">shared idx</span></td>
+        </tr>
+        <tr>
+          <td>Namespace isolation + scope visibility (<code>as_agent</code>)</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Per-namespace governance policy</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Pending-approval gates (write/promote/delete)</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Knowledge-graph w/ temporal validity (v0.6.3)</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Hierarchical taxonomy (<code>memory_get_taxonomy</code>)</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Capabilities introspection v2 (v0.6.3)</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>One-way <code>sync_push</code> fanout (memories, links, governance, pending)</td>
+          <td>n/a</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Vector-clock causality (<code>sync/since</code>)</td>
+          <td>n/a</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Quorum-write contract (W-of-N peer ack)</td>
+          <td>n/a</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>mTLS peer mesh + fingerprint allowlist</td>
+          <td>n/a</td>
+          <td>n/a</td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+          <td><span class="cap-badge cap-today">YES</span></td>
+        </tr>
+        <tr>
+          <td>Postgres + pgvector backend</td>
+          <td><span class="cap-badge cap-partial">feature flag</span></td>
+          <td><span class="cap-badge cap-partial">feature flag</span></td>
+          <td><span class="cap-badge cap-partial">feature flag</span></td>
+          <td><span class="cap-badge cap-roadmap">GA · v0.7</span></td>
+          <td><span class="cap-badge cap-roadmap">GA · v0.7</span></td>
+        </tr>
+        <tr>
+          <td>Cryptographic agent attestation (<code>signature</code> field)</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="cap-badge cap-roadmap">field reserved</span></td>
+          <td><span class="cap-badge cap-roadmap">v0.7</span></td>
+          <td><span class="cap-badge cap-future">v1.0+</span></td>
+        </tr>
+        <tr>
+          <td>Distributed consensus (Raft / Paxos)</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="cap-badge cap-future">v1.0+</span></td>
+        </tr>
+        <tr>
+          <td>Gossip / DHT for many-node discovery</td>
+          <td>—</td>
+          <td>—</td>
+          <td>—</td>
+          <td><span class="cap-badge cap-roadmap">scoped</span></td>
+          <td><span class="cap-badge cap-future">required</span></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Composition</span>
+    <h2>Why a layered architecture story.</h2>
+    <p>ai-memory is a <strong>primitive, not a platform</strong>. The same Rust binary, the same data model, the same MCP protocol surface scales from a developer's <code>~/.claude/ai-memory.db</code> to a fleet running across racks. What changes between tiers:</p>
+    <ul>
+      <li><strong>Topology</strong> — one process, then many, then many on many machines.</li>
+      <li><strong>Consistency model</strong> — single-writer atomic → eventually consistent peer mesh → quorum → consensus.</li>
+      <li><strong>Trust boundary</strong> — local trust → namespace + scope → governance policy → attested identity.</li>
+    </ul>
+    <p>What stays the same:</p>
+    <ul>
+      <li>The 43 MCP tools and 50 HTTP endpoints.</li>
+      <li>The recall pipeline (FTS5 + HNSW + adaptive blending).</li>
+      <li>The tier model (<code>short</code> / <code>mid</code> / <code>long</code>).</li>
+      <li>The namespace hierarchy and scope visibility filter.</li>
+      <li>The governance contract (<code>Allow</code> / <code>Deny</code> / <code>Pending</code>).</li>
+    </ul>
+    <p>Every tier inherits everything below it.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Federation primitives</span>
+    <h2>What lives in the codebase today.</h2>
+    <p class="lede">These are the building blocks every multi-node tier composes. All shipped, all in v0.6.3:</p>
+    <ul>
+      <li><code>src/main.rs:405-447</code> — quorum-write CLI surface: <code>--quorum-writes N</code>, <code>--quorum-peers &lt;comma-list&gt;</code>, <code>--quorum-timeout-ms</code>, <code>--quorum-client-cert/-key/-ca-cert</code>, <code>--catchup-interval-secs</code>.</li>
+      <li><code>src/main.rs:380-393</code> — TLS / mTLS allowlist: <code>--tls-cert</code>, <code>--tls-key</code>, <code>--mtls-allowlist &lt;SHA-256 fingerprint file&gt;</code>. Allowlist presence enforces mTLS.</li>
+      <li><code>src/handlers.rs:442-454</code> — <code>broadcast_store_quorum</code> + <code>finalise_quorum</code> wired into the write path; returns <code>200 OK</code> with <code>quorum_acks</code> on success, <code>503 quorum_not_met</code> on timeout.</li>
+      <li><code>src/federation.rs</code> — <strong>10 broadcast functions</strong>: <code>broadcast_store_quorum</code>, <code>broadcast_delete_quorum</code>, <code>broadcast_archive_quorum</code>, <code>broadcast_restore_quorum</code>, <code>broadcast_link_quorum</code>, <code>broadcast_consolidate_quorum</code>, <code>broadcast_pending_quorum</code>, <code>broadcast_pending_decision_quorum</code>, <code>broadcast_namespace_meta_quorum</code>, <code>broadcast_namespace_meta_clear_quorum</code>.</li>
+      <li><code>src/handlers.rs</code> — <code>POST /api/v1/sync/push</code> accepts memories, deletions, archives, links, pending actions, pending decisions, namespace metadata, and (v0.6.3) entity registrations. <code>GET /api/v1/sync/since?peer=&lt;id&gt;&amp;clock=&lt;n&gt;</code> returns causally-correct deltas for a rejoining peer.</li>
+      <li><code>src/db.rs</code> — <code>compute_visibility_prefixes()</code> + <code>visibility_clause()</code> enforce scope-based recall filtering at the SQL level using the indexed <code>scope_idx</code> generated column.</li>
+      <li><code>src/models.rs</code> — <code>GovernancePolicy</code> per-namespace, <code>PendingAction</code> queue, <code>namespace_ancestors()</code> for visibility hierarchy.</li>
+      <li><code>src/replication.rs</code> (422 lines) — <code>QuorumWriter</code> + <code>AckTracker</code>, <strong>functional</strong>, wired into the write path.</li>
+      <li><code>Cargo.toml</code> — <code>sal-postgres</code> feature flag for the v0.7 GA Postgres+pgvector backbone (<code>sqlx</code> + <code>pgvector</code> deps, schema parity fixes shipped #294-#297).</li>
+    </ul>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">How to read</span>
+    <h2>Each tier page contains.</h2>
+    <ol>
+      <li>An <strong>animated SVG diagram</strong> showing memory data flow — writes, recalls, peer sync, governance gates, and (where relevant) attestations.</li>
+      <li>A <strong>"what's actually happening"</strong> narrative walking the reader through a recall and a write.</li>
+      <li><strong>Capability badges</strong> on every primitive — cyan ships today, orange partial, purple roadmap, pink future vision.</li>
+      <li>A <strong>deployment recipe</strong> with real commands.</li>
+      <li><strong>Governance, skills, and attestations</strong> wiring for the tier — what enforces the rules at this scale.</li>
+      <li><strong>Honest limits</strong> — what would break, and at what scale.</li>
+    </ol>
+    <p>Start at <a href="architectures-t1.html" style="color:var(--p1)">Tier 1</a> and walk forward, or jump straight to the tier that matches your fleet.</p>
+
+    <div class="honesty-notice">
+      <strong>Engineering honesty.</strong> Every "ships today" claim cites a file path and behavior in the v0.6.3 source tree. Roadmap items reference ADRs and tracked work. The vision tier (T5) is the north star — we'll get there, but it's not shipping in v0.7. If a diagram shows something the code doesn't do, that's a documentation bug — please file an issue.
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>© 2026 AlphaOne LLC. Licensed Apache-2.0. ai-memory v0.6.3.1 — <a href="https://github.com/alphaonedev/ai-memory-mcp">source on GitHub</a> · <a href="./">home</a></p>
+</footer>
+
+</body>
+</html>

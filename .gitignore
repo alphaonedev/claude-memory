@@ -13,10 +13,20 @@
 *.secret
 credentials*
 
+# Test fixtures — checked-in PEMs the TLS module's tests assert against.
+# These are deliberately committed; the global *.pem ignore above must
+# not catch them.
+!tests/fixtures/tls/*.pem
+!examples/fixtures_data/*.pem
+
 # Benchmark results
 benchmarks/longmemeval/results/
 .mcpregistry_*
 
 # Local scratch (never committed)
 /backup/
+/backups/
 .claude/
+
+# Autonomous campaign runtime state (logs, kill-switch, pid)
+.agentic/

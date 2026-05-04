@@ -46,7 +46,7 @@ Below is an example for **Claude Code** (user scope: merge `mcpServers` into `~/
 
 ### How It Works
 
-With MCP configured, your AI client gains 21 memory tools:
+With MCP configured, your AI client gains 43 memory tools (highlights below; see [API_REFERENCE.md](API_REFERENCE.md) for the full reference):
 
 - **memory_store** -- Store new knowledge (auto-deduplicates by title+namespace, reports contradictions)
 - **memory_recall** -- Recall relevant memories for the current context (supports `until` date filter)
@@ -74,7 +74,7 @@ Your AI assistant uses these tools automatically during conversations. You can a
 
 ## MCP Tool Reference
 
-This section documents all 26 MCP tools with their exact parameter schemas, example requests, and response formats. All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
+This section documents the 43 MCP tools with their exact parameter schemas, example requests, and response formats (canonical counts on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)). All tools are invoked via JSON-RPC 2.0 using method `tools/call` with the tool name in `params.name` and tool parameters in `params.arguments`.
 
 All responses are wrapped in the MCP content envelope:
 
@@ -239,6 +239,8 @@ Search memories by exact keyword match with AND semantics (all terms must match)
 | `namespace` | string | No | -- | Filter by namespace |
 | `tier` | string | No | -- | Filter by tier: `"short"`, `"mid"`, or `"long"` |
 | `limit` | integer (max 200) | No | `20` | Maximum results |
+| `agent_id` | string | No | -- | Filter by `metadata.agent_id` (exact match) |
+| `as_agent` | string | No | -- | Querying agent for scope-based visibility filtering (Task 1.5) |
 | `format` | string | No | `"toon_compact"` | Response format: `"json"`, `"toon"`, or `"toon_compact"` |
 
 **Example request:**
@@ -352,6 +354,7 @@ Promote a memory to long-term (permanent). Clears the expiry timestamp.
 | Name | Type | Required | Default | Description |
 |------|------|----------|---------|-------------|
 | `id` | string | Yes | -- | Memory ID to promote |
+| `to_namespace` | string | No | -- | Clone to ancestor namespace (Task 1.7; preserves original) |
 
 **Example request:**
 
@@ -463,6 +466,7 @@ Update an existing memory by ID. Only provided fields are changed -- omitted fie
 | `priority` | integer (1-10) | No | -- | New priority |
 | `confidence` | number (0.0-1.0) | No | -- | New confidence |
 | `expires_at` | string | No | -- | Expiry timestamp (RFC 3339), or null to clear |
+| `metadata` | object | No | -- | Arbitrary JSON metadata (replaces existing) |
 
 **Example request:**
 
@@ -712,7 +716,7 @@ Report the active feature tier, loaded models, and available capabilities of the
     "auto_tagging": false,
     "contradiction_detection": false,
     "cross_encoder_reranking": false,
-    "memory_reflection": false
+    "cross_encoder_reranking": false
   },
   "models": {
     "embedding": "all-MiniLM-L6-v2",
@@ -964,6 +968,273 @@ Show archive statistics: total count and breakdown by namespace.
   "by_namespace": { "my-app": 10, "global": 5 }
 }
 ```
+
+---
+
+## Knowledge Graph & Hierarchy (v0.6.3)
+
+The v0.6.3 release introduces hierarchical namespace taxonomy
+(Pillar 1 / Stream A) and a temporal-validity knowledge graph
+(Pillar 2 / Streams B–D). The tools below operate on `memory_links`
+and the `entity_aliases` side table; existing memory CRUD is
+unaffected.
+
+### memory_get_taxonomy
+
+Walk live (non-expired) memories grouped by namespace and fold them
+into a `TaxonomyNode` tree. Splits on `/` so a namespace like
+`alphaone/engineering/platform` becomes a 3-level subtree. Each node
+carries `count` (memories at exactly this namespace) and
+`subtree_count` (count plus every descendant within the depth limit).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `namespace_prefix` | string | No | -- | Restrict the walk to namespaces under this prefix (e.g. `"alphaone/engineering"`) |
+| `depth` | integer (0-8) | No | `8` | Maximum tree depth from the root or prefix |
+| `limit` | integer (1-10000) | No | `1000` | Maximum nodes to return (response includes `truncated: true` if exceeded) |
+
+**Example response envelope:**
+
+```json
+{
+  "tree": [
+    {
+      "namespace": "alphaone",
+      "count": 0,
+      "subtree_count": 47,
+      "children": [
+        { "namespace": "alphaone/engineering", "count": 3, "subtree_count": 47, "children": [ ... ] }
+      ]
+    }
+  ],
+  "total_count": 47,
+  "truncated": false
+}
+```
+
+`total_count` is computed as an independent aggregation that stays
+honest even when `limit` drops rows from the walk.
+
+---
+
+### memory_check_duplicate
+
+Embedding cosine-similarity duplicate detection. Embeds `title +
+content`, scans live memories with non-NULL embeddings, and returns
+the nearest match with an `is_duplicate` flag.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `title` | string | Yes | -- | Candidate title |
+| `content` | string | Yes | -- | Candidate content |
+| `namespace` | string | No | -- | Restrict scan to a single namespace |
+| `threshold` | number (0.5-1.0) | No | `0.85` | Cosine similarity at or above this is `is_duplicate: true` (clamped to 0.5 floor) |
+
+**Example response:**
+
+```json
+{
+  "is_duplicate": true,
+  "threshold": 0.85,
+  "nearest": {
+    "id": "a1b2c3d4-...",
+    "title": "Project uses PostgreSQL 15",
+    "namespace": "my-app",
+    "similarity": 0.92
+  },
+  "suggested_merge": "a1b2c3d4-...",
+  "candidates_scanned": 412
+}
+```
+
+`suggested_merge` is non-null when `is_duplicate == true`. Requires
+the `semantic` feature tier or higher (embeddings must be available).
+
+---
+
+### memory_entity_register
+
+Register an entity as a typed memory (no separate entities table —
+entities live in `memories` with `metadata.kind = "entity"`). Idempotent:
+calling twice with the same `canonical_name + namespace` returns the
+same entity ID and merges any new aliases via `INSERT OR IGNORE`.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `canonical_name` | string | Yes | -- | Primary name for the entity |
+| `namespace` | string | Yes | -- | Namespace to scope the entity to |
+| `aliases` | array of strings | No | `[]` | Alternate names; blanks skipped, dupes deduped |
+| `metadata` | object | No | `{}` | Additional metadata (`kind` is forced to `"entity"`) |
+| `agent_id` | string | No | (caller NHI) | Override the recorded agent_id |
+
+**Example response (newly created):**
+
+```json
+{
+  "entity_id": "ent-9876...",
+  "canonical_name": "PostgreSQL",
+  "namespace": "my-app",
+  "aliases": ["pg", "postgres", "PostgreSQL"],
+  "created": true
+}
+```
+
+If a non-entity memory already exists with the same `(title,
+namespace)`, the call returns an error rather than overwriting it.
+
+---
+
+### memory_entity_get_by_alias
+
+Resolve an alias to its canonical entity. Trims whitespace, matches
+case-sensitively, and discriminates against non-entity memories that
+happen to share the alias.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `alias` | string | Yes | -- | Alias to look up |
+| `namespace` | string | No | -- | Restrict lookup to this namespace; if omitted, picks the most-recently-created match across namespaces |
+
+**Example response:**
+
+```json
+{
+  "found": true,
+  "entity_id": "ent-9876...",
+  "canonical_name": "PostgreSQL",
+  "namespace": "my-app",
+  "aliases": ["pg", "postgres", "PostgreSQL"]
+}
+```
+
+Returns `{"found": false, ...}` (with null fields) if no entity
+matches the alias.
+
+---
+
+### memory_kg_query
+
+Recursive-CTE traversal of the temporal knowledge graph rooted at a
+source memory. Walks outbound links up to `max_depth` hops, applies
+per-hop temporal and agent filters, and prunes cycles via
+accumulated path matching.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Memory ID to start the walk from |
+| `max_depth` | integer (1-5) | No | `1` | Maximum hops; ceiling enforced (depth=0 errors, depth>5 errors) |
+| `valid_at` | string (RFC 3339) | No | -- | Apply per-hop: `valid_from <= ? AND (valid_until IS NULL OR valid_until > ?)`; rows with NULL `valid_from` are excluded when set |
+| `allowed_agents` | array of strings | No | -- | Apply per-hop: `observed_by IN (...)`; an empty array (`[]`) returns zero rows (vs. omitting which skips the filter) |
+| `limit` | integer (1-1000) | No | `200` | Maximum rows returned |
+
+**Example response:**
+
+```json
+{
+  "source_id": "a1b2c3d4-...",
+  "max_depth": 3,
+  "memories": [
+    {
+      "target_id": "e5f6g7h8-...",
+      "title": "API uses Axum 0.8",
+      "target_namespace": "my-app",
+      "relation": "depends_on",
+      "valid_from": "2026-04-25T19:25:00Z",
+      "valid_until": null,
+      "observed_by": "ai:claude-code@host:pid-12345",
+      "depth": 1,
+      "path": "a1b2c3d4->e5f6g7h8"
+    }
+  ],
+  "paths": ["a1b2c3d4->e5f6g7h8->..."],
+  "count": 1
+}
+```
+
+Ordering: `depth ASC, COALESCE(valid_from, link_created_at) ASC,
+link_created_at ASC`.
+
+---
+
+### memory_kg_timeline
+
+Ordered fact timeline for an entity. Returns every link with the
+given `source_id`, ordered by `valid_from` ascending. Skips links
+with NULL `valid_from` (legacy un-anchored links from before the v15
+migration backfill).
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Entity / memory ID anchoring the timeline |
+| `since` | string (RFC 3339) | No | -- | Only events with `valid_from >= since` |
+| `until` | string (RFC 3339) | No | -- | Only events with `valid_from <= until` |
+| `limit` | integer (1-1000) | No | `200` | Maximum events |
+
+**Example response:**
+
+```json
+{
+  "source_id": "a1b2c3d4-...",
+  "events": [
+    {
+      "target_id": "e5f6g7h8-...",
+      "relation": "depends_on",
+      "valid_from": "2026-04-25T19:25:00Z",
+      "valid_until": null,
+      "observed_by": "ai:claude-code@host:pid-12345"
+    }
+  ],
+  "count": 1
+}
+```
+
+---
+
+### memory_kg_invalidate
+
+Mark a knowledge-graph link as superseded by setting its `valid_until`
+column. **The link is NOT deleted** — historical queries that pin
+`valid_at` to a time before the invalidation still see it. Idempotent:
+repeated calls overwrite `valid_until`; the prior value is returned
+so callers can detect overwrites.
+
+> **Federation note:** invalidations are NOT quorum-broadcast. They
+> apply locally and propagate to peers asynchronously via the
+> sync-daemon. See `docs/MIGRATION-v0.6.2-to-v0.6.3.md` for details.
+
+**Parameters:**
+
+| Name | Type | Required | Default | Description |
+|------|------|----------|---------|-------------|
+| `source_id` | string | Yes | -- | Source memory ID of the link |
+| `target_id` | string | Yes | -- | Target memory ID of the link |
+| `relation` | string | Yes | -- | Relation type (the third part of the link triple) |
+| `valid_until` | string (RFC 3339) | No | (now) | When to mark the link superseded |
+
+**Example response:**
+
+```json
+{
+  "found": true,
+  "valid_until": "2026-04-26T03:00:00Z",
+  "previous_valid_until": null
+}
+```
+
+Returns `{"found": false, ...}` if no link matches the
+`(source_id, target_id, relation)` triple.
 
 ---
 

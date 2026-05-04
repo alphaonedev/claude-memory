@@ -419,4 +419,82 @@ mod tests {
         tracker.record_local();
         assert!(tracker.is_quorum_met(instant_base()));
     }
+
+    // -----------------------------------------------------------------
+    // W12-H — InFlight + display variants + minor edges
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn finalise_pre_deadline_partial_acks_is_inflight() {
+        let policy =
+            QuorumPolicy::new(5, 3, Duration::from_secs(10), Duration::from_secs(30)).unwrap();
+        let t0 = instant_base();
+        let mut tracker = AckTracker::new(policy, t0);
+        tracker.record_local();
+        tracker.record_peer_ack("peer-1");
+        // Pre-deadline; quorum not yet met → InFlight.
+        let err = tracker.finalise(t0).unwrap_err();
+        match err {
+            QuorumError::QuorumNotMet { reason, .. } => {
+                assert_eq!(reason, QuorumFailureReason::InFlight);
+            }
+            other => panic!("expected QuorumNotMet/InFlight, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_policy_display_contains_detail() {
+        let e = QuorumError::InvalidPolicy {
+            detail: "n must be >= 1".to_string(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("invalid quorum policy"));
+        assert!(s.contains("n must be >= 1"));
+    }
+
+    #[test]
+    fn local_write_failed_display_contains_detail() {
+        let e = QuorumError::LocalWriteFailed {
+            detail: "disk full".to_string(),
+        };
+        let s = format!("{e}");
+        assert!(s.contains("local write failed"));
+        assert!(s.contains("disk full"));
+    }
+
+    #[test]
+    fn quorum_policy_serde_roundtrip() {
+        let p = QuorumPolicy::new(5, 3, Duration::from_secs(2), Duration::from_secs(30)).unwrap();
+        let json = serde_json::to_string(&p).unwrap();
+        let back: QuorumPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.n, p.n);
+        assert_eq!(back.w, p.w);
+    }
+
+    #[test]
+    fn quorum_failure_reason_serde_snake_case() {
+        let json = serde_json::to_string(&QuorumFailureReason::InFlight).unwrap();
+        assert_eq!(json, "\"in_flight\"");
+        let back: QuorumFailureReason = serde_json::from_str("\"unreachable\"").unwrap();
+        assert_eq!(back, QuorumFailureReason::Unreachable);
+    }
+
+    #[test]
+    fn finalise_succeeds_returns_count() {
+        let policy =
+            QuorumPolicy::new(3, 2, Duration::from_secs(10), Duration::from_secs(30)).unwrap();
+        let t0 = instant_base();
+        let mut tracker = AckTracker::new(policy, t0);
+        tracker.record_local();
+        tracker.record_peer_ack("p1");
+        let n = tracker.finalise(t0).unwrap();
+        assert_eq!(n, 2);
+    }
+
+    #[test]
+    fn id_drift_count_zero_initially() {
+        let policy = QuorumPolicy::majority(3).unwrap();
+        let tracker = AckTracker::new(policy, instant_base());
+        assert_eq!(tracker.id_drift_count(), 0);
+    }
 }

@@ -135,8 +135,8 @@ both of those qualifications — a campaign report with only
 - **Strong-consistency reads.** Would require a read quorum + leader
   election. Not worth the complexity for a memory store whose reads
   are inherently approximate (semantic recall).
-- **Byzantine fault tolerance.** Peers are assumed to be honest
-  (mTLS + signed memories gate that at the transport layer).
+- **Byzantine fault tolerance.** Peers are assumed to be honest; mTLS
+  on the peer allowlist is the trust boundary.
 - **Split-brain healing.** When `N < W` on both halves of a partition,
   both halves stop accepting writes. Healing on reconnect follows the
   same reconciliation the sync-daemon already does.
@@ -156,8 +156,8 @@ both of those qualifications — a campaign report with only
   disruption to the v0.6.0 code paths. Deployments that don't set
   `--quorum-writes` keep the existing behaviour byte-for-byte.
 - We avoid a full Raft integration, which would require a persistent
-  log, term numbers, leader election, and a new protocol version.
-  Those are appropriate for a future v1.0 but are premature here.
+  log, term numbers, leader election, and a new protocol version. The
+  W-of-N quorum writer is the right complexity budget for v0.7.
 
 ### Negative
 

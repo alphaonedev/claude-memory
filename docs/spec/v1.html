@@ -1,0 +1,157 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  Memory Portability Spec v1 — GitHub Pages landing page.
+
+  This is the canonical URL: https://alphaonedev.github.io/ai-memory-mcp/spec/v1/
+  The normative document is docs/spec/v1.md in the repo. This page links to it
+  and provides a one-screen summary so search engines and humans land on a
+  scannable summary first.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Portability Spec v1 — ai-memory</title>
+<meta name="description" content="Memory Portability Spec v1: stable export envelope for ai-memory deployments. JSON + TOON encodings. Round-trip guarantees. Field-by-field semantics for memories, links, archived, agents, entities, subscriptions.">
+<meta name="theme-color" content="#0d1117">
+<meta property="og:title" content="Memory Portability Spec v1 — ai-memory">
+<meta property="og:description" content="Stable export envelope for ai-memory data. JSON + TOON. Round-trip guarantee. Field-by-field semantics.">
+<meta property="og:url" content="https://alphaonedev.github.io/ai-memory-mcp/spec/v1/">
+<meta property="og:type" content="article">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/spec/v1/">
+<style>
+:root {
+  --bg: #000;
+  --bg-card: #111;
+  --border: #262626;
+  --text: #fff;
+  --muted: #9ca3af;
+  --cyan: #6ee7ff;
+  --orange: #ffb86b;
+  --code-bg: #1a1a1a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 0; background: var(--bg); color: var(--text);
+       font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+       line-height: 1.6; }
+.wrap { max-width: 880px; margin: 0 auto; padding: 2.5rem 1.5rem; }
+h1 { font-size: 2rem; margin: 0 0 .25rem 0; }
+h2 { font-size: 1.25rem; margin: 2rem 0 .5rem 0; color: var(--cyan); }
+h3 { font-size: 1rem; margin: 1.25rem 0 .25rem 0; color: var(--orange); }
+.tag { display: inline-block; padding: .15rem .5rem; border: 1px solid var(--border);
+       border-radius: 4px; font-size: .8rem; color: var(--muted); margin-right: .25rem; }
+.muted { color: var(--muted); }
+a { color: var(--cyan); text-decoration: none; }
+a:hover { text-decoration: underline; }
+code { background: var(--code-bg); padding: .12rem .35rem; border-radius: 3px; font-size: .9em; }
+pre { background: var(--code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto;
+      border: 1px solid var(--border); }
+.box { border: 1px solid var(--border); background: var(--bg-card);
+       padding: 1rem 1.25rem; border-radius: 8px; margin: 1rem 0; }
+.cta { display: inline-block; padding: .6rem 1rem; border: 1px solid var(--cyan);
+       border-radius: 6px; color: var(--cyan); margin: .25rem .5rem .25rem 0; }
+.cta:hover { background: rgba(110,231,255,.08); text-decoration: none; }
+table { width: 100%; border-collapse: collapse; margin: 1rem 0; font-size: .9rem; }
+th, td { border-bottom: 1px solid var(--border); padding: .5rem .6rem; text-align: left; }
+th { color: var(--muted); font-weight: 600; }
+.crumb { color: var(--muted); font-size: .9rem; margin-bottom: 1rem; }
+.crumb a { color: var(--muted); }
+hr { border: none; border-top: 1px solid var(--border); margin: 2rem 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="crumb">
+    <a href="../../at-a-glance.html">Atlas</a> /
+    <a href="../">spec</a> /
+    <strong>v1</strong>
+  </div>
+
+  <h1>Memory Portability Spec v1</h1>
+  <p class="muted">
+    <span class="tag">Status: Draft v1</span>
+    <span class="tag">Release: v0.6.3.1</span>
+    <span class="tag">Encodings: JSON + TOON</span>
+    <span class="tag">Round-trip: guaranteed</span>
+  </p>
+
+  <p>
+    The Memory Portability Spec defines a stable export envelope so any
+    ai-memory deployment can produce data that any other deployment can
+    consume without loss. This page is a summary; the
+    <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/spec/v1.md">normative document</a>
+    is in the repo at <code>docs/spec/v1.md</code>.
+  </p>
+
+  <p>
+    <a class="cta" href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/spec/v1.md">Read the full spec →</a>
+    <a class="cta" href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/migrations/sqlite/">Browse the canonical schema →</a>
+  </p>
+
+  <h2>Why portability v1 exists</h2>
+  <ol>
+    <li>Operators can move a store from machine A to machine B without losing embeddings or rerunning mining.</li>
+    <li>Third parties can write tools (diff, audit, archive) that consume the envelope rather than scraping live SQLite.</li>
+    <li>Round-trip guarantee: <code>ai-memory export | ai-memory import</code> produces a byte-equivalent store under <code>--preserve-timestamps</code>.</li>
+  </ol>
+
+  <h2>Envelope at a glance</h2>
+  <pre><code>{
+  "schema_version": "v1",
+  "source": "ai-memory-v0.6.3.1",
+  "exported_at": "2026-04-29T12:00:00.000Z",
+  "db_schema_version": 17,
+  "namespaces":    [...],
+  "memories":      [...],
+  "links":         [...],
+  "archived":      [...],
+  "agents":        [...],
+  "entities":      [...],
+  "subscriptions": [...]   // secrets stripped
+}</code></pre>
+
+  <h2>Embedding encoding</h2>
+  <p>
+    Embeddings are <code>base64(magic_byte || raw_LE_f32_bytes)</code>. The
+    magic byte (introduced in migration v17) declares the byte order:
+  </p>
+  <table>
+    <thead><tr><th>Magic</th><th>Meaning</th><th>Reader behaviour</th></tr></thead>
+    <tbody>
+      <tr><td><code>0x01</code></td><td>Little-endian f32</td><td>Accept</td></tr>
+      <tr><td><code>0x02</code></td><td>Big-endian f32</td><td>Reject (until v0.7)</td></tr>
+      <tr><td>(no header)</td><td>Legacy LE-f32</td><td>Accept (one major version)</td></tr>
+      <tr><td>any other</td><td>Unknown</td><td>Reject with EmbeddingFormatError</td></tr>
+    </tbody>
+  </table>
+
+  <h2>Conformance</h2>
+  <ul>
+    <li><strong>Producer-conformant</strong> — emits the v1 envelope correctly.</li>
+    <li><strong>Consumer-conformant</strong> — accepts any v1 envelope, preserves unknown fields.</li>
+    <li><strong>Round-trip-conformant</strong> — both, with byte-equivalence under <code>--preserve-timestamps</code>.</li>
+  </ul>
+  <p>ai-memory v0.6.3.1 is producer- and consumer-conformant. Round-trip is demonstrated by the test plan in spec §10.</p>
+
+  <h2>Out of scope for v1</h2>
+  <ul>
+    <li>Multi-implementation interop (v2.0 — ROADMAP §7.6).</li>
+    <li>Federation identity attestation (v0.7).</li>
+    <li>Big-endian conversion (v0.7).</li>
+    <li>Streaming exports / encrypted envelope (v2).</li>
+  </ul>
+
+  <hr>
+
+  <p class="muted">
+    Companion artifact: the
+    <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/benchmarks/longmemeval/results.md">LongMemEval variant disclosure</a>
+    (4 rows: keyword baseline + semantic-rerank-on/off + autonomous-curator-on)
+    landed alongside this spec in v0.6.3.1 P8.
+  </p>
+</div>
+</body>
+</html>

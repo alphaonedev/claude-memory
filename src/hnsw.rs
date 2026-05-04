@@ -11,12 +11,77 @@
 
 use instant_distance::{Builder, HnswMap, Point, Search};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Maximum overflow entries before triggering a rebuild.
 const REBUILD_THRESHOLD: usize = 200;
 
 /// Maximum entries before evicting oldest to prevent unbounded memory growth.
 const MAX_ENTRIES: usize = 100_000;
+
+// ---------------------------------------------------------------------------
+// v0.6.3.1 (P3, G2): eviction observability
+//
+// `MAX_ENTRIES`-triggered eviction in `insert()` previously dropped the
+// oldest embeddings silently — operators near the cap lost recall quality
+// invisibly. The two counters below + the structured `hnsw.eviction`
+// tracing event close that gap:
+//
+//   - `INDEX_EVICTIONS_TOTAL` — cumulative count surfaced via
+//     `db::stats().index_evictions_total` (and capabilities).
+//   - `LAST_EVICTION_AT_NANOS` — wall-clock UNIX nanoseconds of the most
+//     recent eviction; capabilities derive `hnsw.evicted_recently` from
+//     this with a 60 s rolling window.
+//
+// Process-local. The counters reset on restart because the index itself
+// resets on restart. Both atomics are touched only on the eviction edge
+// (rare: requires >100k vectors), so there is no measurable hot-path cost.
+// ---------------------------------------------------------------------------
+
+static INDEX_EVICTIONS_TOTAL: AtomicU64 = AtomicU64::new(0);
+static LAST_EVICTION_AT_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative HNSW oldest-eviction count since process start.
+///
+/// Surfaces in `memory_stats`. Non-zero indicates the in-memory vector
+/// index has hit `MAX_ENTRIES` and dropped older embeddings; recall
+/// quality may have degraded for evicted ids until they are re-inserted
+/// (e.g. on next access via `recall` touch path).
+#[must_use]
+pub fn index_evictions_total() -> u64 {
+    INDEX_EVICTIONS_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Whether an eviction occurred within the trailing `window_secs`.
+///
+/// Used by capabilities (P1) to set `hnsw.evicted_recently` so operators
+/// can see ongoing pressure on the cap, not just the cumulative count.
+/// Returns `false` when no evictions have ever happened in this process.
+#[must_use]
+pub fn evicted_recently(window_secs: u64) -> bool {
+    let last = LAST_EVICTION_AT_NANOS.load(Ordering::Relaxed);
+    if last == 0 {
+        return false;
+    }
+    let now_nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    // Saturating math: clock can move backwards on some VMs.
+    let elapsed_nanos = u128::from(u64::MAX).min(now_nanos.saturating_sub(u128::from(last)));
+    elapsed_nanos < u128::from(window_secs).saturating_mul(1_000_000_000)
+}
+
+/// Reset the eviction counters. Test-only — production callers must not
+/// reach into the counter directly. The function is `pub` (rather than
+/// `pub(crate)`) so the integration-test crate at `tests/` can drive it
+/// alongside the public `index_evictions_total()` accessor; renaming
+/// keeps the intent obvious at every call site.
+#[doc(hidden)]
+pub fn reset_eviction_counters_for_test() {
+    INDEX_EVICTIONS_TOTAL.store(0, Ordering::Relaxed);
+    LAST_EVICTION_AT_NANOS.store(0, Ordering::Relaxed);
+}
 
 /// A point in the HNSW index — wraps a dense embedding vector.
 #[derive(Clone, Debug)]
@@ -106,9 +171,41 @@ impl VectorIndex {
         // Evict oldest entries if over capacity
         if state.all_entries.len() > MAX_ENTRIES {
             let excess = state.all_entries.len() - MAX_ENTRIES;
+            // v0.6.3.1 (P3, G2): emit one structured tracing event per evicted
+            // id BEFORE we drop the rows so operators can post-mortem which
+            // memories lost their semantic-search affordance. Bumping the
+            // counter and last-eviction timestamp surfaces aggregate pressure
+            // through `memory_stats` and capabilities. The drain itself is
+            // unchanged — observability only.
+            for (evicted_id, _) in state.all_entries.iter().take(excess) {
+                tracing::warn!(
+                    target: "hnsw.eviction",
+                    evicted_id = %evicted_id,
+                    reason = "max_entries_reached",
+                    max_entries = MAX_ENTRIES,
+                    "hnsw index evicting oldest entry: cap reached"
+                );
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            let evicted = excess as u64;
+            INDEX_EVICTIONS_TOTAL.fetch_add(evicted, Ordering::Relaxed);
+
             state.all_entries.drain(..excess);
             state.hnsw = Self::build_hnsw(&state.all_entries);
             state.overflow.clear();
+
+            // Record completion time AFTER the rebuild. `evicted_recently` is
+            // a "did we evict in the trailing N seconds" check; an operator
+            // asking that wants the operation completion time, not the
+            // start. At cap, build_hnsw dominates wall time (~minutes at
+            // 100k entries) — using the start would make evicted_recently
+            // misreport even immediately after insert returns.
+            let now_nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let now_nanos_u64 = u64::try_from(now_nanos).unwrap_or(u64::MAX);
+            LAST_EVICTION_AT_NANOS.store(now_nanos_u64, Ordering::Relaxed);
         }
     }
 
@@ -259,5 +356,202 @@ mod tests {
         idx.remove("a");
         let results = idx.search(&make_embedding(&[1.0, 0.0, 0.0]), 5);
         assert!(results.iter().all(|h| h.id != "a"));
+    }
+
+    // -----------------------------------------------------------------
+    // W11/S11b — rebuild + batched-insert hardening
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_rebuild_preserves_all_entries() {
+        // Build a small but non-trivial set of orthonormal-ish vectors,
+        // rebuild the index, and confirm every id is still findable via
+        // search with a top-k that covers them all.
+        let raw: Vec<(String, Vec<f32>)> = (0..12)
+            .map(|i| {
+                let mut v = vec![0.0_f32; 16];
+                #[allow(clippy::cast_precision_loss)]
+                let f = i as f32;
+                v[i % 16] = 1.0 + f * 0.01; // bias to make L2 norm non-trivial
+                (format!("id-{i}"), make_embedding(&v))
+            })
+            .collect();
+
+        let idx = VectorIndex::build(raw.clone());
+        idx.rebuild();
+        assert_eq!(idx.len(), raw.len());
+
+        // Every id should appear when we ask for top-N where N >= count.
+        let query = make_embedding(&[1.0; 16]);
+        let hits = idx.search(&query, raw.len() * 2);
+        let found: std::collections::HashSet<String> = hits.into_iter().map(|h| h.id).collect();
+        for (id, _) in &raw {
+            assert!(
+                found.contains(id),
+                "rebuild must preserve id {id}, found: {:?}",
+                found
+            );
+        }
+    }
+
+    #[test]
+    fn test_remove_then_search_excludes_id() {
+        let entries = vec![
+            ("alpha".into(), make_embedding(&[1.0, 0.0, 0.0, 0.0])),
+            ("beta".into(), make_embedding(&[0.9, 0.1, 0.0, 0.0])),
+            ("gamma".into(), make_embedding(&[0.8, 0.2, 0.0, 0.0])),
+        ];
+        let idx = VectorIndex::build(entries);
+        // Pre-remove: alpha should be the closest to (1,0,0,0).
+        let pre = idx.search(&make_embedding(&[1.0, 0.0, 0.0, 0.0]), 5);
+        assert!(pre.iter().any(|h| h.id == "alpha"));
+
+        idx.remove("alpha");
+        // Post-remove: alpha must not appear regardless of k.
+        for k in 1..=10 {
+            let hits = idx.search(&make_embedding(&[1.0, 0.0, 0.0, 0.0]), k);
+            assert!(
+                hits.iter().all(|h| h.id != "alpha"),
+                "removed id `alpha` resurfaced with k={k}: {:?}",
+                hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+            );
+        }
+
+        // Other entries still findable.
+        let hits = idx.search(&make_embedding(&[1.0, 0.0, 0.0, 0.0]), 5);
+        let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert!(ids.contains(&"beta"));
+        assert!(ids.contains(&"gamma"));
+    }
+
+    // -----------------------------------------------------------------
+    // W12-H — small edge cases
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn empty_index_len_is_zero() {
+        let idx = VectorIndex::empty();
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn build_with_empty_entries_search_empty() {
+        let idx = VectorIndex::build(Vec::new());
+        assert_eq!(idx.len(), 0);
+        let results = idx.search(&[1.0, 0.0, 0.0], 5);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn search_with_k_zero_returns_empty() {
+        let entries = vec![("a".into(), make_embedding(&[1.0, 0.0, 0.0]))];
+        let idx = VectorIndex::build(entries);
+        let results = idx.search(&make_embedding(&[1.0, 0.0, 0.0]), 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn rebuild_on_empty_does_not_crash() {
+        let idx = VectorIndex::empty();
+        idx.rebuild();
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn insert_increases_len() {
+        let idx = VectorIndex::empty();
+        idx.insert("a".into(), make_embedding(&[1.0, 0.0, 0.0]));
+        idx.insert("b".into(), make_embedding(&[0.0, 1.0, 0.0]));
+        assert_eq!(idx.len(), 2);
+    }
+
+    #[test]
+    fn embedding_point_distance_orthogonal() {
+        let a = EmbeddingPoint(vec![1.0, 0.0, 0.0]);
+        let b = EmbeddingPoint(vec![0.0, 1.0, 0.0]);
+        // 1 - dot = 1 - 0 = 1
+        assert!((a.distance(&b) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn embedding_point_distance_identical_is_zero() {
+        let a = EmbeddingPoint(make_embedding(&[1.0, 1.0, 1.0]));
+        // 1 - 1 = 0 (L2-normalised)
+        assert!(a.distance(&a).abs() < 1e-6);
+    }
+
+    #[test]
+    fn remove_on_empty_index_is_noop() {
+        let idx = VectorIndex::empty();
+        idx.remove("nonexistent");
+        assert_eq!(idx.len(), 0);
+    }
+
+    #[test]
+    fn insert_triggers_auto_rebuild_at_threshold() {
+        // REBUILD_THRESHOLD = 200. Inserting that many into a fresh index
+        // exercises the auto-rebuild branch in `insert`.
+        let idx = VectorIndex::empty();
+        for i in 0..205_usize {
+            let mut v = vec![0.0_f32; 8];
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            v[i % 8] = 1.0 + f * 0.001;
+            idx.insert(format!("id-{i}"), make_embedding(&v));
+        }
+        assert_eq!(idx.len(), 205);
+        // After auto-rebuild, search still works — top-k returns hits.
+        let q = make_embedding(&[1.0_f32; 8]);
+        let hits = idx.search(&q, 5);
+        assert_eq!(hits.len(), 5);
+    }
+
+    #[test]
+    fn test_rebuild_after_batch_insert_settles() {
+        // Start empty, batch-insert N entries, force a rebuild, then assert
+        // that top-K search returns exactly K results (deterministic count
+        // for a fully-populated index with K <= len).
+        let idx = VectorIndex::empty();
+        let n = 25_usize;
+        for i in 0..n {
+            let mut v = vec![0.0_f32; 8];
+            #[allow(clippy::cast_precision_loss)]
+            let f = i as f32;
+            v[i % 8] = 1.0 + f * 0.001;
+            idx.insert(format!("id-{i}"), make_embedding(&v));
+        }
+        // Force a rebuild — overflow may not have hit REBUILD_THRESHOLD.
+        idx.rebuild();
+        assert_eq!(idx.len(), n);
+
+        let query = make_embedding(&[1.0; 8]);
+        let k = 5;
+        let hits = idx.search(&query, k);
+        assert_eq!(
+            hits.len(),
+            k,
+            "post-rebuild search top-{k} must return exactly {k} hits, got {:?}",
+            hits.iter().map(|h| &h.id).collect::<Vec<_>>()
+        );
+
+        // Distances should be sorted ascending (closest first).
+        for w in hits.windows(2) {
+            assert!(
+                w[0].distance <= w[1].distance,
+                "search results must be ascending by distance: {} > {}",
+                w[0].distance,
+                w[1].distance
+            );
+        }
+
+        // No duplicate ids in the result.
+        let mut seen = std::collections::HashSet::new();
+        for h in &hits {
+            assert!(
+                seen.insert(h.id.clone()),
+                "duplicate id in search: {}",
+                h.id
+            );
+        }
     }
 }

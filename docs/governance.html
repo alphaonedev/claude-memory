@@ -1,0 +1,495 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+  Governance atlas — decision tree, levels, approver types, governed actions.
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ai-memory · Governance — Allow / Deny / Pending</title>
+<meta name="description" content="ai-memory v0.6.3.1 governance reference. Allow / Deny / Pending decision tree, GovernanceLevel × GovernedAction matrix, ApproverType (Human / Agent / Consensus), pending-action lifecycle.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/governance.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#6ee7ff;--bad:#ff6b9d;--warn:#ffd700;--gold:#ffd700;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--text);text-decoration:none}a:hover{color:var(--p1)}
+code{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em}h2{font-size:1.6rem;margin-bottom:.5rem;font-family:var(--font-mono)}h3{font-size:1.05rem}
+p{color:var(--text-muted)}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.85);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}.topnav a:hover{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.topnav .right{display:flex;gap:1.25rem}@media(max-width:800px){.topnav .right{display:none}}
+.hero{padding:4rem 1.5rem 2.5rem;text-align:center;background:radial-gradient(ellipse at center,rgba(200,162,255,0.08),transparent 60%);border-bottom:1px solid var(--border)}
+.hero h1{font-size:clamp(2rem,4.5vw,3.25rem);line-height:1.1;letter-spacing:-0.03em;margin-bottom:1rem}
+.hero .tagline{color:var(--text-muted);font-size:1.05rem;max-width:760px;margin:0 auto 1rem}
+.hero .pills{display:flex;justify-content:center;gap:.5rem;flex-wrap:wrap;margin-top:1.25rem}
+.hero .pill{padding:.4rem 1rem;border:1px solid var(--border-hl);border-radius:999px;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted)}
+
+section{padding:3.5rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.72rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:.5rem;padding:.2rem .6rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:.95rem;max-width:820px;margin-bottom:2rem}
+
+.tree-svg{width:100%;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.5rem;margin-bottom:1.5rem}
+
+.matrix{width:100%;border-collapse:separate;border-spacing:0;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;overflow:hidden;font-size:.88rem}
+.matrix th{background:var(--bg-elev);padding:.85rem 1rem;text-align:left;font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid var(--border)}
+.matrix td{padding:.75rem 1rem;border-bottom:1px solid var(--border);vertical-align:top}
+.matrix tr:last-child td{border-bottom:none}
+.matrix .level-name{font-family:var(--font-mono);font-weight:700;color:var(--p3)}
+.matrix .verdict{font-family:var(--font-mono);font-size:.82rem}
+.matrix .verdict.allow{color:var(--good)}
+.matrix .verdict.deny{color:var(--bad)}
+.matrix .verdict.pending{color:var(--warn)}
+
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:1rem;margin-bottom:2rem}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:1.25rem;position:relative;overflow:hidden}
+.card::before{content:"";position:absolute;top:0;left:0;right:0;height:3px;background:var(--p3)}
+.card.allow::before{background:var(--good)}
+.card.deny::before{background:var(--bad)}
+.card.pending::before{background:var(--warn)}
+.card h3{font-family:var(--font-mono);font-size:1rem;margin-bottom:.5rem}
+.card .lbl{font-family:var(--font-mono);font-size:.7rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem}
+.card p{color:var(--text-muted);font-size:.88rem}
+
+.flow{display:flex;align-items:flex-start;gap:1rem;flex-wrap:wrap;margin:1.5rem 0;padding:1.5rem;background:var(--bg-card);border:1px solid var(--border);border-radius:12px}
+.flow .step{flex:1;min-width:180px;padding:.85rem 1rem;background:var(--bg-elev);border:1px solid var(--border);border-radius:8px;font-size:.85rem}
+.flow .step .num{font-family:var(--font-mono);color:var(--p3);font-size:.78rem;font-weight:700;margin-bottom:.3rem}
+.flow .step .what{font-family:var(--font-mono);font-size:.85rem;font-weight:700;color:var(--text);margin-bottom:.3rem}
+.flow .step .why{color:var(--text-muted);font-size:.82rem;line-height:1.45}
+.flow .arr{font-family:var(--font-mono);color:var(--text-dim);align-self:center;font-size:1.5rem}
+
+.snip{font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);margin-top:.85rem;padding:.7rem .85rem;background:var(--bg-code);border-radius:6px;line-height:1.55;white-space:pre;overflow-x:auto}
+.snip .ok{color:var(--good)}
+.snip .err{color:var(--bad)}
+.snip .warn{color:var(--warn)}
+.snip .cm{color:var(--text-dim)}
+.snip .key{color:var(--p3)}
+.snip .val{color:var(--p2)}
+
+.act-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1rem;margin-bottom:1.5rem}
+.act{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:1rem 1.15rem}
+.act .name{font-family:var(--font-mono);font-size:1rem;font-weight:700;color:var(--text);margin-bottom:.4rem}
+.act .name.store{color:var(--good)}
+.act .name.delete{color:var(--bad)}
+.act .name.promote{color:var(--p2)}
+.act .desc{font-size:.85rem;color:var(--text-muted);line-height:1.45}
+.act .ws{font-family:var(--font-mono);font-size:.7rem;color:var(--text-dim);margin-top:.4rem}
+
+footer{padding:3rem 1.5rem;text-align:center;font-size:.85rem;color:var(--text-dim);border-top:1px solid var(--border)}
+footer a{color:var(--text-muted)}
+
+/* Grouped dropdown menu (atlas v2) */
+.topnav .menu{position:relative;display:inline-block}
+.topnav .menu-btn{background:none;border:none;color:var(--text-muted);font-family:inherit;font-size:inherit;cursor:pointer;padding:.2rem 0;line-height:1;letter-spacing:0}
+.topnav .menu-btn:hover,.topnav .menu:focus-within .menu-btn{color:var(--text)}
+.topnav .menu-btn.active{color:var(--text)}
+.topnav .menu-btn .caret{opacity:.5;font-size:.7em;margin-left:.2em}
+.topnav .menu-pane{position:absolute;top:calc(100% + .55rem);right:0;background:var(--bg-card);border:1px solid var(--border-hl);border-radius:8px;padding:.4rem 0;min-width:240px;box-shadow:0 10px 28px rgba(0,0,0,0.5);z-index:60;visibility:hidden;opacity:0;transition:opacity .12s ease,visibility 0s .12s}
+.topnav .menu:focus-within .menu-pane,.topnav .menu:hover .menu-pane{visibility:visible;opacity:1;transition:opacity .12s ease}
+.topnav .menu-pane a{display:block;padding:.5rem 1rem;color:var(--text-muted);font-size:.85rem;margin-right:0;white-space:nowrap;text-decoration:none}
+.topnav .menu-pane a:hover{background:var(--bg-elev);color:var(--text)}
+.topnav .menu-pane a.current{color:var(--p1);background:var(--bg-elev)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="./">ai-memory <span style="opacity:.5">▸ Governance</span></a>
+    <div class="right">
+      <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
+      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <div class="menu">
+        <button class="menu-btn">Audiences<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="for-everyone.html">For Everyone</a>
+          <a href="feature-matrix.html">Feature Matrix</a>
+          <a href="data-flow.html">Data Flow</a>
+          <a href="integrations.html">Integrations</a>
+          <a href="import-history.html">Import History</a>
+          <a href="release-pipeline.html">Release Pipeline</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Features<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="memory-tiers.html">Memory Tiers</a>
+          <a href="memory-rules.html">Memory Rules</a>
+          <a href="ttl-controls.html">TTL Controls</a>
+          <a href="archival.html">Archival</a>
+          <a href="encryption.html">Encryption</a>
+          <a href="hierarchies.html">Hierarchies</a>
+          <a href="knowledge-graph.html">Knowledge Graph</a>
+          <a href="autonomous.html">Autonomous</a>
+          <a href="a2a-messaging.html">A2A Messaging</a>
+          <a href="lifecycle.html">Lifecycle</a>
+          <a href="performance.html">Performance</a>
+          <a href="agent-identity.html">Agent Identity (NHI)</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Architectures<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="architectures.html">Overview</a>
+          <a href="architectures-t1.html">T1 — Single Agent</a>
+          <a href="architectures-t2.html">T2 — Many Agents</a>
+          <a href="architectures-t3.html">T3 — Multi-Node Cluster</a>
+          <a href="architectures-t4.html">T4 — Data-Center Swarm</a>
+          <a href="architectures-t5.html">T5 — Global Hive</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn active">Internals<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="schema.html">Schema</a>
+          <a href="types.html">Types</a>
+          <a href="validators.html">Validators</a>
+          <a href="governance.html" class="current">Governance</a>
+          <a href="tracing.html">Tracing</a>
+        </div>
+      </div>
+      <div class="menu">
+        <button class="menu-btn">Evidence<span class="caret">▾</span></button>
+        <div class="menu-pane">
+          <a href="evidence.html">Frozen Claims</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
+          <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate</a>
+          <a href="performance.html">Performance budgets</a>
+        </div>
+      </div>
+      <a href="credits.html">Credits</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <h1>The governance gate.</h1>
+  <p class="tagline">Three decisions: <strong style="color:var(--good)">Allow</strong>, <strong style="color:var(--bad)">Deny</strong>, <strong style="color:var(--warn)">Pending</strong>. Three actions: <code>store</code>, <code>delete</code>, <code>promote</code>. Four levels: Any, Registered, Owner, Approve. Three approver types: Human, Agent, Consensus. Every governed write either returns immediately or queues for approval — never silently succeeds.</p>
+  <div class="pills">
+    <span class="pill">Task 1.8 — policy shape</span>
+    <span class="pill">Task 1.9 — enforcement</span>
+    <span class="pill">Task 1.10 — approver types</span>
+    <span class="pill">v0.6.2 S34 — federation propagation</span>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The decision</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Allow / Deny / Pending.</h2>
+    <p class="lede">Every governed write goes through one function and produces one of three outcomes. The decision is not advisory — callers <strong>MAY</strong> execute on Allow, <strong>MUST</strong> reject on Deny, and <strong>SHOULD</strong> queue + return the <code>pending_id</code> on Pending.</p>
+    <div class="cards">
+      <div class="card allow">
+        <div class="lbl">verdict 1</div>
+        <h3 style="color:var(--good)">Allow</h3>
+        <p>Proceed with the action. Caller receives the new memory or success response. No row in <code>pending_actions</code>.</p>
+      </div>
+      <div class="card deny">
+        <div class="lbl">verdict 2</div>
+        <h3 style="color:var(--bad)">Deny(reason)</h3>
+        <p>Reject with HTTP 403. The wrapped <code>String</code> surfaces the human-readable reason — <em>not</em> a placeholder. AI clients can quote it verbatim.</p>
+      </div>
+      <div class="card pending">
+        <div class="lbl">verdict 3</div>
+        <h3 style="color:var(--warn)">Pending(id)</h3>
+        <p>Queued in <code>pending_actions</code>; caller receives the new <code>pending_id</code> and HTTP 202. The action replays once approved.</p>
+      </div>
+    </div>
+    <div class="snip">// src/models.rs
+<span class="key">pub enum</span> <span class="val">GovernanceDecision</span> {
+    Allow,
+    Deny(String),
+    Pending(String),
+}</div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">The decision tree</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">How a write becomes Allow / Deny / Pending.</h2>
+    <p class="lede">For every governed action, the daemon walks this tree. The lookup is namespace-local — the policy lives in the namespace's standard memory at <code>metadata.governance</code>; absent a standard, the default policy applies.</p>
+    <svg class="tree-svg" viewBox="0 0 1180 540" xmlns="http://www.w3.org/2000/svg">
+      <style>
+        .tn{fill:#161616;stroke:#3d3d3d;stroke-width:1.5;rx:8;ry:8}
+        .tn-allow{stroke:#6ee7ff;stroke-width:2}
+        .tn-deny{stroke:#ff6b9d;stroke-width:2}
+        .tn-pend{stroke:#ffd700;stroke-width:2}
+        .tt{fill:#fff;font-family:monospace;font-size:13px;font-weight:700}
+        .tdesc{fill:#999;font-family:monospace;font-size:10px}
+        .ll{stroke:#666;stroke-width:1.5;fill:none}
+        .lcap{fill:#999;font-family:monospace;font-size:10px}
+        .start{fill:#0a0a0a;stroke:#c8a2ff;stroke-width:2;rx:8;ry:8}
+        .leaf-allow{fill:rgba(110,231,255,0.12);stroke:#6ee7ff}
+        .leaf-deny{fill:rgba(255,107,157,0.12);stroke:#ff6b9d}
+        .leaf-pend{fill:rgba(255,215,0,0.12);stroke:#ffd700}
+      </style>
+      <!-- Start -->
+      <rect class="start" x="490" y="20" width="200" height="60"/>
+      <text class="tt" x="590" y="48" text-anchor="middle">Governed action arrives</text>
+      <text class="tdesc" x="590" y="65" text-anchor="middle">store / delete / promote</text>
+      <!-- Step 1: Resolve policy -->
+      <line class="ll" x1="590" y1="80" x2="590" y2="115"/>
+      <rect class="tn" x="455" y="115" width="270" height="60"/>
+      <text class="tt" x="590" y="140" text-anchor="middle">Resolve namespace policy</text>
+      <text class="tdesc" x="590" y="158" text-anchor="middle">walk standards.metadata.governance</text>
+      <!-- Step 2: Pick gate field -->
+      <line class="ll" x1="590" y1="175" x2="590" y2="210"/>
+      <rect class="tn" x="455" y="210" width="270" height="60"/>
+      <text class="tt" x="590" y="234" text-anchor="middle">Pick gate from policy</text>
+      <text class="tdesc" x="590" y="252" text-anchor="middle">store→write · delete→delete · promote→promote</text>
+      <!-- Branch: 4 levels -->
+      <line class="ll" x1="590" y1="270" x2="170" y2="320"/>
+      <line class="ll" x1="590" y1="270" x2="450" y2="320"/>
+      <line class="ll" x1="590" y1="270" x2="730" y2="320"/>
+      <line class="ll" x1="590" y1="270" x2="1010" y2="320"/>
+      <rect class="tn tn-allow" x="80" y="320" width="180" height="50"/>
+      <text class="tt" x="170" y="343" text-anchor="middle">Any</text>
+      <text class="tdesc" x="170" y="358" text-anchor="middle">no gate</text>
+      <rect class="tn" x="360" y="320" width="180" height="50"/>
+      <text class="tt" x="450" y="343" text-anchor="middle">Registered</text>
+      <text class="tdesc" x="450" y="358" text-anchor="middle">in _agents?</text>
+      <rect class="tn" x="640" y="320" width="180" height="50"/>
+      <text class="tt" x="730" y="343" text-anchor="middle">Owner</text>
+      <text class="tdesc" x="730" y="358" text-anchor="middle">caller == metadata.agent_id?</text>
+      <rect class="tn tn-pend" x="920" y="320" width="180" height="50"/>
+      <text class="tt" x="1010" y="343" text-anchor="middle">Approve</text>
+      <text class="tdesc" x="1010" y="358" text-anchor="middle">queue + run approver</text>
+      <!-- Leaves: Any → Allow -->
+      <line class="ll" x1="170" y1="370" x2="170" y2="430"/>
+      <rect class="tn leaf-allow" x="80" y="430" width="180" height="50"/>
+      <text class="tt" x="170" y="453" text-anchor="middle">Allow</text>
+      <text class="tdesc" x="170" y="468" text-anchor="middle">execute immediately</text>
+      <!-- Registered → Allow / Deny -->
+      <line class="ll" x1="450" y1="370" x2="395" y2="430"/>
+      <line class="ll" x1="450" y1="370" x2="505" y2="430"/>
+      <rect class="tn leaf-allow" x="305" y="430" width="180" height="50"/>
+      <text class="tt" x="395" y="453" text-anchor="middle">Allow</text>
+      <text class="tdesc" x="395" y="468" text-anchor="middle">caller is registered</text>
+      <rect class="tn leaf-deny" x="495" y="490" width="120" height="40"/>
+      <text class="tt" x="555" y="510" text-anchor="middle" style="font-size:11px">Deny</text>
+      <text class="tdesc" x="555" y="524" text-anchor="middle">not registered</text>
+      <!-- Owner → Allow / Deny -->
+      <line class="ll" x1="730" y1="370" x2="675" y2="430"/>
+      <line class="ll" x1="730" y1="370" x2="785" y2="430"/>
+      <rect class="tn leaf-allow" x="585" y="430" width="180" height="50"/>
+      <text class="tt" x="675" y="453" text-anchor="middle">Allow</text>
+      <text class="tdesc" x="675" y="468" text-anchor="middle">caller is owner</text>
+      <rect class="tn leaf-deny" x="775" y="490" width="120" height="40"/>
+      <text class="tt" x="835" y="510" text-anchor="middle" style="font-size:11px">Deny</text>
+      <text class="tdesc" x="835" y="524" text-anchor="middle">other agent</text>
+      <!-- Approve → Pending -->
+      <line class="ll" x1="1010" y1="370" x2="1010" y2="430"/>
+      <rect class="tn leaf-pend" x="920" y="430" width="180" height="50"/>
+      <text class="tt" x="1010" y="453" text-anchor="middle">Pending(id)</text>
+      <text class="tdesc" x="1010" y="468" text-anchor="middle">replay once approver decides</text>
+    </svg>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">GovernanceLevel × GovernedAction</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">The 12-cell verdict matrix.</h2>
+    <p class="lede">Each policy field (<code>write</code>, <code>promote</code>, <code>delete</code>) holds one <code>GovernanceLevel</code>. Pick the field by action; the level determines the outcome shape.</p>
+    <table class="matrix">
+      <thead><tr>
+        <th>Level</th>
+        <th>store action</th>
+        <th>promote action</th>
+        <th>delete action</th>
+        <th>Used when</th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="level-name">Any</td>
+          <td class="verdict allow">Allow</td>
+          <td class="verdict allow">Allow</td>
+          <td class="verdict allow">Allow</td>
+          <td>Wide-open namespaces (no gate). Default for <code>write</code> and <code>promote</code>.</td>
+        </tr>
+        <tr>
+          <td class="level-name">Registered</td>
+          <td class="verdict allow">Allow if in _agents</td>
+          <td class="verdict allow">Allow if in _agents</td>
+          <td class="verdict allow">Allow if in _agents</td>
+          <td>Caller must have run <code>POST /agents/register</code> first. Otherwise <code>Deny("agent not registered")</code>.</td>
+        </tr>
+        <tr>
+          <td class="level-name">Owner</td>
+          <td class="verdict allow">Allow if caller == agent_id</td>
+          <td class="verdict allow">Allow if caller == agent_id</td>
+          <td class="verdict allow">Allow if caller == agent_id</td>
+          <td>Default for <code>delete</code>. Compares <code>caller_agent_id</code> to <code>memory.metadata.agent_id</code>.</td>
+        </tr>
+        <tr>
+          <td class="level-name">Approve</td>
+          <td class="verdict pending">Pending(id)</td>
+          <td class="verdict pending">Pending(id)</td>
+          <td class="verdict pending">Pending(id)</td>
+          <td>Routes to <code>ApproverType</code>: Human / Agent(id) / Consensus(N).</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">GovernedAction</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">The three actions a policy gates.</h2>
+    <p class="lede">These are the only operations that pass through the governance gate. Reads (<code>memory_get</code>, <code>memory_list</code>, <code>memory_recall</code>, <code>memory_search</code>) bypass governance — they go through the visibility/scope filter instead.</p>
+    <div class="act-grid">
+      <div class="act">
+        <div class="name store">Store</div>
+        <div class="desc">Creating a new memory in a governed namespace. Picks <code>policy.write</code>.</div>
+        <div class="ws">discriminator: "store"</div>
+      </div>
+      <div class="act">
+        <div class="name delete">Delete</div>
+        <div class="desc">Hard-deleting a memory. Picks <code>policy.delete</code>. Default <code>Owner</code> — unowned memories can be deleted by anyone unless the namespace is opted into stricter rules.</div>
+        <div class="ws">discriminator: "delete"</div>
+      </div>
+      <div class="act">
+        <div class="name promote">Promote</div>
+        <div class="desc">Tier change Mid → Long. Picks <code>policy.promote</code>. Long-tier memories don't expire — promotion is the only edit that affects retention.</div>
+        <div class="ws">discriminator: "promote"</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">ApproverType — who decides on Approve</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Three flavors of approval.</h2>
+    <p class="lede">When a level resolves to <code>Approve</code>, the approver shape determines what unblocks the pending action. <code>ApproverType</code> serializes externally-tagged so policy JSON stays unambiguous.</p>
+    <div class="cards">
+      <div class="card">
+        <div class="lbl">approver 1</div>
+        <h3>Human</h3>
+        <p>Out-of-band — UI button, email, Slack approve. Resolves via <code>POST /pending/:id/approve</code> with a human session.</p>
+        <div class="snip">{<span class="key">"approver"</span>: <span class="val">"human"</span>}</div>
+      </div>
+      <div class="card">
+        <div class="lbl">approver 2</div>
+        <h3>Agent(id)</h3>
+        <p>A single specific registered agent must approve. Used for AI-supervisor patterns: junior agents queue, supervising agent approves.</p>
+        <div class="snip">{<span class="key">"approver"</span>: {<span class="key">"agent"</span>: <span class="val">"alice"</span>}}</div>
+      </div>
+      <div class="card">
+        <div class="lbl">approver 3</div>
+        <h3>Consensus(N)</h3>
+        <p>N approval votes from any mix of human/agent registrations. Each vote appends to <code>PendingAction.approvals</code>; clears at threshold.</p>
+        <div class="snip">{<span class="key">"approver"</span>: {<span class="key">"consensus"</span>: <span class="val">3</span>}}</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Policy shape — GovernancePolicy</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">What a namespace standard stores.</h2>
+    <p class="lede">A namespace's standard memory carries the policy at <code>metadata.governance</code>. Absent a standard, the default applies. The default opens writes/promotes wide and gates deletes to owners with human-approver fallback for any <code>Approve</code> usage.</p>
+    <div class="snip">// Default GovernancePolicy
+{
+  <span class="key">"write"</span>:    <span class="val">"any"</span>,
+  <span class="key">"promote"</span>:  <span class="val">"any"</span>,
+  <span class="key">"delete"</span>:   <span class="val">"owner"</span>,
+  <span class="key">"approver"</span>: <span class="val">"human"</span>
+}
+
+// Tight policy for a research-team namespace
+{
+  <span class="key">"write"</span>:    <span class="val">"registered"</span>,        <span class="cm">// only registered agents can write</span>
+  <span class="key">"promote"</span>:  <span class="val">"approve"</span>,           <span class="cm">// promotion goes through the approver</span>
+  <span class="key">"delete"</span>:   <span class="val">"owner"</span>,
+  <span class="key">"approver"</span>: {<span class="key">"consensus"</span>: <span class="val">2</span>}  <span class="cm">// any 2 votes unblock promote</span>
+}
+
+// Sole-author policy
+{
+  <span class="key">"write"</span>:    <span class="val">"approve"</span>,           <span class="cm">// every write needs approval</span>
+  <span class="key">"promote"</span>:  <span class="val">"approve"</span>,
+  <span class="key">"delete"</span>:   <span class="val">"approve"</span>,
+  <span class="key">"approver"</span>: {<span class="key">"agent"</span>: <span class="val">"alice"</span>}  <span class="cm">// alice approves everything</span>
+}</div>
+    <p class="lede" style="margin-top:1rem"><strong>Defensive defaults (v0.6.2 S34):</strong> <code>promote</code>, <code>delete</code>, and <code>approver</code> carry <code>#[serde(default)]</code> so partial-policy payloads (a common shape for operator CLIs / test harnesses that only care about <code>write</code>) round-trip instead of 400-ing on missing fields. <code>write</code> remains required.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Pending-action lifecycle</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">From queue to replay, in five steps.</h2>
+    <p class="lede">An <code>Approve</code> verdict isn't terminal — it parks the action. The original payload sits in <code>pending_actions.payload</code> until a decision arrives, then the daemon replays it as if the caller had just submitted it.</p>
+    <div class="flow">
+      <div class="step"><div class="num">step 1</div><div class="what">Caller submits</div><div class="why">HTTP/MCP write hits the daemon. Validators pass. Governance check picks <code>policy.write</code>.</div></div>
+      <div class="arr">→</div>
+      <div class="step"><div class="num">step 2</div><div class="what">Verdict: Pending</div><div class="why">Daemon inserts a row into <code>pending_actions</code>: action_type, namespace, payload (full action JSON), requested_by, status="pending".</div></div>
+      <div class="arr">→</div>
+      <div class="step"><div class="num">step 3</div><div class="what">Caller gets 202</div><div class="why">Response: <code>{"status":"pending","pending_id":"..."}</code>. The HTTP request returns immediately — no blocking poll.</div></div>
+    </div>
+    <div class="flow">
+      <div class="step"><div class="num">step 4</div><div class="what">Approver decides</div><div class="why">Human, agent, or consensus vote (<code>POST /pending/:id/approve</code> or <code>/reject</code>). Each consensus vote appends to <code>approvals[]</code>; threshold flips status.</div></div>
+      <div class="arr">→</div>
+      <div class="step"><div class="num">step 5a</div><div class="what">Approved → replay</div><div class="why">Daemon re-executes the original payload. The new memory or delete completes. Status=<code>approved</code>; <code>decided_by</code>, <code>decided_at</code> stamped.</div></div>
+      <div class="arr">→</div>
+      <div class="step"><div class="num">step 5b</div><div class="what">Rejected → drop</div><div class="why">Status=<code>rejected</code>. Payload retained for audit. Caller's original write does not happen.</div></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">Federation propagation — v0.6.2 S34/S35</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">Decisions and policies cross peer boundaries.</h2>
+    <p class="lede">Without propagation, a decision on node-2 wouldn't reach node-1, and a caller on node-1 would still see <code>pending</code> after the action was already approved. Two additive sync_push fields close that gap:</p>
+    <div class="cards">
+      <div class="card">
+        <div class="lbl">S34 — pending decisions</div>
+        <h3>PendingDecision</h3>
+        <p><code>sync_push.pending_decisions</code> carries <code>{ id, approved, decider }</code>. Peers apply via <code>db::decide_pending_action</code>. Already-decided rows: idempotent no-op.</p>
+      </div>
+      <div class="card">
+        <div class="lbl">S35 — namespace meta</div>
+        <h3>NamespaceMetaEntry</h3>
+        <p><code>sync_push.namespace_meta</code> carries <code>{ namespace, standard_id, parent_namespace }</code>. Without this, peers see the standard memory itself but miss the parent-link tuple, breaking inheritance walks.</p>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:1rem">Decisions also use <strong>quorum-fanout writes</strong> via <code>broadcast_store_quorum</code> at W of N — a single decision sticks across the federation with the same durability guarantee as a memory write.</p>
+  </div>
+</section>
+
+<section>
+  <div class="container">
+    <span class="eyebrow">What governance does <em>not</em> cover</span>
+    <h2 style="font-family:var(--font-sans);font-size:1.75rem">The boundary, drawn explicit.</h2>
+    <p class="lede">Governance is a write-side gate. Reads, federation, and audit live elsewhere. Calling these out so AI clients don't assume the wrong contract.</p>
+    <div class="snip" style="font-family:var(--font-sans);white-space:normal;line-height:1.7">
+      <div><strong style="color:var(--bad)">Not covered:</strong> read paths (<code>memory_get</code>, <code>memory_list</code>, <code>memory_recall</code>, <code>memory_search</code>) — those use the <code>scope</code>/<code>as_agent</code> visibility filter, not governance.</div>
+      <div><strong style="color:var(--bad)">Not covered:</strong> link creation (<code>memory_link</code>) — passes <code>validate_link</code> only; KG edges are not gated. May change in v0.7 (Hook Pipeline can run KG-write hooks).</div>
+      <div><strong style="color:var(--bad)">Not covered:</strong> sync push receive — peers trust each other on validated payloads, but governance is <em>not</em> re-checked on the receiver. The sender's verdict is authoritative.</div>
+      <div><strong style="color:var(--bad)">Not covered (yet):</strong> hooks (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/architectural-enhancement-spec-v1.md" style="color:var(--p1)">v0.7 Bucket 0</a>) and Permission System refactor (<a href="https://github.com/alphaonedev/agentic-mem-labs/blob/main/strategy/2026-04-26/ai-memory-v0.7-grand-slam.md" style="color:var(--p1)">v0.7 Bucket 3</a>) — current governance is the foundation those layers extend.</div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory v0.6.3.1 · Apache 2.0 · governance lives in <code>src/governance.rs</code> + <code>src/models.rs</code> · <a href="https://github.com/alphaonedev/ai-memory-mcp">repo</a></p>
+  <p style="margin-top:.5rem"><a href="./">← Back to ai-memory</a> · <a href="at-a-glance.html">Atlas</a> · <a href="types.html">Types</a> · <a href="schema.html">Schema</a> · <a href="validators.html">Validators</a></p>
+</footer>
+
+</body>
+</html>

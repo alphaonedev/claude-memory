@@ -181,12 +181,24 @@ pub struct TierConfig {
 }
 
 impl TierConfig {
-    /// Produce a [`Capabilities`] report suitable for JSON serialisation.
+    /// Produce a [`Capabilities`] (schema v2) report suitable for JSON
+    /// serialisation. The MCP / HTTP `handle_capabilities_with_conn`
+    /// wrapper overlays live runtime state (recall mode, reranker mode,
+    /// embedder-loaded flag) and live DB counts (active rules, hook
+    /// registrations, pending approvals) before the report goes on the
+    /// wire.
+    ///
+    /// v2 honesty patch (P1, v0.6.3.1): `recall_mode_active` and
+    /// `reranker_active` start at conservative defaults (`disabled` /
+    /// `off`); the wrapper updates them based on the *runtime* embedder
+    /// + reranker handles, not the *configured* tier values.
     pub fn capabilities(&self) -> Capabilities {
         let has_embeddings = self.embedding_model.is_some();
         let has_llm = self.llm_model.is_some();
 
         Capabilities {
+            // Capabilities schema v2 — see `Capabilities` doc comment.
+            schema_version: "2".to_string(),
             tier: self.tier.as_str().to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             features: CapabilityFeatures {
@@ -198,11 +210,25 @@ impl TierConfig {
                 auto_tagging: has_llm,
                 contradiction_analysis: has_llm,
                 cross_encoder_reranking: self.cross_encoder,
-                memory_reflection: self.cross_encoder && has_llm,
+                // Honesty patch: planned-not-implemented. The flag was
+                // previously a `bool` whose `true` value implied a wired
+                // feature that does not exist in this build.
+                memory_reflection: PlannedFeature::planned("v0.7+"),
                 // Default false — the HTTP/MCP capabilities handler
                 // overwrites this with the live runtime state when it
                 // has access to the embedder handle.
                 embedder_loaded: false,
+                // Conservative defaults; the handler wrapper overlays the
+                // live runtime state (`hybrid` when embedder is loaded,
+                // `keyword_only` when it is not, `degraded` if the load
+                // failed, `disabled` for the keyword tier).
+                recall_mode_active: RecallMode::Disabled,
+                // Conservative default; overwritten when the wrapper has
+                // the actual reranker handle. `off` means no reranker is
+                // configured; `lexical_fallback` means the neural model
+                // failed to materialize; `neural` means the BERT
+                // cross-encoder is loaded.
+                reranker_active: RerankerMode::Off,
             },
             models: CapabilityModels {
                 embedding: self
@@ -218,6 +244,32 @@ impl TierConfig {
                     "none".to_string()
                 },
             },
+            // v2 dynamic blocks — start at zero-state defaults. The MCP
+            // and HTTP `handle_capabilities` wrappers overwrite these
+            // with live counts when they have a `&Connection` handle.
+            //
+            // Honesty patch (P1): `permissions.mode` is `"advisory"`
+            // until P4 lands the enforcement gate. Was `"ask"`, which
+            // implied an active prompt loop that does not exist.
+            // `rule_summary`, `hooks.by_event`, `approval.subscribers`,
+            // and `approval.default_timeout_seconds` were dropped in v2
+            // because they have no backing implementation.
+            permissions: CapabilityPermissions {
+                mode: "advisory".to_string(),
+                active_rules: 0,
+                // v0.6.3.1 (P4, G1): chain-walking enforcement landed
+                // in this release. Surface "enforced" so consumers can
+                // distinguish a governed deployment from the historical
+                // "display_only" posture.
+                inheritance: Some("enforced".to_string()),
+            },
+            hooks: CapabilityHooks::default(),
+            compaction: CapabilityCompaction::planned(),
+            approval: CapabilityApproval {
+                pending_requests: 0,
+            },
+            transcripts: CapabilityTranscripts::planned(),
+            hnsw: CapabilityHnsw::default(),
         }
     }
 }
@@ -227,12 +279,129 @@ impl TierConfig {
 // ---------------------------------------------------------------------------
 
 /// Top-level capabilities report for a running instance.
+///
+/// Schema versions:
+/// - **v1** (legacy, pre-v0.6.3.1): `tier`, `version`, `features`,
+///   `models`. Reachable via `Accept-Capabilities: v1` (HTTP) or the MCP
+///   `accept` argument set to `"v1"`. See [`CapabilitiesV1`].
+/// - **v2** (v0.6.3.1 honesty patch): `schema_version="2"` plus the
+///   `permissions`, `hooks`, `compaction`, `approval`, `transcripts`
+///   blocks. v1 fields preserved at the same top-level paths — old
+///   clients that read v2 by name continue to work for the un-dropped
+///   fields. Default response shape.
+///
+/// **v2 honesty patch (P1, v0.6.3.1):**
+/// - `features.recall_mode_active` and `features.reranker_active` are
+///   *runtime* state, not config-derived flags.
+/// - `features.memory_reflection` is now a `{planned, version, enabled}`
+///   object, not a `bool`.
+/// - `compaction` and `transcripts` carry the same planned-feature
+///   shape so operators can distinguish "disabled but built" from "not
+///   in this build."
+/// - `permissions.mode = "advisory"` until the enforcement gate ships
+///   in P4. Was `"ask"`, which implied an active interactive loop.
+/// - The following fields were **removed** because no backing
+///   implementation exists: `permissions.rule_summary`,
+///   `hooks.by_event`, `approval.subscribers`,
+///   `approval.default_timeout_seconds`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Capabilities {
+    /// Schema-version discriminator. Always `"2"` since v0.6.3.
+    pub schema_version: String,
     pub tier: String,
     pub version: String,
     pub features: CapabilityFeatures,
     pub models: CapabilityModels,
+
+    /// Active permission/governance rules. Pre-P4 reports the count of
+    /// namespaces that have a `metadata.governance` policy attached to
+    /// their standard memory; the underlying permission system itself
+    /// is P4 work.
+    pub permissions: CapabilityPermissions,
+
+    /// Registered hooks. Pre-v0.7 reports webhook subscriptions as a
+    /// proxy (hook system itself is v0.7 Bucket 0).
+    pub hooks: CapabilityHooks,
+
+    /// Compaction state. v0.8 work — reports `{planned, version,
+    /// enabled}` until the subsystem ships.
+    pub compaction: CapabilityCompaction,
+
+    /// Approval API state. Reports the live count of pending actions
+    /// from the existing `pending_actions` table.
+    pub approval: CapabilityApproval,
+
+    /// Sidechain-transcript state. v0.7 Bucket 1.7 work — reports
+    /// `{planned, version, enabled}` until the subsystem ships.
+    pub transcripts: CapabilityTranscripts,
+
+    /// v0.6.3.1 (P3, G2): HNSW vector-index health. Defaults to a
+    /// quiet zero-state report; the MCP/HTTP capabilities wrapper
+    /// overwrites with live process counters when the index module
+    /// has run an eviction.
+    #[serde(default)]
+    pub hnsw: CapabilityHnsw,
+}
+
+/// Live recall-mode tag (P1 honesty patch). Reflects the *runtime*
+/// state of the embedder + LLM, not the configured tier.
+///
+/// - `Hybrid` — embedder loaded; semantic + keyword blending active.
+/// - `KeywordOnly` — no embedder loaded; FTS5 only.
+/// - `Degraded` — embedder configured but `Embedder::load()` failed
+///   (offline runner, read-only fs, missing HF token, etc.).
+/// - `Disabled` — keyword-tier daemon, semantic recall not configured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecallMode {
+    Hybrid,
+    KeywordOnly,
+    Degraded,
+    Disabled,
+}
+
+/// Live reranker-mode tag (P1 honesty patch). Reflects the *runtime*
+/// `CrossEncoder` enum variant, not the configured `cross_encoder` flag.
+///
+/// - `Neural` — `CrossEncoder::Neural` loaded successfully.
+/// - `LexicalFallback` — `cross_encoder` was requested but neural model
+///   download or load failed; running on the lexical scorer.
+/// - `Off` — no reranker handle in the daemon (non-autonomous tier).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RerankerMode {
+    Neural,
+    LexicalFallback,
+    Off,
+}
+
+/// Generic "planned but not implemented" marker used by v2 capability
+/// fields whose underlying subsystem is on the roadmap but not in this
+/// build. Operators reading the JSON can distinguish "disabled but
+/// available" from "not in this build" by inspecting `planned`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PlannedFeature {
+    /// `true` when the feature exists only on the roadmap.
+    pub planned: bool,
+    /// Earliest release that is expected to ship the feature, e.g.
+    /// `"v0.7+"` or `"v0.8+"`. Free-form string; clients should treat
+    /// it as advisory.
+    pub version: String,
+    /// `true` only when the feature is built **and** turned on in this
+    /// daemon. Always `false` when `planned == true`.
+    pub enabled: bool,
+}
+
+impl PlannedFeature {
+    /// A planned-not-yet-shipped feature. `enabled = false`.
+    #[must_use]
+    pub fn planned(version: &str) -> Self {
+        Self {
+            planned: true,
+            version: version.to_string(),
+            enabled: false,
+        }
+    }
 }
 
 /// Boolean feature flags exposed in the capabilities report.
@@ -247,7 +416,11 @@ pub struct CapabilityFeatures {
     pub auto_tagging: bool,
     pub contradiction_analysis: bool,
     pub cross_encoder_reranking: bool,
-    pub memory_reflection: bool,
+    /// Memory-reflection (v0.7+): planned, not yet implemented.
+    /// Was a `bool` before the P1 honesty patch; an object now so
+    /// operators can tell "feature exists but disabled" apart from
+    /// "feature not in this build".
+    pub memory_reflection: PlannedFeature,
     /// v0.6.2 (S18): runtime-observed embedder state. `semantic_search`
     /// above reflects *configured* capability (derived from the tier's
     /// `embedding_model` setting). `embedder_loaded` reflects *actual*
@@ -262,6 +435,23 @@ pub struct CapabilityFeatures {
     /// live embedder handle.
     #[serde(default)]
     pub embedder_loaded: bool,
+    /// v0.6.3.1 (P1 honesty patch): runtime recall-mode tag. Reflects
+    /// the live embedder + LLM availability, not the configured tier.
+    /// See [`RecallMode`].
+    #[serde(default = "default_recall_mode")]
+    pub recall_mode_active: RecallMode,
+    /// v0.6.3.1 (P1 honesty patch): runtime reranker-mode tag.
+    /// Reflects the live `CrossEncoder` variant. See [`RerankerMode`].
+    #[serde(default = "default_reranker_mode")]
+    pub reranker_active: RerankerMode,
+}
+
+fn default_recall_mode() -> RecallMode {
+    RecallMode::Disabled
+}
+
+fn default_reranker_mode() -> RerankerMode {
+    RerankerMode::Off
 }
 
 /// Model identifiers exposed in the capabilities report.
@@ -271,6 +461,260 @@ pub struct CapabilityModels {
     pub embedding_dim: usize,
     pub llm: String,
     pub cross_encoder: String,
+}
+
+/// Permissions block (capabilities schema v2). Pre-P4 reports a live
+/// count of namespace standards carrying a `metadata.governance` policy;
+/// the full enforcement gate lands in P4. The honesty patch (P1)
+/// renames the mode from `"ask"` (which implied an interactive prompt
+/// loop) to `"advisory"` (governance metadata is recorded but not
+/// enforced).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CapabilityPermissions {
+    /// Enforcement mode. `"advisory"` until P4 ships the gate.
+    pub mode: String,
+    /// Number of namespace standards whose `metadata.governance` is
+    /// non-null. Counts policies, not memories.
+    pub active_rules: usize,
+    // P1 honesty patch: `rule_summary` was always empty — no per-rule
+    // serializer existed. Dropped from the v2 wire schema.
+    /// v0.6.3.1 (P4, audit G1): governance-inheritance posture.
+    /// `"enforced"` = `resolve_governance_policy` walks the namespace
+    /// chain leaf-first and returns the most-specific policy (with
+    /// `inherit: false` short-circuiting). Pre-v0.6.3.1 was
+    /// `"display_only"` — the UI surfaced the chain but the gate
+    /// consulted only the leaf, leaving children of governed parents
+    /// completely ungoverned. The field is `Option<String>` so older
+    /// capabilities responses (without the field) round-trip cleanly
+    /// via `#[serde(default)]`.
+    #[serde(default)]
+    pub inheritance: Option<String>,
+}
+
+/// Hook-pipeline block (capabilities schema v2). Pre-v0.7 reports webhook
+/// subscriptions as the closest analogue. The full hook pipeline lands in
+/// v0.7 Bucket 0 (arch-enhancement-spec §2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityHooks {
+    /// Number of registered hook subscribers (proxy: webhook subscriptions).
+    pub registered_count: usize,
+    // P1 honesty patch: `by_event` was always an empty map — no event
+    // registry exists. Dropped from the v2 wire schema.
+    /// v0.6.3.1 P5 (G9): canonical list of webhook event types the
+    /// daemon emits. Integrators pin the `subscribe(event_types: …)`
+    /// filter against these strings. Always populated so downstream
+    /// callers do not have to handle a missing field.
+    #[serde(default = "default_webhook_events")]
+    pub webhook_events: Vec<String>,
+}
+
+impl Default for CapabilityHooks {
+    fn default() -> Self {
+        Self {
+            registered_count: 0,
+            webhook_events: default_webhook_events(),
+        }
+    }
+}
+
+/// Default webhook events list — kept in sync with
+/// `crate::subscriptions::WEBHOOK_EVENT_TYPES`. The constant lives in
+/// `subscriptions.rs` (the surface that uses it at runtime); this
+/// helper exists so `serde(default = …)` and `CapabilityHooks::default`
+/// can fill the field without a cross-module dep on `subscriptions`.
+fn default_webhook_events() -> Vec<String> {
+    vec![
+        "memory_store".to_string(),
+        "memory_promote".to_string(),
+        "memory_delete".to_string(),
+        "memory_link_created".to_string(),
+        "memory_consolidated".to_string(),
+    ]
+}
+
+/// Compaction block (capabilities schema v2). v0.8 Pillar 2.5 work —
+/// reports `{planned, version, enabled}` plus optional run stats. The
+/// honesty patch (P1) replaced the bare `enabled: false` with the
+/// planned-feature shape so operators can distinguish "feature exists
+/// but disabled" from "feature not in this build".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityCompaction {
+    /// Planned-feature marker. `planned = true` while compaction lives
+    /// only on the roadmap. When the subsystem ships the daemon will
+    /// flip `planned = false` and `enabled` will reflect runtime state.
+    #[serde(flatten)]
+    pub status: PlannedFeature,
+    /// Once shipped: scheduled compaction interval in minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<u64>,
+    /// Once shipped: timestamp of the most recent compaction run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<String>,
+    /// Once shipped: arbitrary JSON describing the most recent run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_stats: Option<serde_json::Value>,
+}
+
+impl CapabilityCompaction {
+    /// Pre-v0.8 zero-state: planned, not enabled.
+    #[must_use]
+    pub fn planned() -> Self {
+        Self {
+            status: PlannedFeature::planned("v0.8+"),
+            interval_minutes: None,
+            last_run_at: None,
+            last_run_stats: None,
+        }
+    }
+}
+
+impl Default for CapabilityCompaction {
+    fn default() -> Self {
+        Self::planned()
+    }
+}
+
+/// Approval-API block (capabilities schema v2). `pending_requests`
+/// counts the existing `pending_actions` table (live signal).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CapabilityApproval {
+    /// Live count of `pending_actions` with status='pending'.
+    pub pending_requests: usize,
+    // P1 honesty patch: `subscribers` (no subscription API exists) and
+    // `default_timeout_seconds` (no sweeper enforces timeouts) dropped
+    // from the v2 wire schema.
+}
+
+/// Sidechain-transcript block (capabilities schema v2). v0.7 Bucket 1.7
+/// work — reports `{planned, version, enabled}` until the subsystem
+/// ships. The honesty patch (P1) replaced the bare `enabled: false`
+/// with the planned-feature shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityTranscripts {
+    /// Planned-feature marker. `planned = true` while sidechain
+    /// transcripts live only on the roadmap.
+    #[serde(flatten)]
+    pub status: PlannedFeature,
+    /// Once shipped: number of stored transcripts.
+    #[serde(default, skip_serializing_if = "is_zero_usize")]
+    pub total_count: usize,
+    /// Once shipped: total transcript storage in megabytes.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub total_size_mb: u64,
+}
+
+impl CapabilityTranscripts {
+    /// Pre-v0.7 zero-state: planned, not enabled.
+    #[must_use]
+    pub fn planned() -> Self {
+        Self {
+            status: PlannedFeature::planned("v0.7+"),
+            total_count: 0,
+            total_size_mb: 0,
+        }
+    }
+}
+
+impl Default for CapabilityTranscripts {
+    fn default() -> Self {
+        Self::planned()
+    }
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_usize(n: &usize) -> bool {
+    *n == 0
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// HNSW vector-index health (capabilities schema v2, v0.6.3.1 P3).
+///
+/// Closes the G2 audit gap by surfacing both the cumulative oldest-eviction
+/// count and a rolling-window flag so operators can distinguish "this
+/// process has hit the cap once, long ago" from "we are currently
+/// sustained at the cap and shedding embeddings now". Both numbers are
+/// process-local — the index itself resets on restart so persistence
+/// would be misleading.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CapabilityHnsw {
+    /// Cumulative count of vectors evicted by the `MAX_ENTRIES`-cap path
+    /// since this process started.
+    pub evictions_total: u64,
+    /// True when at least one eviction has occurred in the last 60 s.
+    /// Lets dashboards alert on *active* pressure rather than only the
+    /// historical counter.
+    pub evicted_recently: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities v1 — legacy shape retained for backward compat
+// ---------------------------------------------------------------------------
+
+/// Legacy (v1) capabilities shape — the structure shipped before the
+/// v0.6.3.1 honesty patch. Returned only when a client opts in via
+/// `Accept-Capabilities: v1` (HTTP) or the MCP `accept` argument set
+/// to `"v1"`. Default response is v2.
+///
+/// The v1 schema is frozen — do not extend it. New fields go into v2
+/// (see [`Capabilities`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesV1 {
+    pub tier: String,
+    pub version: String,
+    pub features: CapabilityFeaturesV1,
+    pub models: CapabilityModels,
+}
+
+/// Legacy v1 feature-flag block. Notably, `memory_reflection` is a
+/// `bool` here (it became a `PlannedFeature` object in v2).
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilityFeaturesV1 {
+    pub keyword_search: bool,
+    pub semantic_search: bool,
+    pub hybrid_recall: bool,
+    pub query_expansion: bool,
+    pub auto_consolidation: bool,
+    pub auto_tagging: bool,
+    pub contradiction_analysis: bool,
+    pub cross_encoder_reranking: bool,
+    pub memory_reflection: bool,
+    #[serde(default)]
+    pub embedder_loaded: bool,
+}
+
+impl Capabilities {
+    /// Project the v2 report down to the legacy v1 shape. Used to
+    /// honour `Accept-Capabilities: v1` from older clients.
+    ///
+    /// `memory_reflection` collapses from `{planned, enabled}` to a
+    /// single bool (`enabled` value). All v2-only fields
+    /// (`recall_mode_active`, `reranker_active`, `permissions`,
+    /// `hooks`, `compaction`, `approval`, `transcripts`) are dropped.
+    #[must_use]
+    pub fn to_v1(&self) -> CapabilitiesV1 {
+        CapabilitiesV1 {
+            tier: self.tier.clone(),
+            version: self.version.clone(),
+            features: CapabilityFeaturesV1 {
+                keyword_search: self.features.keyword_search,
+                semantic_search: self.features.semantic_search,
+                hybrid_recall: self.features.hybrid_recall,
+                query_expansion: self.features.query_expansion,
+                auto_consolidation: self.features.auto_consolidation,
+                auto_tagging: self.features.auto_tagging,
+                contradiction_analysis: self.features.contradiction_analysis,
+                cross_encoder_reranking: self.features.cross_encoder_reranking,
+                memory_reflection: self.features.memory_reflection.enabled,
+                embedder_loaded: self.features.embedder_loaded,
+            },
+            models: self.models.clone(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -519,6 +963,233 @@ pub struct AppConfig {
     /// behind an Ollama round-trip. `AI_MEMORY_AUTONOMOUS_HOOKS=1`
     /// env var overrides the config file.
     pub autonomous_hooks: Option<bool>,
+    /// v0.6.3.1 (PR-5 / issue #487) — operational logging facility.
+    /// Default-OFF for privacy; opt-in turns on the rolling file
+    /// appender that captures every `tracing::*` call site to disk.
+    pub logging: Option<LoggingConfig>,
+    /// v0.6.3.1 (PR-5 / issue #487) — security audit trail. Default-OFF
+    /// for privacy; opt-in emits a hash-chained, tamper-evident JSON
+    /// log of every memory mutation suitable for SIEM ingestion and
+    /// SOC2 / HIPAA / GDPR / FedRAMP compliance evidence.
+    pub audit: Option<AuditConfig>,
+    /// v0.6.3.1 (PR-9h / issue #487 PR #497 req #73) — boot privacy
+    /// kill-switch. Default-ON (existing users see no behavior change);
+    /// `[boot] enabled = false` silences boot entirely (empty stdout +
+    /// empty stderr, exit 0) for privacy-sensitive hosts where memory
+    /// titles must not enter CI logs. `[boot] redact_titles = true`
+    /// keeps the manifest header but replaces row titles with
+    /// `<redacted>` for compliance contexts that need the audit-trail
+    /// signal of "boot ran with N memories" without exposing subjects.
+    pub boot: Option<BootConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Logging facility (PR-5)
+// ---------------------------------------------------------------------------
+
+/// `[logging]` block in `config.toml`. Every field is `Option`; missing
+/// fields fall back to the documented defaults.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct LoggingConfig {
+    /// Master toggle. Default `false`.
+    pub enabled: Option<bool>,
+    /// Directory for rotated logs. Default `~/.local/state/ai-memory/logs/`.
+    pub path: Option<String>,
+    /// Soft cap on a single rotated file (advisory — informs rotation
+    /// configuration; the appender enforces this via the chosen
+    /// `rotation` cadence). Default 100.
+    pub max_size_mb: Option<u64>,
+    /// Maximum number of rotated files retained on disk. Default 30.
+    pub max_files: Option<usize>,
+    /// Days of log history to keep before `ai-memory logs archive`
+    /// would compress them. Default 90.
+    pub retention_days: Option<u32>,
+    /// Emit JSON lines instead of the human-readable fmt layer. Default `false`.
+    pub structured: Option<bool>,
+    /// Tracing level / `EnvFilter` directive. Default `"info"`.
+    pub level: Option<String>,
+    /// Rotation policy: `minutely | hourly | daily | never`. Default `"daily"`.
+    pub rotation: Option<String>,
+    /// Override the rotated-file prefix. Default `"ai-memory.log"`.
+    pub filename_prefix: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Audit facility (PR-5)
+// ---------------------------------------------------------------------------
+
+/// `[audit]` block in `config.toml`. Drives the hash-chained audit
+/// trail emitted from every memory mutation call site.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditConfig {
+    /// Master toggle. Default `false`.
+    pub enabled: Option<bool>,
+    /// Audit log path. Either a directory (in which case `audit.log`
+    /// is appended) or an explicit file path. Default
+    /// `~/.local/state/ai-memory/audit/`.
+    pub path: Option<String>,
+    /// Documented schema version on the wire. The binary always emits
+    /// `audit::SCHEMA_VERSION`; this knob is reserved for forward
+    /// compatibility and must equal the binary's emitted version
+    /// today (validated at init).
+    pub schema_version: Option<u32>,
+    /// Whether to redact `memory.content` from emitted events. **The
+    /// only supported value in v1 is `true`** — the audit schema does
+    /// not expose a content field at all; this flag is reserved for a
+    /// future per-namespace exception API.
+    pub redact_content: Option<bool>,
+    /// Whether to compute and verify the per-line hash chain. Default `true`.
+    pub hash_chain: Option<bool>,
+    /// Cadence in minutes for the periodic `CHECKPOINT.sig`
+    /// attestation marker. The marker is a synthetic audit event that
+    /// pins the chain head into the log so an attacker who truncates
+    /// the file can't silently rewind history. Default 60. 0 disables.
+    pub attestation_cadence_minutes: Option<u32>,
+    /// Apply the platform-appropriate "append-only" file flag at
+    /// startup. Best-effort defense in depth; the chain is the
+    /// load-bearing tamper-evidence. Default `true`.
+    pub append_only: Option<bool>,
+    /// Retention horizon (days). `ai-memory logs purge` warns about
+    /// deleting audit records younger than this, and `audit verify`
+    /// surfaces gaps when retention is shorter than the chain extent.
+    /// Default 90. Compliance presets override.
+    pub retention_days: Option<u32>,
+    /// Compliance presets — apply industry-standard retention /
+    /// redaction policy on top of the base config. See
+    /// `docs/security/audit-trail.md` §Compliance.
+    pub compliance: Option<AuditComplianceConfig>,
+}
+
+impl AuditConfig {
+    /// Resolve the effective retention horizon after applying any
+    /// active compliance preset. Presets win when `applied = true`;
+    /// when multiple presets are applied the most-conservative
+    /// (longest) retention wins so the binary never picks a value
+    /// that violates any active policy.
+    #[must_use]
+    pub fn effective_retention_days(&self) -> u32 {
+        let mut chosen = self.retention_days.unwrap_or(90);
+        if let Some(comp) = &self.compliance {
+            for preset in comp.applied_presets() {
+                if let Some(d) = preset.retention_days
+                    && d > chosen
+                {
+                    chosen = d;
+                }
+            }
+        }
+        chosen
+    }
+
+    /// Resolve the effective attestation cadence — the most-frequent
+    /// (smallest non-zero) cadence across the base config and applied
+    /// presets so the strictest compliance rule wins.
+    #[must_use]
+    pub fn effective_attestation_cadence_minutes(&self) -> u32 {
+        let base = self.attestation_cadence_minutes.unwrap_or(60);
+        let mut chosen = base;
+        if let Some(comp) = &self.compliance {
+            for preset in comp.applied_presets() {
+                if let Some(m) = preset.attestation_cadence_minutes
+                    && m > 0
+                    && (chosen == 0 || m < chosen)
+                {
+                    chosen = m;
+                }
+            }
+        }
+        chosen
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Boot privacy controls (PR-9h, v0.6.3.1, issue #487 PR #497 req #73)
+// ---------------------------------------------------------------------------
+
+/// `[boot]` block in `config.toml`. Drives the privacy kill-switch +
+/// title-redaction behaviour of `ai-memory boot`. Both fields default
+/// to the historical (pre-v0.6.3.1) behaviour so existing users see no
+/// change.
+///
+/// Precedence for `enabled`:
+///   `AI_MEMORY_BOOT_ENABLED=0` env var (truthy "0/false/no/off") >
+///   `[boot] enabled` config value > compiled default `true`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BootConfig {
+    /// Master toggle. Default `true`. When set to `false`, `ai-memory
+    /// boot` exits 0 with **empty stdout AND empty stderr** — the
+    /// privacy-sensitive escape hatch for hosts where memory titles
+    /// must never enter CI logs. The hook injects nothing.
+    pub enabled: Option<bool>,
+    /// When `true`, the manifest header still appears but every
+    /// memory row's `title` field is replaced with `<redacted>` —
+    /// useful for compliance contexts that need an audit trail of
+    /// "boot ran with N memories" without exposing memory subjects.
+    /// Default `false`.
+    pub redact_titles: Option<bool>,
+}
+
+impl BootConfig {
+    /// Resolve the effective `enabled` value with env-var precedence.
+    /// `AI_MEMORY_BOOT_ENABLED=0/false/no/off` forces disabled;
+    /// `=1/true/yes/on` forces enabled. Anything else falls through to
+    /// the config file value (or the compiled default `true`).
+    #[must_use]
+    pub fn effective_enabled(&self) -> bool {
+        if let Ok(v) = std::env::var("AI_MEMORY_BOOT_ENABLED") {
+            let v = v.trim().to_ascii_lowercase();
+            if matches!(v.as_str(), "0" | "false" | "no" | "off") {
+                return false;
+            }
+            if matches!(v.as_str(), "1" | "true" | "yes" | "on") {
+                return true;
+            }
+        }
+        self.enabled.unwrap_or(true)
+    }
+
+    /// Resolve the effective `redact_titles` value. Default `false`.
+    #[must_use]
+    pub fn effective_redact_titles(&self) -> bool {
+        self.redact_titles.unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AuditComplianceConfig {
+    pub soc2: Option<CompliancePreset>,
+    pub hipaa: Option<CompliancePreset>,
+    pub gdpr: Option<CompliancePreset>,
+    pub fedramp: Option<CompliancePreset>,
+}
+
+impl AuditComplianceConfig {
+    /// Iterate over every preset whose `applied = true`.
+    pub fn applied_presets(&self) -> impl Iterator<Item = &CompliancePreset> {
+        [
+            self.soc2.as_ref(),
+            self.hipaa.as_ref(),
+            self.gdpr.as_ref(),
+            self.fedramp.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|p| p.applied.unwrap_or(false))
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct CompliancePreset {
+    pub applied: Option<bool>,
+    pub retention_days: Option<u32>,
+    pub redact_content: Option<bool>,
+    pub attestation_cadence_minutes: Option<u32>,
+    /// Reserved for compliance contexts that mandate at-rest crypto.
+    /// HIPAA preset surfaces this so operators can pair audit with
+    /// `--features sqlcipher` for end-to-end at-rest encryption.
+    pub encrypt_at_rest: Option<bool>,
+    /// GDPR-style actor pseudonymization toggle. Reserved for v0.7+.
+    pub pseudonymize_actors: Option<bool>,
 }
 
 /// Identity-resolution configuration (Task 1.2 follow-up #198).
@@ -647,6 +1318,25 @@ impl AppConfig {
         self.identity.as_ref().is_some_and(|i| i.anonymize_default)
     }
 
+    /// Resolve the [`LoggingConfig`] block, returning a default
+    /// (disabled) instance when the config file omits it.
+    pub fn effective_logging(&self) -> LoggingConfig {
+        self.logging.clone().unwrap_or_default()
+    }
+
+    /// Resolve the [`AuditConfig`] block, returning a default
+    /// (disabled) instance when the config file omits it.
+    pub fn effective_audit(&self) -> AuditConfig {
+        self.audit.clone().unwrap_or_default()
+    }
+
+    /// Resolve the [`BootConfig`] block, returning a default
+    /// (enabled, no redaction) instance when the config file omits
+    /// it. v0.6.3.1 (PR-9h / issue #487 PR #497 req #73).
+    pub fn effective_boot(&self) -> BootConfig {
+        self.boot.clone().unwrap_or_default()
+    }
+
     /// Resolve URL for embedding model (falls back to `ollama_url`).
     pub fn effective_embed_url(&self) -> &str {
         self.embed_url
@@ -703,6 +1393,80 @@ impl AppConfig {
 # long_ttl_secs = 0             # 0 = never expires (default)
 # short_extend_secs = 3600      # +1h on access (default)
 # mid_extend_secs = 86400       # +1d on access (default)
+
+# v0.6.3.1 (PR-5 / issue #487) — operational logging facility.
+# Default-OFF. Uncomment + set enabled = true to capture every
+# `tracing::*` call site to a rotating on-disk log file. See
+# `docs/security/audit-trail.md` §SIEM ingestion guide for Splunk /
+# Datadog / Elastic / Loki recipes.
+# [logging]
+# enabled = false
+# path = "~/.local/state/ai-memory/logs/"
+# max_size_mb = 100
+# max_files = 30
+# retention_days = 90
+# structured = false              # true = emit JSON lines for SIEM ingest
+# level = "info"                  # tracing EnvFilter directive
+# rotation = "daily"              # minutely | hourly | daily | never
+
+# v0.6.3.1 (PR-5 / issue #487) — security audit trail. Default-OFF.
+# When enabled, every memory mutation emits one hash-chained JSON
+# line per event suitable for SOC2 / HIPAA / GDPR / FedRAMP evidence.
+# `ai-memory audit verify` walks the chain; `ai-memory logs tail`
+# streams events.
+# [audit]
+# enabled = false
+# path = "~/.local/state/ai-memory/audit/"
+# schema_version = 1
+# redact_content = true            # v1 schema never emits content; reserved
+# hash_chain = true
+# attestation_cadence_minutes = 60
+# append_only = true               # best-effort chflags(2) / FS_IOC_SETFLAGS
+
+# Compliance presets. Set `applied = true` and the documented retention
+# / cadence values override the defaults above. See
+# `docs/security/audit-trail.md` §Compliance.
+# [audit.compliance.soc2]
+# applied = false
+# retention_days = 730
+# redact_content = true
+# attestation_cadence_minutes = 60
+#
+# [audit.compliance.hipaa]
+# applied = false
+# retention_days = 2190
+# redact_content = true
+# encrypt_at_rest = true           # pair with --features sqlcipher
+#
+# [audit.compliance.gdpr]
+# applied = false
+# retention_days = 1095
+# redact_content = true
+# pseudonymize_actors = true       # reserved for v0.7+
+#
+# [audit.compliance.fedramp]
+# applied = false
+# retention_days = 1095
+# redact_content = true
+# attestation_cadence_minutes = 30
+
+# v0.6.3.1 (PR-9h / issue #487 PR #497 req #73) — boot privacy controls.
+# Default-ON (omit the section entirely for the historical pre-v0.6.3.1
+# behavior). Two knobs:
+#
+# - `enabled = false` silences `ai-memory boot` entirely: empty stdout,
+#   empty stderr, exit 0. The SessionStart hook injects nothing. Use on
+#   privacy-sensitive hosts where memory titles must never enter CI
+#   logs. The env var `AI_MEMORY_BOOT_ENABLED=0` takes precedence over
+#   this config (same precedence pattern as PR-5's log-dir resolution).
+#
+# - `redact_titles = true` keeps the manifest header but replaces row
+#   `title` fields with `<redacted>` — useful for compliance contexts
+#   that need the audit-trail signal of "boot ran with N memories"
+#   without exposing memory subjects.
+# [boot]
+# enabled = true
+# redact_titles = false
 "#;
         let _ = std::fs::write(&path, default_toml);
     }
@@ -756,8 +1520,15 @@ mod tests {
     fn autonomous_has_cross_encoder() {
         let cfg = FeatureTier::Autonomous.config();
         assert!(cfg.cross_encoder);
-        assert!(cfg.capabilities().features.cross_encoder_reranking);
-        assert!(cfg.capabilities().features.memory_reflection);
+        let caps = cfg.capabilities();
+        assert!(caps.features.cross_encoder_reranking);
+        // P1 honesty patch: memory_reflection is a planned-feature
+        // object now. Even on the autonomous tier the underlying
+        // subsystem is roadmap (v0.7+), so `planned == true` and
+        // `enabled == false` regardless of tier.
+        assert!(caps.features.memory_reflection.planned);
+        assert!(!caps.features.memory_reflection.enabled);
+        assert_eq!(caps.features.memory_reflection.version, "v0.7+");
     }
 
     #[test]
@@ -776,6 +1547,149 @@ mod tests {
         assert!(json.contains("\"tier\": \"smart\""));
         assert!(json.contains("nomic"));
         assert!(json.contains("gemma4:e2b"));
+    }
+
+    /// v0.6.3.1 (capabilities schema v2, P1 honesty patch).
+    /// Round-trip the new struct through serde_json and assert the v2
+    /// honesty contract: dropped fields absent, planned-feature blocks
+    /// shaped correctly, runtime-state defaults conservative.
+    #[test]
+    fn capabilities_v2_zero_state_round_trip() {
+        let caps = FeatureTier::Keyword.config().capabilities();
+        let val: serde_json::Value = serde_json::to_value(&caps).unwrap();
+
+        assert_eq!(val["schema_version"], "2");
+
+        // permissions zero-state: mode="advisory" (was "ask" in v1),
+        // active_rules=0. `rule_summary` dropped from v2.
+        assert_eq!(val["permissions"]["mode"], "advisory");
+        assert_eq!(val["permissions"]["active_rules"], 0);
+        assert!(
+            val["permissions"].get("rule_summary").is_none(),
+            "v2 honesty patch drops `permissions.rule_summary` (no per-rule serializer)"
+        );
+        // v0.6.3.1 (P4, audit G1): inheritance posture surfaced.
+        assert_eq!(val["permissions"]["inheritance"], "enforced");
+
+        // hooks zero-state: 0 registered. `by_event` dropped from v2.
+        assert_eq!(val["hooks"]["registered_count"], 0);
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 honesty patch drops `hooks.by_event` (no event registry)"
+        );
+
+        // hooks zero-state: 0 registered, by_event dropped (P1 honesty)
+        assert_eq!(val["hooks"]["registered_count"], 0);
+        assert!(
+            val["hooks"].get("by_event").is_none(),
+            "v2 drops hooks.by_event (no event registry)"
+        );
+        // P5 (G9): webhook_events must always surface the canonical
+        // five lifecycle events so integrators can pin a subscribe
+        // filter against them.
+        let events = val["hooks"]["webhook_events"].as_array().unwrap();
+        assert_eq!(events.len(), 5);
+        for expected in [
+            "memory_store",
+            "memory_promote",
+            "memory_delete",
+            "memory_link_created",
+            "memory_consolidated",
+        ] {
+            assert!(
+                events.iter().any(|v| v.as_str() == Some(expected)),
+                "webhook_events missing {expected}"
+            );
+        }
+
+        // compaction zero-state: planned, not enabled, optional fields omitted
+        assert_eq!(val["compaction"]["planned"], true);
+        assert_eq!(val["compaction"]["enabled"], false);
+        assert_eq!(val["compaction"]["version"], "v0.8+");
+        assert!(
+            val["compaction"].get("interval_minutes").is_none(),
+            "Option::None values must be skipped in serialization"
+        );
+        assert!(val["compaction"].get("last_run_at").is_none());
+        assert!(val["compaction"].get("last_run_stats").is_none());
+
+        // approval zero-state: 0 pending. `subscribers` and
+        // `default_timeout_seconds` dropped from v2.
+        assert_eq!(val["approval"]["pending_requests"], 0);
+        assert!(
+            val["approval"].get("subscribers").is_none(),
+            "v2 honesty patch drops `approval.subscribers` (no subscription API)"
+        );
+        assert!(
+            val["approval"].get("default_timeout_seconds").is_none(),
+            "v2 honesty patch drops `approval.default_timeout_seconds` (no sweeper)"
+        );
+
+        // transcripts zero-state: planned, not enabled, zero counts skipped
+        assert_eq!(val["transcripts"]["planned"], true);
+        assert_eq!(val["transcripts"]["enabled"], false);
+        assert_eq!(val["transcripts"]["version"], "v0.7+");
+
+        // memory_reflection: planned-feature object (was bool)
+        assert_eq!(val["features"]["memory_reflection"]["planned"], true);
+        assert_eq!(val["features"]["memory_reflection"]["enabled"], false);
+        assert_eq!(val["features"]["memory_reflection"]["version"], "v0.7+");
+
+        // Runtime-state defaults are conservative — they get overlaid
+        // at the handler boundary based on the live embedder + reranker
+        // handles. With no overlays, the keyword-tier daemon reports
+        // `disabled` / `off`.
+        assert_eq!(val["features"]["recall_mode_active"], "disabled");
+        assert_eq!(val["features"]["reranker_active"], "off");
+
+        // Round-trip back to a typed Capabilities and confirm field
+        // identity (proves Deserialize works for all reshaped structs).
+        let restored: Capabilities = serde_json::from_value(val).unwrap();
+        assert_eq!(restored.schema_version, "2");
+        assert_eq!(restored.permissions.mode, "advisory");
+        assert!(restored.compaction.status.planned);
+        assert!(restored.transcripts.status.planned);
+        assert_eq!(restored.features.recall_mode_active, RecallMode::Disabled);
+        assert_eq!(restored.features.reranker_active, RerankerMode::Off);
+    }
+
+    /// P1 honesty patch: legacy v1 projection preserves the old shape
+    /// for clients that opt in via `Accept-Capabilities: v1`.
+    #[test]
+    fn capabilities_v1_projection_preserves_legacy_shape() {
+        let caps = FeatureTier::Autonomous.config().capabilities();
+        let v1 = caps.to_v1();
+        let val: serde_json::Value = serde_json::to_value(&v1).unwrap();
+
+        // v1: no schema_version, no v2-only blocks
+        assert!(
+            val.get("schema_version").is_none(),
+            "v1 has no schema_version"
+        );
+        assert!(
+            val.get("permissions").is_none(),
+            "v1 has no permissions block"
+        );
+        assert!(val.get("hooks").is_none());
+        assert!(val.get("compaction").is_none());
+        assert!(val.get("approval").is_none());
+        assert!(val.get("transcripts").is_none());
+
+        // v1 keeps the four legacy top-level keys
+        assert!(val["tier"].is_string());
+        assert!(val["version"].is_string());
+        assert!(val["features"].is_object());
+        assert!(val["models"].is_object());
+
+        // v1 features.memory_reflection collapses to a bool — autonomous
+        // tier had cross_encoder + has_llm but the planned object's
+        // `enabled = false`, so the v1 bool is `false`.
+        assert!(val["features"]["memory_reflection"].is_boolean());
+        assert_eq!(val["features"]["memory_reflection"], false);
+
+        // v1 features carry no recall_mode_active / reranker_active
+        assert!(val["features"].get("recall_mode_active").is_none());
+        assert!(val["features"].get("reranker_active").is_none());
     }
 
     #[test]
@@ -982,17 +1896,221 @@ mod tests {
 
     #[test]
     fn scoring_roundtrip_through_toml() {
-        let toml_src = r#"
+        let toml_src = r"
 [scoring]
 half_life_days_short = 5.0
 half_life_days_mid = 25.0
 legacy_scoring = false
-"#;
+";
         let cfg: AppConfig = toml::from_str(toml_src).expect("parses");
         let s = cfg.effective_scoring();
         assert!((s.half_life_days_short - 5.0).abs() < f64::EPSILON);
         assert!((s.half_life_days_mid - 25.0).abs() < f64::EPSILON);
         // Unset long defaults.
         assert!((s.half_life_days_long - 365.0).abs() < f64::EPSILON);
+    }
+
+    // ---- Wave 3 (Closer T) tests for uncovered effective_* helpers
+    // and write_default_if_missing. ----
+
+    #[test]
+    fn effective_tier_cli_overrides_config() {
+        let cfg = AppConfig {
+            tier: Some("smart".to_string()),
+            ..AppConfig::default()
+        };
+        // CLI flag wins over config.
+        assert_eq!(
+            cfg.effective_tier(Some("autonomous")),
+            FeatureTier::Autonomous
+        );
+        // No CLI flag → config used.
+        assert_eq!(cfg.effective_tier(None), FeatureTier::Smart);
+    }
+
+    #[test]
+    fn effective_tier_unknown_falls_back_to_semantic() {
+        let cfg = AppConfig::default();
+        assert_eq!(
+            cfg.effective_tier(Some("invalid-tier")),
+            FeatureTier::Semantic
+        );
+        // No CLI, no config → default semantic.
+        assert_eq!(cfg.effective_tier(None), FeatureTier::Semantic);
+    }
+
+    #[test]
+    fn effective_db_cli_path_wins_when_non_default() {
+        let cfg = AppConfig {
+            db: Some("/from/config.db".to_string()),
+            ..AppConfig::default()
+        };
+        let cli_path = Path::new("/from/cli.db");
+        assert_eq!(cfg.effective_db(cli_path), PathBuf::from("/from/cli.db"));
+    }
+
+    #[test]
+    fn effective_db_falls_back_to_config_when_cli_default() {
+        let cfg = AppConfig {
+            db: Some("/from/config.db".to_string()),
+            ..AppConfig::default()
+        };
+        // The CLI default is "ai-memory.db" — config wins for that case.
+        assert_eq!(
+            cfg.effective_db(Path::new("ai-memory.db")),
+            PathBuf::from("/from/config.db")
+        );
+    }
+
+    #[test]
+    fn effective_db_falls_back_to_cli_when_no_config() {
+        let cfg = AppConfig::default();
+        let cli_path = Path::new("ai-memory.db");
+        assert_eq!(cfg.effective_db(cli_path), PathBuf::from("ai-memory.db"));
+    }
+
+    #[test]
+    fn effective_ollama_url_default_when_unset() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
+    }
+
+    #[test]
+    fn effective_ollama_url_uses_configured_value() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://my-host:9999".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(cfg.effective_ollama_url(), "http://my-host:9999");
+    }
+
+    #[test]
+    fn effective_embed_url_falls_back_to_ollama_url() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://ollama:11434".to_string()),
+            ..AppConfig::default()
+        };
+        // No embed_url → fall back to ollama_url.
+        assert_eq!(cfg.effective_embed_url(), "http://ollama:11434");
+    }
+
+    #[test]
+    fn effective_embed_url_uses_dedicated_value_when_set() {
+        let cfg = AppConfig {
+            ollama_url: Some("http://ollama:11434".to_string()),
+            embed_url: Some("http://embed:8080".to_string()),
+            ..AppConfig::default()
+        };
+        // Dedicated embed_url wins.
+        assert_eq!(cfg.effective_embed_url(), "http://embed:8080");
+    }
+
+    #[test]
+    fn effective_embed_url_uses_default_when_neither_set() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_embed_url(), "http://localhost:11434");
+    }
+
+    #[test]
+    fn effective_archive_on_gc_default_is_true() {
+        let cfg = AppConfig::default();
+        assert!(cfg.effective_archive_on_gc());
+    }
+
+    #[test]
+    fn effective_archive_on_gc_respects_explicit_false() {
+        let cfg = AppConfig {
+            archive_on_gc: Some(false),
+            ..AppConfig::default()
+        };
+        assert!(!cfg.effective_archive_on_gc());
+    }
+
+    #[test]
+    fn effective_autonomous_hooks_default_is_false() {
+        // SAFETY: clear env so this test is deterministic; tests run with
+        // --test-threads=1 in CI for env-based tests, but we stay
+        // defensive and set+unset locally.
+        // SAFETY: env mutation is acceptable here because we set then unset.
+        unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
+        let cfg = AppConfig::default();
+        assert!(!cfg.effective_autonomous_hooks());
+    }
+
+    #[test]
+    fn effective_autonomous_hooks_config_value_used_when_env_unset() {
+        unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
+        let cfg = AppConfig {
+            autonomous_hooks: Some(true),
+            ..AppConfig::default()
+        };
+        assert!(cfg.effective_autonomous_hooks());
+    }
+
+    #[test]
+    fn effective_anonymize_default_falls_back_to_config() {
+        unsafe { std::env::remove_var("AI_MEMORY_ANONYMIZE") };
+        let cfg = AppConfig::default();
+        assert!(!cfg.effective_anonymize_default());
+    }
+
+    #[test]
+    fn write_default_if_missing_creates_file_then_noops() {
+        // Use a temp dir as $HOME so we don't clobber a real config.
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: env mutation is contained; we restore at end.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        // First call writes the file.
+        AppConfig::write_default_if_missing();
+        let expected = AppConfig::config_path().unwrap();
+        assert!(expected.exists(), "config not written at {expected:?}");
+        let original = std::fs::read_to_string(&expected).unwrap();
+        assert!(original.contains("ai-memory configuration"));
+        // Second call must NOT overwrite (idempotent).
+        std::fs::write(&expected, "# user-edited\n").unwrap();
+        AppConfig::write_default_if_missing();
+        let after = std::fs::read_to_string(&expected).unwrap();
+        assert_eq!(after, "# user-edited\n");
+    }
+
+    #[test]
+    fn config_path_returns_some_when_home_set() {
+        // SAFETY: env mutation contained to this test.
+        unsafe { std::env::set_var("HOME", "/some/home") };
+        let path = AppConfig::config_path().unwrap();
+        assert!(path.starts_with("/some/home"));
+    }
+
+    #[test]
+    fn load_from_returns_default_for_missing_file() {
+        // Non-existent path → default config.
+        let cfg = AppConfig::load_from(Path::new("/non/existent/path.toml"));
+        assert!(cfg.tier.is_none());
+        assert!(cfg.db.is_none());
+    }
+
+    #[test]
+    fn load_from_returns_default_for_unparseable_toml() {
+        // Garbage TOML → load_from prints a warning and returns default.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), "this is not [valid toml]]]").unwrap();
+        let cfg = AppConfig::load_from(tmp.path());
+        assert!(cfg.tier.is_none());
+    }
+
+    #[test]
+    fn load_from_parses_valid_toml() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(
+            tmp.path(),
+            r#"
+                tier = "smart"
+                db = "/disk.db"
+            "#,
+        )
+        .unwrap();
+        let cfg = AppConfig::load_from(tmp.path());
+        assert_eq!(cfg.tier.as_deref(), Some("smart"));
+        assert_eq!(cfg.db.as_deref(), Some("/disk.db"));
     }
 }

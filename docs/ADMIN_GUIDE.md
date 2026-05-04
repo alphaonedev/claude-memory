@@ -2,7 +2,9 @@
 
 `ai-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
 
-**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 191 tests with 95%+ coverage across 15/15 modules.
+**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 1,886 lib tests + 49+ integration tests at 93.84% line coverage (v0.6.3.1). v0.6.3 baseline numbers (1,600 lib / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 deltas are documented in `CHANGELOG.md` and the v0.6.3.1 release notes.
+
+> **Maturity framing (v0.6.3).** The single-machine primitive (T1/T2 in the [architectures matrix](https://alphaonedev.github.io/ai-memory-mcp/architectures.html)) is **production-ready**. Federation (T3 multi-node quorum cluster) is **beta** — the code is shipped and tested but not recommended for unattended production fleets. The Postgres+pgvector backend is **experimental** under the `sal-postgres` Cargo feature, GA target v0.7. Multi-region distributed consensus (T5 "global hive") is **vision** at v1.0+. ai-memory is a single-machine primitive that ships beta-quality federation primitives for opt-in multi-node clusters; it is not a distributed database. See the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html) for the canonical maturity labels — use those labels in all customer-facing materials.
 
 ## Deployment Options
 
@@ -41,7 +43,7 @@ Run the HTTP daemon directly in the foreground:
 ai-memory --db /path/to/ai-memory.db serve
 ```
 
-The daemon listens on `127.0.0.1:9077` by default and exposes 24 HTTP endpoints.
+The daemon listens on `127.0.0.1:9077` by default and exposes 42 HTTP endpoints (canonical count on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)).
 
 ### Systemd (Production HTTP Daemon)
 
@@ -132,10 +134,10 @@ The `--tier` flag controls which features are enabled. Each tier builds on the p
 
 | Tier | Tools | Embedding Model | LLM Required | Approx. Memory |
 |------|-------|----------------|--------------|----------------|
-| `keyword` | 21 | No | No | Minimal |
-| `semantic` (default) | 21 | Yes (HuggingFace) | No | ~256 MB |
-| `smart` | 21 | Yes | Yes (Ollama) | ~1 GB |
-| `autonomous` | 21 | Yes | Yes (Ollama) | ~4 GB |
+| `keyword` | keyword subset | No | No | Minimal |
+| `semantic` (default) | semantic subset | Yes (HuggingFace) | No | ~256 MB |
+| `smart` | smart subset (LLM tools enabled) | Yes | Yes (Ollama) | ~1 GB |
+| `autonomous` | full 43-tool surface | Yes | Yes (Ollama) | ~4 GB |
 
 Set the tier when starting the MCP server or HTTP daemon:
 
@@ -709,11 +711,11 @@ openssl req -x509 -newkey rsa:2048 -keyout client.key -out client.pem \
 openssl x509 -in client.pem -outform DER | sha256sum
 ```
 
-3. Build the allowlist file (one fingerprint per line; `sha256:` prefix and `:` separators are optional):
+3. Build the allowlist file (one fingerprint per line; `sha256:` prefix and `:` separators are optional). Full-line `#` comments and inline trailing `# label` annotations after a fingerprint are both tolerated:
 
 ```
 # peer A's client cert
-sha256:25ab790783dbe969f994063db0412f1930e187e5e1e6c7d79bb76224a76b7bb7
+sha256:25ab790783dbe969f994063db0412f1930e187e5e1e6c7d79bb76224a76b7bb7  # node-1
 ```
 
 4. Run with all three flags:
@@ -748,7 +750,7 @@ Both are cleaned up on graceful shutdown (the daemon runs `PRAGMA wal_checkpoint
 
 Maximum request body size: 50 MB.
 
-The HTTP daemon exposes **24 endpoints** under `/api/v1`:
+The HTTP daemon exposes **50 endpoints** under `/api/v1`:
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -1153,7 +1155,7 @@ Runs on `ubuntu-latest` and `macos-latest`:
 
 1. **Formatting** -- `cargo fmt --check`
 2. **Linting** -- `cargo clippy -- -D warnings`
-3. **Tests** -- `cargo test` (191 tests: 140 unit + 51 integration, 15/15 modules)
+3. **Tests** -- `cargo test` (1,600 lib tests; canonical counts on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html))
 4. **Build** -- `cargo build --release`
 
 Uses `Swatinem/rust-cache@v2` for build caching.
