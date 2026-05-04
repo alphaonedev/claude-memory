@@ -34,6 +34,7 @@ pub mod mcp;
 pub mod metrics;
 pub mod mine;
 pub mod models;
+pub mod profile;
 pub mod replication;
 pub mod reranker;
 pub mod sizes;

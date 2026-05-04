@@ -3644,11 +3644,20 @@ fn handle_request(
 
 /// Run the MCP server over stdio. Blocks until stdin closes.
 /// Initializes components based on the requested feature tier.
+///
+/// `profile` (v0.6.4-001) selects the tool surface advertised through
+/// `tools/list`. Today the parameter is plumbed through and recorded in
+/// the boot manifest; the family-scoped registration filter that
+/// actually gates which tools land in `tools/list` is wired in
+/// v0.6.4-002 (#522). Until that lands, every profile shows the full
+/// 43-tool surface — the resolution step still runs so the parse error
+/// path is exercised (and asserted in the integration tests).
 #[allow(clippy::too_many_lines)]
 pub fn run_mcp_server(
     db_path: &Path,
     tier: FeatureTier,
     app_config: &AppConfig,
+    profile: &crate::profile::Profile,
 ) -> anyhow::Result<()> {
     // Pillar 3 / Stream E — wire `tracing` for the MCP entrypoint so the
     // per-tool spans added in `handle_request` actually surface. The
@@ -3670,6 +3679,16 @@ pub fn run_mcp_server(
 
     let mut tier_config = tier.config();
     eprintln!("ai-memory: requested tier = {}", tier.as_str());
+    // v0.6.4-001 — log resolved profile so an operator inspecting MCP
+    // boot stderr can immediately see which tool surface is active.
+    // Family-scoped filtering of tools/list arrives in v0.6.4-002.
+    let family_names: Vec<&'static str> = profile.families().iter().map(|f| f.name()).collect();
+    eprintln!(
+        "ai-memory: profile = {} families ({}); expected tool count = {}",
+        profile.families().len(),
+        family_names.join(", "),
+        profile.expected_tool_count()
+    );
 
     // Apply config.toml overrides — tiers gate features, models are independently configurable
     // Only override if the tier actually uses an LLM (smart/autonomous)

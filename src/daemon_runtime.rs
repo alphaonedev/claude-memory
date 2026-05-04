@@ -133,6 +133,14 @@ pub enum Command {
         /// Feature tier: keyword (FTS only) or semantic (embeddings + FTS)
         #[arg(long, default_value = "semantic")]
         tier: String,
+        /// v0.6.4 — Tool surface profile. One of `core`, `graph`, `admin`,
+        /// `power`, `full`, or a comma-separated custom list (e.g.,
+        /// `core,graph,archive`). Default `core` (5 tools). Resolution
+        /// order: this CLI flag > `AI_MEMORY_PROFILE` env > `[mcp].profile`
+        /// in config.toml > `core`. Set `--profile full` to reproduce
+        /// v0.6.3 surface 1:1 (43 tools).
+        #[arg(long, env = "AI_MEMORY_PROFILE")]
+        profile: Option<String>,
     },
     /// Store a new memory
     Store(StoreArgs),
@@ -450,9 +458,20 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
 
     let result = match cli.command {
         Command::Serve(a) => serve(db_path, a, app_config).await,
-        Command::Mcp { tier } => {
+        Command::Mcp { tier, profile } => {
             let feature_tier = app_config.effective_tier(Some(&tier));
-            mcp::run_mcp_server(&db_path, feature_tier, app_config)?;
+            // v0.6.4-001 — resolve profile (CLI/env > config > default core).
+            // Surface parse errors to stderr with the diagnostic that
+            // ProfileParseError already produces (lists valid profiles +
+            // valid families) before exiting.
+            let resolved_profile = match app_config.effective_profile(profile.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("ai-memory mcp: invalid profile: {e}");
+                    std::process::exit(2);
+                }
+            };
+            mcp::run_mcp_server(&db_path, feature_tier, app_config, &resolved_profile)?;
             Ok(())
         }
         Command::Store(a) => {
@@ -1911,7 +1930,8 @@ mod tests {
         assert!(!is_write_command(&Command::Shell));
         assert!(!is_write_command(&Command::Man));
         assert!(!is_write_command(&Command::Mcp {
-            tier: "keyword".to_string()
+            tier: "keyword".to_string(),
+            profile: None,
         }));
     }
 

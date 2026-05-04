@@ -981,6 +981,11 @@ pub struct AppConfig {
     /// `<redacted>` for compliance contexts that need the audit-trail
     /// signal of "boot ran with N memories" without exposing subjects.
     pub boot: Option<BootConfig>,
+    /// v0.6.4 — MCP server tunables. Today this only carries `profile`
+    /// (the named tool surface). Future v0.6.4 phases add the
+    /// `[mcp.allowlist]` per-agent capability table (Track D —
+    /// v0.6.4-008).
+    pub mcp: Option<McpConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1155,6 +1160,24 @@ impl BootConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// MCP server tunables (v0.6.4)
+// ---------------------------------------------------------------------------
+
+/// `[mcp]` block in `config.toml` — v0.6.4 addition. Today this only
+/// carries the named tool `profile`. v0.6.4 Track D will extend with
+/// `[mcp.allowlist]` for per-agent capability gating.
+///
+/// Resolution for `profile`: CLI flag > `AI_MEMORY_PROFILE` env (both
+/// merged by clap) > this config field > compiled default `"core"`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpConfig {
+    /// Named tool profile. One of `core`, `graph`, `admin`, `power`,
+    /// `full`, or a comma-separated custom list (e.g.,
+    /// `core,graph,archive`). Default `core` (v0.6.4 default flip).
+    pub profile: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AuditComplianceConfig {
     pub soc2: Option<CompliancePreset>,
@@ -1283,6 +1306,27 @@ impl AppConfig {
     /// Whether to archive memories before GC deletion (default: true).
     pub fn effective_archive_on_gc(&self) -> bool {
         self.archive_on_gc.unwrap_or(true)
+    }
+
+    /// v0.6.4-001 — resolve the effective MCP tool profile.
+    ///
+    /// Resolution order:
+    /// 1. `cli_or_env` (already merged by clap's `#[arg(env="AI_MEMORY_PROFILE")]`)
+    /// 2. `[mcp].profile` config field
+    /// 3. compiled default `"core"`
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::profile::ProfileParseError`] if any layer's
+    /// value is malformed (unknown family or mixed-case token).
+    pub fn effective_profile(
+        &self,
+        cli_or_env: Option<&str>,
+    ) -> Result<crate::profile::Profile, crate::profile::ProfileParseError> {
+        let raw = cli_or_env
+            .or_else(|| self.mcp.as_ref().and_then(|m| m.profile.as_deref()))
+            .unwrap_or("core");
+        crate::profile::Profile::parse(raw)
     }
 
     /// Whether post-store autonomy hooks (`auto_tag` + `detect_contradiction`)
@@ -1937,6 +1981,63 @@ legacy_scoring = false
         );
         // No CLI, no config → default semantic.
         assert_eq!(cfg.effective_tier(None), FeatureTier::Semantic);
+    }
+
+    // ---- v0.6.4-001 — `effective_profile` resolution tests.
+    //
+    // Resolution order: CLI/env > [mcp].profile config > "core" default.
+    // Clap merges CLI and env into the same `Option<&str>` before this
+    // function sees it, so the function only needs to test "explicit
+    // override > config > default". Env-var precedence over CLI cannot
+    // happen by design (clap precedence is CLI > env), so it is not
+    // tested at this layer.
+
+    #[test]
+    fn effective_profile_cli_or_env_overrides_config() {
+        let cfg = AppConfig {
+            mcp: Some(McpConfig {
+                profile: Some("graph".to_string()),
+            }),
+            ..AppConfig::default()
+        };
+        // CLI/env value beats the config value.
+        assert_eq!(
+            cfg.effective_profile(Some("admin")).unwrap(),
+            crate::profile::Profile::admin()
+        );
+        // No CLI/env → config used.
+        assert_eq!(
+            cfg.effective_profile(None).unwrap(),
+            crate::profile::Profile::graph()
+        );
+    }
+
+    #[test]
+    fn effective_profile_falls_back_to_core_default() {
+        let cfg = AppConfig::default();
+        // No mcp config, no CLI → core (the v0.6.4 default flip).
+        assert_eq!(
+            cfg.effective_profile(None).unwrap(),
+            crate::profile::Profile::core()
+        );
+    }
+
+    #[test]
+    fn effective_profile_surfaces_parse_error_for_unknown_family() {
+        let cfg = AppConfig::default();
+        assert!(matches!(
+            cfg.effective_profile(Some("xyz")),
+            Err(crate::profile::ProfileParseError::UnknownFamily(_))
+        ));
+    }
+
+    #[test]
+    fn effective_profile_surfaces_parse_error_for_mixed_case() {
+        let cfg = AppConfig::default();
+        assert!(matches!(
+            cfg.effective_profile(Some("Core")),
+            Err(crate::profile::ProfileParseError::CaseMismatch(_))
+        ));
     }
 
     #[test]
