@@ -30,3 +30,11 @@ export {
 export type { ApiErrorBody } from "./errors.js";
 
 export { verifyWebhookSignature, signWebhookBody } from "./webhooks.js";
+
+// v0.6.4-007 — `requireProfile` runtime profile-bootstrap helper.
+export {
+  ProfileNotLoaded,
+  requireProfile,
+  resolveRequiredFamilies,
+} from "./profile.js";
+export type { CapabilitiesProbe } from "./profile.js";
