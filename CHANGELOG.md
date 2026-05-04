@@ -5,6 +5,57 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] — v0.6.4 — `quiet-tools`
+
+### Breaking
+
+- **Default tool surface collapses from 43 to 5 (#523).** v0.6.4 ships
+  with `--profile core` as the default for `ai-memory mcp`, advertising
+  only `memory_store`, `memory_recall`, `memory_list`, `memory_get`,
+  and `memory_search` plus the always-on `memory_capabilities`
+  bootstrap. Eager-loading harnesses (Codex CLI, Grok CLI, Gemini CLI,
+  Claude Desktop) drop ~5,300 input tokens of tool schemas from every
+  request — measured against `cl100k_base`, the BPE Claude/GPT use for
+  input accounting. **Action required for power users:** to reproduce
+  v0.6.3 behavior 1:1, run `ai-memory mcp --profile full` (or set
+  `AI_MEMORY_PROFILE=full` / `[mcp].profile = "full"` in config.toml).
+  See `docs/MIGRATION_v0.6.4.md`.
+
+### Added
+
+- **`--profile` flag + `[mcp].profile` config + `AI_MEMORY_PROFILE` env
+  (#521).** Resolution order: CLI > env > config > `core` default. Six
+  named profiles plus comma-list custom syntax. Parse errors exit with
+  code 2 and a diagnostic that lists every valid profile/family.
+- **Family-scoped tool registration filter (#522).** `tools/list`
+  returns only the tools loaded under the active profile;
+  `tools/call` rejects unloaded tools with `-32601` plus a
+  profile/family hint pointing the agent at the right `--profile` or
+  `memory_capabilities --include-schema` invocation. v0.6.4-006 will
+  extend `memory_capabilities` for runtime expansion.
+- **Static schema-size table (#525).** New `crate::sizes` module
+  computes per-tool `cl100k_base` BPE cost via `tiktoken-rs`, cached
+  behind a `OnceLock`. CI-gated assertion: no individual tool may
+  exceed 1,500 tokens. Truthfulness correction: the v0.6.4 RFC's
+  ~25,800-token full-surface claim was measured against MiniLM and
+  over-counted JSON by ~4×; the actual cl100k_base measurement is
+  ~6,000 tokens.
+
+### Fixed
+
+- **G9 HTTP webhook parity (#526).** v0.6.3.1 P5 wired
+  `dispatch_event_with_details` into the four lifecycle event types
+  (`memory_delete`, `memory_promote`, `memory_link_created`,
+  `memory_consolidated`) on the **MCP path only**. The HTTP handlers
+  were silent — `grep "dispatch_event" src/handlers.rs` returned zero
+  matches. v0.6.4-017 closes the gap symmetrically: HTTP `DELETE`,
+  `POST /memories/{id}/promote`, `POST /links`, and `POST /consolidate`
+  now fire the same events the MCP path fires, with the same
+  payloads, the same fire-and-forget semantics, and the same
+  signing/SSRF protections. New integration tests in
+  `tests/webhook_http_parity.rs` pin the contract.
+
+
 ## [Unreleased] — v0.6.3.1 closure
 
 
