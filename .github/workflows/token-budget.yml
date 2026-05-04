@@ -1,0 +1,44 @@
+# v0.6.4-011 — token-budget CI gate.
+#
+# Runs the per-tool ceiling (1500 tokens) and the full-profile honest-
+# range (5K–8K cl100k_base) assertions on every push and PR. Either
+# failing blocks merge to main per branch protection.
+#
+# These two gates together protect against a regression that would
+# silently grow the v0.6.4 default surface back toward the v0.6.3
+# 6K-token baseline. The actual `core` profile cost is bounded
+# transitively: even if every family except `core` doubled in size,
+# `core` itself would not move (it depends only on the 5 core tools
+# + the always-on `memory_capabilities` bootstrap).
+name: token-budget
+
+on:
+  push:
+    branches: [main, develop, "feat/**", "release/**"]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  budget:
+    name: token-budget gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: token-budget
+      - name: per-tool ceiling (1500 tokens cl100k_base)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: cargo test --lib sizes::tests::no_tool_exceeds_1500_tokens -- --exact
+      - name: full-profile honest range (5K–8K cl100k_base)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: cargo test --lib sizes::tests::full_profile_total_in_honest_measured_range -- --exact
+      - name: doctor --tokens default-profile-is-core
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: cargo test --lib cli::doctor::tests::run_tokens_human_default_profile_is_core -- --exact
