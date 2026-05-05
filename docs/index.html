@@ -8,16 +8,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ai-memory&trade; -- Persistent Memory for Any AI</title>
-    <meta name="description" content="Persistent memory for any AI agent. v0.6.3.1 ships a single Rust binary with four operational modes — stdio MCP server, HTTP/mTLS daemon, autonomous curator, and quorum sync — plus 43 MCP tools, 42 HTTP endpoints, 26 CLI commands. Hybrid recall (FTS5 + vector + cross-encoder reranking), three-tier TTL, namespaces, links, archive, governance approval flow. SQLite-backed, local-first, zero cloud dependencies. Frozen claims: see evidence.html.">
+    <meta name="description" content="The memory substrate AI agents run on. v0.6.4 (quiet-tools) ships a 5-tool default MCP surface (43 full) at 76.4% input-token reduction on session start, NHI guardrails phase 1 (per-agent capability allowlist + audit_log schema v20), first-party SDKs on npm + PyPI. Single Rust binary; four operational modes (stdio MCP, HTTP/mTLS, autonomous curator, quorum sync). Five-tier architecture (T1 single agent → T5 multi-region hive). Empirically validated 6/6 PASS on the NHI Discovery Gate vs. live xAI Grok 4.3. SQLite-backed, local-first, zero cloud dependencies, Apache-2.0.">
     <meta name="theme-color" content="#0d1117">
-    <meta property="og:title" content="ai-memory — Persistent Memory for Any AI">
-    <meta property="og:description" content="Persistent memory for any AI agent. v0.6.3.1: 43 MCP tools, hybrid recall, autonomous curator daemon that keeps memory tidy between sessions. Local-first, zero cloud dependencies.">
+    <meta property="og:title" content="ai-memory — The memory substrate AI agents run on">
+    <meta property="og:description" content="v0.6.4 (quiet-tools): 5-tool default MCP surface, 76.4% token reduction, NHI guardrails phase 1, first-party SDKs (npm + PyPI). One binary scales T1→T5 (laptop → multi-region hive). Empirically validated 6/6 PASS vs. live xAI Grok 4.3.">
     <meta property="og:url" content="https://alphaonedev.github.io/ai-memory-mcp/">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="ai-memory">
     <meta name="twitter:card" content="summary">
-    <meta name="twitter:title" content="ai-memory — Persistent Memory for Any AI">
-    <meta name="twitter:description" content="Persistent memory for any AI agent. v0.6.3.1: 43 MCP tools, hybrid recall, autonomous curator daemon. Local-first, zero cloud dependencies.">
+    <meta name="twitter:title" content="ai-memory — The memory substrate AI agents run on">
+    <meta name="twitter:description" content="v0.6.4 (quiet-tools): 5-tool default surface, 76.4% token reduction, NHI guardrails phase 1, first-party SDKs (npm + PyPI). One binary scales T1→T5. 6/6 PASS Discovery Gate vs. live Grok 4.3.">
     <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/">
     <style>
         /* ============================================================
@@ -104,7 +104,7 @@
         .hero .bluf{color:var(--text-muted);font-size:1.2rem;max-width:720px;margin:0 auto 2.5rem;line-height:1.6}
 
         /* ==========================================================
-           BLUF CARD — top-shelf hero block, v0.6.3-reality framed
+           BLUF CARD — top-shelf hero block, v0.6.4-reality framed
            ========================================================== */
         .bluf-card{max-width:860px;margin:0 auto 2.25rem;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,rgba(255,255,255,.015) 100%);border:1px solid var(--border-hl);border-radius:14px;padding:1.75rem 2rem;text-align:left;box-shadow:0 8px 32px rgba(0,0,0,.18)}
         .bluf-eyebrow{display:inline-block;font-family:var(--font-mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.2em;color:var(--orange);font-weight:700;padding:.35em .85em;border:1px solid rgba(210,153,34,.45);background:rgba(255,184,107,.07);border-radius:4px;margin-bottom:1.15rem}
@@ -401,8 +401,10 @@
         <div class="menu-pane">
           <a href="evidence.html">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
-          <a href="https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/" style="color:#ffd700">v0.6.3.1 a2a (live)</a>
-          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/">v0.6.3 evidence</a>
+          <a href="https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md" style="color:#2ea043">v0.6.4 cert (CERT GREEN)</a>
+          <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">NHI Discovery Gate (6/6 PASS)</a>
+          <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="color:#999">v0.6.3 evidence (historical)</a>
+          <a href="https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/" style="color:#999">v0.6.3.1 a2a (historical)</a>
           <a href="https://alphaonedev.github.io/ai-memory-ship-gate/">Ship Gate</a>
           <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/">A2A Gate (umbrella spec)</a>
           <a href="performance.html">Performance budgets</a>
@@ -458,7 +460,7 @@
 
             <p class="bluf-section">
                 <strong>First-party SDKs, OIDC-published.</strong>
-                <a href="https://www.npmjs.com/package/@alphaone/ai-memory" style="color:#cb3837"><code>@alphaone/ai-memory</code> on npm</a> &middot; <a href="https://pypi.org/project/ai-memory-mcp/" style="color:#3776AB"><code>ai-memory-mcp</code> on PyPI</a>. <code>requireProfile</code> helper for runtime profile assertions. Trademark-protected (USPTO Serial No.&nbsp;99761257).
+                <a href="https://www.npmjs.com/package/@alphaone/ai-memory" style="color:#cb3837"><code>@alphaone/ai-memory</code> on npm</a> &middot; <a href="https://pypi.org/project/ai-memory-mcp/" style="color:#3776AB"><code>ai-memory-mcp</code> on PyPI</a>. <code>requireProfile</code> helper for runtime profile assertions.
             </p>
         </div>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
@@ -2371,10 +2373,10 @@ ai-memory list -n my-project                                         <span class
             <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/README.md">README</a>
         </div>
         <p>
-            <strong>ai-memory&trade;</strong> v0.6.3 &mdash; AI-Agnostic MCP Memory Server
+            <strong>ai-memory&trade;</strong> v0.6.4 &mdash; AI-Agnostic MCP Memory Server
         </p>
         <p style="margin-top:.5rem">
-            Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. ai-memory is a trademark of AlphaOne LLC.
+            Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. ai-memory is a trademark of AlphaOne LLC (USPTO Serial No.&nbsp;99761257).
         </p>
         <p style="margin-top:.25rem;font-size:.78rem">
             Licensed under the <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/LICENSE">Apache License, Version 2.0</a>.
