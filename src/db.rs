@@ -220,7 +220,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       when memories are deleted or I3's archive->prune lifecycle
 //       removes transcripts. Substrate for I4 (memory_replay) and
 //       I5/R5 (pre_store extraction hook).
-const CURRENT_SCHEMA_VERSION: i64 = 24;
+const CURRENT_SCHEMA_VERSION: i64 = 25;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -313,6 +313,15 @@ const MIGRATION_V23_SQLITE: &str =
 // (pre_store extraction hook) writes to it.
 const MIGRATION_V24_SQLITE: &str =
     include_str!("../migrations/sqlite/0018_v07_transcript_links.sql");
+// v0.7.0 H5 — append-only `signed_events` audit table backing the
+// immutable attestation chain. CREATE TABLE IF NOT EXISTS + three
+// supporting indexes (agent_id, event_type, timestamp) — fully
+// idempotent. Each `memory_link` write also appends one row to this
+// table via `db::create_link` / `db::create_link_signed`. The
+// append-only invariant is enforced at the Rust API surface
+// (`crate::signed_events`) — there are no `UPDATE signed_events` /
+// `DELETE FROM signed_events` call sites in production code.
+const MIGRATION_V25_SQLITE: &str = include_str!("../migrations/sqlite/0019_v07_signed_events.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -837,6 +846,18 @@ fn migrate(conn: &Connection) -> Result<()> {
             // Substrate only; I4 layers `memory_replay` on top, I5/R5
             // wires the pre_store extraction hook that populates it.
             conn.execute_batch(MIGRATION_V24_SQLITE)?;
+        }
+        if version < 25 {
+            // v0.7.0 H5 — append-only `signed_events` audit table.
+            // CREATE TABLE IF NOT EXISTS + three indexes (agent_id,
+            // event_type, timestamp) — fully idempotent. Substrate
+            // for the immutable attestation chain; producer side is
+            // wired into `db::create_link` / `db::create_link_signed`
+            // so every link write appends one audit row. The
+            // append-only invariant is enforced at the Rust API
+            // surface in `crate::signed_events` — there are no
+            // `UPDATE` / `DELETE` call sites in production code.
+            conn.execute_batch(MIGRATION_V25_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -1978,6 +1999,15 @@ pub fn create_link(
 ///
 /// Returns the chosen attest level so callers (HTTP/MCP wrappers) can
 /// surface it in the wire response without re-querying the row.
+///
+/// v0.7 H5 — every successful insert (whether signed or not) also
+/// appends one row to the append-only `signed_events` audit table
+/// with `event_type = "memory_link.created"`, `payload_hash =
+/// SHA-256` over the canonical-CBOR bytes the signer commits to,
+/// and the same `signature` / `attest_level` written to the link
+/// row. Duplicate-edge inserts (the `INSERT OR IGNORE` no-op path)
+/// do NOT produce a new audit row — the chain only records actual
+/// state transitions.
 pub fn create_link_signed(
     conn: &Connection,
     source_id: &str,
@@ -2017,28 +2047,62 @@ pub fn create_link_signed(
     // outright write error (vs. a silent partial-write). The signed
     // payload includes `valid_from = now` and matching `observed_by`
     // so H3's verifier can re-derive the same bytes from the row.
+    //
+    // v0.7 H5 — every link write also produces a `signed_events` audit
+    // row. We compute the canonical-CBOR payload here regardless of
+    // whether a signing key is present, because the audit row's
+    // `payload_hash` (SHA-256 over those exact bytes) must bind to
+    // what the signer would have committed to: same six fields, same
+    // canonical encoding, no per-attest-level branching that could
+    // let a downstream auditor spot a divergence between the link row
+    // and the audit row.
+    let observed_by = keypair.map(|kp| kp.agent_id.as_str());
+    let signable = crate::identity::sign::SignableLink {
+        src_id: source_id,
+        dst_id: target_id,
+        relation,
+        observed_by,
+        valid_from: Some(now.as_str()),
+        valid_until: None,
+    };
+    let canonical_bytes = crate::identity::sign::canonical_cbor(&signable)?;
     let (signature, attest_level): (Option<Vec<u8>>, &'static str) = match keypair {
         Some(kp) if kp.can_sign() => {
-            let link = crate::identity::sign::SignableLink {
-                src_id: source_id,
-                dst_id: target_id,
-                relation,
-                observed_by: Some(kp.agent_id.as_str()),
-                valid_from: Some(now.as_str()),
-                valid_until: None,
-            };
-            let sig = crate::identity::sign::sign(kp, &link)?;
+            let sig = crate::identity::sign::sign(kp, &signable)?;
             (Some(sig), "self_signed")
         }
         _ => (None, "unsigned"),
     };
 
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO memory_links \
             (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
         params![source_id, target_id, relation, now, signature, attest_level],
     )?;
+
+    // v0.7 H5 — append one row to `signed_events` per *new* link
+    // write. We skip the audit row when `INSERT OR IGNORE` was a
+    // no-op (duplicate edge — already in the link table, so the
+    // chain already recorded its creation event upstream). The
+    // append failing surfaces as a hard error: a missing audit row
+    // would silently break the immutable chain, which is exactly
+    // the contract H5 exists to enforce.
+    if inserted > 0 {
+        let agent_id = keypair
+            .map(|kp| kp.agent_id.clone())
+            .unwrap_or_else(|| "unsigned".to_string());
+        let event = crate::signed_events::SignedEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id,
+            event_type: "memory_link.created".to_string(),
+            payload_hash: crate::signed_events::payload_hash(&canonical_bytes),
+            signature: signature.clone(),
+            attest_level: attest_level.to_string(),
+            timestamp: now.clone(),
+        };
+        crate::signed_events::append_signed_event(conn, &event)?;
+    }
     Ok(attest_level)
 }
 
