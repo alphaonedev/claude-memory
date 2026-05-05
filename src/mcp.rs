@@ -1824,7 +1824,8 @@ pub fn handle_capabilities_with_conn_v3(
 ) -> Result<Value, String> {
     let caps = build_capabilities_overlay(tier_config, reranker, embedder_loaded, conn);
     let summary = build_capabilities_summary(profile);
-    serde_json::to_value(caps.to_v3(summary)).map_err(|e| e.to_string())
+    let describe = build_capabilities_describe_to_user(profile);
+    serde_json::to_value(caps.to_v3(summary, describe)).map_err(|e| e.to_string())
 }
 
 /// Build the runtime-overlaid [`Capabilities`] document. Shared between
@@ -1918,6 +1919,94 @@ pub fn build_capabilities_summary(profile: &crate::profile::Profile) -> String {
          (c) call memory_smart_load(intent='<plain language>') — easiest, \
          (d) call the tool by name and recover from JSON-RPC -32601."
     )
+}
+
+/// v0.7.0 A2 — build the capabilities-v3 `to_describe_to_user` string.
+///
+/// This is the canonical plain-language sentence the LLM should repeat
+/// (verbatim) when an end-user asks "what tools do you have?". It
+/// names how many tools are loaded right now, lists the first few by
+/// short name (without the `memory_` prefix, since the prefix is MCP
+/// jargon a user doesn't care about), reports how many are unloaded,
+/// and gives an end-user-friendly recovery hint ("I can load them on
+/// demand, or you can restart the server with a different profile").
+///
+/// Tone constraint (per A2 spec): NO MCP jargon. No mention of
+/// `tools/list`, `JSON-RPC`, or `--profile <family>`. Reads like a
+/// normal sentence a person would write.
+///
+/// The always-on bootstrap (`memory_capabilities`) is intentionally
+/// excluded from the loaded-tool preview — to a user, it's plumbing,
+/// not a feature.
+#[must_use]
+pub fn build_capabilities_describe_to_user(profile: &crate::profile::Profile) -> String {
+    use crate::profile::Family;
+
+    // Loaded vs unloaded by family membership. The always-on bootstrap
+    // sits in `Family::Meta`; under e.g. `--profile core` Meta isn't
+    // loaded, so `memory_capabilities` would normally count as
+    // unloaded. We strip it from BOTH sides — the user-facing sentence
+    // talks about the substantive tool surface, not the
+    // runtime-discovery bootstrap.
+    let loaded_tools: Vec<&'static str> = Family::all()
+        .iter()
+        .filter(|f| profile.includes(**f))
+        .flat_map(|f| f.tool_names().iter().copied())
+        .filter(|name| !crate::profile::ALWAYS_ON_TOOLS.contains(name))
+        .collect();
+    let unloaded_tools: Vec<&'static str> = Family::all()
+        .iter()
+        .filter(|f| !profile.includes(**f))
+        .flat_map(|f| f.tool_names().iter().copied())
+        .filter(|name| !crate::profile::ALWAYS_ON_TOOLS.contains(name))
+        .collect();
+
+    let n_loaded = loaded_tools.len();
+    let n_unloaded = unloaded_tools.len();
+
+    // Preview the first 5 loaded tools by short name (strip the
+    // `memory_` prefix). Five matches the canonical example in the
+    // A2 NHI prompt and lines up with the size of the smallest
+    // (`core`) profile so the preview is a complete enumeration there.
+    let preview_loaded = loaded_tools
+        .iter()
+        .take(5)
+        .map(|name| short_tool_name(name))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let loaded_more_marker = if n_loaded > 5 { ", ..." } else { "" };
+
+    if n_unloaded == 0 {
+        format!(
+            "I can directly use all {n_loaded} memory tools right now \
+             ({preview_loaded}{loaded_more_marker}). Nothing more to load — \
+             the full memory surface is already active."
+        )
+    } else {
+        // Preview 4 unloaded tool names — the canonical example uses 4
+        // (link, kg_query, consolidate, delete) followed by ", etc.".
+        let preview_unloaded = unloaded_tools
+            .iter()
+            .take(4)
+            .map(|name| short_tool_name(name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let plural_loaded = if n_loaded == 1 { "" } else { "s" };
+        format!(
+            "I can directly use {n_loaded} memory tool{plural_loaded} right now \
+             ({preview_loaded}{loaded_more_marker}). {n_unloaded} more \
+             ({preview_unloaded}, etc.) are available on demand — I can load them \
+             if you ask for something that needs them, or you can restart the \
+             server with a different profile."
+        )
+    }
+}
+
+/// Strip the `memory_` prefix from a tool name for end-user-facing
+/// previews. v0.7.0 A2 — the prefix is MCP jargon; a user doesn't care
+/// that every tool name starts with the same five characters.
+fn short_tool_name(name: &'static str) -> &'static str {
+    name.strip_prefix("memory_").unwrap_or(name)
 }
 
 /// Return a stable label for a profile's summary string. Named profiles
