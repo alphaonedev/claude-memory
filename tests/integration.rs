@@ -9,6 +9,13 @@
 fn cmd(binary: &str) -> std::process::Command {
     let mut c = std::process::Command::new(binary);
     c.env("AI_MEMORY_NO_CONFIG", "1");
+    // v0.7.0 K3 — the integration suite asserts the gate's strict
+    // semantics (Pending/Deny on policy violation). The v0.7.0
+    // process default for `permissions.mode` is `advisory` (log +
+    // Allow) to preserve the v0.6.x posture for upgrading operators,
+    // so opt these scenarios into Enforce explicitly. Per-test
+    // overrides win because env-vars are shadowed at .env() call time.
+    c.env("AI_MEMORY_PERMISSIONS_MODE", "enforce");
     c
 }
 /// Spawn a command and collect its output, panicking with a descriptive

@@ -526,6 +526,15 @@ mod tests {
 
     #[test]
     fn test_delete_governance_pending_returns_pending_status() {
+        // v0.7.0 K3 — pin Enforce so delete-Pending still drives the
+        // strict path (Advisory is the v0.7.0 default and would Allow
+        // the delete unconditionally). Holds the central gate-mode
+        // Mutex from `config::lock_permissions_mode_for_test`.
+        let _gate = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+
         use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
         let mut env = TestEnv::fresh();
         let db = env.db_path.clone();

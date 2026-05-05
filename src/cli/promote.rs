@@ -147,6 +147,19 @@ mod tests {
     use super::*;
     use crate::cli::test_utils::{TestEnv, seed_memory};
 
+    /// v0.7.0 K3 — pin Enforce so promote-Pending / promote-Deny
+    /// scenarios still hit the strict path (Advisory is the new
+    /// process default and would Allow). Holds the central
+    /// gate-mode Mutex; see `cli::governance::tests` for the full
+    /// rationale.
+    fn pin_governance_enforce_for_test() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        guard
+    }
+
     fn promote_args(id: &str) -> PromoteArgs {
         PromoteArgs {
             id: id.to_string(),
@@ -268,6 +281,7 @@ mod tests {
 
     #[test]
     fn test_promote_governance_pending() {
+        let _gate = pin_governance_enforce_for_test();
         let mut env = TestEnv::fresh();
         let db = env.db_path.clone();
         let id = seed_memory(&db, "gov-promote-ns", "tt", "cc");
@@ -293,6 +307,7 @@ mod tests {
 
     #[test]
     fn test_promote_governance_deny() {
+        let _gate = pin_governance_enforce_for_test();
         // The Deny branch in cmd_promote calls std::process::exit, which
         // tears down the test runner. The print-side of Deny is covered
         // by `cli::governance::tests::test_governance_deny_writes_reason_to_stderr`.

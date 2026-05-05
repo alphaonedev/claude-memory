@@ -153,6 +153,19 @@ mod tests {
     use crate::cli::test_utils::{TestEnv, seed_memory};
     use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
 
+    /// v0.7.0 K3 — pin the gate to Enforce so this suite's
+    /// historical Pending/Deny outcome assertions still drive the
+    /// strict path. Holds the central gate-mode Mutex from
+    /// [`crate::config::lock_permissions_mode_for_test`] so parallel
+    /// tests in other modules cannot race the atomic.
+    fn pin_governance_enforce_for_test() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        guard
+    }
+
     /// Seed a namespace standard with the supplied governance policy. The
     /// standard memory is inserted in `_standards` and pinned via
     /// `set_namespace_standard`.
@@ -226,6 +239,7 @@ mod tests {
 
     #[test]
     fn test_governance_pending_writes_pending_status_text() {
+        let _gate = pin_governance_enforce_for_test();
         let mut env = TestEnv::fresh();
         let db_path = env.db_path.clone();
         let policy = GovernancePolicy {
@@ -262,6 +276,7 @@ mod tests {
 
     #[test]
     fn test_governance_pending_writes_pending_status_json() {
+        let _gate = pin_governance_enforce_for_test();
         let mut env = TestEnv::fresh();
         let db_path = env.db_path.clone();
         let policy = GovernancePolicy {
@@ -303,6 +318,7 @@ mod tests {
 
     #[test]
     fn test_governance_deny_writes_reason_to_stderr() {
+        let _gate = pin_governance_enforce_for_test();
         let mut env = TestEnv::fresh();
         let db_path = env.db_path.clone();
         let policy = GovernancePolicy {
@@ -343,6 +359,7 @@ mod tests {
 
     #[test]
     fn test_governance_deny_returns_deny_outcome() {
+        let _gate = pin_governance_enforce_for_test();
         let mut env = TestEnv::fresh();
         let db_path = env.db_path.clone();
         let policy = GovernancePolicy {
@@ -376,6 +393,7 @@ mod tests {
 
     #[test]
     fn test_governance_payload_serializes_correctly() {
+        let _gate = pin_governance_enforce_for_test();
         // The payload arg is forwarded into queue_pending_action so a
         // peer-side approver can replay the original request. Sanity
         // check: the exact bytes we passed in are stored in the

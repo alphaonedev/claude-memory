@@ -25,6 +25,11 @@ async fn main() -> Result<()> {
     config::AppConfig::write_default_if_missing();
     daemon_runtime::apply_anonymize_default(&app_config);
 
+    // v0.7.0 K3 — pin the process-wide governance gate posture before
+    // any subcommand has a chance to call `db::enforce_governance`.
+    // Idempotent (`OnceLock::set`); first writer wins.
+    config::set_active_permissions_mode(app_config.effective_permissions_mode());
+
     // PR-5 (issue #487): bootstrap operational logging + security
     // audit trail. Both are default-OFF; init returns silently when
     // disabled. The `_log_guard` MUST stay in scope for the lifetime

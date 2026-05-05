@@ -255,13 +255,21 @@ impl TierConfig {
             // and `approval.default_timeout_seconds` were dropped in v2
             // because they have no backing implementation.
             permissions: CapabilityPermissions {
-                mode: "advisory".to_string(),
+                // v0.7.0 K3: surface the *active* mode (the one the
+                // gate will actually consult), not a hard-coded string.
+                // Falls through to the K3 default (`advisory`) when
+                // `[permissions].mode` is unset in `config.toml`.
+                mode: active_permissions_mode().as_str().to_string(),
                 active_rules: 0,
                 // v0.6.3.1 (P4, G1): chain-walking enforcement landed
                 // in this release. Surface "enforced" so consumers can
                 // distinguish a governed deployment from the historical
                 // "display_only" posture.
                 inheritance: Some("enforced".to_string()),
+                // v0.7.0 K3: per-mode decision counts. Snapshot at
+                // capability-build time so operators can correlate
+                // doctor reports with capability responses.
+                decision_counts: Some(permissions_decision_counts()),
             },
             hooks: CapabilityHooks::default(),
             compaction: CapabilityCompaction::planned(),
@@ -508,6 +516,12 @@ pub struct CapabilityPermissions {
     /// via `#[serde(default)]`.
     #[serde(default)]
     pub inheritance: Option<String>,
+    /// v0.7.0 K3: per-mode decision counts since process start. Lets
+    /// operators verify the gate is actually being consulted and spot
+    /// drift between advertised policy and enforced policy. `None` on
+    /// older responses (`#[serde(default)]` round-trips cleanly).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_counts: Option<PermissionsDecisionCounts>,
 }
 
 /// Hook-pipeline block (capabilities schema v2). Pre-v0.7 reports webhook
@@ -1181,6 +1195,229 @@ pub struct AppConfig {
     /// `[mcp.allowlist]` per-agent capability table (Track D —
     /// v0.6.4-008).
     pub mcp: Option<McpConfig>,
+    /// v0.7.0 K3 — `[permissions]` block. Drives the gate's enforcement
+    /// posture (`enforce` / `advisory` / `off`). When unset, the
+    /// compiled default in [`PermissionsConfig::default`] applies
+    /// (`advisory` — preserves the v0.6.x honest-disclosure posture
+    /// where governance metadata was recorded but not blocked at the
+    /// gate). New installs that want the strict gate set
+    /// `[permissions] mode = "enforce"` explicitly.
+    pub permissions: Option<PermissionsConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Permissions / governance gate (K3)
+// ---------------------------------------------------------------------------
+
+/// Enforcement posture consulted by [`crate::db::enforce_governance`].
+///
+/// v0.7.0 K3 — closes the v0.6.3.1 honest-Capabilities-v2 disclosure
+/// that `permissions.mode = "advisory"` was advertised but the gate
+/// itself returned `Deny` / `Pending` regardless. The gate now actually
+/// honors this knob.
+///
+/// Wire format on `config.toml`:
+///
+/// ```toml
+/// [permissions]
+/// mode = "advisory"   # or "enforce" / "off"
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionsMode {
+    /// Block on policy violation. `Deny`/`Pending` decisions returned
+    /// to the caller as-is. The strict, audit-ready posture.
+    Enforce,
+    /// Log a warning and allow the action. Governance metadata is
+    /// recorded but does not block writes. Default for v0.7.0 to
+    /// preserve the v0.6.x posture for upgrading operators.
+    Advisory,
+    /// Skip the gate entirely. No policy resolution, no log, no
+    /// `pending_actions` row. Useful for benchmarking and temporary
+    /// freeze-thaw incident response.
+    Off,
+}
+
+impl Default for PermissionsMode {
+    fn default() -> Self {
+        Self::Advisory
+    }
+}
+
+impl PermissionsMode {
+    /// Lowercase wire string for capabilities + doctor surfaces.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Advisory => "advisory",
+            Self::Off => "off",
+        }
+    }
+}
+
+/// `[permissions]` block in `config.toml`. Carries the gate's
+/// enforcement posture.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PermissionsConfig {
+    /// Enforcement mode. Defaults to [`PermissionsMode::Advisory`] when
+    /// omitted from the config file.
+    #[serde(default)]
+    pub mode: PermissionsMode,
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide permissions-mode handle (K3)
+// ---------------------------------------------------------------------------
+//
+// The gate (`db::enforce_governance`) needs to consult the active mode
+// at decision time but lives in the `db` module, which has no handle on
+// `AppConfig`. We use a `OnceLock` set by `main` (and the daemon
+// runtime) so the gate can read the mode without an API churn through
+// every callsite. When the lock is unset — the case for unit and
+// integration tests that drive `db::enforce_governance` directly
+// without booting the daemon — the gate defaults to
+// [`PermissionsMode::Enforce`] so the strict semantics that the K1
+// ship-gate suite codifies remain the load-bearing default for
+// programmatic callers.
+
+use std::sync::OnceLock;
+
+static ACTIVE_PERMISSIONS_MODE: OnceLock<PermissionsMode> = OnceLock::new();
+
+/// Set the process-wide active [`PermissionsMode`]. Idempotent — the
+/// first caller wins; subsequent calls are no-ops. Called from
+/// `main` (CLI) and the daemon bootstrap path with the value resolved
+/// from `[permissions].mode` in `config.toml`.
+pub fn set_active_permissions_mode(mode: PermissionsMode) {
+    let _ = ACTIVE_PERMISSIONS_MODE.set(mode);
+}
+
+/// Read the process-wide active [`PermissionsMode`]. Falls back to
+/// [`PermissionsMode::default`] (`advisory`) when unset, matching the
+/// v0.7.0 K3 default for upgrading operators (governance recorded but
+/// not blocked at the gate).
+///
+/// Test note: the K1 ship-gate matrix asserts `Pending`/`Deny`
+/// outcomes from `db::enforce_governance` and therefore opts into
+/// `Enforce` via [`set_active_permissions_mode`] at the start of each
+/// scenario.
+#[must_use]
+pub fn active_permissions_mode() -> PermissionsMode {
+    let override_tag = OVERRIDE_PERMISSIONS_MODE.load(std::sync::atomic::Ordering::SeqCst);
+    match override_tag {
+        1 => return PermissionsMode::Enforce,
+        2 => return PermissionsMode::Advisory,
+        3 => return PermissionsMode::Off,
+        _ => {}
+    }
+    ACTIVE_PERMISSIONS_MODE
+        .get()
+        .copied()
+        .unwrap_or(PermissionsMode::Advisory)
+}
+
+/// Test-only override of the active mode. Production code MUST use
+/// [`set_active_permissions_mode`]; this helper exists so the K3 test
+/// matrix can flip mode mid-test without spinning up a fresh process.
+#[doc(hidden)]
+pub fn override_active_permissions_mode_for_test(mode: PermissionsMode) {
+    // SAFETY: OnceLock::set returns Err when already set; we want
+    // last-writer-wins for tests only. Use a static Mutex to serialize
+    // and an inner OnceCell-like reset via take + set is not possible
+    // (OnceLock has no take). Instead, store an atomic indirection.
+    OVERRIDE_PERMISSIONS_MODE.store(
+        match mode {
+            PermissionsMode::Enforce => 1,
+            PermissionsMode::Advisory => 2,
+            PermissionsMode::Off => 3,
+        },
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+/// Test-only override slot. `0` = no override, otherwise encodes the
+/// mode tag. Read by [`active_permissions_mode`] when set.
+static OVERRIDE_PERMISSIONS_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Test-only: clear any override so subsequent tests see the
+/// `OnceLock` value (or the default).
+#[doc(hidden)]
+pub fn clear_permissions_mode_override_for_test() {
+    OVERRIDE_PERMISSIONS_MODE.store(0, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Test-only: acquire the global gate-mode serialization lock.
+///
+/// The active [`PermissionsMode`] lives in a process-wide atomic so
+/// the gate at `db::enforce_governance` can read it without an API
+/// churn through every callsite. Multiple lib tests flip the mode
+/// (the K3 mode-matrix file, the CLI / HTTP gate scenarios, the
+/// capabilities zero-state round-trip) and `cargo test --lib` runs
+/// them in parallel by default. Each scenario MUST hold this guard
+/// for its duration so two scenarios cannot race the atomic. The
+/// returned guard poisons-OK so one panicking scenario does not
+/// chain-fail the rest.
+#[doc(hidden)]
+#[must_use]
+pub fn lock_permissions_mode_for_test() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static GATE_LOCK: Mutex<()> = Mutex::new(());
+    GATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+// ---------------------------------------------------------------------------
+// Decision counters per mode (K3 — surfaced by doctor + capabilities)
+// ---------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static DECISIONS_ENFORCE: AtomicU64 = AtomicU64::new(0);
+static DECISIONS_ADVISORY: AtomicU64 = AtomicU64::new(0);
+static DECISIONS_OFF: AtomicU64 = AtomicU64::new(0);
+
+/// Snapshot of decision counts per mode since process start. Surfaced
+/// by `ai-memory doctor` and the capabilities `permissions` block so
+/// operators can verify the gate is wired and observe drift between
+/// "policies advertised" and "policies enforced".
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PermissionsDecisionCounts {
+    pub enforce: u64,
+    pub advisory: u64,
+    pub off: u64,
+}
+
+/// Increment the decision counter for `mode`. Called by the gate on
+/// every consult. `Relaxed` is fine: the counters are observability,
+/// not load-bearing for correctness.
+pub fn record_permissions_decision(mode: PermissionsMode) {
+    let c = match mode {
+        PermissionsMode::Enforce => &DECISIONS_ENFORCE,
+        PermissionsMode::Advisory => &DECISIONS_ADVISORY,
+        PermissionsMode::Off => &DECISIONS_OFF,
+    };
+    c.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the current per-mode decision counts.
+#[must_use]
+pub fn permissions_decision_counts() -> PermissionsDecisionCounts {
+    PermissionsDecisionCounts {
+        enforce: DECISIONS_ENFORCE.load(Ordering::Relaxed),
+        advisory: DECISIONS_ADVISORY.load(Ordering::Relaxed),
+        off: DECISIONS_OFF.load(Ordering::Relaxed),
+    }
+}
+
+/// Test-only: zero the counters between scenarios so the K3 matrix
+/// can assert exact deltas.
+#[doc(hidden)]
+pub fn reset_permissions_decision_counts_for_test() {
+    DECISIONS_ENFORCE.store(0, Ordering::SeqCst);
+    DECISIONS_ADVISORY.store(0, Ordering::SeqCst);
+    DECISIONS_OFF.store(0, Ordering::SeqCst);
 }
 
 // ---------------------------------------------------------------------------
@@ -1549,6 +1786,37 @@ impl AppConfig {
         }
     }
 
+    /// v0.7.0 K3 — resolve the effective [`PermissionsMode`] consulted
+    /// by [`crate::db::enforce_governance`].
+    ///
+    /// Resolution order:
+    /// 1. `AI_MEMORY_PERMISSIONS_MODE` env var (`enforce` /
+    ///    `advisory` / `off`, case-insensitive). Lets the integration
+    ///    suite — which sets `AI_MEMORY_NO_CONFIG=1` and therefore
+    ///    cannot use `[permissions]` from `config.toml` — flip the
+    ///    gate to Enforce per scenario.
+    /// 2. `[permissions].mode` from `config.toml`.
+    /// 3. Compiled default ([`PermissionsMode::default`] = `advisory`).
+    #[must_use]
+    pub fn effective_permissions_mode(&self) -> PermissionsMode {
+        if let Ok(raw) = std::env::var("AI_MEMORY_PERMISSIONS_MODE") {
+            match raw.to_ascii_lowercase().as_str() {
+                "enforce" => return PermissionsMode::Enforce,
+                "advisory" => return PermissionsMode::Advisory,
+                "off" => return PermissionsMode::Off,
+                other => {
+                    eprintln!(
+                        "ai-memory: AI_MEMORY_PERMISSIONS_MODE={other:?} is not a valid mode \
+                         (expected enforce / advisory / off); falling back to config.toml"
+                    );
+                }
+            }
+        }
+        self.permissions
+            .as_ref()
+            .map_or_else(PermissionsMode::default, |p| p.mode)
+    }
+
     /// Resolve the effective feature tier from config (CLI flag overrides).
     pub fn effective_tier(&self, cli_tier: Option<&str>) -> FeatureTier {
         let tier_str = cli_tier.or(self.tier.as_deref()).unwrap_or("semantic");
@@ -1882,6 +2150,11 @@ mod tests {
     /// shaped correctly, runtime-state defaults conservative.
     #[test]
     fn capabilities_v2_zero_state_round_trip() {
+        let _gate = lock_permissions_mode_for_test();
+        // K3 default is `advisory` — clear any override that a
+        // sibling test might have left behind so the
+        // `permissions.mode` field reflects the documented zero-state.
+        clear_permissions_mode_override_for_test();
         let caps = FeatureTier::Keyword.config().capabilities();
         let val: serde_json::Value = serde_json::to_value(&caps).unwrap();
 

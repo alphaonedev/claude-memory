@@ -21,12 +21,28 @@
 // CUTLINE-PROTECTED: even if every other v0.6.3.1 phase slips, this
 // scenario file ships green. Failures here are release blockers.
 
+use ai_memory::config::{
+    PermissionsMode, lock_permissions_mode_for_test, override_active_permissions_mode_for_test,
+};
 use ai_memory::db;
 use ai_memory::models::{
     ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction, Memory,
     Tier, default_metadata,
 };
 use rusqlite::Connection;
+
+/// K3: the ship-gate matrix asserts the gate's *blocking* semantics
+/// (Pending / Deny). v0.7.0 K3 made the gate consult
+/// `permissions.mode`, with the v0.7.0 process default being
+/// `advisory` (log + Allow). Pin the K1 cutline to Enforce so the
+/// ship-gate scenarios still drive the blocking path. Returns the
+/// process-wide gate-mode Mutex guard so concurrent scenarios in
+/// this binary cannot flip the atomic mid-test.
+fn pin_enforce_mode() -> std::sync::MutexGuard<'static, ()> {
+    let guard = lock_permissions_mode_for_test();
+    override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+    guard
+}
 
 fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, owner_agent_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
@@ -89,6 +105,7 @@ fn any_policy_no_inherit() -> GovernancePolicy {
 /// G1 #1 — depth-5 chain inherits Approve to the leaf, store is queued.
 #[test]
 fn shipgate_inherit_default_governance_chain_5_deep_requires_approval_at_leaf() {
+    let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     seed_policy(&conn, "alphaone", approve_write_policy(), "alice");
 
@@ -124,6 +141,7 @@ fn shipgate_inherit_default_governance_chain_5_deep_requires_approval_at_leaf() 
 /// policy applies and the parent's Approve does NOT bubble through.
 #[test]
 fn shipgate_inherit_false_at_child_blocks_parent_policy() {
+    let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
     seed_policy(
@@ -154,6 +172,7 @@ fn shipgate_inherit_false_at_child_blocks_parent_policy() {
 /// G1 #3 — both levels set, the most-specific (child) policy wins.
 #[test]
 fn shipgate_most_specific_policy_wins_when_both_set() {
+    let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
     seed_policy(
@@ -185,6 +204,7 @@ fn shipgate_most_specific_policy_wins_when_both_set() {
 /// through the gate (the original audit reproducer).
 #[test]
 fn shipgate_child_with_no_policy_inherits_parent_policy() {
+    let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
     // NB: alphaone/secure/team-a has no standard.
@@ -214,6 +234,7 @@ fn shipgate_child_with_no_policy_inherits_parent_policy() {
 /// approver pipeline.
 #[test]
 fn shipgate_audit_no_silent_bypass_in_v063_compatibility_path() {
+    let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
 
     // Replicate the audit scenario verbatim: alphaone/secure has an
