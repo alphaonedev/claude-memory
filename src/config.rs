@@ -715,6 +715,84 @@ impl Capabilities {
             models: self.models.clone(),
         }
     }
+
+    /// v0.7.0 (A1): project the report into the v3 shape.
+    ///
+    /// v3 = v2 + a top-level `summary` string carrying a pre-computed,
+    /// plain-language description of the LLM's operational tool surface
+    /// (loaded count, total count, the three named recovery paths an LLM
+    /// can take to reach unloaded families). The summary is computed by
+    /// the caller from the live `Profile` state because the
+    /// [`Capabilities`] struct itself doesn't know which families the
+    /// MCP server actually advertised in `tools/list`.
+    ///
+    /// Future v0.7.0 increments (A2–A4) extend this struct with
+    /// `to_describe_to_user`, per-tool `callable_now`, and
+    /// `agent_permitted_families`. A5 bumps the default wire shape to v3.
+    /// v2 stays supported indefinitely.
+    #[must_use]
+    pub fn to_v3(&self, summary: String) -> CapabilitiesV3 {
+        CapabilitiesV3 {
+            schema_version: "3".to_string(),
+            summary,
+            tier: self.tier.clone(),
+            version: self.version.clone(),
+            features: self.features.clone(),
+            models: self.models.clone(),
+            permissions: self.permissions.clone(),
+            hooks: self.hooks.clone(),
+            compaction: self.compaction.clone(),
+            approval: self.approval.clone(),
+            transcripts: self.transcripts.clone(),
+            hnsw: self.hnsw.clone(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Capabilities v3 — v0.7.0 attested-cortex schema (additive over v2)
+// ---------------------------------------------------------------------------
+
+/// v0.7.0 capabilities schema (A1 increment). Additive over [`Capabilities`]
+/// (v2): the top-level `summary` field carries a pre-computed,
+/// plain-language description of the LLM's operational tool surface so
+/// reasoning-class LLMs converge on accurate first-answer descriptions
+/// without having to traverse `families[]` and count manually.
+///
+/// Wire selection: clients opt in via `accept="v3"` on the MCP
+/// `memory_capabilities` call, or `Accept-Capabilities: v3` over HTTP
+/// (HTTP wiring lands with A5). Default response remains v2 until A5
+/// flips the default. v2 stays supported indefinitely.
+///
+/// Increment plan: A2 adds `to_describe_to_user`, A3 adds per-tool
+/// `callable_now`, A4 adds `agent_permitted_families`. A5 bumps the
+/// default wire shape and seals v3 as the recommended client target.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapabilitiesV3 {
+    /// Schema-version discriminator. Always `"3"` in v0.7.0.
+    pub schema_version: String,
+
+    /// Pre-computed plain-language summary of operational access.
+    /// Carries the loaded vs total tool counts under the active profile
+    /// plus the three named recovery paths (`--profile`,
+    /// `memory_load_family`, `memory_smart_load`). Computed at response
+    /// time from the live profile state — never cached at build time
+    /// because the count of advertised tools depends on the running
+    /// server's `--profile` flag.
+    pub summary: String,
+
+    pub tier: String,
+    pub version: String,
+    pub features: CapabilityFeatures,
+    pub models: CapabilityModels,
+    pub permissions: CapabilityPermissions,
+    pub hooks: CapabilityHooks,
+    pub compaction: CapabilityCompaction,
+    pub approval: CapabilityApproval,
+    pub transcripts: CapabilityTranscripts,
+
+    #[serde(default)]
+    pub hnsw: CapabilityHnsw,
 }
 
 // ---------------------------------------------------------------------------
