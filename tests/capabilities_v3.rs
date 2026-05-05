@@ -77,15 +77,18 @@ fn cap_v3_accept_parses_v3_alias() {
 }
 
 // ---------------------------------------------------------------------------
-// CapabilitiesAccept::parse on unknown values still falls back to V2 (A1
-// preserves v0.6.3.1 behavior — only "v1"/"1" and "v3"/"3" route away from
-// the v2 default).
+// CapabilitiesAccept::parse on unknown / missing values falls back to V3
+// since v0.7.0 A5 (was V2 in A1–A4). Explicit `"v1"`/`"v2"` still resolve
+// to their respective shapes.
 // ---------------------------------------------------------------------------
 #[test]
-fn cap_v3_unknown_accept_still_falls_back_to_v2() {
-    assert_eq!(CapabilitiesAccept::parse("bogus"), CapabilitiesAccept::V2);
-    assert_eq!(CapabilitiesAccept::parse(""), CapabilitiesAccept::V2);
-    assert_eq!(CapabilitiesAccept::parse("v9"), CapabilitiesAccept::V2);
+fn cap_v3_unknown_accept_falls_back_to_v3_after_a5() {
+    assert_eq!(CapabilitiesAccept::parse("bogus"), CapabilitiesAccept::V3);
+    assert_eq!(CapabilitiesAccept::parse(""), CapabilitiesAccept::V3);
+    assert_eq!(CapabilitiesAccept::parse("v9"), CapabilitiesAccept::V3);
+    // Sanity: explicit pinning still works.
+    assert_eq!(CapabilitiesAccept::parse("v2"), CapabilitiesAccept::V2);
+    assert_eq!(CapabilitiesAccept::parse("v1"), CapabilitiesAccept::V1);
 }
 
 // ---------------------------------------------------------------------------

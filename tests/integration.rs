@@ -8747,6 +8747,8 @@ impl OneshotDaemon {
             federation: std::sync::Arc::new(federation),
             tier_config: std::sync::Arc::new(ai_memory::config::FeatureTier::Keyword.config()),
             scoring: std::sync::Arc::new(ai_memory::config::ResolvedScoring::default()),
+            profile: std::sync::Arc::new(ai_memory::profile::Profile::core()),
+            mcp_config: std::sync::Arc::new(None),
         };
         let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
         let router = ai_memory::build_router(api_key_state, app_state);
@@ -12384,6 +12386,8 @@ fn build_serve_state(
         federation: std::sync::Arc::new(None),
         tier_config: std::sync::Arc::new(ai_memory::config::FeatureTier::Keyword.config()),
         scoring: std::sync::Arc::new(ai_memory::config::ResolvedScoring::default()),
+        profile: std::sync::Arc::new(ai_memory::profile::Profile::core()),
+        mcp_config: std::sync::Arc::new(None),
     };
     let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
     (api_key_state, app_state)
