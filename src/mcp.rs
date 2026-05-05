@@ -597,6 +597,19 @@ pub(crate) fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_verify",
+                "description": "v0.7 Track H4 — re-verify a stored memory_links row's Ed25519 signature on demand. Returns {signature_verified, attest_level, signed_by, signed_at}. attest_level is one of unsigned/self_signed/peer_attested. Pass either the link_id composite ('source--relation-->target') or the explicit source_id+target_id (+optional relation, default related_to).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "link_id": {"type": "string", "description": "Composite link identifier in the form 'source_id--relation-->target_id'. Equivalent to passing source_id+target_id+relation explicitly."},
+                        "source_id": {"type": "string", "description": "Source memory ID. Required when link_id is omitted."},
+                        "target_id": {"type": "string", "description": "Target memory ID. Required when link_id is omitted."},
+                        "relation": {"type": "string", "enum": ["related_to", "supersedes", "contradicts", "derived_from"], "default": "related_to", "description": "Link relation. Defaults to related_to when omitted (matches memory_link's default)."}
+                    }
+                }
+            },
+            {
                 "name": "memory_replay",
                 "description": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript.",
                 "inputSchema": {
@@ -2072,7 +2085,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(44);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(45);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -3154,6 +3167,201 @@ fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value
     validate::validate_id(id).map_err(|e| e.to_string())?;
     let links = db::get_links(conn, id).map_err(|e| e.to_string())?;
     Ok(json!({"links": links, "count": links.len()}))
+}
+
+/// v0.7 H4 — parse the composite link_id form
+/// `"<source_id>--<relation>-->\<target_id>"` into the three components
+/// the SQL composite primary key uses. Returns `None` if the shape does
+/// not match — callers fall back to the explicit `source_id`/`target_id`
+/// parameter form.
+///
+/// Why this shape: `memory_links` has no synthetic surrogate key (the PK
+/// is the composite tuple). H4's MCP tool needs *some* string-shaped
+/// link identifier so a caller can name a link in one argument; this
+/// form reads naturally in logs and is unambiguous because `--` and
+/// `-->` are not valid characters inside a memory id (memory ids are
+/// validated by `validate::validate_id`).
+fn parse_link_id(s: &str) -> Option<(String, String, String)> {
+    // Returns `(source_id, target_id, relation)` to match the
+    // destructuring shape `handle_verify` uses below.
+    //
+    // Split on the relation marker first (the only multi-char arrow in
+    // the form) so a relation containing `--` would still parse — none
+    // of the four valid relations contain it, but we keep the parser
+    // permissive against future relation additions.
+    let (left, target) = s.split_once("-->")?;
+    let (source, relation) = left.split_once("--")?;
+    if source.is_empty() || target.is_empty() || relation.is_empty() {
+        return None;
+    }
+    Some((source.to_string(), target.to_string(), relation.to_string()))
+}
+
+/// v0.7 H4 — `memory_verify` MCP tool handler.
+///
+/// Looks up the named link by composite PK, re-derives the canonical
+/// CBOR payload via [`crate::identity::sign::canonical_cbor`], looks up
+/// the `observed_by` public key via
+/// [`crate::identity::verify::lookup_peer_public_key`], and re-checks
+/// the stored signature with [`crate::identity::verify::verify`].
+///
+/// Wire shape (always returned, even on the unsigned path):
+///
+/// ```json
+/// {
+///   "signature_verified": bool,
+///   "attest_level": "unsigned" | "self_signed" | "peer_attested",
+///   "signed_by": <observed_by string or null>,
+///   "signed_at": <valid_from string or null>
+/// }
+/// ```
+///
+/// `signed_by` and `signed_at` are sourced from the `observed_by` and
+/// `valid_from` columns respectively — the same columns the H2/H3
+/// signature commits to. They are returned `null` on the unsigned path
+/// so callers can drop them without a None-check.
+///
+/// `pub` so the H4 integration test in `tests/memory_verify.rs` can
+/// drive the handler directly without standing up the JSON-RPC
+/// envelope or spawning the daemon binary. Other handlers in this
+/// module stay private because the dispatcher is their sole caller.
+///
+/// # Errors
+///
+/// Returned as JSON-RPC error strings (the dispatcher wraps them as
+/// `-32602` invalid params). Specifically:
+/// - missing required arguments (no `link_id` and no
+///   `source_id`+`target_id`)
+/// - `link_id` shape doesn't match the composite form
+/// - link tuple does not exist in `memory_links`
+pub fn handle_verify(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    // Two callable shapes:
+    //   1. link_id="<src>--<rel>-->\<dst>"
+    //   2. source_id=… target_id=… [relation="related_to"]
+    let (source_id, target_id, relation): (String, String, String) =
+        if let Some(lid) = params.get("link_id").and_then(Value::as_str) {
+            parse_link_id(lid).ok_or_else(|| {
+                format!(
+                    "link_id '{lid}' is not in the expected form \
+                         'source_id--relation-->target_id'"
+                )
+            })?
+        } else {
+            let src = params
+                .get("source_id")
+                .and_then(Value::as_str)
+                .ok_or("link_id or source_id+target_id is required")?;
+            let dst = params
+                .get("target_id")
+                .and_then(Value::as_str)
+                .ok_or("link_id or source_id+target_id is required")?;
+            let rel = params
+                .get("relation")
+                .and_then(Value::as_str)
+                .unwrap_or("related_to");
+            (src.to_string(), dst.to_string(), rel.to_string())
+        };
+
+    // Validate the IDs / relation through the same gate `memory_link`
+    // uses on the write path — keeps the verify surface from being a
+    // back-door past the validator.
+    validate::validate_link(&source_id, &target_id, &relation).map_err(|e| e.to_string())?;
+
+    let record = db::get_link_for_verify(conn, &source_id, &target_id, &relation)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("link not found: ({source_id}, {relation}, {target_id})"))?;
+
+    // Decision matrix mirrors `decide_attest_level` from the H3 tests:
+    //   - signature is None → unsigned, signature_verified=false
+    //   - signature is Some + observed_by is None → unsigned (no claim
+    //     to verify against)
+    //   - signature is Some + observed_by is Some + no enrolled
+    //     pubkey on this host → return the column's stored attest_level
+    //     (which the inbound path already wrote as either "unsigned" on
+    //     enrolled-but-tampered, or whatever it landed as) but report
+    //     `signature_verified = false` because *we* cannot verify
+    //     without the public key.
+    //   - signature is Some + observed_by is Some + pubkey enrolled →
+    //     verify and report the actual outcome. We deliberately recheck
+    //     here even when the column already says "self_signed" or
+    //     "peer_attested": the whole point of `memory_verify` is on-
+    //     demand re-validation, not a stored-flag readback.
+    let stored_attest = record
+        .attest_level
+        .as_deref()
+        .and_then(crate::models::AttestLevel::from_str)
+        .unwrap_or(crate::models::AttestLevel::Unsigned);
+
+    let (verified, attest_out): (bool, crate::models::AttestLevel) =
+        match (record.signature.as_deref(), record.observed_by.as_deref()) {
+            (None, _) | (_, None) => (false, crate::models::AttestLevel::Unsigned),
+            (Some(sig_bytes), Some(observed_by)) => {
+                let signable = crate::identity::sign::SignableLink {
+                    src_id: &record.source_id,
+                    dst_id: &record.target_id,
+                    relation: &record.relation,
+                    observed_by: Some(observed_by),
+                    valid_from: record.valid_from.as_deref(),
+                    valid_until: record.valid_until.as_deref(),
+                };
+                match crate::identity::verify::lookup_peer_public_key(observed_by) {
+                    Some(pubkey) => {
+                        let ok =
+                            crate::identity::verify::verify(&pubkey, &signable, sig_bytes).is_ok();
+                        if ok {
+                            // On a successful re-verify, prefer the stored
+                            // attest_level — it distinguishes self_signed
+                            // (this host wrote+signed) from peer_attested
+                            // (a peer signed and we accepted on inbound).
+                            // If the column drifted to None on a very old
+                            // row, fall back to PeerAttested (the only
+                            // attestation we can re-derive without
+                            // knowing whether the signing key is our own).
+                            let level = match stored_attest {
+                                crate::models::AttestLevel::Unsigned => {
+                                    crate::models::AttestLevel::PeerAttested
+                                }
+                                other => other,
+                            };
+                            (true, level)
+                        } else {
+                            (false, crate::models::AttestLevel::Unsigned)
+                        }
+                    }
+                    None => {
+                        // Signature is present but we can't look up the
+                        // pubkey on this host — surface as not-verified.
+                        // Keep the stored attest_level so callers can see
+                        // what the inbound path originally decided.
+                        (false, stored_attest)
+                    }
+                }
+            }
+        };
+
+    let signed_by: Value = if verified {
+        record
+            .observed_by
+            .as_deref()
+            .map_or(Value::Null, |s| Value::String(s.to_string()))
+    } else {
+        Value::Null
+    };
+    let signed_at: Value = if verified {
+        record
+            .valid_from
+            .as_deref()
+            .map_or(Value::Null, |s| Value::String(s.to_string()))
+    } else {
+        Value::Null
+    };
+
+    Ok(json!({
+        "signature_verified": verified,
+        "attest_level": attest_out.as_str(),
+        "signed_by": signed_by,
+        "signed_at": signed_at,
+    }))
 }
 
 /// v0.7.0 I4 — single-transcript content threshold above which the
@@ -4251,6 +4459,7 @@ fn handle_request(
                 "memory_get" => handle_get(conn, arguments),
                 "memory_link" => handle_link(conn, db_path, arguments, active_keypair),
                 "memory_get_links" => handle_get_links(conn, arguments),
+                "memory_verify" => handle_verify(conn, arguments),
                 "memory_replay" => handle_replay(conn, arguments),
                 "memory_consolidate" => handle_consolidate(
                     conn,
@@ -4792,7 +5001,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_44_tools() {
+    fn tool_definitions_returns_45_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
@@ -4800,15 +5009,16 @@ mod tests {
         // memory_kg_invalidate + memory_kg_query (Pillar 2 / Stream C)
         // on top of the 36-tool v0.6.0.0 surface = 43.
         // v0.7.0 I4 adds memory_replay (Family::Graph) → 44.
+        // v0.7 H4 adds memory_verify (Family::Graph) → 45.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 44);
+        assert_eq!(tools.len(), 45);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
     /// registers exactly 5 family tools + 1 always-on bootstrap
     /// (memory_capabilities) = 6 visible tools. `--profile full`
-    /// registers all 43.
+    /// registers all 45 (43 v0.6.3 + memory_replay + memory_verify).
     #[test]
     fn tool_definitions_for_profile_core_registers_5_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
@@ -4849,27 +5059,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_44() {
+    fn tool_definitions_for_profile_full_registers_45() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            44,
-            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay = 44"
+            45,
+            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + v0.7 H4 memory_verify (1) = 45"
         );
     }
 
     #[test]
-    fn tool_definitions_for_profile_graph_registers_fourteen_plus_capabilities() {
+    fn tool_definitions_for_profile_graph_registers_sixteen() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
         let tools = defs["tools"].as_array().unwrap();
-        // 5 core + 9 graph (v0.7.0 I4 added memory_replay) + 1 always-on
-        // capabilities = 15 (capabilities is in meta but loaded as
-        // bootstrap; without it we'd have 14).
+        // 5 core + 10 graph (8 baseline + memory_replay + memory_verify)
+        // + 1 always-on capabilities = 16 (capabilities is in meta but
+        // loaded as bootstrap; without it we'd have 15).
         assert_eq!(
             tools.len(),
-            15,
-            "graph profile = core(5) + graph(9, with memory_replay) + capabilities-bootstrap(1)"
+            16,
+            "graph profile = core(5) + graph(10, with memory_replay+memory_verify) + capabilities-bootstrap(1)"
         );
     }
 
@@ -4881,8 +5091,8 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            15,
-            "core,graph = 5 + 9 (v0.7.0 I4 memory_replay) + capabilities"
+            16,
+            "core,graph = 5 + 10 (I4 memory_replay + H4 memory_verify) + capabilities = 16"
         );
     }
 
@@ -4900,8 +5110,9 @@ mod tests {
         assert_eq!(core_row["tool_count"], 5);
         let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
         assert_eq!(graph_row["loaded"], false);
-        // v0.7.0 I4 — graph now ships 9 tools (8 baseline + memory_replay).
-        assert_eq!(graph_row["tool_count"], 9);
+        // v0.7 H4 — graph now ships 10 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4]).
+        assert_eq!(graph_row["tool_count"], 10);
 
         let always_on = v["always_on"].as_array().unwrap();
         assert_eq!(always_on.len(), 1);
@@ -4915,11 +5126,13 @@ mod tests {
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
-        // v0.7.0 I4 — graph now lists 9 tools (8 baseline + memory_replay).
-        assert_eq!(tools.len(), 9);
+        // v0.7 H4 — graph now lists 10 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4]).
+        assert_eq!(tools.len(), 10);
         // Spot-check known graph tool present.
         assert!(tools.iter().any(|t| t == "memory_kg_query"));
         assert!(tools.iter().any(|t| t == "memory_replay"));
+        assert!(tools.iter().any(|t| t == "memory_verify"));
     }
 
     #[test]
@@ -4928,8 +5141,9 @@ mod tests {
         let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
-        // v0.7.0 I4 — graph now ships 9 schemas (8 baseline + memory_replay).
-        assert_eq!(tools.len(), 9);
+        // v0.7 H4 — graph now ships 10 schemas (8 baseline + memory_replay
+        // [I4] + memory_verify [H4]).
+        assert_eq!(tools.len(), 10);
         // Each row must carry the full MCP tool definition shape.
         for tool in tools {
             assert!(tool.get("name").is_some(), "missing name");
@@ -5290,8 +5504,9 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 44 MCP tools (Justice of MCP pathway).
-    /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay.
+    /// Parametrized smoke matrix for all 45 MCP tools (Justice of MCP pathway).
+    /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
+    /// v0.7 H4 added memory_verify (45).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5403,6 +5618,23 @@ mod tests {
                 name: "memory_get_links",
                 valid_args: json!({"id": "fake-id-for-test"}),
                 required_arg: Some("id"),
+            },
+            ToolCase {
+                name: "memory_verify",
+                // Happy-path arg shape — the link won't be found in the
+                // empty in-memory DB but the dispatcher path is what the
+                // smoke matrix covers; the "not found" branch is still
+                // an Err result, which the matrix tolerates because it
+                // already classifies dispatch outcomes.
+                valid_args: json!({
+                    "source_id": "fake-src-id",
+                    "target_id": "fake-dst-id",
+                    "relation": "related_to"
+                }),
+                // No "single required arg" — the tool is reachable via
+                // either link_id OR (source_id+target_id), so the
+                // smoke matrix's required-arg branch is not applicable.
+                required_arg: None,
             },
             // v0.7.0 I4 — memory_replay walks the I2 join table; an
             // unknown memory_id yields an empty `transcripts` list

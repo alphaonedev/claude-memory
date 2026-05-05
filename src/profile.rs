@@ -25,11 +25,11 @@
 //! ## Profile vocabulary
 //!
 //! - `core` — 5 tools, the new v0.6.4 default. Always loaded.
-//! - `graph` — adds the 9 KG/entity/replay tools. ~14 tools.
+//! - `graph` — adds the 10 KG/entity/replay/verify tools. ~15 tools.
 //! - `admin` — adds lifecycle (5) + governance (8). ~18 tools.
 //! - `power` — adds the 6 LLM-augmented tools (consolidate, auto_tag, …).
 //!   ~11 tools.
-//! - `full` — every family. 44 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay`).
+//! - `full` — every family. 45 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -55,8 +55,9 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-05. Counts must sum to 44 (the v0.6.3.1 baseline of 43 +
-/// v0.7.0 I4 `memory_replay` in `Family::Graph`).
+/// 2026-05-05. Counts must sum to 45 (the v0.6.3.1 baseline of 43 +
+/// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify`, both in
+/// `Family::Graph`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     /// store, recall, list, get, search — 5
@@ -64,9 +65,11 @@ pub enum Family {
     /// update, delete, forget, gc, promote — 5
     Lifecycle,
     /// kg_query, kg_timeline, kg_invalidate, link, get_links,
-    /// entity_register, entity_get_by_alias, get_taxonomy, replay — 9
-    /// (replay added in v0.7.0 I4 — joins to the I2 transcript-link
-    /// substrate to reconstruct a memory's source transcript chain.)
+    /// entity_register, entity_get_by_alias, get_taxonomy, replay,
+    /// verify — 10 (replay added in v0.7.0 I4 — joins to the I2
+    /// transcript-link substrate to reconstruct a memory's source
+    /// transcript chain; verify added in v0.7 H4 — re-checks the
+    /// Ed25519 signature on a stored memory_links row.)
     Graph,
     /// pending_list/approve/reject, namespace_set/get/clear_standard,
     /// subscribe, unsubscribe — 8
@@ -106,7 +109,7 @@ impl Family {
             // lifecycle (5)
             "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
             | "memory_promote" => Some(Self::Lifecycle),
-            // graph (9 — v0.7.0 I4 added memory_replay)
+            // graph (10 — v0.7.0 I4 added memory_replay; v0.7 H4 added memory_verify)
             "memory_kg_query"
             | "memory_kg_timeline"
             | "memory_kg_invalidate"
@@ -115,7 +118,8 @@ impl Family {
             | "memory_entity_register"
             | "memory_entity_get_by_alias"
             | "memory_get_taxonomy"
-            | "memory_replay" => Some(Self::Graph),
+            | "memory_replay"
+            | "memory_verify" => Some(Self::Graph),
             // governance (8)
             "memory_pending_list"
             | "memory_pending_approve"
@@ -186,8 +190,8 @@ impl Family {
     pub const fn expected_tool_count(self) -> usize {
         match self {
             Self::Core | Self::Lifecycle | Self::Meta => 5,
-            // Graph: 8 baseline + memory_replay (v0.7.0 I4) = 9.
-            Self::Graph => 9,
+            // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) = 10.
+            Self::Graph => 10,
             Self::Governance => 8,
             Self::Power => 6,
             Self::Archive => 4,
@@ -236,6 +240,9 @@ impl Family {
                 // v0.7.0 I4 — traverses memory_transcript_links (I2) to
                 // reconstruct the source-transcript chain for a memory.
                 "memory_replay",
+                // v0.7 H4 — re-verifies a stored link's Ed25519
+                // signature on demand, returning attest_level.
+                "memory_verify",
             ],
             Self::Governance => &[
                 "memory_pending_list",
@@ -319,7 +326,8 @@ impl Profile {
         }
     }
 
-    /// `graph` — core + graph. 14 tools (v0.7.0 I4 added `memory_replay`).
+    /// `graph` — core + graph. 15 tools (v0.7.0 I4 added `memory_replay`;
+    /// v0.7 H4 added `memory_verify`).
     #[must_use]
     pub fn graph() -> Self {
         Self {
@@ -343,8 +351,8 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 44 tools (v0.6.3 baseline 43 + v0.7.0 I4
-    /// `memory_replay`).
+    /// `full` — every family. 45 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `memory_replay` + v0.7 H4 `memory_verify`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -523,13 +531,13 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_44() {
+    fn family_expected_tool_counts_sum_to_45() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 44,
-            "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` = 44. If this \
-             drifts, update Family::expected_tool_count and the family map docs \
-             together."
+            total, 45,
+            "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
+             `memory_verify` = 45. If this drifts, update \
+             Family::expected_tool_count and the family map docs together."
         );
     }
 
@@ -577,10 +585,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_graph_has_fourteen_tools() {
+    fn profile_graph_has_fifteen_tools() {
         let p = Profile::graph();
-        // v0.7.0 I4 — Graph now ships 9 tools (8 baseline + memory_replay).
-        assert_eq!(p.expected_tool_count(), 5 + 9);
+        // v0.7 H4 — Graph now ships 10 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4]).
+        assert_eq!(p.expected_tool_count(), 5 + 10);
         assert!(p.includes(Family::Graph));
     }
 
@@ -600,10 +609,11 @@ mod tests {
     }
 
     #[test]
-    fn profile_full_has_forty_four_tools() {
+    fn profile_full_has_forty_five_tools() {
         let p = Profile::full();
-        // v0.7.0 I4 — full surface = 43 baseline + memory_replay.
-        assert_eq!(p.expected_tool_count(), 44);
+        // v0.7 H4 — full surface = 43 baseline + memory_replay (I4) +
+        // memory_verify (H4) = 45.
+        assert_eq!(p.expected_tool_count(), 45);
     }
 
     // ---------- Profile::parse ----------
@@ -625,14 +635,14 @@ mod tests {
 
     #[test]
     fn parse_custom_comma_list_dedup() {
-        // `core,graph` → core (5) + graph (9, after v0.7.0 I4) = 14 tools.
+        // `core,graph` → core (5) + graph (10, after v0.7 H4) = 15 tools.
         // Meta is NOT included — `memory_capabilities` is always-on
         // bootstrapped outside the family map (v0.6.4-002).
         let p = Profile::parse("core,graph").unwrap();
         assert!(p.includes(Family::Core));
         assert!(!p.includes(Family::Meta));
         assert!(p.includes(Family::Graph));
-        assert_eq!(p.expected_tool_count(), 14);
+        assert_eq!(p.expected_tool_count(), 15);
     }
 
     #[test]
@@ -740,6 +750,8 @@ mod tests {
             "memory_get_taxonomy",
             // graph (v0.7.0 I4 addition)
             "memory_replay",
+            // graph (v0.7 H4 addition)
+            "memory_verify",
             // governance
             "memory_pending_list",
             "memory_pending_approve",
@@ -773,8 +785,8 @@ mod tests {
         ];
         assert_eq!(
             baseline.len(),
-            44,
-            "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) = 44"
+            45,
+            "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + 1 (v0.7 H4 memory_verify) = 45"
         );
         for name in baseline {
             assert!(
