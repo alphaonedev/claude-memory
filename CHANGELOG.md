@@ -64,6 +64,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v0.7.0 G2 — 20 hook lifecycle event types with payloads.** New
+  `src/hooks/events.rs` module attaches a JSON-serializable payload
+  struct to every variant of `HookEvent` (lifted out of G1's
+  `src/hooks/config.rs` stub; re-exported from the G1 path for
+  back-compat). The 20 events the hook pipeline supports:
+  `pre_store`, `post_store`, `pre_recall`, `post_recall`,
+  `pre_search`, `post_search`, `pre_delete`, `post_delete`,
+  `pre_promote`, `post_promote`, `pre_link`, `post_link`,
+  `pre_consolidate`, `post_consolidate`, `pre_governance_decision`,
+  `post_governance_decision`, `on_index_eviction`, `pre_archive`,
+  `pre_transcript_store`, `post_transcript_store`. Pre-events carry
+  writable deltas (`MemoryDelta`, `RecallQuery`, `SearchQuery`,
+  `MemoryRef`, `PromoteDelta`, `LinkDelta`, `ConsolidationDelta`,
+  `GovernanceContext`, `TranscriptDelta`); post-events carry
+  read-only snapshots (`Memory`, `RecallResult`, `SearchResult`,
+  `MemoryRef`, `PromoteResult`, `Link` (= `MemoryLink` re-export),
+  `ConsolidationResult`, `GovernanceDecision`, `EvictionEvent`,
+  `Transcript`). The `Link` and `Transcript` wire types reuse / project
+  from `crate::models::MemoryLink` and `crate::transcripts::Transcript`
+  respectively. Every variant carries a doc-comment naming the
+  source-code location G3-G11 will hook into. Hooks are not yet fired
+  at the memory operation points — that's G3-G11. New round-trip JSON
+  tests cover all 20 variants and one representative payload per
+  family.
 - **v0.7.0 K2 — `pending_actions` timeout sweeper.** Closes the
   v0.6.3.1 honest-Capabilities-v2 disclosure that
   `default_timeout_seconds` was advertised in v1 but unused. Schema

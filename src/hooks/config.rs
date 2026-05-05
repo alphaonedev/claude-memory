@@ -60,37 +60,14 @@ use tokio::sync::RwLock;
 // HookEvent
 // ---------------------------------------------------------------------------
 //
-// G1 ships only the *names* of the 20 lifecycle events. G2 will
-// attach payload structs to each variant. Today the enum is a
-// flat C-style enum so the config can name an event without the
-// payload types existing yet.
+// G1 shipped a 20-variant stub of `HookEvent` here so the
+// configuration loader had a tag type to deserialize against.
+// G2 lifts the canonical definition into `crate::hooks::events`
+// and attaches a payload struct to every variant. The re-export
+// below preserves `use crate::hooks::config::HookEvent` for any
+// caller that landed against the G1 path.
 
-/// The 20 lifecycle events the hook pipeline supports. Payload
-/// types are filled in by G2 (`src/hooks/events.rs`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookEvent {
-    PreStore,
-    PostStore,
-    PreRecall,
-    PostRecall,
-    PreSearch,
-    PostSearch,
-    PreDelete,
-    PostDelete,
-    PrePromote,
-    PostPromote,
-    PreLink,
-    PostLink,
-    PreConsolidate,
-    PostConsolidate,
-    PreGovernanceDecision,
-    PostGovernanceDecision,
-    OnIndexEviction,
-    PreArchive,
-    PreTranscriptStore,
-    PostTranscriptStore,
-}
+pub use super::events::HookEvent;
 
 // ---------------------------------------------------------------------------
 // HookMode
