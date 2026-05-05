@@ -211,7 +211,16 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       BLOB column shipped dead in v15 and is now live. H3+H4 will
 //       layer inbound verification + the `memory_verify` MCP tool on
 //       top of this column.
-const CURRENT_SCHEMA_VERSION: i64 = 23;
+// v24 = v0.7.0 I2 (attested-cortex epic) `memory_transcript_links`
+//       join table establishing the m:n relationship between
+//       `memories` and the `memory_transcripts` substrate from I1
+//       (v22). Optional (span_start, span_end) byte offsets address a
+//       sub-region of the decompressed transcript. ON DELETE CASCADE
+//       on both foreign keys keeps the table free of dangling rows
+//       when memories are deleted or I3's archive->prune lifecycle
+//       removes transcripts. Substrate for I4 (memory_replay) and
+//       I5/R5 (pre_store extraction hook).
+const CURRENT_SCHEMA_VERSION: i64 = 24;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -297,6 +306,13 @@ const MIGRATION_V22_SQLITE: &str = include_str!("../migrations/sqlite/0016_v07_t
 // backfill ("unsigned" for legacy rows) plus the supporting index.
 const MIGRATION_V23_SQLITE: &str =
     include_str!("../migrations/sqlite/0017_v07_link_attest_level.sql");
+// v0.7.0 I2 — `memory_transcript_links` join table connecting
+// `memories` to the `memory_transcripts` substrate from I1 (v22).
+// CREATE TABLE IF NOT EXISTS + indexes — fully idempotent. Substrate
+// only; I4 (memory_replay) reads from this table and I5/R5
+// (pre_store extraction hook) writes to it.
+const MIGRATION_V24_SQLITE: &str =
+    include_str!("../migrations/sqlite/0018_v07_transcript_links.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -813,6 +829,14 @@ fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE memory_links ADD COLUMN attest_level TEXT", [])?;
             }
             conn.execute_batch(MIGRATION_V23_SQLITE)?;
+        }
+        if version < 24 {
+            // v0.7.0 I2 — `memory_transcript_links` join table tying
+            // memories to the `memory_transcripts` substrate from I1.
+            // CREATE TABLE IF NOT EXISTS + indexes — fully idempotent.
+            // Substrate only; I4 layers `memory_replay` on top, I5/R5
+            // wires the pre_store extraction hook that populates it.
+            conn.execute_batch(MIGRATION_V24_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
