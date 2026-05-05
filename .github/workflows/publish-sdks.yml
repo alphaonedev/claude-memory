@@ -1,0 +1,76 @@
+name: publish-sdks
+
+# OIDC-based Trusted Publishing for both SDKs.
+# - PyPI: pypa/gh-action-pypi-publish using `id-token: write` (no API token).
+# - npm: `npm publish --provenance --access public` using `id-token: write`
+#   against a Trusted Publisher configured at npmjs.com.
+#
+# Both jobs run inside protected GitHub Environments so a maintainer
+# must approve each publish.
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Which SDK(s) to publish"
+        required: true
+        default: "both"
+        type: choice
+        options: [both, pypi, npm]
+  push:
+    tags:
+      - "v*"
+
+permissions: {}
+
+jobs:
+  publish-pypi:
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'both' || github.event.inputs.target == 'pypi' }}
+    name: publish ai-memory to PyPI
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi-publish
+      url: https://pypi.org/project/ai-memory/
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: build wheel + sdist
+        working-directory: sdk/python
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+      - name: publish via PyPI Trusted Publisher (OIDC)
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+          print-hash: true
+
+  publish-npm:
+    if: ${{ github.event_name == 'push' || github.event.inputs.target == 'both' || github.event.inputs.target == 'npm' }}
+    name: publish @alphaone/ai-memory to npm
+    runs-on: ubuntu-latest
+    environment:
+      name: npm-publish
+      url: https://www.npmjs.com/package/@alphaone/ai-memory
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org/"
+      - name: install + build
+        working-directory: sdk/typescript
+        run: |
+          npm ci
+          npm run build
+      - name: publish via npm Trusted Publisher (OIDC + provenance)
+        working-directory: sdk/typescript
+        run: npm publish --provenance --access public
