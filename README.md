@@ -11,12 +11,15 @@
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![SQLite](https://img.shields.io/badge/sqlite-FTS5-003B57?logo=sqlite)](https://www.sqlite.org/)
-[![Tests](https://img.shields.io/badge/tests-1%2C886_%E2%80%A2_93.84%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Tests](https://img.shields.io/badge/tests-2%2C400%2B_%E2%80%A2_%E2%89%A592%25_cov-brightgreen)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
 [![Test Hub](https://img.shields.io/badge/test--hub-live_results-6ee7ff?logo=githubpages)](https://alphaonedev.github.io/ai-memory-test-hub/)
-[![v0.6.3.1 A2A](https://img.shields.io/badge/v0.6.3.1_a2a-testing_in_flight-ffd700?logo=githubpages)](https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/)
+[![Discovery Gate](https://img.shields.io/badge/discovery--gate-6%2F6_PASS_%E2%80%A2_GATE_GREEN-2ea043?logo=githubpages)](https://alphaonedev.github.io/ai-memory-discovery-gate/)
+[![v0.6.4 Cert](https://img.shields.io/badge/v0.6.4_cert-CERT_GREEN-2ea043?logo=githubpages)](https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md)
 [![MCP](https://img.shields.io/badge/MCP-5_default_%E2%80%A2_43_full-blueviolet)]()
-[![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.3-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
-[![Crates.io Version](https://img.shields.io/crates/v/ai-memory)]()
+[![Evidence](https://img.shields.io/badge/claims-frozen_v0.6.4-c8a2ff)](https://alphaonedev.github.io/ai-memory-mcp/evidence.html)
+[![Crates.io Version](https://img.shields.io/crates/v/ai-memory)](https://crates.io/crates/ai-memory)
+[![npm](https://img.shields.io/npm/v/@alphaone/ai-memory?label=npm&logo=npm)](https://www.npmjs.com/package/@alphaone/ai-memory)
+[![PyPI](https://img.shields.io/pypi/v/ai-memory-mcp?label=pypi&logo=pypi&logoColor=white)](https://pypi.org/project/ai-memory-mcp/)
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
@@ -439,7 +442,7 @@ ai-memory serve
 
 **Step 4: Done. Test it.**
 
-Restart your AI assistant. If using MCP, it now has 43 memory tools. Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
+Restart your AI assistant. If using MCP, it now has the **5-tool default surface** advertised on session boot (the other 38 of 43 total tools load on demand via `--profile` or `memory_capabilities --include-schema`). Ask it: "Store a memory that my favorite language is Rust." Then in a new conversation, ask: "What is my favorite language?" It will remember.
 
 ---
 
@@ -486,7 +489,34 @@ ai-memory recall "database"
 ai-memory stats
 ```
 
-**6. Use with your AI.** Restart your AI client. It now has **43 memory tools** available via MCP -- it can store and recall memories natively during conversations.
+**6. Use with your AI.** Restart your AI client. It now has **5 default memory tools** advertised on boot (43 total reachable via runtime expansion or `--profile full`) over MCP -- it can store and recall memories natively during conversations.
+
+---
+
+## SDKs
+
+In addition to the MCP / HTTP / CLI surfaces, ai-memory ships first-party language SDKs for HTTP clients and helper utilities (e.g. `requireProfile` for runtime profile assertions on v0.6.4+ daemons).
+
+**TypeScript / JavaScript** — [`@alphaone/ai-memory`](https://www.npmjs.com/package/@alphaone/ai-memory) on npm
+
+```bash
+npm install @alphaone/ai-memory
+```
+
+**Python** — [`ai-memory-mcp`](https://pypi.org/project/ai-memory-mcp/) on PyPI (the import name remains `ai_memory`)
+
+```bash
+pip install ai-memory-mcp
+```
+
+```python
+from ai_memory import Client, requireProfile
+
+client = Client(base_url="http://127.0.0.1:9077", api_key="...")
+requireProfile(client, ["core", "graph"])  # raises ProfileNotLoaded with .hint on miss
+```
+
+Both SDKs are versioned with the server (`0.6.4` matches `ai-memory 0.6.4`). v0.6.4+ daemons enforce the profile contract; pre-v0.6.4 daemons fall back to a permissive warn-and-continue so SDK upgrades don't break old servers. Source lives in [`sdk/typescript/`](sdk/typescript/) and [`sdk/python/`](sdk/python/).
 
 ---
 
@@ -552,7 +582,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (50 endpoints on port 90
 - **Color CLI output** -- ANSI tier labels (red/yellow/green), priority bars, bold titles, cyan namespaces
 
 ### Quality
-- **1,886 lib tests + 49+ integration tests** -- 93.84% line coverage (gate ≥93%, buffer +0.84pp; v0.6.3.1). v0.6.3 baseline numbers (1,809 / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 metrics in the release notes.
+- **~2,400 tests across the full surface** -- 1,960 lib + 211 integration + 16 mcp_integration + 4 webhook_http_parity (new in v0.6.4) + 16 recipe_contract + ~150 across other binary targets. Line coverage held above the **≥92% project bar**; net-new v0.6.4 modules at 100% (`sizes.rs`), 99.50% (`profile.rs`), 97.58% (`cli/audit.rs`), 97.05% (`cli/doctor.rs`), 92.56% (`handlers.rs`), 92.26% (`cli/install.rs`). v0.6.3.x baselines (1,809 / 93.08% and 1,886 / 93.84%) remain frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.4 metrics in the release notes and on the [test-hub campaign](https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md). Empirical NHI discovery acceptance proven separately by the [Discovery Gate](https://alphaonedev.github.io/ai-memory-discovery-gate/) (T1–T4 matrix vs. live xAI Grok 4.3, 6/6 PASS, **GATE GREEN**).
 - **LongMemEval benchmark** -- **97.8% R@5** (489/500), **99.0% R@10**, **99.8% R@20** on ICLR 2025 LongMemEval-S dataset. 499/500 at R@20. Pure FTS5 keyword achieves 97.0% R@5 in 2.2 seconds (232 q/s). LLM query expansion pushes to 97.8% R@5. Zero cloud API costs. See [benchmark details](benchmarks/longmemeval/).
 - **MCP Prompts** -- `recall-first` and `memory-workflow` prompts teach AI clients to use memory proactively
 - **TOON-default** -- recall/list/search responses use TOON compact by default (79% smaller than JSON)
@@ -590,7 +620,7 @@ Evaluated on the [ICLR 2025 LongMemEval-S](benchmarks/longmemeval/) dataset (500
 | **semantic** | 97.4% | 45 q/s | Embedding model (~100MB) |
 | **smart** | 97.8% | 12 q/s | Ollama + Gemma 4 E2B |
 
-### Performance Budgets (v0.6.3)
+### Performance Budgets (v0.6.4)
 
 Every release ships with **published p95/p99 budgets** for hot-path
 operations and a CI gate that fails any PR whose measured p95 exceeds
@@ -615,7 +645,7 @@ ai-memory bench                      # human-readable table
 ai-memory bench --json               # machine-parseable
 ```
 
-p99 targets are informational until the v0.6.3 soak window closes.
+Substrate is unchanged across v0.6.3.x → v0.6.4 (the `quiet-tools` release ships a smaller default tool surface, not a different hot-path). p99 targets here remain informational pending the next dedicated soak window; latest soak evidence is on the [test hub](https://alphaonedev.github.io/ai-memory-test-hub/).
 
 ---
 
@@ -623,7 +653,7 @@ p99 targets are informational until the v0.6.3 soak window closes.
 
 ### MCP (Primary -- for MCP-compatible AI platforms)
 
-MCP is the recommended integration. Your AI gets 21 native memory tools with zero glue code. Configure the MCP server in your AI platform's config:
+MCP is the recommended integration. Your AI gets **5 native memory tools advertised by default** (plus the always-on `memory_capabilities` bootstrap) with zero glue code. The other 38 tools (43 total) remain reachable via `--profile graph|admin|power|full` or runtime expansion through `memory_capabilities --include-schema family=<name>`. Configure the MCP server in your AI platform's config:
 
 ```json
 {
