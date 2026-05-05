@@ -4158,6 +4158,15 @@ pub async fn get_capabilities(
         .map_or(crate::mcp::CapabilitiesAccept::V2, |raw| {
             crate::mcp::CapabilitiesAccept::parse(raw)
         });
+    // v0.7.0 A1 — HTTP wiring for v3 lands with A5 (which threads the
+    // active `Profile` through `AppState`). Until then, downgrade
+    // `Accept-Capabilities: v3` to v2 over HTTP so a curious client
+    // doesn't 500 the endpoint. MCP callers reach v3 directly via
+    // `accept="v3"`; the HTTP path is a documented A5 gap.
+    let accept = match accept {
+        crate::mcp::CapabilitiesAccept::V3 => crate::mcp::CapabilitiesAccept::V2,
+        other => other,
+    };
     let embedder_loaded = app.embedder.as_ref().is_some();
     let lock = app.db.lock().await;
     let conn = &lock.0;

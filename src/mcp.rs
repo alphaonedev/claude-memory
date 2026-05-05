@@ -1719,15 +1719,29 @@ pub fn handle_recall(
     Ok(resp)
 }
 
-/// Capabilities schema selector (v0.6.3.1 P1 honesty patch).
+/// Capabilities schema selector (v0.6.3.1 P1 honesty patch; extended for
+/// v0.7.0 A1).
 ///
-/// HTTP callers send `Accept-Capabilities: v1` (or `v2`) to request a
-/// shape; MCP callers pass `accept: "v1"` (or `"v2"`) to
-/// `memory_capabilities`. Default is v2.
+/// HTTP callers send `Accept-Capabilities: v1`/`v2`/`v3` to request a
+/// shape; MCP callers pass `accept: "v1"`/`"v2"`/`"v3"` to
+/// `memory_capabilities`. Default remains v2 in the A1 increment;
+/// v0.7.0 A5 will flip the default to v3 once the full A1–A4 surface
+/// is in place.
+///
+/// v3 carries pre-computed calibration fields (top-level `summary` from
+/// A1; `to_describe_to_user`, per-tool `callable_now`, and
+/// `agent_permitted_families` land in A2–A4). v3 requires the live
+/// `Profile` for summary computation, so callers that opt in must reach
+/// for [`handle_capabilities_with_conn_v3`] instead of the v1/v2 entry
+/// point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilitiesAccept {
     V1,
     V2,
+    /// v0.7.0 A1 — additive on top of v2 (top-level `summary`). Requires
+    /// profile context; opt-in via `accept="v3"` or
+    /// `Accept-Capabilities: v3`.
+    V3,
 }
 
 impl CapabilitiesAccept {
@@ -1737,6 +1751,7 @@ impl CapabilitiesAccept {
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "v1" | "1" => Self::V1,
+            "v3" | "3" => Self::V3,
             _ => Self::V2,
         }
     }
@@ -1774,12 +1789,57 @@ pub fn handle_capabilities_with_conn(
     conn: Option<&rusqlite::Connection>,
     accept: CapabilitiesAccept,
 ) -> Result<Value, String> {
+    let caps = build_capabilities_overlay(tier_config, reranker, embedder_loaded, conn);
+
+    // --- Schema selection ---
+    match accept {
+        CapabilitiesAccept::V2 => serde_json::to_value(caps).map_err(|e| e.to_string()),
+        CapabilitiesAccept::V1 => serde_json::to_value(caps.to_v1()).map_err(|e| e.to_string()),
+        CapabilitiesAccept::V3 => Err(
+            "capabilities v3 requires profile context — call handle_capabilities_with_conn_v3"
+                .to_string(),
+        ),
+    }
+}
+
+/// v0.7.0 A1 — the v3-shaped capabilities entry point.
+///
+/// Same overlay logic as [`handle_capabilities_with_conn`] (factored
+/// into [`build_capabilities_overlay`]); additionally computes the
+/// top-level `summary` string from the live `profile` state so the
+/// LLM gets a pre-computed, plain-language description of its
+/// operational tool surface (loaded count, total count, the three
+/// named recovery paths for unloaded families).
+///
+/// HTTP callers reach this path through `Accept-Capabilities: v3`;
+/// MCP callers via `accept: "v3"`. The HTTP wire-up is deferred until
+/// A5 (which flips the default and threads the profile through
+/// `AppState`); A1 lights up the MCP dispatch path only.
+pub fn handle_capabilities_with_conn_v3(
+    tier_config: &TierConfig,
+    reranker: Option<&CrossEncoder>,
+    embedder_loaded: bool,
+    conn: Option<&rusqlite::Connection>,
+    profile: &crate::profile::Profile,
+) -> Result<Value, String> {
+    let caps = build_capabilities_overlay(tier_config, reranker, embedder_loaded, conn);
+    let summary = build_capabilities_summary(profile);
+    serde_json::to_value(caps.to_v3(summary)).map_err(|e| e.to_string())
+}
+
+/// Build the runtime-overlaid [`Capabilities`] document. Shared between
+/// the v1/v2 entry point [`handle_capabilities_with_conn`] and the v3
+/// entry point [`handle_capabilities_with_conn_v3`] so the overlay
+/// logic stays single-sourced.
+fn build_capabilities_overlay(
+    tier_config: &TierConfig,
+    reranker: Option<&CrossEncoder>,
+    embedder_loaded: bool,
+    conn: Option<&rusqlite::Connection>,
+) -> crate::config::Capabilities {
     let mut caps = tier_config.capabilities();
 
     // --- Reranker live state (P1) ---
-    // The old (#93) handler flipped `cross_encoder_reranking` to false
-    // when the neural model fell back to lexical. The honesty patch
-    // additionally surfaces the runtime variant in `reranker_active`.
     caps.features.reranker_active = match reranker {
         Some(ce) if ce.is_neural() => RerankerMode::Neural,
         Some(_) => {
@@ -1796,10 +1856,6 @@ pub fn handle_capabilities_with_conn(
     caps.features.recall_mode_active = compute_recall_mode(tier_config, embedder_loaded);
 
     // --- HNSW eviction surface (P3, G2) ---
-    // Mirror the per-process HNSW eviction counters into the capabilities
-    // surface so a `memory_capabilities` poll can tell operators whether
-    // the index is currently shedding embeddings. Same values surfaced in
-    // `memory_stats.index_evictions_total`.
     caps.hnsw.evictions_total = crate::hnsw::index_evictions_total();
     caps.hnsw.evicted_recently = crate::hnsw::evicted_recently(60);
 
@@ -1816,10 +1872,80 @@ pub fn handle_capabilities_with_conn(
         }
     }
 
-    // --- Schema selection ---
-    match accept {
-        CapabilitiesAccept::V2 => serde_json::to_value(caps).map_err(|e| e.to_string()),
-        CapabilitiesAccept::V1 => serde_json::to_value(caps.to_v1()).map_err(|e| e.to_string()),
+    caps
+}
+
+/// v0.7.0 A1 — build the capabilities-v3 `summary` string from the live
+/// `Profile` state.
+///
+/// The summary names: how many tools are advertised in `tools/list`
+/// under the active profile vs how many exist in total, and the three
+/// recovery paths an LLM can take to reach unloaded tools (`--profile`
+/// CLI flag, [`memory_load_family`](#) — landing in B1, and
+/// [`memory_smart_load`](#) — landing in B2).
+///
+/// The result is a single plain-language string, intentionally written
+/// for an LLM to repeat verbatim when an end-user asks "what tools do
+/// you have?" — see the A2 increment for the explicit
+/// `to_describe_to_user` field.
+#[must_use]
+pub fn build_capabilities_summary(profile: &crate::profile::Profile) -> String {
+    use crate::profile::{ALWAYS_ON_TOOLS, Family};
+
+    let total: usize = Family::all()
+        .iter()
+        .map(|f| f.expected_tool_count())
+        .sum();
+
+    // Tools advertised in tools/list = sum of family counts the profile
+    // includes, plus any always-on bootstrap tool whose owning family is
+    // NOT included (so it isn't double-counted). In v0.6.4
+    // `memory_capabilities` lives in `Family::Meta` and is also in
+    // `ALWAYS_ON_TOOLS`; on `--profile core` the meta family isn't
+    // loaded, so the bootstrap injection adds it back here.
+    let from_families: usize = profile.expected_tool_count();
+    let always_on_extra: usize = ALWAYS_ON_TOOLS
+        .iter()
+        .filter(|name| Family::for_tool(name).is_none_or(|f| !profile.includes(f)))
+        .count();
+    let visible = from_families + always_on_extra;
+    let unloaded = total.saturating_sub(visible);
+    let label = profile_summary_label(profile);
+
+    format!(
+        "{visible} of {total} tools are advertised in tools/list under the current profile \
+         ({label}). The other {unloaded} are listed in this manifest but NOT directly \
+         callable. To use any unloaded tool, choose one of: \
+         (a) restart the server with --profile <family> or --profile full, \
+         (b) call memory_load_family(family=<name>) — preferred, \
+         (c) call memory_smart_load(intent='<plain language>') — easiest, \
+         (d) call the tool by name and recover from JSON-RPC -32601."
+    )
+}
+
+/// Return a stable label for a profile's summary string. Named profiles
+/// (core/graph/admin/power/full) use their canonical name; custom
+/// profiles use the comma-joined family list (matches the
+/// `--profile core,graph,archive` CLI form).
+fn profile_summary_label(profile: &crate::profile::Profile) -> String {
+    use crate::profile::Profile;
+    if *profile == Profile::full() {
+        "full".to_string()
+    } else if *profile == Profile::core() {
+        "core".to_string()
+    } else if *profile == Profile::graph() {
+        "graph".to_string()
+    } else if *profile == Profile::admin() {
+        "admin".to_string()
+    } else if *profile == Profile::power() {
+        "power".to_string()
+    } else {
+        profile
+            .families()
+            .iter()
+            .map(|f| f.name())
+            .collect::<Vec<_>>()
+            .join(",")
     }
 }
 
@@ -3765,25 +3891,36 @@ fn handle_request(
                     } else {
                         // P1 honesty patch: optional `accept` argument lets MCP
                         // clients opt into the legacy v1 shape, mirroring the
-                        // HTTP `Accept-Capabilities` header.
+                        // HTTP `Accept-Capabilities` header. v0.7.0 A1 adds
+                        // `accept="v3"` for the additive v3 schema (top-level
+                        // `summary` + future A2-A4 fields).
                         let accept = arguments
                             .get("accept")
                             .and_then(Value::as_str)
                             .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
                         // v0.6.4-006 — when no family is requested, augment
-                        // the v2 response with a top-level `families` field
+                        // the v2/v3 response with a top-level `families` field
                         // describing the family taxonomy and which families
                         // the active profile loads. Backward-compat: v1
                         // shape never gets the families overlay.
-                        let result = handle_capabilities_with_conn(
-                            tier_config,
-                            reranker,
-                            embedder.is_some(),
-                            Some(conn),
-                            accept,
-                        );
+                        let result = match accept {
+                            CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
+                                tier_config,
+                                reranker,
+                                embedder.is_some(),
+                                Some(conn),
+                                profile,
+                            ),
+                            _ => handle_capabilities_with_conn(
+                                tier_config,
+                                reranker,
+                                embedder.is_some(),
+                                Some(conn),
+                                accept,
+                            ),
+                        };
                         result.map(|mut value| {
-                            if matches!(accept, CapabilitiesAccept::V2) {
+                            if matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3) {
                                 if let Some(obj) = value.as_object_mut() {
                                     obj.insert("families".to_string(), families_overview(profile));
                                 }
