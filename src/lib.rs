@@ -26,6 +26,11 @@ pub mod errors;
 pub mod federation;
 pub mod handlers;
 pub mod hnsw;
+// v0.7 Track G — programmable lifecycle hook pipeline. G1 lands
+// the config schema + SIGHUP hot-reload plumbing; the executor
+// (G3) and the actual fire points (G7+) layer on top of this
+// module without touching call sites in `handlers.rs` etc.
+pub mod hooks;
 pub mod identity;
 pub mod llm;
 pub mod log_paths;
