@@ -36,7 +36,7 @@ fn semantic_tier() -> TierConfig {
 fn v3_response(profile: &Profile) -> Value {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
-    handle_capabilities_with_conn_v3(&tier_config, None, false, Some(&conn), profile)
+    handle_capabilities_with_conn_v3(&tier_config, None, false, Some(&conn), profile, None, None)
         .expect("v3 capabilities serialize")
 }
 

@@ -716,7 +716,7 @@ impl Capabilities {
         }
     }
 
-    /// v0.7.0 (A1+A2): project the report into the v3 shape.
+    /// v0.7.0 (A1+A2+A3): project the report into the v3 shape.
     ///
     /// v3 = v2 +
     ///   - top-level `summary` (A1) — terse description of operational
@@ -724,21 +724,33 @@ impl Capabilities {
     ///   - top-level `to_describe_to_user` (A2) — plain-English
     ///     end-user-facing sentence the LLM should repeat verbatim
     ///     when asked "what tools do you have?". No MCP jargon.
+    ///   - top-level `tools` (A3) — per-tool array carrying name,
+    ///     family, `loaded`, and `callable_now`. `callable_now`
+    ///     combines profile-side loaded-state with the
+    ///     `[mcp.allowlist]` agent-can-call decision so an LLM that
+    ///     keeps a manifest cache doesn't need to ask twice to know
+    ///     whether a tool will resolve.
     ///
-    /// Both strings are computed by the caller from the live `Profile`
-    /// state because the [`Capabilities`] struct itself doesn't know
-    /// which families the MCP server actually advertised in
-    /// `tools/list`.
+    /// All three are computed by the caller from the live `Profile` +
+    /// `McpConfig` + `agent_id` state because the [`Capabilities`]
+    /// struct itself doesn't know which families the MCP server
+    /// actually advertised or which agent is asking.
     ///
-    /// Future v0.7.0 increments (A3–A4) extend this struct with
-    /// per-tool `callable_now` and `agent_permitted_families`. A5 bumps
-    /// the default wire shape to v3. v2 stays supported indefinitely.
+    /// Future v0.7.0 increment (A4) extends this struct with
+    /// `agent_permitted_families`. A5 bumps the default wire shape to
+    /// v3. v2 stays supported indefinitely.
     #[must_use]
-    pub fn to_v3(&self, summary: String, to_describe_to_user: String) -> CapabilitiesV3 {
+    pub fn to_v3(
+        &self,
+        summary: String,
+        to_describe_to_user: String,
+        tools: Vec<ToolEntry>,
+    ) -> CapabilitiesV3 {
         CapabilitiesV3 {
             schema_version: "3".to_string(),
             summary,
             to_describe_to_user,
+            tools,
             tier: self.tier.clone(),
             version: self.version.clone(),
             features: self.features.clone(),
@@ -751,6 +763,37 @@ impl Capabilities {
             hnsw: self.hnsw.clone(),
         }
     }
+}
+
+/// v0.7.0 A3 — per-tool entry in the capabilities-v3 `tools` array.
+///
+/// `loaded` mirrors `Profile::loads(name)` — true when the active
+/// profile would advertise this tool in `tools/list`.
+///
+/// `callable_now` is the AND of `loaded` with the
+/// `[mcp.allowlist]` per-agent gate. When the allowlist is disabled
+/// (no `[mcp.allowlist]` table or empty table), `callable_now ==
+/// loaded`. When the allowlist is active and the requesting agent
+/// has no entry granting the tool's family, `callable_now == false`
+/// even though `loaded == true`.
+///
+/// LLMs that cache the v3 manifest can use this to skip a doomed
+/// JSON-RPC call rather than discover -32601 the hard way.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolEntry {
+    /// Fully-qualified MCP tool name (e.g., `memory_store`).
+    pub name: String,
+    /// Family the tool belongs to. Always one of the eight canonical
+    /// family names (`core`, `lifecycle`, `graph`, etc.) or
+    /// `"always_on"` for the `memory_capabilities` bootstrap which
+    /// doesn't sit in any single family from a registration standpoint.
+    pub family: String,
+    /// Whether the active profile's family set includes this tool's
+    /// family (i.e., it appears in `tools/list`).
+    pub loaded: bool,
+    /// `loaded && agent_can_call(agent_id, family)`. When the
+    /// `[mcp.allowlist]` is disabled, `callable_now == loaded`.
+    pub callable_now: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -793,6 +836,15 @@ pub struct CapabilitiesV3 {
     /// `docs/v0.7/canonical-phrasings.md` for the canonical
     /// substitution template + worked examples per profile.
     pub to_describe_to_user: String,
+
+    /// v0.7.0 A3 — per-tool array carrying name, family, `loaded`, and
+    /// `callable_now`. `callable_now` combines profile-side
+    /// loaded-state with the `[mcp.allowlist]` agent-can-call decision
+    /// so an LLM that caches this manifest can skip a doomed JSON-RPC
+    /// call rather than discovering -32601 the hard way. Order matches
+    /// `tool_definitions()`'s registration walk so a sequential reader
+    /// gets a stable presentation.
+    pub tools: Vec<ToolEntry>,
 
     pub tier: String,
     pub version: String,

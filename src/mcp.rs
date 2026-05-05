@@ -1821,11 +1821,14 @@ pub fn handle_capabilities_with_conn_v3(
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
     profile: &crate::profile::Profile,
+    mcp_config: Option<&crate::config::McpConfig>,
+    agent_id: Option<&str>,
 ) -> Result<Value, String> {
     let caps = build_capabilities_overlay(tier_config, reranker, embedder_loaded, conn);
     let summary = build_capabilities_summary(profile);
     let describe = build_capabilities_describe_to_user(profile);
-    serde_json::to_value(caps.to_v3(summary, describe)).map_err(|e| e.to_string())
+    let tools = build_capabilities_tools(profile, mcp_config, agent_id);
+    serde_json::to_value(caps.to_v3(summary, describe, tools)).map_err(|e| e.to_string())
 }
 
 /// Build the runtime-overlaid [`Capabilities`] document. Shared between
@@ -2007,6 +2010,75 @@ pub fn build_capabilities_describe_to_user(profile: &crate::profile::Profile) ->
 /// that every tool name starts with the same five characters.
 fn short_tool_name(name: &'static str) -> &'static str {
     name.strip_prefix("memory_").unwrap_or(name)
+}
+
+/// v0.7.0 A3 — build the per-tool array carried in the
+/// capabilities-v3 `tools` field.
+///
+/// Each entry's `loaded` mirrors `Profile::loads(name)`. Each entry's
+/// `callable_now` is `loaded && agent_can_call(agent_id, family)` —
+/// when the `[mcp.allowlist]` is disabled (no table or empty), the
+/// allowlist gate is `Disabled` and the AND collapses to just
+/// `loaded`. When the allowlist is active and the requesting agent
+/// has no entry granting the tool's family, `callable_now == false`
+/// even though `loaded == true`.
+///
+/// The order of the returned vector matches `tool_definitions()`'s
+/// registration walk so a sequential reader gets a stable
+/// presentation matching the order in `tools/list`.
+#[must_use]
+pub fn build_capabilities_tools(
+    profile: &crate::profile::Profile,
+    mcp_config: Option<&crate::config::McpConfig>,
+    agent_id: Option<&str>,
+) -> Vec<crate::config::ToolEntry> {
+    use crate::config::{AllowlistDecision, ToolEntry};
+    use crate::profile::{ALWAYS_ON_TOOLS, Family};
+
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(43);
+
+    for fam in Family::all() {
+        let family_name = fam.name();
+        let loaded = profile.includes(*fam);
+        // Whether THIS agent can call tools in this family — disabled
+        // allowlist falls through to `loaded`. When the allowlist is
+        // configured but denies the family, callable_now collapses to
+        // false regardless of loaded.
+        let allowed = match mcp_config {
+            Some(cfg) => match cfg.allowlist_decision(agent_id, family_name) {
+                AllowlistDecision::Disabled | AllowlistDecision::Allow => true,
+                AllowlistDecision::Deny => false,
+            },
+            None => true,
+        };
+        for name in fam.tool_names() {
+            entries.push(ToolEntry {
+                name: (*name).to_string(),
+                family: family_name.to_string(),
+                loaded,
+                callable_now: loaded && allowed,
+            });
+        }
+    }
+
+    // Always-on bootstraps that are NOT counted via a normal family
+    // walk (in v0.6.4, ALWAYS_ON_TOOLS only contains
+    // `memory_capabilities` which already lives in `Family::Meta`, so
+    // it's already in `entries`. Future bootstraps that don't sit in a
+    // family at all would be appended here with family="always_on" and
+    // unconditionally loaded/callable.)
+    for name in ALWAYS_ON_TOOLS {
+        if !entries.iter().any(|e| e.name == *name) {
+            entries.push(ToolEntry {
+                name: (*name).to_string(),
+                family: "always_on".to_string(),
+                loaded: true,
+                callable_now: true,
+            });
+        }
+    }
+
+    entries
 }
 
 /// Return a stable label for a profile's summary string. Named profiles
@@ -3989,6 +4061,16 @@ fn handle_request(
                         // describing the family taxonomy and which families
                         // the active profile loads. Backward-compat: v1
                         // shape never gets the families overlay.
+                        // v0.7.0 A3 — agent_id resolution mirrors the
+                        // family-listing path's resolution: caller's
+                        // explicit `arguments.agent_id` wins; otherwise
+                        // fall back to the MCP `clientInfo.name`
+                        // captured at initialize time. Threaded into v3
+                        // for per-tool `callable_now` calculation.
+                        let v3_aid = arguments
+                            .get("agent_id")
+                            .and_then(Value::as_str)
+                            .or(mcp_client);
                         let result = match accept {
                             CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
                                 tier_config,
@@ -3996,6 +4078,8 @@ fn handle_request(
                                 embedder.is_some(),
                                 Some(conn),
                                 profile,
+                                mcp_config,
+                                v3_aid,
                             ),
                             _ => handle_capabilities_with_conn(
                                 tier_config,
