@@ -1836,13 +1836,24 @@ pub fn handle_capabilities_with_conn_v3(
     profile: &crate::profile::Profile,
     mcp_config: Option<&crate::config::McpConfig>,
     agent_id: Option<&str>,
+    // v0.7.0 B4 — the harness detected from `initialize.clientInfo.name`
+    // at MCP handshake time. `None` when no handshake has happened
+    // (HTTP callers, or a malformed MCP session that issued
+    // `memory_capabilities` before `initialize`); the resulting
+    // `your_harness_supports_deferred_registration` field is omitted
+    // from the wire via `skip_serializing_if = Option::is_none`.
+    harness: Option<&crate::harness::Harness>,
 ) -> Result<Value, String> {
     let caps = build_capabilities_overlay(tier_config, reranker, embedder_loaded, conn);
     let summary = build_capabilities_summary(profile);
     let describe = build_capabilities_describe_to_user(profile);
     let tools = build_capabilities_tools(profile, mcp_config, agent_id);
     let permitted = build_agent_permitted_families(mcp_config, agent_id);
-    serde_json::to_value(caps.to_v3(summary, describe, tools, permitted)).map_err(|e| e.to_string())
+    // B4 — present only when we know the harness; otherwise omit so
+    // unaware callers and HTTP callers see no schema drift.
+    let deferred = harness.map(crate::harness::Harness::supports_deferred_registration);
+    serde_json::to_value(caps.to_v3(summary, describe, tools, permitted, deferred))
+        .map_err(|e| e.to_string())
 }
 
 /// Build the runtime-overlaid [`Capabilities`] document. Shared between
@@ -3961,6 +3972,13 @@ fn handle_request(
     // (operator hasn't generated one), links go in unsigned, preserving
     // v0.6.4 behaviour.
     active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    // v0.7 Track B (B4) — harness detected from `clientInfo.name` at
+    // MCP `initialize` handshake time. Threaded into the
+    // capabilities-v3 dispatch so the response can carry
+    // `your_harness_supports_deferred_registration` (presence + value
+    // both signal). `None` when no `initialize` has been observed yet
+    // — the field is omitted from the wire on that fall-through.
+    harness: Option<&crate::harness::Harness>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -4164,6 +4182,11 @@ fn handle_request(
                                 profile,
                                 mcp_config,
                                 v3_aid,
+                                // v0.7.0 B4 — pass the detected
+                                // harness through so the response
+                                // surfaces
+                                // `your_harness_supports_deferred_registration`.
+                                harness,
                             ),
                             _ => handle_capabilities_with_conn(
                                 tier_config,
@@ -4549,6 +4572,13 @@ pub fn run_mcp_server(
     // agent_id when the caller doesn't supply one explicitly.
     let mut mcp_client_name: Option<String> = None;
 
+    // v0.7.0 B4 — Harness detected from `clientInfo.name` at handshake
+    // time. Stays `None` until we observe an `initialize` so the
+    // capabilities-v3 response omits
+    // `your_harness_supports_deferred_registration` (presence is
+    // itself meaningful — absence means "we don't know").
+    let mut detected_harness: Option<crate::harness::Harness> = None;
+
     for line in stdin.lock().lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -4572,6 +4602,10 @@ pub fn run_mcp_server(
             && !name.is_empty()
         {
             mcp_client_name = Some(name.to_string());
+            // v0.7.0 B4 — detect the harness so capabilities-v3 +
+            // future B1/B2 loaders can shape responses based on
+            // whether the harness supports deferred-tool registration.
+            detected_harness = Some(crate::harness::Harness::detect(name));
         }
 
         // Notifications have no id — no response expected per JSON-RPC spec
@@ -4600,6 +4634,7 @@ pub fn run_mcp_server(
             profile,
             app_config.mcp.as_ref(),
             active_keypair.as_ref(),
+            detected_harness.as_ref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -5026,6 +5061,7 @@ mod tests {
                 &crate::profile::Profile::full(),
                 None,
                 None,
+                None,
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -5077,6 +5113,7 @@ mod tests {
                 false,
                 None,
                 &crate::profile::Profile::full(),
+                None,
                 None,
                 None,
             );
@@ -5358,6 +5395,7 @@ mod tests {
                 &crate::profile::Profile::full(),
                 None,
                 None,
+                None,
             );
             assert!(
                 resp.error.is_none(),
@@ -5395,6 +5433,7 @@ mod tests {
                     false,
                     None,
                     &crate::profile::Profile::full(),
+                    None,
                     None,
                     None,
                 );
@@ -5451,6 +5490,7 @@ mod tests {
             false,
             None,
             &crate::profile::Profile::full(),
+            None,
             None,
             None,
         )
@@ -5808,6 +5848,7 @@ mod tests {
             &crate::profile::Profile::full(),
             None,
             Some(&kp),
+            None,
         );
         assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
         let text = resp.result.unwrap()["content"][0]["text"]

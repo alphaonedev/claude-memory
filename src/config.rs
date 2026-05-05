@@ -771,6 +771,7 @@ impl Capabilities {
         to_describe_to_user: String,
         tools: Vec<ToolEntry>,
         agent_permitted_families: Option<Vec<String>>,
+        your_harness_supports_deferred_registration: Option<bool>,
     ) -> CapabilitiesV3 {
         CapabilitiesV3 {
             schema_version: "3".to_string(),
@@ -778,6 +779,7 @@ impl Capabilities {
             to_describe_to_user,
             tools,
             agent_permitted_families,
+            your_harness_supports_deferred_registration,
             tier: self.tier.clone(),
             version: self.version.clone(),
             features: self.features.clone(),
@@ -889,6 +891,26 @@ pub struct CapabilitiesV3 {
     /// `tools[]` and counting unique families.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_permitted_families: Option<Vec<String>>,
+
+    /// v0.7.0 B4 — whether the active MCP harness exposes tools
+    /// registered *after* the initial `tools/list` to the LLM. Computed
+    /// at response time from the harness detected at the
+    /// `initialize.clientInfo.name` handshake (see `crate::harness`).
+    ///
+    /// `Some(true)` only for Claude Code today (deferred registration
+    /// via `ToolSearch`). `Some(false)` for every other named harness.
+    /// `None` (omitted from the wire via `skip_serializing_if`) when
+    /// no `clientInfo` was captured — typically HTTP callers, or an
+    /// MCP client that issued `memory_capabilities` before
+    /// `initialize` (malformed but defensively handled by absence).
+    ///
+    /// Track B's runtime loaders (B1 `memory_load_family`, B2
+    /// `memory_smart_load`) key off this bit to shape their
+    /// `to_invoke` text — on `false` harnesses they advise the LLM to
+    /// ask the operator for a `--profile <family>` restart rather
+    /// than expect the new tools to appear mid-session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub your_harness_supports_deferred_registration: Option<bool>,
 
     pub tier: String,
     pub version: String,

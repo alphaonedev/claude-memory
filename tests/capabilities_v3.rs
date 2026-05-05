@@ -31,6 +31,7 @@
 //! - v2 callers see no behavior change (backward compat).
 
 use ai_memory::config::{Capabilities, CapabilitiesV3, FeatureTier, McpConfig, TierConfig};
+use ai_memory::harness::Harness;
 use ai_memory::mcp::{
     CapabilitiesAccept, build_agent_permitted_families, build_capabilities_describe_to_user,
     build_capabilities_summary, build_capabilities_tools, handle_capabilities_with_conn,
@@ -130,6 +131,7 @@ fn cap_v3_response_carries_schema_version_and_summary() {
         false,
         Some(&conn),
         &Profile::core(),
+        None,
         None,
         None,
     )
@@ -234,6 +236,7 @@ fn cap_v3_struct_round_trips_through_serde() {
         "hello human".to_string(),
         Vec::new(),
         None,
+        None,
     );
 
     let json = serde_json::to_value(&v3).expect("serialize v3");
@@ -268,6 +271,7 @@ fn cap_v3_response_carries_to_describe_to_user() {
         false,
         Some(&conn),
         &Profile::core(),
+        None,
         None,
         None,
     )
@@ -384,6 +388,7 @@ fn cap_v3_preserves_v2_sub_blocks() {
         true, // embedder loaded
         Some(&conn),
         &Profile::full(),
+        None,
         None,
         None,
     )
@@ -537,6 +542,7 @@ fn cap_v3_response_carries_tools_array_with_43_entries() {
         &Profile::full(),
         None,
         None,
+        None,
     )
     .expect("v3 capabilities serialize");
 
@@ -605,6 +611,7 @@ fn cap_v3_a4_allowlist_disabled_omits_field() {
         &Profile::core(),
         None,
         Some("alice"),
+        None,
     )
     .expect("v3 capabilities serialize");
     assert!(
@@ -647,6 +654,7 @@ fn cap_v3_a4_allowlist_with_agent_lists_families() {
         &Profile::full(),
         Some(&cfg),
         Some("alice"),
+        None,
     )
     .expect("v3 capabilities serialize");
     let permitted = val["agent_permitted_families"]
@@ -677,10 +685,155 @@ fn cap_v3_a4_allowlist_no_agent_id_omits_field() {
         &Profile::core(),
         Some(&cfg),
         None, // no agent_id
+        None,
     )
     .expect("v3 capabilities serialize");
     assert!(
         val.get("agent_permitted_families").is_none(),
         "no agent_id → field must be absent even with allowlist enabled; got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B4 case 1 — when the detected harness supports deferred-tool
+// registration (Claude Code today), the v3 response carries
+// `your_harness_supports_deferred_registration: true` so the LLM can
+// reason about whether B1's `memory_load_family` will actually surface
+// new tools mid-session.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_b4_claude_code_harness_advertises_deferred_true() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let harness = Harness::ClaudeCode;
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        Some(&harness),
+    )
+    .expect("v3 capabilities serialize");
+    assert_eq!(
+        val.get("your_harness_supports_deferred_registration")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "Claude Code → field must be present and true; got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B4 case 2 — when the detected harness does NOT support deferred
+// registration (Codex today), the field is present but false. Presence
+// is the signal that the substrate did detect a harness; the value
+// tells the LLM that mid-session loading won't surface new tools.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_b4_codex_harness_advertises_deferred_false() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let harness = Harness::Codex;
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        Some(&harness),
+    )
+    .expect("v3 capabilities serialize");
+    assert_eq!(
+        val.get("your_harness_supports_deferred_registration")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "Codex → field must be present and false; got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B4 case 3 — when no clientInfo was captured (HTTP callers, or an MCP
+// session that issued `memory_capabilities` before `initialize`), the
+// field is OMITTED from the wire entirely. Absence carries meaning
+// distinct from `false`: false means "we know your harness can't",
+// absent means "we don't know your harness".
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_b4_no_harness_omits_field_from_wire() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        None, // no harness detected
+    )
+    .expect("v3 capabilities serialize");
+    assert!(
+        val.get("your_harness_supports_deferred_registration")
+            .is_none(),
+        "no harness → field must be absent on wire (skip_serializing_if); got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B4 case 4 — unknown harness (Generic) defaults to false. Conservative
+// because we'd rather under-promise mid-session loading than have an
+// LLM tell an end-user "I just loaded the graph tools" and have those
+// tools never appear because the harness cached the manifest.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_b4_generic_harness_defaults_deferred_false() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let harness = Harness::Generic("some-unknown-mcp-client".to_string());
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        Some(&harness),
+    )
+    .expect("v3 capabilities serialize");
+    assert_eq!(
+        val.get("your_harness_supports_deferred_registration")
+            .and_then(|v| v.as_bool()),
+        Some(false),
+        "unknown harness → field must be present and false (conservative default); got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// B4 case 5 — the v2 wire shape is unaffected by B4. v2 callers must
+// not gain the field even when a harness is in scope (the field lives
+// on `CapabilitiesV3` only).
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_b4_v2_callers_unaffected() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        CapabilitiesAccept::V2,
+    )
+    .expect("v2 capabilities still work");
+    assert!(
+        val.get("your_harness_supports_deferred_registration")
+            .is_none(),
+        "v2 must not gain the B4 field"
     );
 }

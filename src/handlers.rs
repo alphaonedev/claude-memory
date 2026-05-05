@@ -4220,6 +4220,11 @@ pub async fn get_capabilities(
             app.profile.as_ref(),
             app.mcp_config.as_ref().as_ref(),
             None,
+            // v0.7.0 B4 — HTTP path has no MCP `initialize` handshake,
+            // so harness is always None here. The
+            // `your_harness_supports_deferred_registration` field is
+            // omitted on the wire via `skip_serializing_if`.
+            None,
         ),
         _ => crate::mcp::handle_capabilities_with_conn(
             app.tier_config.as_ref(),
