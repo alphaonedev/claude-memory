@@ -1828,7 +1828,8 @@ pub fn handle_capabilities_with_conn_v3(
     let summary = build_capabilities_summary(profile);
     let describe = build_capabilities_describe_to_user(profile);
     let tools = build_capabilities_tools(profile, mcp_config, agent_id);
-    serde_json::to_value(caps.to_v3(summary, describe, tools)).map_err(|e| e.to_string())
+    let permitted = build_agent_permitted_families(mcp_config, agent_id);
+    serde_json::to_value(caps.to_v3(summary, describe, tools, permitted)).map_err(|e| e.to_string())
 }
 
 /// Build the runtime-overlaid [`Capabilities`] document. Shared between
@@ -2079,6 +2080,55 @@ pub fn build_capabilities_tools(
     }
 
     entries
+}
+
+/// v0.7.0 A4 — compute the optional `agent_permitted_families` field
+/// for a v3 capabilities response.
+///
+/// Returns:
+/// - `Some(Vec<...>)` (possibly empty) when `[mcp.allowlist]` is
+///   configured AND an `agent_id` was provided. The vector lists the
+///   canonical family names the agent is permitted to access (per the
+///   `Family::all()` registration order).
+/// - `None` when the allowlist is disabled (no table, empty table, or
+///   `mcp_config = None`) OR when no `agent_id` was provided.
+///   `serde(skip_serializing_if = "Option::is_none")` on the field
+///   means a `None` value drops the field from the wire entirely so
+///   v2-shaped consumers don't see drift from A4 alone.
+///
+/// The wildcard pattern `"*"` participates in the per-family
+/// allowlist_decision call — this matches the existing v0.6.4-008
+/// resolution semantics, so a `"*" = ["core"]` row grants every agent
+/// access to `core` even when their explicit row is missing.
+#[must_use]
+pub fn build_agent_permitted_families(
+    mcp_config: Option<&crate::config::McpConfig>,
+    agent_id: Option<&str>,
+) -> Option<Vec<String>> {
+    use crate::config::AllowlistDecision;
+    use crate::profile::Family;
+
+    // A4 spec: omit the field when allowlist disabled OR no agent_id.
+    let cfg = mcp_config?;
+    let aid = agent_id?;
+    let table = cfg.allowlist.as_ref()?;
+    if table.is_empty() {
+        // Allowlist Disabled (per the v0.6.4-008 contract): omit.
+        return None;
+    }
+
+    let permitted: Vec<String> = Family::all()
+        .iter()
+        .filter(|fam| {
+            matches!(
+                cfg.allowlist_decision(Some(aid), fam.name()),
+                AllowlistDecision::Allow
+            )
+        })
+        .map(|fam| fam.name().to_string())
+        .collect();
+
+    Some(permitted)
 }
 
 /// Return a stable label for a profile's summary string. Named profiles

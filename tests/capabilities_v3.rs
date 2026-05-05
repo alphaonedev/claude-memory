@@ -32,8 +32,9 @@
 
 use ai_memory::config::{Capabilities, CapabilitiesV3, FeatureTier, McpConfig, TierConfig};
 use ai_memory::mcp::{
-    CapabilitiesAccept, build_capabilities_describe_to_user, build_capabilities_summary,
-    build_capabilities_tools, handle_capabilities_with_conn, handle_capabilities_with_conn_v3,
+    CapabilitiesAccept, build_agent_permitted_families, build_capabilities_describe_to_user,
+    build_capabilities_summary, build_capabilities_tools, handle_capabilities_with_conn,
+    handle_capabilities_with_conn_v3,
 };
 use ai_memory::profile::Profile;
 use serde_json::Value;
@@ -229,6 +230,7 @@ fn cap_v3_struct_round_trips_through_serde() {
         "hello operator".to_string(),
         "hello human".to_string(),
         Vec::new(),
+        None,
     );
 
     let json = serde_json::to_value(&v3).expect("serialize v3");
@@ -564,4 +566,118 @@ fn cap_v3_response_carries_tools_array_with_43_entries() {
             "full profile + no allowlist → every tool callable_now: {entry}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// A4 case 1 — allowlist disabled (no McpConfig OR empty table) →
+// `agent_permitted_families` is OMITTED from the v3 response.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a4_allowlist_disabled_omits_field() {
+    // Sub-case A: mcp_config = None.
+    assert_eq!(build_agent_permitted_families(None, Some("alice")), None);
+    assert_eq!(build_agent_permitted_families(None, None), None);
+
+    // Sub-case B: empty allowlist table → Disabled per the v0.6.4-008
+    // contract → omit.
+    let cfg = McpConfig {
+        profile: None,
+        allowlist: Some(HashMap::new()),
+    };
+    assert_eq!(
+        build_agent_permitted_families(Some(&cfg), Some("alice")),
+        None,
+        "empty allowlist table = disabled = omit field"
+    );
+
+    // Sub-case C: full v3 response with allowlist disabled must NOT
+    // include the field on the wire (skip_serializing_if).
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        Some("alice"),
+    )
+    .expect("v3 capabilities serialize");
+    assert!(
+        val.get("agent_permitted_families").is_none(),
+        "allowlist disabled → field must be absent on wire; got: {val}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A4 case 2 — allowlist enabled with agent → field carries the family
+// names the agent is permitted to access.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a4_allowlist_with_agent_lists_families() {
+    let cfg = allowlist(&[
+        ("alice", &["core", "graph"]),
+        ("bob", &["core"]),
+        ("*", &["core"]),
+    ]);
+    // alice → core + graph
+    let alice = build_agent_permitted_families(Some(&cfg), Some("alice")).unwrap();
+    assert_eq!(alice, vec!["core".to_string(), "graph".to_string()]);
+
+    // bob → core only (his explicit row wins over the wildcard)
+    let bob = build_agent_permitted_families(Some(&cfg), Some("bob")).unwrap();
+    assert_eq!(bob, vec!["core".to_string()]);
+
+    // unknown agent → wildcard fallback (core only)
+    let unknown = build_agent_permitted_families(Some(&cfg), Some("eve")).unwrap();
+    assert_eq!(unknown, vec!["core".to_string()]);
+
+    // The field round-trips on the wire.
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::full(),
+        Some(&cfg),
+        Some("alice"),
+    )
+    .expect("v3 capabilities serialize");
+    let permitted = val["agent_permitted_families"]
+        .as_array()
+        .expect("agent_permitted_families must be present when allowlist enabled + agent_id given");
+    let names: Vec<&str> = permitted.iter().filter_map(|v| v.as_str()).collect();
+    assert_eq!(names, vec!["core", "graph"]);
+}
+
+// ---------------------------------------------------------------------------
+// A4 case 3 — allowlist enabled but no agent_id → field omitted (the
+// v0.6.4-008 default for an unknown caller is restrictive, but A4's
+// contract is "tell the caller what they're allowed only when the
+// caller identified themselves" — present absence is the signal).
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a4_allowlist_no_agent_id_omits_field() {
+    let cfg = allowlist(&[("alice", &["core"]), ("*", &["core"])]);
+    assert_eq!(build_agent_permitted_families(Some(&cfg), None), None);
+
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        Some(&cfg),
+        None, // no agent_id
+    )
+    .expect("v3 capabilities serialize");
+    assert!(
+        val.get("agent_permitted_families").is_none(),
+        "no agent_id → field must be absent even with allowlist enabled; got: {val}"
+    );
 }
