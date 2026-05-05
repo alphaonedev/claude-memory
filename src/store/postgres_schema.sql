@@ -193,21 +193,30 @@ CREATE TABLE IF NOT EXISTS namespace_meta (
 -- pending_actions — governance approval queue (Task 1.9–1.10).
 -- ─────────────────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS pending_actions (
-    id            TEXT PRIMARY KEY,
-    action_type   TEXT NOT NULL,
-    memory_id     TEXT,
-    namespace     TEXT NOT NULL,
-    payload       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    requested_by  TEXT NOT NULL,
-    requested_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    status        TEXT NOT NULL DEFAULT 'pending',
-    decided_by    TEXT,
-    decided_at    TIMESTAMPTZ,
-    approvals     JSONB NOT NULL DEFAULT '[]'::jsonb
+    id                       TEXT PRIMARY KEY,
+    action_type              TEXT NOT NULL,
+    memory_id                TEXT,
+    namespace                TEXT NOT NULL,
+    payload                  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    requested_by             TEXT NOT NULL,
+    requested_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    status                   TEXT NOT NULL DEFAULT 'pending',
+    decided_by               TEXT,
+    decided_at               TIMESTAMPTZ,
+    approvals                JSONB NOT NULL DEFAULT '[]'::jsonb,
+    -- v0.7.0 K2 — pending_actions timeout sweeper. Per-row TTL
+    -- (NULL → cluster default) and the stamp set when the sweep
+    -- transitions a stale row to status='expired'.
+    default_timeout_seconds  BIGINT,
+    expired_at               TIMESTAMPTZ
 );
 
 CREATE INDEX IF NOT EXISTS pending_actions_status_idx    ON pending_actions (status);
 CREATE INDEX IF NOT EXISTS pending_actions_namespace_idx ON pending_actions (namespace);
+-- v0.7.0 K2 — composite index for the 60-second sweep query
+-- (`WHERE status='pending' AND ...julianday math`).
+CREATE INDEX IF NOT EXISTS pending_actions_status_requested_idx
+    ON pending_actions (status, requested_at);
 
 -- ─────────────────────────────────────────────────────────────────────
 -- sync_state — per-peer vector-clock high-watermarks.

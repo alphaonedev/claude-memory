@@ -197,7 +197,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       per-subscriber filter.
 // v20 = v0.6.4-009 (NHI guardrails phase 1) capability-expansion
 //       audit_log table.
-const CURRENT_SCHEMA_VERSION: i64 = 20;
+// v21 = v0.7.0 K2 pending_actions timeout sweeper:
+//       `default_timeout_seconds` + `expired_at` columns plus a
+//       composite (status, requested_at) index to bound the sweep
+//       cost.
+const CURRENT_SCHEMA_VERSION: i64 = 21;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -267,6 +271,11 @@ const MIGRATION_V19_SQLITE: &str =
 // v0.6.4-009: capability-expansion audit log table. CREATE TABLE IF NOT
 // EXISTS + indexes — fully idempotent.
 const MIGRATION_V20_SQLITE: &str = include_str!("../migrations/sqlite/0014_v064_audit_log.sql");
+// v0.7.0 K2: pending_actions timeout sweeper. ALTER TABLEs are emitted
+// from Rust (see v21 below) because SQLite has no `ADD COLUMN IF NOT
+// EXISTS`; this file just holds the idempotent index batch.
+const MIGRATION_V21_SQLITE: &str =
+    include_str!("../migrations/sqlite/0015_v07_pending_action_timeouts.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -725,6 +734,38 @@ fn migrate(conn: &Connection) -> Result<()> {
         if version < 20 {
             // v0.6.4-009 — fully idempotent (CREATE TABLE IF NOT EXISTS).
             conn.execute_batch(MIGRATION_V20_SQLITE)?;
+        }
+        if version < 21 {
+            // v0.7.0 K2 — pending_actions timeout sweeper.
+            //
+            // Two new columns back the 60-second background sweep:
+            //   default_timeout_seconds  per-row TTL (NULL → cluster default)
+            //   expired_at               RFC3339 stamp set when sweeper fires
+            //
+            // ALTER TABLE done inline (SQLite has no `ADD COLUMN IF NOT
+            // EXISTS`); SQL file holds the idempotent index batch.
+            //
+            // v0.6.3.1 honesty patch: the v2 capabilities response had
+            // dropped `approval.default_timeout_seconds` because no
+            // sweeper enforced it. K2 closes that gap. The capabilities
+            // wire shape is intentionally unchanged here — v0.7-K5 owns
+            // re-introducing the public surface.
+            let has_timeout: bool = conn
+                .prepare("SELECT default_timeout_seconds FROM pending_actions LIMIT 0")
+                .is_ok();
+            if !has_timeout {
+                conn.execute(
+                    "ALTER TABLE pending_actions ADD COLUMN default_timeout_seconds INTEGER",
+                    [],
+                )?;
+            }
+            let has_expired_at: bool = conn
+                .prepare("SELECT expired_at FROM pending_actions LIMIT 0")
+                .is_ok();
+            if !has_expired_at {
+                conn.execute("ALTER TABLE pending_actions ADD COLUMN expired_at TEXT", [])?;
+            }
+            conn.execute_batch(MIGRATION_V21_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -5033,6 +5074,77 @@ pub fn count_pending_actions_by_status(conn: &Connection, status: &str) -> Resul
     Ok(usize::try_from(count.max(0)).unwrap_or(0))
 }
 
+/// v0.7.0 K2 — pending_actions timeout sweeper.
+///
+/// Scans `pending_actions` for `status='pending'` rows whose age exceeds
+/// the per-row `default_timeout_seconds` (or `global_default_secs` when
+/// the per-row column is NULL). Transitions matching rows to
+/// `status='expired'` and stamps `expired_at = now`.
+///
+/// Returns the list of `(id, namespace)` tuples that were just expired
+/// so the caller can fan out approval-decision events. Empty queue is a
+/// silent no-op.
+///
+/// Closes the v0.6.3.1 honest-Capabilities-v2 disclosure that
+/// `default_timeout_seconds` was previously advertised but unused (the
+/// v2 honesty patch had dropped it from the wire shape; K2 ships the
+/// backing sweeper so the field is meaningful again).
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures (e.g. table missing).
+pub fn sweep_pending_action_timeouts(
+    conn: &Connection,
+    global_default_secs: i64,
+) -> Result<Vec<(String, String)>> {
+    // Step 1 — find candidates. We compute age in SQL via julianday()
+    // arithmetic so the sweep is index-friendly and avoids parsing
+    // every `requested_at` row in Rust. The composite index
+    // `idx_pending_status_requested` (added in migration v21) keeps
+    // the planner from full-scanning the table.
+    //
+    // The `default_timeout_seconds` column is nullable; rows with NULL
+    // fall back to `global_default_secs`. A non-positive global default
+    // disables the sweeper entirely (operator escape hatch).
+    if global_default_secs <= 0 {
+        return Ok(Vec::new());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT id, namespace FROM pending_actions
+         WHERE status = 'pending'
+           AND (julianday('now') - julianday(requested_at)) * 86400.0
+               > COALESCE(default_timeout_seconds, ?1)",
+    )?;
+    let rows: Vec<(String, String)> = stmt
+        .query_map(params![global_default_secs], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Step 2 — flip status='expired' + stamp expired_at. We update
+    // row-by-row inside a single transaction so a failure mid-batch
+    // rolls back cleanly. The WHERE clause re-checks status='pending'
+    // so a concurrent decide_pending_action wins (its decision is
+    // not overwritten).
+    let now = Utc::now().to_rfc3339();
+    let tx_savepoint = conn.unchecked_transaction()?;
+    {
+        let mut update = tx_savepoint.prepare(
+            "UPDATE pending_actions
+             SET status = 'expired', expired_at = ?1
+             WHERE id = ?2 AND status = 'pending'",
+        )?;
+        for (id, _) in &rows {
+            update.execute(params![now, id])?;
+        }
+    }
+    tx_savepoint.commit()?;
+    Ok(rows)
+}
+
 // ---------------------------------------------------------------------------
 // `ai-memory doctor` (P7 / R7) — query helpers.
 // ---------------------------------------------------------------------------
@@ -8554,5 +8666,137 @@ mod tests {
             cnt, 3,
             "expected 3 audit_log indexes (agent_id, ts, event_type)"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // v0.7.0 K2 — pending_actions timeout sweeper.
+    //
+    // Closes the v0.6.3.1 honest-Capabilities-v2 disclosure that
+    // `default_timeout_seconds` was advertised but unused.
+    // ---------------------------------------------------------------
+
+    /// Insert a `pending_actions` row with a back-dated `requested_at`
+    /// so we can drive the sweeper without `tokio::time` games.
+    fn insert_stale_pending(
+        conn: &Connection,
+        id: &str,
+        namespace: &str,
+        age_secs: i64,
+        per_row_timeout: Option<i64>,
+    ) {
+        let requested_at = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO pending_actions
+             (id, action_type, namespace, payload, requested_by, requested_at,
+              status, default_timeout_seconds)
+             VALUES (?1, 'store', ?2, '{}', 'tester', ?3, 'pending', ?4)",
+            params![id, namespace, requested_at, per_row_timeout],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sweep_marks_stale_pending_row_expired() {
+        let conn = test_db();
+        // 2-hour-old pending row; global default is 1 hour → must expire.
+        insert_stale_pending(&conn, "stale-1", "ns/a", 7_200, None);
+
+        let expired = sweep_pending_action_timeouts(&conn, 3_600).unwrap();
+        assert_eq!(expired.len(), 1, "expected exactly one expiry");
+        assert_eq!(expired[0], ("stale-1".to_string(), "ns/a".to_string()));
+
+        // Row is now status='expired' with expired_at populated.
+        let (status, expired_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, expired_at FROM pending_actions WHERE id = ?1",
+                params!["stale-1"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "expired");
+        assert!(
+            expired_at.is_some(),
+            "expired_at must be stamped by the sweeper"
+        );
+    }
+
+    #[test]
+    fn sweep_leaves_fresh_pending_alone() {
+        let conn = test_db();
+        // 30-second-old pending row; global default is 1 hour → still pending.
+        insert_stale_pending(&conn, "fresh-1", "ns/a", 30, None);
+
+        let expired = sweep_pending_action_timeouts(&conn, 3_600).unwrap();
+        assert!(expired.is_empty());
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM pending_actions WHERE id = ?1",
+                params!["fresh-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "pending");
+    }
+
+    #[test]
+    fn sweep_per_row_timeout_overrides_global_default() {
+        let conn = test_db();
+        // 5-minute-old row; per-row TTL = 60s → MUST expire even
+        // though the global default (1h) would say "still fresh".
+        insert_stale_pending(&conn, "short-ttl", "ns/a", 300, Some(60));
+        // Same age, no per-row override → still pending under the
+        // 1h global default.
+        insert_stale_pending(&conn, "no-override", "ns/a", 300, None);
+
+        let expired = sweep_pending_action_timeouts(&conn, 3_600).unwrap();
+        let ids: Vec<&String> = expired.iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec![&"short-ttl".to_string()]);
+    }
+
+    #[test]
+    fn sweep_skips_already_decided_rows() {
+        let conn = test_db();
+        // Pre-insert an OLD row already approved — must not touch it.
+        let approved_at = (chrono::Utc::now() - chrono::Duration::seconds(7_200)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO pending_actions
+             (id, action_type, namespace, payload, requested_by, requested_at,
+              status, decided_by, decided_at)
+             VALUES ('approved-old', 'store', 'ns/a', '{}', 'alice', ?1,
+                     'approved', 'bob', ?1)",
+            params![approved_at],
+        )
+        .unwrap();
+
+        let expired = sweep_pending_action_timeouts(&conn, 60).unwrap();
+        assert!(expired.is_empty(), "non-pending rows must be ignored");
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM pending_actions WHERE id = 'approved-old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "approved", "decided row status preserved");
+    }
+
+    #[test]
+    fn sweep_disabled_when_global_default_non_positive() {
+        let conn = test_db();
+        // Stale row with no per-row TTL.
+        insert_stale_pending(&conn, "stale-2", "ns/a", 7_200, None);
+        // Operator escape hatch: 0 (or negative) global default
+        // disables the sweep entirely.
+        let expired = sweep_pending_action_timeouts(&conn, 0).unwrap();
+        assert!(expired.is_empty());
+        let expired_neg = sweep_pending_action_timeouts(&conn, -1).unwrap();
+        assert!(expired_neg.is_empty());
+    }
+
+    #[test]
+    fn sweep_empty_queue_is_silent_noop() {
+        let conn = test_db();
+        let expired = sweep_pending_action_timeouts(&conn, 60).unwrap();
+        assert!(expired.is_empty());
     }
 }
