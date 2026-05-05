@@ -716,7 +716,7 @@ impl Capabilities {
         }
     }
 
-    /// v0.7.0 (A1+A2+A3): project the report into the v3 shape.
+    /// v0.7.0 (A1+A2+A3+A4): project the report into the v3 shape.
     ///
     /// v3 = v2 +
     ///   - top-level `summary` (A1) — terse description of operational
@@ -730,27 +730,35 @@ impl Capabilities {
     ///     `[mcp.allowlist]` agent-can-call decision so an LLM that
     ///     keeps a manifest cache doesn't need to ask twice to know
     ///     whether a tool will resolve.
+    ///   - top-level `agent_permitted_families` (A4, optional) — when
+    ///     the `[mcp.allowlist]` is enabled AND an `agent_id` is
+    ///     provided, lists the family names the requesting agent is
+    ///     allowed to access (collapses every callable_now=true entry's
+    ///     family to a unique list). When the allowlist is disabled or
+    ///     no agent_id is provided, the field is omitted from the wire
+    ///     (so v2-shaped consumers see no churn from A4 alone).
     ///
-    /// All three are computed by the caller from the live `Profile` +
+    /// All four are computed by the caller from the live `Profile` +
     /// `McpConfig` + `agent_id` state because the [`Capabilities`]
     /// struct itself doesn't know which families the MCP server
     /// actually advertised or which agent is asking.
     ///
-    /// Future v0.7.0 increment (A4) extends this struct with
-    /// `agent_permitted_families`. A5 bumps the default wire shape to
-    /// v3. v2 stays supported indefinitely.
+    /// A5 bumps the default wire shape to v3. v2 stays supported
+    /// indefinitely.
     #[must_use]
     pub fn to_v3(
         &self,
         summary: String,
         to_describe_to_user: String,
         tools: Vec<ToolEntry>,
+        agent_permitted_families: Option<Vec<String>>,
     ) -> CapabilitiesV3 {
         CapabilitiesV3 {
             schema_version: "3".to_string(),
             summary,
             to_describe_to_user,
             tools,
+            agent_permitted_families,
             tier: self.tier.clone(),
             version: self.version.clone(),
             features: self.features.clone(),
@@ -845,6 +853,19 @@ pub struct CapabilitiesV3 {
     /// `tool_definitions()`'s registration walk so a sequential reader
     /// gets a stable presentation.
     pub tools: Vec<ToolEntry>,
+
+    /// v0.7.0 A4 — list of family names this agent is permitted to
+    /// access via the `[mcp.allowlist]` gate. Present (with possibly
+    /// an empty array) only when the allowlist is configured AND an
+    /// `agent_id` was provided. Absent when the allowlist is disabled
+    /// or no agent_id was provided — that absence is meaningful, not a
+    /// drift, hence `Option<Vec<String>>` + `skip_serializing_if`.
+    ///
+    /// LLMs that keep a per-agent manifest cache can use this to
+    /// short-circuit family-level decisions without iterating
+    /// `tools[]` and counting unique families.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_permitted_families: Option<Vec<String>>,
 
     pub tier: String,
     pub version: String,
