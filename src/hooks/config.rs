@@ -188,10 +188,7 @@ fn validate_hook(idx: usize, h: &HookConfig) -> Result<(), HooksConfigError> {
     if h.timeout_ms > MAX_TIMEOUT_MS {
         return Err(HooksConfigError::Validation {
             field: format!("hook[{idx}].timeout_ms"),
-            reason: format!(
-                "{} exceeds maximum {MAX_TIMEOUT_MS}ms",
-                h.timeout_ms
-            ),
+            reason: format!("{} exceeds maximum {MAX_TIMEOUT_MS}ms", h.timeout_ms),
         });
     }
     if h.command.as_os_str().is_empty() {
@@ -398,7 +395,10 @@ namespace = "team/*"
         assert_eq!(hooks.len(), 1);
         let h = &hooks[0];
         assert_eq!(h.event, HookEvent::PostStore);
-        assert_eq!(h.command, PathBuf::from("/usr/local/bin/auto-link-detector"));
+        assert_eq!(
+            h.command,
+            PathBuf::from("/usr/local/bin/auto-link-detector")
+        );
         assert_eq!(h.priority, 100);
         assert_eq!(h.timeout_ms, 5_000);
         assert_eq!(h.mode, HookMode::Daemon);
@@ -436,7 +436,9 @@ namespace = "*"
         let toml_src = "\n\n[[hook]]\nevent = \"post_store\"\nmode = \n";
         let err = HookConfig::load_from_str(toml_src).unwrap_err();
         match err {
-            HooksConfigError::Toml { line, ref message, .. } => {
+            HooksConfigError::Toml {
+                line, ref message, ..
+            } => {
                 assert!(line > 0, "expected non-zero line, got {line}");
                 let displayed = err.to_string();
                 assert!(
@@ -562,7 +564,10 @@ namespace = "*"
         {
             let guard = snapshot.read().await;
             assert_eq!(guard.len(), 1);
-            assert_eq!(guard[0].command, PathBuf::from("/usr/local/bin/auto-link-detector"));
+            assert_eq!(
+                guard[0].command,
+                PathBuf::from("/usr/local/bin/auto-link-detector")
+            );
         }
 
         // Replace on-disk content with config B (different
@@ -612,8 +617,7 @@ namespace = "team/*"
         if let Some(p) = HookConfig::default_path() {
             let s = p.to_string_lossy();
             assert!(
-                s.ends_with("ai-memory/hooks.toml")
-                    || s.ends_with("ai-memory\\hooks.toml"),
+                s.ends_with("ai-memory/hooks.toml") || s.ends_with("ai-memory\\hooks.toml"),
                 "unexpected default path: {s}"
             );
         }
