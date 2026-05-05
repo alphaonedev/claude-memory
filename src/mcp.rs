@@ -2612,7 +2612,11 @@ fn handle_kg_timeline(conn: &rusqlite::Connection, params: &Value) -> Result<Val
     }))
 }
 
-fn handle_kg_invalidate(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+fn handle_kg_invalidate(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    params: &Value,
+) -> Result<Value, String> {
     let source_id = params["source_id"]
         .as_str()
         .ok_or("source_id is required")?;
@@ -2632,14 +2636,54 @@ fn handle_kg_invalidate(conn: &rusqlite::Connection, params: &Value) -> Result<V
     match db::invalidate_link(conn, source_id, target_id, relation, valid_until)
         .map_err(|e| e.to_string())?
     {
-        Some(res) => Ok(json!({
-            "found": true,
-            "source_id": source_id,
-            "target_id": target_id,
-            "relation": relation,
-            "valid_until": res.valid_until,
-            "previous_valid_until": res.previous_valid_until,
-        })),
+        Some(res) => {
+            // v0.7 J4 / G14 — emit `memory_link_invalidated` webhook
+            // event AFTER the supersession is persisted. Mirrors the
+            // `memory_link_created` dispatch in `handle_link`: pull
+            // namespace + agent_id from the source memory so
+            // subscribers see the canonical envelope, then flatten
+            // the supersession-specific details (target/relation +
+            // both timestamps) into the payload. This is the G14
+            // audit-edge pattern — every invalidation surfaces as a
+            // replayable event without requiring a separate audit
+            // table on the SQLite path.
+            let (event_namespace, event_agent_id) = match db::get(conn, source_id) {
+                Ok(Some(mem)) => {
+                    let owner = mem
+                        .metadata
+                        .get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    (mem.namespace, owner)
+                }
+                _ => ("global".to_string(), None),
+            };
+            let details = serde_json::to_value(crate::subscriptions::LinkInvalidatedEventDetails {
+                target_id: target_id.to_string(),
+                relation: relation.to_string(),
+                valid_until: res.valid_until.clone(),
+                previous_valid_until: res.previous_valid_until.clone(),
+            })
+            .ok();
+            crate::subscriptions::dispatch_event_with_details(
+                conn,
+                "memory_link_invalidated",
+                source_id,
+                &event_namespace,
+                event_agent_id.as_deref(),
+                db_path,
+                details,
+            );
+
+            Ok(json!({
+                "found": true,
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation,
+                "valid_until": res.valid_until,
+                "previous_valid_until": res.previous_valid_until,
+            }))
+        }
         None => Ok(json!({
             "found": false,
             "source_id": source_id,
@@ -4504,7 +4548,7 @@ fn handle_request(
                 "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
                 "memory_entity_get_by_alias" => handle_entity_get_by_alias(conn, arguments),
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
-                "memory_kg_invalidate" => handle_kg_invalidate(conn, arguments),
+                "memory_kg_invalidate" => handle_kg_invalidate(conn, db_path, arguments),
                 "memory_kg_query" => handle_kg_query(conn, arguments),
                 "memory_delete" => {
                     handle_delete(conn, db_path, arguments, vector_index, mcp_client)

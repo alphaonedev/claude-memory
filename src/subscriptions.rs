@@ -77,11 +77,18 @@ pub struct NewSubscription<'a> {
 /// v0.6.3.1 honest-Capabilities-v2 disclosure that
 /// `approval.subscribers` was advertised but never published — the
 /// K10 Approval API HTTP+SSE handler consumes these events directly.
+///
+/// v0.7 J4 / G14 — `memory_link_invalidated` also joins so subscribers
+/// can replay the audit-edge timeline (every successful
+/// `memory_kg_invalidate` fires this event after the link's
+/// `valid_until` is set, regardless of which KG backend handled the
+/// SET).
 pub const WEBHOOK_EVENT_TYPES: &[&str] = &[
     "memory_store",
     "memory_promote",
     "memory_delete",
     "memory_link_created",
+    "memory_link_invalidated",
     "memory_consolidated",
     "approval_requested",
 ];
@@ -379,6 +386,24 @@ pub struct ApprovalRequestedEventDetails {
     /// this event — the decision flows through the planned
     /// `approval_decided` event in K7.
     pub status: String,
+}
+
+/// `memory_link_invalidated` event (v0.7 J4 / G14) — fires after a
+/// successful `memory_kg_invalidate` writes `valid_until` on the
+/// `(source_id, target_id, relation)` link. The outer `memory_id`
+/// carries the source id (the link-author side); `target_id`,
+/// `relation`, and the freshly-written `valid_until` describe the
+/// supersession edge so consumers can replay the invalidation log
+/// without re-reading `memory_links`. `previous_valid_until`
+/// distinguishes the first supersession (`None`) from an idempotent
+/// retry (carries the prior stamp).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkInvalidatedEventDetails {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_until: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_valid_until: Option<String>,
 }
 
 /// Fire an event to all matching subscribers. Each dispatch runs in

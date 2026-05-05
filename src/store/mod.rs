@@ -156,6 +156,31 @@ pub struct KgTimelineRow {
     pub target_namespace: String,
 }
 
+/// Outcome of [`crate::store::postgres::PostgresStore::kg_invalidate`] at
+/// the SAL layer.
+///
+/// v0.7 J4 substrate: both the Cypher (AGE) backend and the SQL fallback
+/// project their result into this shared shape, mirroring
+/// [`crate::db::InvalidateResult`] (the SQLite-side row used by
+/// `db::invalidate_link`). `valid_until` is the timestamp now stored on
+/// the link; `previous_valid_until` is the prior value, or `None` if
+/// this was the first invalidation. `found` is `false` when the
+/// `(source_id, target_id, relation)` triple did not match an existing
+/// link — callers should treat that as a no-op rather than an error so
+/// the dispatcher contract matches the SQLite path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KgInvalidateRow {
+    /// True when an existing link was matched and updated; false when
+    /// the triple did not exist.
+    pub found: bool,
+    /// RFC3339 timestamp now stored on the link's `valid_until` column.
+    /// Empty string when `found` is false.
+    pub valid_until: String,
+    /// Prior value of `valid_until` before the update, or `None` if
+    /// the link had no prior supersession (or `found` is false).
+    pub previous_valid_until: Option<String>,
+}
+
 impl std::fmt::Display for KgBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
