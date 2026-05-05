@@ -1,0 +1,617 @@
+<!--
+  Copyright 2026 AlphaOne LLC
+  SPDX-License-Identifier: Apache-2.0
+
+  v0.7 Compatibility Matrix — per-harness × per-feature support grid for the
+  attested-cortex release. Lifted and consolidated from:
+   - docs/v0.7/V0.7-EPIC.md (workstream summary)
+   - docs/v0.7/rfc-attested-cortex.md §"Compatibility matrix"
+   - docs/MIGRATION_v0.7.md §"Upgrade steps" / §"Backward compat"
+   - docs/index.html §"cortex-on-core" (v0.6.4 harness compat baseline)
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>v0.7 Compatibility Matrix — attested-cortex | ai-memory</title>
+<meta name="description" content="ai-memory v0.7 (attested-cortex) per-harness compatibility matrix. Which harnesses (Claude Code, Claude Desktop, Codex, Cursor, Cline, Continue, Aider, Goose, generic JSON-RPC) support which v0.7 features (capabilities v3, memory_load_family, memory_smart_load, hook pipeline, Ed25519 attestation, sidechain transcripts, Apache AGE, approval API). Status emojis: supported, partial, not yet, in progress.">
+<link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/v0.7/compatibility-matrix.html">
+<style>
+:root{--bg:#000;--bg-raised:#0a0a0a;--bg-card:#111;--bg-elev:#161616;--bg-code:#1a1a1a;--border:#262626;--border-hl:#3d3d3d;--text:#fff;--text-muted:#999;--text-dim:#666;--p1:#6ee7ff;--p2:#ffb86b;--p3:#c8a2ff;--good:#2ea043;--warn:#ffb86b;--bad:#f85149;--prog:#c8a2ff;--accent:#6ee7ff;--green:#2ea043;--font-mono:'SF Mono','Cascadia Code','Fira Code',Consolas,monospace;--font-sans:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;--max-w:1280px}
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth;scroll-padding-top:5rem}
+body{font-family:var(--font-sans);background:var(--bg);color:var(--text);line-height:1.6;-webkit-font-smoothing:antialiased;overflow-x:hidden}
+a{color:var(--accent);text-decoration:none}a:hover{filter:brightness(1.2)}
+code{font-family:var(--font-mono);font-size:.85em;background:var(--bg-code);padding:.1em .35em;border-radius:4px}
+pre{font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);border:1px solid var(--border);border-radius:8px;padding:1rem;overflow-x:auto;margin:1rem 0}
+.container{max-width:var(--max-w);margin:0 auto;padding:0 1.5rem}
+h1,h2,h3{font-weight:700;letter-spacing:-0.02em;color:#fff}
+h1{font-size:clamp(2.2rem,5vw,3.6rem);line-height:1.05;letter-spacing:-0.04em;margin-bottom:1rem}
+h2{font-size:1.85rem;margin-bottom:.6rem;margin-top:0}
+h3{font-size:1.15rem;margin-bottom:.5rem}
+p{color:var(--text-muted);margin-bottom:1rem}
+.topnav{position:sticky;top:0;z-index:50;background:rgba(0,0,0,0.9);backdrop-filter:blur(12px);border-bottom:1px solid var(--border)}
+.topnav .inner{display:flex;align-items:center;justify-content:space-between;max-width:var(--max-w);margin:0 auto;padding:.9rem 1.5rem;font-size:.875rem}
+.topnav a{color:var(--text-muted);margin-right:1.25rem}
+.topnav a:hover,.topnav a.active{color:var(--text)}
+.topnav .home-link{color:var(--text);font-weight:600}
+.hero{padding:5rem 1.5rem 3rem;text-align:center;background:radial-gradient(ellipse at center,rgba(110,231,255,0.08),transparent 60%),radial-gradient(ellipse at bottom,rgba(46,160,67,0.05),transparent 70%);border-bottom:1px solid var(--border)}
+.hero .badge{display:inline-block;padding:.4rem 1rem;background:rgba(110,231,255,0.1);border:1px solid var(--p1);color:var(--p1);border-radius:999px;font-family:var(--font-mono);font-size:.85rem;margin-bottom:1.5rem}
+.hero .subtitle{font-size:1.15rem;color:var(--text-muted);max-width:820px;margin:0 auto 1.5rem}
+.hero .meta{display:flex;justify-content:center;gap:2rem;color:var(--text-dim);font-family:var(--font-mono);font-size:.85rem;flex-wrap:wrap}
+section{padding:4rem 0;border-bottom:1px solid var(--border)}
+.eyebrow{display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border-hl);border-radius:999px}
+.lede{color:var(--text-muted);font-size:1.05rem;max-width:820px;margin-bottom:2rem}
+.grid-2{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:1.25rem}
+.grid-3{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem}
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:1.5rem;position:relative}
+.card.cyan{border-top:3px solid var(--p1)}
+.card.amber{border-top:3px solid var(--p2)}
+.card.violet{border-top:3px solid var(--p3)}
+.card.green{border-top:3px solid var(--good)}
+.card h3{margin-bottom:.65rem}
+.card p{font-size:.92rem;color:var(--text-muted);margin-bottom:.75rem}
+.card .tag{font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;color:var(--text-muted);text-transform:uppercase;margin-bottom:.5rem;display:block}
+.matrix-wrap{overflow-x:auto;margin:1rem 0 1.5rem;border:1px solid var(--border);border-radius:10px;background:var(--bg-card)}
+table.matrix{width:100%;border-collapse:collapse;font-size:.86rem;min-width:1100px}
+table.matrix th,table.matrix td{text-align:center;padding:.6rem .7rem;border-bottom:1px solid var(--border);border-right:1px solid var(--border);color:var(--text-muted)}
+table.matrix th{color:#fff;font-weight:600;background:var(--bg-elev);font-size:.78rem;letter-spacing:.02em;vertical-align:bottom}
+table.matrix th.harness-col,table.matrix td.harness-col{text-align:left;color:#fff;font-weight:600;background:var(--bg-elev);position:sticky;left:0;z-index:1;min-width:180px}
+table.matrix td.harness-col{background:var(--bg-card);border-right:2px solid var(--border-hl)}
+table.matrix tbody tr:hover td{background:rgba(110,231,255,0.03)}
+table.matrix tbody tr:hover td.harness-col{background:rgba(110,231,255,0.06)}
+table.matrix .cell-good{color:var(--good);font-weight:700}
+table.matrix .cell-warn{color:var(--warn);font-weight:700}
+table.matrix .cell-bad{color:var(--bad);font-weight:700}
+table.matrix .cell-prog{color:var(--prog);font-weight:700}
+table.matrix .cell-na{color:var(--text-dim)}
+table.matrix th .feat-tag{display:block;font-family:var(--font-mono);font-size:.65rem;letter-spacing:.08em;color:var(--text-muted);text-transform:uppercase;margin-bottom:.25rem;font-weight:500}
+.legend{display:flex;flex-wrap:wrap;gap:1rem;font-size:.85rem;color:var(--text-muted);margin:.5rem 0 1.5rem;padding:.75rem 1rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px}
+.legend span{white-space:nowrap}
+.legend strong{color:#fff;margin-right:.35rem}
+table.simple{width:100%;border-collapse:collapse;margin:1rem 0;font-size:.92rem}
+table.simple th,table.simple td{text-align:left;padding:.65rem .85rem;border-bottom:1px solid var(--border);color:var(--text-muted)}
+table.simple th{color:#fff;font-weight:600;background:var(--bg-elev);font-size:.85rem}
+table.simple tr:hover{background:rgba(110,231,255,0.03)}
+ul.checked{list-style:none;padding-left:0}
+ul.checked li{padding-left:1.5rem;position:relative;margin:.35rem 0;color:var(--text-muted);font-size:.92rem}
+ul.checked li::before{content:"✓";position:absolute;left:0;color:var(--good);font-weight:800}
+.callout{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--p1);border-radius:10px;padding:1.25rem 1.5rem;margin:1.25rem 0}
+.callout.green{border-left-color:var(--good)}
+.callout.amber{border-left-color:var(--p2)}
+.callout.violet{border-left-color:var(--p3)}
+.callout p{font-size:.92rem;color:var(--text-muted);margin-bottom:.5rem}
+.callout p:last-child{margin-bottom:0}
+.callout strong{color:#fff}
+.cta-row{display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;margin-top:2rem}
+.cta-row a{padding:.7rem 1.25rem;border-radius:10px;font-weight:600;font-size:.92rem;border:1px solid var(--p1);color:var(--p1)}
+.cta-row a.solid{background:var(--p1);color:#000;border-color:var(--p1)}
+.cta-row a.amber{border-color:var(--p2);color:var(--p2)}
+.cta-row a.green{border-color:var(--good);color:var(--good)}
+.cta-row a.violet{border-color:var(--p3);color:var(--p3)}
+footer{padding:2.5rem 1.5rem;text-align:center;color:var(--text-dim);font-size:.85rem;border-top:1px solid var(--border)}
+</style>
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="inner">
+    <a class="home-link" href="../index.html">ai-memory&trade;</a>
+    <div class="right">
+      <a href="../index.html">Home</a>
+      <a href="../architectures.html">Tiers T1&rarr;T5</a>
+      <a href="../whats-new-v064.html">v0.6.4</a>
+      <a href="compatibility-matrix.html" class="active">v0.7 compat</a>
+      <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">Discovery Gate</a>
+      <a href="https://alphaonedev.github.io/ai-memory-test-hub/" style="color:#6ee7ff">Test Hub</a>
+      <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="container">
+    <span class="badge">v0.7.0 &middot; attested-cortex &middot; in progress</span>
+    <h1>v0.7 Compatibility Matrix</h1>
+    <p class="subtitle">
+      Which AI harnesses support which v0.7 attested-cortex features &mdash; today,
+      planned, in progress, blocked. The operator's contract for choosing a harness
+      against the attested-cortex feature set.
+    </p>
+    <div class="meta">
+      <span>9 harnesses</span>
+      <span>8 v0.7 features</span>
+      <span>schema v20 &rarr; v22</span>
+      <span>updated 2026-05-05</span>
+    </div>
+    <div class="cta-row">
+      <a class="solid" href="V0.7-EPIC.md">📐 V0.7 EPIC</a>
+      <a class="amber" href="../MIGRATION_v0.7.md">📖 Migration v0.7</a>
+      <a class="violet" href="rfc-attested-cortex.md">📑 RFC: attested-cortex</a>
+      <a class="green" href="https://alphaonedev.github.io/ai-memory-discovery-gate/">🟢 Discovery Gate</a>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LEGEND ============ -->
+<section>
+  <div class="container">
+    <span class="eyebrow">How to read this page</span>
+    <h2>The matrix</h2>
+    <p class="lede">
+      Each row is an MCP-speaking AI harness. Each column is a v0.7 feature track. Cells use a five-level
+      status alphabet so the operator can scan a row (&ldquo;what does my harness do?&rdquo;) or a
+      column (&ldquo;who has this feature?&rdquo;) at a glance.
+    </p>
+
+    <div class="legend">
+      <span><strong>✅</strong> supported &mdash; lands in v0.7.0, validated end-to-end</span>
+      <span><strong>⚠️</strong> partial &mdash; works with caveats; see notes</span>
+      <span><strong>🚧</strong> in progress &mdash; track is open, lands later in v0.7.x</span>
+      <span><strong>❌</strong> not yet &mdash; harness lacks the prerequisite (e.g. deferred-tool registration)</span>
+      <span><strong>N/A</strong> not applicable to this harness shape</span>
+    </div>
+
+    <div class="matrix-wrap">
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th class="harness-col">Harness</th>
+            <th><span class="feat-tag">A1+A2</span>Capabilities&nbsp;v3<br>(<code>accept="v3"</code>)</th>
+            <th><span class="feat-tag">B1</span><code>memory_load_family</code></th>
+            <th><span class="feat-tag">B2</span><code>memory_smart_load</code></th>
+            <th><span class="feat-tag">G-track</span>Hook&nbsp;pipeline</th>
+            <th><span class="feat-tag">H-track</span>Ed25519&nbsp;attestation</th>
+            <th><span class="feat-tag">I-track</span>Sidechain&nbsp;transcripts</th>
+            <th><span class="feat-tag">J-track</span>Apache&nbsp;AGE<br>(Postgres)</th>
+            <th><span class="feat-tag">K10</span>Approval&nbsp;API</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="harness-col">Claude&nbsp;Code<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">Anthropic, deferred-tool registration via ToolSearch</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+            <td class="cell-prog">🚧</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Claude&nbsp;Desktop<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">Anthropic, eager-load only</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Codex&nbsp;CLI<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">OpenAI, eager-load only</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Cursor<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">Anysphere, MCP via stdio</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Cline<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">VS Code extension, MCP via stdio</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Continue.dev<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">VS Code / JetBrains, MCP via stdio</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Aider<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">CLI pair-programmer, MCP via stdio</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Goose<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">Block / Square, MCP via stdio</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-warn">⚠️</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-prog">🚧</td>
+          </tr>
+          <tr>
+            <td class="harness-col">Generic JSON-RPC<br><span style="font-weight:400;color:var(--text-muted);font-size:.75rem">any MCP-compliant client / SDK</span></td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+            <td class="cell-good">✅</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p><strong>Reading guide.</strong> The substrate features (G/H/I/J/K-track) ship in the v0.7.0
+      server binary &mdash; they are <strong>server-side capabilities</strong> that any MCP-speaking
+      client can drive over JSON-RPC. The harness column tells you whether the harness's
+      <em>UX shell</em> exposes those capabilities ergonomically (e.g. surfacing approval prompts to
+      the operator, or routing <code>memory_load_family</code> as a natural-language affordance).
+      Capabilities v3 (A1+A2) is unconditionally supported by every MCP harness because it&rsquo;s a
+      passive response-shape change &mdash; the harness simply receives more data.</p>
+      <p><strong>Why <code>memory_load_family</code> / <code>memory_smart_load</code> show partial / in-progress.</strong>
+      Eager-load harnesses (Claude Desktop, Codex, Cursor, Cline, Continue, Aider, Goose) can call
+      these tools, but cannot mid-session register newly-loaded tools without a session restart.
+      Claude Code is the only first-class harness today with deferred-tool registration via
+      ToolSearch &mdash; B1/B2 land in Claude Code first and roll out as harnesses adopt the MCP
+      <code>notifications/tools/list_changed</code> primitive.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ FEATURE COLUMN GLOSSARY ============ -->
+<section style="background:var(--bg-raised)">
+  <div class="container">
+    <span class="eyebrow">What each column means</span>
+    <h2>Feature glossary</h2>
+    <p class="lede">Each v0.7 feature column maps to one or more tracks in
+      <a href="V0.7-EPIC.md">V0.7-EPIC.md</a>. The references below tie each cell&rsquo;s status back
+      to a specific PR / RFC section / migration paragraph.</p>
+
+    <div class="grid-2">
+      <div class="card cyan">
+        <span class="tag">A1 + A2 &middot; just merged via #556</span>
+        <h3>Capabilities&nbsp;v3 schema</h3>
+        <p>The <code>memory_capabilities</code> response gets a top-level <code>schema_version: 3</code>
+        field plus per-family auto-discovery driven by the client request header
+        <code>accept="v3"</code>. v2 fields stay at the same paths with the same shapes &mdash;
+        v3 is strictly additive. SDKs that pin v2 receive the v2 response unchanged through
+        all of v0.7.x. <em>Universal support</em>: any harness that already speaks
+        <code>memory_capabilities</code> receives v3 transparently.</p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="canonical-phrasings.md">canonical-phrasings.md</a> &middot;
+        <a href="rfc-attested-cortex.md#compatibility-matrix">RFC §Compatibility matrix</a></p>
+      </div>
+
+      <div class="card amber">
+        <span class="tag">B1 &middot; lands later in v0.7.x</span>
+        <h3><code>memory_load_family</code></h3>
+        <p>Named loader tool that takes a family identifier (e.g. <code>"governance"</code>,
+        <code>"knowledge_graph"</code>) and registers that family&rsquo;s tools into the live MCP
+        session. Replaces the v0.6.4 paradigm of
+        <code>memory_capabilities(family=&hellip;, include_schema=true)</code> as the canonical
+        runtime-expansion path. Most cells today are <strong>🚧 in progress</strong> because B1
+        is mid-track in v0.7.x.</p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track B</a></p>
+      </div>
+
+      <div class="card violet">
+        <span class="tag">B2 &middot; lands later in v0.7.x</span>
+        <h3><code>memory_smart_load</code></h3>
+        <p>Natural-language loader that takes an <code>intent</code> string
+        (e.g. <code>"I need to write a permission policy"</code>) and infers which families to
+        register. Built on top of B1 plus the v0.6.5 schema-compaction work absorbed into Track
+        C. This is the cortex-fluent answer to the v0.6.4 fancy-notebook framing &mdash;
+        the agent describes what it wants, not which tools to load.</p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track B</a> &middot;
+        <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/546">#546</a></p>
+      </div>
+
+      <div class="card green">
+        <span class="tag">G-track &middot; Bucket 0</span>
+        <h3>Hook pipeline</h3>
+        <p>Subprocess JSON-stdio hook executor with 20 documented event types
+        (<code>pre_store</code>, <code>post_store</code>, <code>pre_link</code>, <code>post_link</code>,
+        <code>pre_recall</code>, <code>pre_transcript_store</code>, etc.), four decision shapes
+        (<code>Allow</code> / <code>Modify(MemoryDelta)</code> / <code>Deny</code> /
+        <code>AskUser</code>), per-event-class hard timeouts, and SIGHUP hot reload. Server-side
+        feature; transparent to the harness. <strong>✅ universal.</strong></p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track G</a> &middot;
+        <a href="rfc-attested-cortex.md">RFC §Hook pipeline</a></p>
+      </div>
+
+      <div class="card cyan">
+        <span class="tag">H-track &middot; Bucket 1</span>
+        <h3>Ed25519 attestation</h3>
+        <p>Per-agent Ed25519 keypair management, outbound link signing over canonical CBOR
+        (RFC 8949 §4.2.1), inbound verification against the <code>observed_by</code> claim,
+        and a tri-state <code>attest_level</code> enum (<code>unsigned</code> / <code>self_signed</code>
+        / <code>peer_attested</code>) returned in every link record. Server-side &mdash; harness
+        sees only the new field. <strong>✅ universal.</strong></p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track H</a> &middot;
+        <a href="rfc-attested-cortex.md">RFC §Ed25519 attestation</a></p>
+      </div>
+
+      <div class="card amber">
+        <span class="tag">I-track &middot; Bucket 1.7</span>
+        <h3>Sidechain transcripts</h3>
+        <p>Append-only <code>memory_transcripts</code> table (BLOB + zstd-3) plus
+        <code>memory_transcript_links</code> join table, per-namespace TTL with
+        archive-then-prune lifecycle, and the <code>memory_replay &lt;id&gt;</code> MCP tool.
+        Lets agents store full reasoning traces alongside the conclusions. Server-side.
+        <strong>✅ universal.</strong></p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track I</a></p>
+      </div>
+
+      <div class="card violet">
+        <span class="tag">J-track &middot; Postgres-only</span>
+        <h3>Apache AGE</h3>
+        <p>Optional Postgres-backed Cypher implementations of <code>memory_kg_query</code>,
+        <code>memory_kg_timeline</code>, <code>memory_kg_invalidate</code>, plus the new
+        <code>memory_find_paths(source, target)</code> MCP tool. Dual-path tests assert
+        set-equivalent results vs. the SQLite CTE backend. Bench-gated:
+        AGE-mode p95 must be &ge;30% faster than CTE-mode at depth=5.
+        <strong>N/A on the SQLite default install</strong>; opt-in via Postgres adapter.</p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track J</a> &middot;
+        <a href="../ADR-0002-kg-schema-v15-backward-incompat.md">ADR-0002</a></p>
+      </div>
+
+      <div class="card green">
+        <span class="tag">K10 &middot; lands later in v0.7.x</span>
+        <h3>Approval API</h3>
+        <p>HTTP + SSE + MCP surfaces for human-in-the-loop approvals, with HMAC mandatory and
+        <code>remember=forever</code> persistence. Wraps the K9 permission-decision contract
+        plus the G4 hook <code>AskUser</code> decision shape. Most harness cells show
+        <strong>🚧 in progress</strong> &mdash; harness UX integration is per-harness work
+        (the API is universal but the UX shell varies).</p>
+        <p style="font-size:.82rem"><strong>Refs:</strong>
+        <a href="V0.7-EPIC.md">V0.7-EPIC.md §Track K10</a></p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ HOW WE TESTED THIS ============ -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Empirical, not aspirational</span>
+    <h2>How we tested this</h2>
+    <p class="lede">
+      Every cell in the matrix above is backed by a Discovery Gate observation cell. The Discovery
+      Gate is a public, append-only ledger of <em>live LLM × harness × release-binary</em> runs,
+      with full transcripts, MCP wire logs, and machine-checkable verdict JSON.
+    </p>
+
+    <h3>T0 calibration cells (cross-harness baseline)</h3>
+    <p>The <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/tests/calibration_t0.rs"><code>tests/calibration_t0.rs</code></a>
+    suite drives a synthetic MCP client through every cell of the matrix above &mdash;
+    capability-discovery sweep, loader invocation, hook fire-and-decision, attestation
+    round-trip, transcript replay, AGE/CTE dual-path equivalence, and approval-API HMAC
+    handshake &mdash; against the v0.7.0 release binary. CI-gated; any regression fails the PR.</p>
+
+    <h3>Discovery Gate harness cells</h3>
+    <p>The <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/">Discovery Gate</a>
+    repo runs each supported harness against the v0.7.0 release binary with a real LLM and
+    publishes the verdict JSON. v0.6.4 ran 6/6 PASS against live xAI Grok 4.3; v0.7.0 expands
+    to T5 mesh-recovery cells plus per-feature tracks (G/H/I/J/K).</p>
+
+    <table class="simple">
+      <thead>
+        <tr><th>Tier</th><th>What it measures</th><th>v0.6.4 baseline</th><th>v0.7.0 target</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><strong>T0</strong> Calibration</td><td>Wire-shape parity, error-recovery diagnostics</td><td>6/6 PASS</td><td>Per-track gate, all green</td></tr>
+        <tr><td><strong>T1</strong> Awareness</td><td>Agent recognizes all families exist</td><td>100% PASS</td><td>Capabilities v3 must surface every loader</td></tr>
+        <tr><td><strong>T2</strong> Reactive recovery</td><td>Agent recovers from <code>-32601</code> via <code>--include-schema</code></td><td>100% PASS</td><td>Same; <code>memory_load_family</code> path also tested</td></tr>
+        <tr><td><strong>T3</strong> Proactive expansion</td><td>Agent reaches for the loader <em>before</em> failing</td><td>100% PASS</td><td><code>memory_smart_load(intent=&hellip;)</code> proactive-load path</td></tr>
+        <tr><td><strong>T4</strong> Mesh recovery</td><td>Mesh routes around misconfigured peers</td><td>100% PASS (3/3)</td><td>K6 A2A correlation IDs + retry + replay protection</td></tr>
+        <tr><td><strong>T5</strong> Attestation</td><td>Inbound link verified against peer&rsquo;s known pubkey</td><td>n/a</td><td>H6 verification end-to-end test, signed-events audit table</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ============ WHAT'S PLANNED ============ -->
+<section style="background:var(--bg-raised)">
+  <div class="container">
+    <span class="eyebrow">Roadmap honesty</span>
+    <h2>What&rsquo;s planned for v0.7.1+</h2>
+    <p class="lede">
+      Not every track lands in the v0.7.0 cut. The items below are explicitly deferred to
+      v0.7.1 or later, with a published rationale. This section is the operator&rsquo;s
+      counterpart to the &ldquo;deferred&rdquo; section in
+      <a href="rfc-attested-cortex.md#out-of-scope--explicitly-deferred">rfc-attested-cortex.md §Out of scope</a>.
+    </p>
+
+    <div class="grid-2">
+      <div class="card amber">
+        <span class="tag">Deferred to v0.7.1 (post-ship patch)</span>
+        <h3>Operational polish</h3>
+        <ul class="checked">
+          <li>A2A test scenarios full sweep (S25-S40 federation equivalents)</li>
+          <li>Per-agent quotas full enforcement (per-tool granularity)</li>
+          <li>Full governance-to-permissions migration polish (edge-case shapes)</li>
+          <li>NHI guardrails phase 2 (per-agent profile pre-warm; depends on #238)</li>
+        </ul>
+      </div>
+
+      <div class="card violet">
+        <span class="tag">Deferred to v0.8 (coordination-primitives)</span>
+        <h3>Curator + CRDTs + compaction</h3>
+        <ul class="checked">
+          <li>R4 &mdash; Curator CLI surface (wraps Pillar 2.5 + Bucket 0 hooks)</li>
+          <li>R6 &mdash; Consensus memory truth-determination (CRDT LWW-Register tiebreak)</li>
+          <li>End-to-end memory encryption (X25519 + ChaCha20-Poly1305) &mdash; #228</li>
+          <li>Typed cognition (Goal / Plan / Step / Observation / Decision)</li>
+          <li>Six-stage compaction pipeline + distributed task queue</li>
+        </ul>
+      </div>
+
+      <div class="card cyan">
+        <span class="tag">Deferred to v0.9 (skill-memories)</span>
+        <h3>Reranker + skills</h3>
+        <ul class="checked">
+          <li>R8 &mdash; TOON v2 schema inference (depends on v0.8 typed-cognition)</li>
+          <li>Default-on cross-encoder reranker + pool-of-N batching</li>
+          <li>Skill memories as a first-class type</li>
+          <li><code>sqlite-vec</code> migration + per-namespace HNSW shards</li>
+          <li>Function calling in <code>llm.rs</code> + streaming tool responses</li>
+        </ul>
+      </div>
+
+      <div class="card green">
+        <span class="tag">Deferred to v1.0 (federation-maturity)</span>
+        <h3>Stability commitments</h3>
+        <ul class="checked">
+          <li>API stability guarantee + strict semver discipline</li>
+          <li>Public security audit (post full attestation/permissions/federation)</li>
+          <li>mDNS auto-discovery for federation</li>
+          <li>OpenTelemetry standardization across the codebase</li>
+          <li>Memory Portability Spec v2 (multi-implementation interop tests)</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="callout violet">
+      <p><strong>Permanently out of OSS scope.</strong> Hardware-backed key storage (TPM / HSM /
+      Secure Enclave), compliance certification (FIPS-140, Common Criteria), 24x7 SLA support,
+      curated skill marketplace operations, and hosted multi-tenant federation hubs all live
+      in the AgenticMem commercial layer. The OSS provides the abstractions and protocols;
+      the certified-managed deployments are commercial. See
+      <a href="rfc-attested-cortex.md#out-of-scope--explicitly-deferred">RFC §Out of scope</a>
+      for the full rationale.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SDK COMPAT QUICK TABLE ============ -->
+<section>
+  <div class="container">
+    <span class="eyebrow">Server &times; SDK</span>
+    <h2>SDK compatibility quick table</h2>
+    <p class="lede">
+      The companion table for harness authors. Lifted directly from
+      <a href="rfc-attested-cortex.md#serversdk-compatibility">rfc-attested-cortex.md §Server / SDK compatibility</a>.
+    </p>
+
+    <table class="simple">
+      <thead>
+        <tr>
+          <th>Server version</th>
+          <th>SDK 0.6.3</th>
+          <th>SDK 0.6.4</th>
+          <th>SDK 0.7.0</th>
+          <th>Notes</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><strong>v0.6.3</strong></td>
+          <td>✅</td>
+          <td>✅ (additive only)</td>
+          <td>⚠️ (v0.7 SDK may call missing tools)</td>
+          <td>v0.6.3 lacks loaders, AGE, attestation</td>
+        </tr>
+        <tr>
+          <td><strong>v0.6.4</strong></td>
+          <td>✅</td>
+          <td>✅</td>
+          <td>⚠️ (v0.7 SDK may call missing tools)</td>
+          <td>v0.6.4 lacks all v0.7 features</td>
+        </tr>
+        <tr>
+          <td><strong>v0.7.0</strong></td>
+          <td>✅ (v2 fields preserved)</td>
+          <td>✅ (v2 fields preserved; v3 ignored)</td>
+          <td>✅ (full feature set)</td>
+          <td>Wire compat preserved through v0.7.x</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout green">
+      <p><strong>Forward compat.</strong> The v0.7.0 server preserves v0.6.4 wire formats
+      (v2 capabilities response, all existing tool surfaces, all existing HTTP routes).
+      A v0.6.4 SDK calling a v0.7.0 server sees the same shapes it saw before; new fields
+      are present in responses but the SDK ignores them. New tools (loaders,
+      <code>memory_find_paths</code>, <code>memory_replay</code>, <code>memory_verify</code>,
+      <code>memory_approval_*</code>) are present in <code>tools/list</code> but the v0.6.4 SDK
+      doesn&rsquo;t call them; no harm.</p>
+      <p><strong>Backward compat caveat.</strong> A v0.7.0 SDK calling a v0.6.4 server may
+      attempt to call tools that don&rsquo;t exist (<code>memory_find_paths</code> etc.) &mdash;
+      the SDK handles this with a clean <code>ToolNotFound</code> error, not a hard failure.
+      SDK consumers on v0.7.0 should feature-detect via <code>memory_capabilities</code> before
+      calling new tools.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CTA ============ -->
+<section style="background:var(--bg-raised)">
+  <div class="container" style="text-align:center">
+    <span class="eyebrow">Want to dig deeper?</span>
+    <h2>Where to go next</h2>
+    <p class="lede" style="margin-left:auto;margin-right:auto">
+      The matrix above is the single-screen operator summary. The links below are the
+      authoritative documents the matrix is lifted from.
+    </p>
+    <div class="cta-row">
+      <a class="solid" href="V0.7-EPIC.md">📐 V0.7-EPIC.md (workstreams)</a>
+      <a class="amber" href="rfc-attested-cortex.md">📑 rfc-attested-cortex.md (design)</a>
+      <a class="violet" href="../MIGRATION_v0.7.md">📖 MIGRATION_v0.7.md (upgrade)</a>
+      <a class="green" href="canonical-phrasings.md">🗣️ canonical-phrasings.md</a>
+    </div>
+    <p style="margin-top:1.5rem;font-size:.85rem">
+      <strong style="color:#fff">Refresh cadence:</strong> this page is updated after each track lands
+      (G &rarr; H &rarr; I &rarr; J &rarr; K). The matrix cells move from 🚧 to ✅ as the
+      Discovery Gate observation cells flip green. File an
+      <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/new">issue</a> if a cell
+      doesn&rsquo;t match what you observe in the wild.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <p>ai-memory&trade; &middot; Apache-2.0 &middot; AlphaOne LLC &middot; USPTO Serial No.&nbsp;99761257</p>
+  <p style="margin-top:.5rem"><a href="../index.html">Home</a> &middot; <a href="../architectures.html">Architecture Tiers</a> &middot; <a href="../whats-new-v064.html">v0.6.4 release</a> &middot; <a href="https://github.com/alphaonedev/ai-memory-mcp">GitHub</a></p>
+</footer>
+
+</body>
+</html>
