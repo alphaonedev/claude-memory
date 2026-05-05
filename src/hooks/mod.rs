@@ -21,6 +21,7 @@
 // follow-up PRs on this same `feat/v0.7-g-*` track.
 
 pub mod config;
+pub mod decision;
 pub mod events;
 pub mod executor;
 
@@ -30,10 +31,17 @@ pub mod executor;
 // `crate::hooks::config::HookEvent` compatibility alias) resolving.
 pub use config::{HookConfig, HookMode, HooksConfigError};
 pub use events::HookEvent;
+// G4 — full HookDecision contract. G3 shipped a local `Allow +
+// Deny` prototype inside `executor.rs`; G4 lifts the type into
+// `decision.rs` with the four-variant epic spec (Allow / Modify /
+// Deny / AskUser) and a strict JSON wire contract. The re-export
+// here keeps G3 call sites (`use crate::hooks::HookDecision`,
+// `use crate::hooks::executor::HookDecision`) resolving via the
+// canonical `crate::hooks::decision::HookDecision` path.
+pub use decision::{DecisionParseError, HookDecision, ModifyPayload, is_pre_event};
 // G3 — subprocess hook executor. Re-exports keep call sites
 // (`use crate::hooks::HookExecutor`) tidy without requiring every
 // caller to know the `executor::` submodule path.
 pub use executor::{
-    DaemonExecutor, ExecExecutor, ExecutorError, ExecutorMetrics, ExecutorRegistry, HookDecision,
-    HookExecutor,
+    DaemonExecutor, ExecExecutor, ExecutorError, ExecutorMetrics, ExecutorRegistry, HookExecutor,
 };

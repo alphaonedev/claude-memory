@@ -56,11 +56,19 @@
 // `timeout_ms × queue_depth` — which is exactly the deadline-drain shape
 // the prompt asked for.
 //
-// # Out of scope (per the G3 prompt)
+// # G4 update — HookDecision lifted into `src/hooks/decision.rs`
 //
-// * G4's full `HookDecision` enum (`Modify(MemoryDelta)`,
-//   `AskUser`) — G3 ships a local prototype with `Allow` and
-//   `Deny` only; G4 lifts it into `src/hooks/decision.rs`.
+// G3 shipped a local `Allow + Deny` stub of `HookDecision` here so
+// the executor had something to deserialize against. G4 replaces
+// the stub with the full four-variant enum
+// (`Allow / Modify(MemoryDelta) / Deny / AskUser`) in the
+// dedicated `decision.rs` module. This file now imports the
+// canonical type and routes parse errors through the executor's
+// `Decode` variant — failure modes the operator sees (warning
+// log + degrade-to-Allow on the dispatcher path) are unchanged.
+//
+// # Out of scope (per the G3 prompt; still pending)
+//
 // * G5 chain ordering / first-deny-wins — separate task.
 // * G6 per-event-class deadlines — G3 honours `HookConfig.timeout_ms`
 //   only.
@@ -72,7 +80,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
@@ -80,60 +88,18 @@ use tokio::sync::Mutex;
 use tokio::time::timeout;
 
 use super::config::HookConfig;
+use super::decision::HookDecision;
 use super::events::HookEvent;
 
-// ---------------------------------------------------------------------------
-// HookDecision — local G3 prototype
-// ---------------------------------------------------------------------------
-
-/// G3 prototype of the hook decision contract. G4 lifts this into
-/// `src/hooks/decision.rs` with the full `Modify(MemoryDelta)` /
-/// `AskUser` variants. G3 ships only `Allow` + `Deny` so the
-/// executor has something to deserialize against and the
-/// integration tests can assert end-to-end JSON round-trip.
-///
-/// The wire shape matches what G4 will land:
-///
-/// ```json
-/// {"action": "allow"}
-/// {"action": "deny", "reason": "redact required", "code": 403}
-/// ```
-///
-/// A decision payload missing the `action` discriminator is treated
-/// as `Allow` so a hook author writing a no-op observability hook
-/// can `print("{}\n")` from any language and stay correct.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case")]
-pub enum HookDecision {
-    /// Continue the memory operation unchanged.
-    Allow,
-    /// Halt the memory operation. `reason` surfaces in the operator
-    /// log and (when G7+ wires the executor into the request path)
-    /// the API response. `code` is an HTTP-style integer the API
-    /// surface translates to a status code.
-    Deny {
-        reason: String,
-        #[serde(default = "default_deny_code")]
-        code: i32,
-    },
-}
-
-fn default_deny_code() -> i32 {
-    403
-}
-
-impl HookDecision {
-    /// Parse a decision payload from a hook subprocess. An empty or
-    /// `{}` payload is treated as `Allow` per the wire contract.
-    fn parse(line: &str) -> Result<Self> {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == "{}" {
-            return Ok(HookDecision::Allow);
-        }
-        serde_json::from_str(trimmed).map_err(|e| ExecutorError::Decode {
-            reason: e.to_string(),
-        })
-    }
+/// Adapter from the G4 strict-parse path into the executor's
+/// existing `Decode` error surface. Keeps `drive_exec_child` /
+/// `exchange` callers using one error type while letting the
+/// dispatcher (G5) reach for `DecisionParseError`'s named
+/// variants when it wants to log the precise failure mode.
+fn parse_decision_line(line: &str) -> Result<HookDecision> {
+    HookDecision::parse(line).map_err(|e| ExecutorError::Decode {
+        reason: e.to_string(),
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -418,7 +384,7 @@ async fn drive_exec_child(mut child: Child, envelope: Vec<u8>) -> Result<HookDec
         .filter(|l| !l.trim().is_empty())
         .next_back()
         .unwrap_or("");
-    HookDecision::parse(decision_line)
+    parse_decision_line(decision_line)
 }
 
 // ---------------------------------------------------------------------------
@@ -521,7 +487,7 @@ impl DaemonExecutor {
                     stderr: "daemon child closed stdout".into(),
                 })
             }
-            Ok(_) => HookDecision::parse(&line).map_err(|e| {
+            Ok(_) => parse_decision_line(&line).map_err(|e| {
                 // Framing error — reset the connection so the next
                 // fire doesn't read into a half-consumed envelope.
                 *guard = None;
@@ -739,22 +705,27 @@ mod tests {
         }
     }
 
+    // The G3 stub's parse path now lives in `decision.rs`. These
+    // tests cover the executor-side adapter (`parse_decision_line`)
+    // which wraps `DecisionParseError` into `ExecutorError::Decode`
+    // — the failure mode that surfaces on the daemon stdout path.
+
     #[test]
-    fn decision_parse_allow_default_on_empty() {
-        assert_eq!(HookDecision::parse("").unwrap(), HookDecision::Allow);
-        assert_eq!(HookDecision::parse("   ").unwrap(), HookDecision::Allow);
-        assert_eq!(HookDecision::parse("{}").unwrap(), HookDecision::Allow);
+    fn parse_decision_line_allow_default_on_empty() {
+        assert_eq!(parse_decision_line("").unwrap(), HookDecision::Allow);
+        assert_eq!(parse_decision_line("   ").unwrap(), HookDecision::Allow);
+        assert_eq!(parse_decision_line("{}").unwrap(), HookDecision::Allow);
     }
 
     #[test]
-    fn decision_parse_allow_explicit() {
-        let d: HookDecision = HookDecision::parse(r#"{"action":"allow"}"#).unwrap();
+    fn parse_decision_line_allow_explicit() {
+        let d = parse_decision_line(r#"{"action":"allow"}"#).unwrap();
         assert_eq!(d, HookDecision::Allow);
     }
 
     #[test]
-    fn decision_parse_deny_with_default_code() {
-        let d = HookDecision::parse(r#"{"action":"deny","reason":"nope"}"#).unwrap();
+    fn parse_decision_line_deny_with_default_code() {
+        let d = parse_decision_line(r#"{"action":"deny","reason":"nope"}"#).unwrap();
         match d {
             HookDecision::Deny { reason, code } => {
                 assert_eq!(reason, "nope");
@@ -765,8 +736,8 @@ mod tests {
     }
 
     #[test]
-    fn decision_parse_deny_with_explicit_code() {
-        let d = HookDecision::parse(r#"{"action":"deny","reason":"x","code":429}"#).unwrap();
+    fn parse_decision_line_deny_with_explicit_code() {
+        let d = parse_decision_line(r#"{"action":"deny","reason":"x","code":429}"#).unwrap();
         match d {
             HookDecision::Deny { code, .. } => assert_eq!(code, 429),
             _ => panic!("expected Deny"),
@@ -774,9 +745,30 @@ mod tests {
     }
 
     #[test]
-    fn decision_parse_unknown_action_errors() {
-        let err = HookDecision::parse(r#"{"action":"modify","delta":{}}"#).unwrap_err();
-        assert!(matches!(err, ExecutorError::Decode { .. }));
+    fn parse_decision_line_unknown_action_wraps_to_decode() {
+        // G4 recognises `modify` so the canonical "unknown action"
+        // case becomes a deliberately bogus discriminator.
+        let err = parse_decision_line(r#"{"action":"explode"}"#).unwrap_err();
+        match err {
+            ExecutorError::Decode { reason } => {
+                assert!(
+                    reason.contains("unknown action"),
+                    "decode reason should name the failure: {reason}"
+                );
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_decision_line_modify_now_recognised() {
+        // G3's stub rejected `modify`; G4 lifts it into the wire
+        // contract, so the executor must round-trip it cleanly.
+        let d = parse_decision_line(r#"{"action":"modify","delta":{"priority":7}}"#).unwrap();
+        match d {
+            HookDecision::Modify(m) => assert_eq!(m.delta.priority, Some(7)),
+            other => panic!("expected Modify, got {other:?}"),
+        }
     }
 
     #[test]
