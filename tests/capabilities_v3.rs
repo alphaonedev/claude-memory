@@ -151,9 +151,10 @@ fn cap_v3_response_carries_schema_version_and_summary() {
 }
 
 // ---------------------------------------------------------------------------
-// summary on the `core` profile honestly reports 6 of 43 visible (5 core
+// summary on the `core` profile honestly reports 6 of 44 visible (5 core
 // tools + memory_capabilities always-on bootstrap), labels the profile
 // "core", and references all three named recovery paths.
+// v0.7 H4 grew the surface from 43 to 44 (added `memory_verify`).
 // ---------------------------------------------------------------------------
 #[test]
 fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
@@ -163,13 +164,13 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // Family::Meta which the core profile doesn't load, so the bootstrap
     // injection adds it back).
     assert!(
-        summary.starts_with("6 of 43 tools"),
-        "core profile summary should open with \"6 of 43 tools\"; got: {summary}"
+        summary.starts_with("6 of 44 tools"),
+        "core profile summary should open with \"6 of 44 tools\"; got: {summary}"
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("37 are listed in this manifest"),
-        "core profile must report 37 unloaded (43 - 6); got: {summary}"
+        summary.contains("38 are listed in this manifest"),
+        "core profile must report 38 unloaded (44 - 6); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -181,18 +182,19 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
 }
 
 // ---------------------------------------------------------------------------
-// summary on the `full` profile reports 43 of 43 visible, 0 unloaded, and
+// summary on the `full` profile reports 44 of 44 visible, 0 unloaded, and
 // labels the profile "full". The recovery paths are still listed —
 // they're the canonical recovery vocabulary the LLM gets calibrated on
 // regardless of the current profile state.
+// v0.7 H4 grew the surface from 43 to 44 (added `memory_verify`).
 // ---------------------------------------------------------------------------
 #[test]
 fn cap_v3_summary_full_profile_reports_all_visible() {
     let summary = build_capabilities_summary(&Profile::full());
 
     assert!(
-        summary.starts_with("43 of 43 tools"),
-        "full profile summary should open with \"43 of 43 tools\"; got: {summary}"
+        summary.starts_with("44 of 44 tools"),
+        "full profile summary should open with \"44 of 44 tools\"; got: {summary}"
     );
     assert!(summary.contains("(full)"));
     assert!(
@@ -214,9 +216,12 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
 #[test]
 fn cap_v3_summary_graph_profile_counts() {
     let summary = build_capabilities_summary(&Profile::graph());
+    // v0.7 H4: graph grew from 8 → 9 with `memory_verify`. Total
+    // surface grew from 43 → 44. Visible under `graph` profile is now
+    // 5 core + 9 graph + 1 bootstrap = 15.
     assert!(
-        summary.starts_with("14 of 43 tools"),
-        "graph profile = 5 core + 8 graph + 1 always-on bootstrap = 14; got: {summary}"
+        summary.starts_with("15 of 44 tools"),
+        "graph profile = 5 core + 9 graph (post-H4) + 1 always-on bootstrap = 15; got: {summary}"
     );
     assert!(summary.contains("(graph)"));
     assert!(summary.contains("29 are listed in this manifest"));
@@ -309,12 +314,13 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
     // Loaded preview lists the 5 core tool names with the memory_
     // prefix STRIPPED (no MCP jargon for end users).
     assert!(describe.contains("(store, recall, list, get, search)"));
-    // Reports the unloaded count. 37 = 42 user-relevant tools − 5
-    // core. The bootstrap (`memory_capabilities`) is excluded from
-    // both sides for honest user-facing counting.
+    // Reports the unloaded count. 38 = 43 user-relevant tools − 5
+    // core (post-H4: total 44, bootstrap excluded → 43 user-facing).
+    // The bootstrap (`memory_capabilities`) is excluded from both
+    // sides for honest user-facing counting.
     assert!(
-        describe.contains("37 more"),
-        "core profile must report 37 unloaded; got: {describe}"
+        describe.contains("38 more"),
+        "core profile must report 38 unloaded post-H4; got: {describe}"
     );
     // Sample of unloaded tools is plain (no memory_ prefix). The first
     // four unloaded under core are lifecycle's update/delete/forget/gc.
@@ -337,18 +343,19 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
 }
 
 // ---------------------------------------------------------------------------
-// A2: to_describe_to_user on `full` profile reports all 42 tools loaded
+// A2: to_describe_to_user on `full` profile reports all 43 tools loaded
 // (ALWAYS_ON_TOOLS bootstrap is excluded from the user-facing count) and
 // uses the "nothing more to load" closing form rather than the recovery
-// hint.
+// hint. v0.7 H4 grew the surface from 43 → 44; the user-facing count is
+// 43 = 44 total - 1 always-on bootstrap.
 // ---------------------------------------------------------------------------
 #[test]
 fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     let describe = build_capabilities_describe_to_user(&Profile::full());
 
-    // 42 = 43 total - 1 always-on bootstrap excluded from describe.
+    // 43 = 44 total - 1 always-on bootstrap excluded from describe.
     assert!(
-        describe.starts_with("I can directly use all 42 memory tools right now ("),
+        describe.starts_with("I can directly use all 43 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -358,18 +365,18 @@ fn cap_v3_describe_full_profile_uses_nothing_more_form() {
 }
 
 // ---------------------------------------------------------------------------
-// A2: to_describe_to_user on `graph` profile (5 core + 8 graph) lists
-// 13 loaded with a 5-name preview ending in ", ..." since there are
-// more loaded than the preview shows.
+// A2: to_describe_to_user on `graph` profile (5 core + 9 graph post-H4)
+// lists 14 loaded with a 5-name preview ending in ", ..." since there
+// are more loaded than the preview shows.
 // ---------------------------------------------------------------------------
 #[test]
 fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     let describe = build_capabilities_describe_to_user(&Profile::graph());
     assert!(
-        describe.starts_with("I can directly use 13 memory tools right now ("),
-        "graph profile describe should open with 13 loaded; got: {describe}"
+        describe.starts_with("I can directly use 14 memory tools right now ("),
+        "graph profile describe should open with 14 loaded post-H4; got: {describe}"
     );
-    // Preview is the first 5 of the 13 loaded — the 5 core tools.
+    // Preview is the first 5 of the 14 loaded — the 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
     assert!(describe.contains("29 more"));
 }
@@ -527,11 +534,12 @@ fn cap_v3_a3_allowlist_on_agent_denied_callable_now_false() {
 
 // ---------------------------------------------------------------------------
 // A3 — the v3 response surfaces the `tools` array at the top level
-// with one entry per registered tool (43 + always-on bootstrap counted
-// once = 43, since the bootstrap already lives in Family::Meta).
+// with one entry per registered tool (44 post-v0.7-H4 + always-on
+// bootstrap counted once = 44, since the bootstrap already lives in
+// Family::Meta).
 // ---------------------------------------------------------------------------
 #[test]
-fn cap_v3_response_carries_tools_array_with_43_entries() {
+fn cap_v3_response_carries_tools_array_with_44_entries() {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
     let val = handle_capabilities_with_conn_v3(
@@ -551,8 +559,8 @@ fn cap_v3_response_carries_tools_array_with_43_entries() {
         .expect("top-level tools must be present and an array under v3");
     assert_eq!(
         tools.len(),
-        43,
-        "v3 must surface all 43 tools regardless of profile; got {}",
+        44,
+        "v3 must surface all 44 tools regardless of profile (43 v0.6.3 + memory_verify); got {}",
         tools.len()
     );
 

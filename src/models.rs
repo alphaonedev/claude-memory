@@ -80,6 +80,70 @@ pub struct Memory {
     pub metadata: Value,
 }
 
+/// v0.7 Track H — attestation level for a `memory_links` row.
+///
+/// H2 (#566) and H3 (#572) already write the three string variants
+/// directly into the `memory_links.attest_level` TEXT column
+/// (`"unsigned"`, `"self_signed"`, `"peer_attested"`). H4 formalises
+/// the enum so the `memory_verify` MCP tool — and any future verifier
+/// surface — can reason in terms of a closed set rather than an
+/// open-ended string.
+///
+/// `#[serde(rename_all = "snake_case")]` keeps the wire shape byte-
+/// identical to what the database column already holds. The
+/// [`AttestLevel::from_str`] / [`AttestLevel::as_str`] helpers exist
+/// because the column is read as a `String` in many call sites that
+/// are not deserialising through serde (e.g. `rusqlite::Row::get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestLevel {
+    /// No signature on the row, or no key enrolled for `observed_by` on
+    /// the receiver. Federation back-compat default — unsigned rows
+    /// still land but downstream consumers know they cannot verify.
+    Unsigned,
+    /// Row was signed locally by this writer (H2 outbound path).
+    SelfSigned,
+    /// Row arrived from a peer with a signature that verified against
+    /// the enrolled `observed_by` public key on this host (H3 inbound
+    /// path).
+    PeerAttested,
+}
+
+impl AttestLevel {
+    /// Parse the string form stored in `memory_links.attest_level`.
+    ///
+    /// Returns `None` for unknown values so callers can decide whether
+    /// to treat the column as legacy/`unsigned` or surface an error.
+    /// Keeps the unit-of-truth on the database column shape — H2/H3
+    /// already write the canonical lowercase snake_case strings.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "unsigned" => Some(Self::Unsigned),
+            "self_signed" => Some(Self::SelfSigned),
+            "peer_attested" => Some(Self::PeerAttested),
+            _ => None,
+        }
+    }
+
+    /// Canonical wire string for this variant. Mirrors the `serde`
+    /// rename_all and the literals H2/H3 already write to the DB.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unsigned => "unsigned",
+            Self::SelfSigned => "self_signed",
+            Self::PeerAttested => "peer_attested",
+        }
+    }
+}
+
+impl std::fmt::Display for AttestLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryLink {
     pub source_id: String,
@@ -1027,6 +1091,69 @@ mod tests {
         assert_eq!(Tier::Short.rank(), 0);
         assert_eq!(Tier::Mid.rank(), 1);
         assert_eq!(Tier::Long.rank(), 2);
+    }
+
+    // ---- v0.7 Track H4 — AttestLevel enum -----------------------------------
+
+    #[test]
+    fn attest_level_from_str_canonical_strings() {
+        // The three strings H2/H3 already write to the
+        // `memory_links.attest_level` column must round-trip.
+        assert_eq!(
+            AttestLevel::from_str("unsigned"),
+            Some(AttestLevel::Unsigned)
+        );
+        assert_eq!(
+            AttestLevel::from_str("self_signed"),
+            Some(AttestLevel::SelfSigned)
+        );
+        assert_eq!(
+            AttestLevel::from_str("peer_attested"),
+            Some(AttestLevel::PeerAttested)
+        );
+    }
+
+    #[test]
+    fn attest_level_from_str_unknown_returns_none() {
+        assert_eq!(AttestLevel::from_str(""), None);
+        assert_eq!(AttestLevel::from_str("Unsigned"), None); // case-sensitive
+        assert_eq!(AttestLevel::from_str("self-signed"), None); // hyphen wrong
+        assert_eq!(AttestLevel::from_str("attested"), None);
+    }
+
+    #[test]
+    fn attest_level_as_str_round_trips_through_from_str() {
+        for lvl in [
+            AttestLevel::Unsigned,
+            AttestLevel::SelfSigned,
+            AttestLevel::PeerAttested,
+        ] {
+            let s = lvl.as_str();
+            assert_eq!(
+                AttestLevel::from_str(s),
+                Some(lvl),
+                "round-trip failed for {lvl:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn attest_level_display_matches_as_str() {
+        assert_eq!(format!("{}", AttestLevel::Unsigned), "unsigned");
+        assert_eq!(format!("{}", AttestLevel::SelfSigned), "self_signed");
+        assert_eq!(format!("{}", AttestLevel::PeerAttested), "peer_attested");
+    }
+
+    #[test]
+    fn attest_level_serde_wire_shape_matches_db_column() {
+        // Wire shape = the literal column value. If this drifts, H2/H3
+        // outputs and H4 inputs decouple silently.
+        let json = serde_json::to_string(&AttestLevel::PeerAttested).unwrap();
+        assert_eq!(json, "\"peer_attested\"");
+        let back: AttestLevel = serde_json::from_str("\"self_signed\"").unwrap();
+        assert_eq!(back, AttestLevel::SelfSigned);
+        // Unknown string must fail deserialization (closed-set enum).
+        assert!(serde_json::from_str::<AttestLevel>("\"bogus\"").is_err());
     }
 
     // Task 1.4 — hierarchical namespace helpers --------------------------------

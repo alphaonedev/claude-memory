@@ -1865,7 +1865,12 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 43, "expected 43 MCP tools");
+    // v0.7 H4: 43 v0.6.3 baseline + memory_verify = 44.
+    assert_eq!(
+        tools.len(),
+        44,
+        "expected 44 MCP tools (43 + memory_verify)"
+    );
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));
@@ -1887,6 +1892,8 @@ fn test_mcp_tools_list() {
     assert!(tool_names.contains(&"memory_get"));
     assert!(tool_names.contains(&"memory_link"));
     assert!(tool_names.contains(&"memory_get_links"));
+    // v0.7 H4 — pin the new tool's presence in the registered surface.
+    assert!(tool_names.contains(&"memory_verify"));
     assert!(tool_names.contains(&"memory_consolidate"));
     assert!(tool_names.contains(&"memory_agent_register"));
     assert!(tool_names.contains(&"memory_agent_list"));

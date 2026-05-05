@@ -2224,6 +2224,74 @@ pub fn delete_link(conn: &Connection, source_id: &str, target_id: &str) -> Resul
     Ok(changed > 0)
 }
 
+/// v0.7 H4 — full row-projection used by the `memory_verify` MCP tool.
+///
+/// `get_links` (above) was deliberately scoped to the four columns the
+/// graph-traversal callers care about; H4 needs the *signed bundle* —
+/// the raw signature blob, the agent_id that signed (`observed_by`),
+/// and the temporal-validity columns the signature commits to. Splitting
+/// it from `get_links` keeps the existing read path's wire shape
+/// unchanged (and its column-count tested by callers).
+///
+/// Returns `Ok(None)` when the row is absent so the caller can shape a
+/// "not found" response instead of bubbling up a generic SQL error.
+#[derive(Debug, Clone)]
+pub struct LinkVerifyRecord {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String,
+    pub signature: Option<Vec<u8>>,
+    pub observed_by: Option<String>,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    /// Raw column value as stored by H2/H3 (`"unsigned"`, `"self_signed"`,
+    /// `"peer_attested"`, or rarely `NULL` for very old rows that
+    /// pre-date the H2 `attest_level` column). H4's MCP handler
+    /// normalises a `NULL` to the `Unsigned` enum variant.
+    pub attest_level: Option<String>,
+}
+
+/// Fetch the single link identified by the `(source_id, target_id, relation)`
+/// composite primary key — the only unique identifier `memory_links`
+/// exposes today.
+///
+/// Used by the H4 `memory_verify` MCP tool to re-derive the canonical
+/// CBOR payload from the stored row before re-checking the signature.
+///
+/// # Errors
+///
+/// Bubbles up rusqlite errors. Returns `Ok(None)` when the row is
+/// absent — this is the load-bearing distinction `memory_verify` needs
+/// to surface a structured "link not found" response to its caller.
+pub fn get_link_for_verify(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> Result<Option<LinkVerifyRecord>> {
+    let mut stmt = conn.prepare(
+        "SELECT source_id, target_id, relation, signature, observed_by, \
+                valid_from, valid_until, attest_level \
+         FROM memory_links \
+         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+    )?;
+    let mut rows = stmt.query(params![source_id, target_id, relation])?;
+    if let Some(row) = rows.next()? {
+        Ok(Some(LinkVerifyRecord {
+            source_id: row.get(0)?,
+            target_id: row.get(1)?,
+            relation: row.get(2)?,
+            signature: row.get::<_, Option<Vec<u8>>>(3)?,
+            observed_by: row.get::<_, Option<String>>(4)?,
+            valid_from: row.get::<_, Option<String>>(5)?,
+            valid_until: row.get::<_, Option<String>>(6)?,
+            attest_level: row.get::<_, Option<String>>(7)?,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
 // --- Consolidation ---
 
 /// Consolidate multiple memories into one. Returns the new memory ID.

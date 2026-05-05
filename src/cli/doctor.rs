@@ -2057,8 +2057,9 @@ mod tests {
             "default profile should be core; got: {stdout}"
         );
         assert!(
-            stdout.contains("Full   (43 tools loaded)"),
-            "report should include full-profile baseline"
+            // v0.7 H4 grew the surface from 43 → 44 (added memory_verify).
+            stdout.contains("Full   (44 tools loaded)"),
+            "report should include full-profile baseline (44 post-H4): {stdout}"
         );
         assert!(
             stdout.contains("Tokenizer: cl100k_base"),
@@ -2112,10 +2113,11 @@ mod tests {
         assert_eq!(exit, 0);
         let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         let tools = v["tools"].as_array().unwrap();
+        // v0.7 H4: 43 v0.6.3 baseline + memory_verify = 44.
         assert_eq!(
             tools.len(),
-            43,
-            "raw_table must include all 43 baseline tools"
+            44,
+            "raw_table must include all 44 baseline tools (43 + memory_verify)"
         );
         // memory_store is in core and must be loaded under the default
         // (core) profile.

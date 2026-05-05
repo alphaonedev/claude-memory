@@ -60,14 +60,14 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    // 37 = 42 user-relevant tools − 5 core. The bootstrap
+    // 38 = 43 user-relevant tools − 5 core. v0.7 H4 grew the surface
+    // from 43 → 44 (added `memory_verify`); the bootstrap
     // (`memory_capabilities`) is excluded from BOTH the loaded and the
     // unloaded count in `to_describe_to_user` (it's plumbing, not a
-    // feature). The A2 NHI starter prompt's example used 38 because it
-    // assumed bootstrap was counted on the unloaded side; the shipped
-    // builder is more honest.
+    // feature), so user-facing total = 44 − 1 = 43, and unloaded
+    // under core = 43 − 5 = 38.
     let expected = "I can directly use 5 memory tools right now \
-                    (store, recall, list, get, search). 37 more \
+                    (store, recall, list, get, search). 38 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -83,7 +83,7 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // ---------------------------------------------------------------------------
 // T0-A2-FULL — `to_describe_to_user` on `--profile full` uses the
 // "nothing more to load" closing form (excludes the always-on bootstrap
-// from the user-facing 42 count).
+// from the user-facing 43 count post-v0.7-H4).
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_full_profile_canonical_phrasing() {
@@ -92,7 +92,9 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use all 42 memory tools right now \
+    // 43 = 44 total - 1 always-on bootstrap (memory_capabilities) excluded.
+    // v0.7 H4 grew the total from 43 → 44 with `memory_verify`.
+    let expected = "I can directly use all 43 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -106,7 +108,10 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 
 // ---------------------------------------------------------------------------
 // T0-A2-GRAPH — `to_describe_to_user` on `--profile graph` uses the
-// preview-with-ellipsis form (5 of 13 loaded shown + ", ...").
+// preview-with-ellipsis form (5 of 14 loaded shown + ", ...").
+// v0.7 H4 grew graph profile from 13 → 14 with `memory_verify`; total
+// surface 43 → 44; unloaded = 44 − 1 (bootstrap) − 14 (graph profile
+// loaded) = 29 (unchanged because both numerator and denominator grew).
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -115,7 +120,7 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use 13 memory tools right now \
+    let expected = "I can directly use 14 memory tools right now \
                     (store, recall, list, get, search, ...). 29 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \

@@ -138,15 +138,17 @@ mod tests {
 
     /// Sanity: the table must be populated. Catches accidental empty
     /// `tool_definitions()` regressions that would silently hide other
-    /// failures.
+    /// failures. v0.7 H4 grew the surface from 43 → 44 (added
+    /// `memory_verify`); update both this assertion and the family
+    /// map together when the count changes again.
     #[test]
-    fn table_has_43_entries_matching_tool_definitions_count() {
+    fn table_has_44_entries_matching_tool_definitions_count() {
         let n = tool_sizes().len();
         assert_eq!(
-            n, 43,
-            "expected exactly 43 tools (v0.6.3.1 baseline source-anchored at \
-             src/mcp.rs::tool_definitions); got {n}. If the count changed, \
-             update the v0.6.4 family map and this assertion together."
+            n, 44,
+            "expected exactly 44 tools (v0.7 H4 baseline = 43 + memory_verify, \
+             source-anchored at src/mcp.rs::tool_definitions); got {n}. \
+             If the count changed, update the family map and this assertion together."
         );
     }
 

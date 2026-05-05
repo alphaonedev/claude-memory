@@ -113,7 +113,20 @@ impl AgentKeypair {
 ///
 /// Errors when the OS does not advertise a config dir (extremely rare;
 /// every supported target — Linux, macOS, Windows — returns one).
+///
+/// `AI_MEMORY_KEY_DIR` env-var override: when set and non-empty, that
+/// path is returned verbatim. This mirrors the env-override pattern
+/// other paths in `ai-memory` use (`AI_MEMORY_DB_PATH`,
+/// `AI_MEMORY_AGENT_ID`) and lets H4's `memory_verify` integration
+/// tests stand up an isolated key dir per test without shelling out to
+/// the operator's real `~/.config/ai-memory/keys/`. Operators who want
+/// to relocate the key store in production can use the same override.
 pub fn default_key_dir() -> Result<PathBuf> {
+    if let Ok(v) = std::env::var("AI_MEMORY_KEY_DIR")
+        && !v.is_empty()
+    {
+        return Ok(PathBuf::from(v));
+    }
     let base = dirs::config_dir()
         .ok_or_else(|| anyhow!("OS did not advertise a config directory for key storage"))?;
     Ok(base.join("ai-memory").join("keys"))
@@ -563,8 +576,32 @@ mod tests {
 
     #[test]
     fn default_key_dir_ends_in_ai_memory_keys() {
+        // SAFETY: single-threaded test block; no concurrent env::var
+        // mutations. The H4 env-var override (`AI_MEMORY_KEY_DIR`) is
+        // scrubbed up-front so this test asserts the *fallback* path.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_KEY_DIR");
+        }
         let p = default_key_dir().expect("default dir");
         let s = p.to_string_lossy();
         assert!(s.ends_with("ai-memory/keys") || s.ends_with("ai-memory\\keys"));
+    }
+
+    #[test]
+    fn default_key_dir_honours_env_override() {
+        // v0.7 H4 — the override exists so `memory_verify` integration
+        // tests can populate a hermetic key dir per test process. Pin
+        // the contract here so a future refactor doesn't quietly drop
+        // the override.
+        // SAFETY: single-threaded test block; no concurrent env writes.
+        unsafe {
+            std::env::set_var("AI_MEMORY_KEY_DIR", "/tmp/h4-override-test");
+        }
+        let p = default_key_dir().expect("default dir");
+        assert_eq!(p, PathBuf::from("/tmp/h4-override-test"));
+        // SAFETY: scoped cleanup so other tests see the unset value.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_KEY_DIR");
+        }
     }
 }
