@@ -96,6 +96,32 @@ impl KgBackend {
     }
 }
 
+/// One row returned by a knowledge-graph traversal at the SAL layer.
+///
+/// v0.7 Track J substrate: the Cypher (AGE) and recursive-CTE backends
+/// project their per-hop results into this shared shape so upper-layer
+/// callers (`memory_kg_query`, `memory_kg_timeline`, follow-on tools)
+/// don't need to branch on the resolved [`KgBackend`]. The field set is
+/// the intersection of what AGE can return through the `cypher()` SRF
+/// and what the existing recursive-CTE wire-format already exposes —
+/// see `db::kg_query`'s `KgQueryNode` for the SQLite mirror.
+///
+/// `path` is the `src->mid->target` chain rendered as a single string
+/// so it survives both backends without forcing a `Vec<String>` shape
+/// (AGE returns it as agtype text, the CTE renders via `group_concat`).
+/// `depth` is the actual hop count (1..=`max_depth`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KgQueryRow {
+    /// The reachable target memory's id.
+    pub target_id: String,
+    /// The traversed link's relation tag (e.g. `"related_to"`).
+    pub relation: String,
+    /// Hop count from the source (1 = direct neighbor).
+    pub depth: usize,
+    /// `src->mid->target` chain as discovered by the traversal.
+    pub path: String,
+}
+
 impl std::fmt::Display for KgBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
