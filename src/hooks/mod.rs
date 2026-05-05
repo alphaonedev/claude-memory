@@ -22,6 +22,7 @@
 
 pub mod config;
 pub mod events;
+pub mod executor;
 
 // G2 lifted `HookEvent` out of `config.rs` into `events.rs` and
 // attached payload structs to every variant. The re-export keeps
@@ -29,3 +30,10 @@ pub mod events;
 // `crate::hooks::config::HookEvent` compatibility alias) resolving.
 pub use config::{HookConfig, HookMode, HooksConfigError};
 pub use events::HookEvent;
+// G3 — subprocess hook executor. Re-exports keep call sites
+// (`use crate::hooks::HookExecutor`) tidy without requiring every
+// caller to know the `executor::` submodule path.
+pub use executor::{
+    DaemonExecutor, ExecExecutor, ExecutorError, ExecutorMetrics, ExecutorRegistry, HookDecision,
+    HookExecutor,
+};

@@ -139,6 +139,18 @@ pub struct TokensArgs {
     /// Hypothetical profile to evaluate (defaults to `core` —
     /// the v0.6.4 default).
     pub profile: Option<String>,
+    /// v0.7-G3 — also append the hook-executor metrics block.
+    /// Operators running `--tokens --hooks` see both surfaces in
+    /// one pass.
+    pub hooks: bool,
+}
+
+/// v0.7-G3 — Args for `ai-memory doctor --hooks` (standalone).
+/// Routes to [`run_hooks`].
+#[derive(Debug, Default)]
+pub struct HooksReportArgs {
+    /// Emit structured JSON instead of human-readable.
+    pub json: bool,
 }
 
 /// v0.6.4-004 — token-cost report.
@@ -285,7 +297,122 @@ pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
             "    {name:<12} {count:>2} tools  {sum:>6} tokens",
         )?;
     }
+    if args.hooks {
+        writeln!(out.stdout)?;
+        render_hooks_human(out)?;
+    }
     Ok(0)
+}
+
+/// v0.7-G3 — `ai-memory doctor --hooks` entry point. Renders the
+/// loaded `hooks.toml` shape plus zeroed metric placeholders.
+///
+/// The CLI process is *not* the running daemon — it can't reach the
+/// in-process `ExecutorRegistry`. Until G7-G11 wires the executor
+/// into the actual memory operation points, this surface reports
+/// the loaded config + a zeroed metrics row per hook so operators
+/// can sanity-check their `hooks.toml` (and so the doctor JSON
+/// schema stabilizes for the dashboard work that lands alongside).
+pub fn run_hooks(args: HooksReportArgs, out: &mut CliOutput<'_>) -> Result<i32> {
+    use crate::hooks::config::HookConfig;
+
+    let path_opt = HookConfig::default_path();
+    let hooks: Vec<HookConfig> = match path_opt.as_ref() {
+        Some(p) if p.exists() => match HookConfig::load_from_file(p) {
+            Ok(h) => h,
+            Err(e) => {
+                writeln!(out.stderr, "ai-memory doctor --hooks: {e}")?;
+                return Ok(2);
+            }
+        },
+        _ => Vec::new(),
+    };
+
+    if args.json {
+        let payload = serde_json::json!({
+            "schema_version": "v0.7-hooks-1",
+            "config_path": path_opt.as_ref().map(|p| p.display().to_string()),
+            "hooks_loaded": hooks.len(),
+            "executors": hooks.iter().map(|h| serde_json::json!({
+                "event": h.event,
+                "command": h.command.display().to_string(),
+                "mode": h.mode,
+                "namespace": h.namespace,
+                "priority": h.priority,
+                "timeout_ms": h.timeout_ms,
+                "enabled": h.enabled,
+                "metrics": {
+                    "events_fired": 0,
+                    "events_dropped": 0,
+                    "mean_latency_us": 0,
+                },
+            })).collect::<Vec<_>>(),
+            "note": "metrics placeholders until G7-G11 wires the executor into the daemon",
+        });
+        writeln!(out.stdout, "{}", serde_json::to_string_pretty(&payload)?)?;
+        return Ok(0);
+    }
+
+    render_hooks_human_with(out, path_opt.as_deref(), &hooks)?;
+    Ok(0)
+}
+
+/// Human-readable hooks block. Used by `--hooks` standalone *and*
+/// by the appended block when the operator combines `--tokens --hooks`.
+fn render_hooks_human(out: &mut CliOutput<'_>) -> Result<()> {
+    use crate::hooks::config::HookConfig;
+    let path_opt = HookConfig::default_path();
+    let hooks: Vec<HookConfig> = match path_opt.as_ref() {
+        Some(p) if p.exists() => HookConfig::load_from_file(p).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    render_hooks_human_with(out, path_opt.as_deref(), &hooks)
+}
+
+fn render_hooks_human_with(
+    out: &mut CliOutput<'_>,
+    path: Option<&Path>,
+    hooks: &[crate::hooks::config::HookConfig],
+) -> Result<()> {
+    writeln!(out.stdout, "ai-memory doctor --hooks")?;
+    if let Some(p) = path {
+        writeln!(out.stdout, "  Config path: {}", p.display())?;
+    }
+    writeln!(out.stdout, "  Hooks loaded: {}", hooks.len())?;
+    if hooks.is_empty() {
+        writeln!(
+            out.stdout,
+            "  (no hooks configured — drop a hooks.toml at the path above to enable)"
+        )?;
+        return Ok(());
+    }
+    writeln!(out.stdout)?;
+    writeln!(
+        out.stdout,
+        "  {:<26} {:<8} {:<22} fired dropped mean_us",
+        "event", "mode", "command"
+    )?;
+    for h in hooks {
+        let event = format!("{:?}", h.event);
+        let mode = format!("{:?}", h.mode);
+        let cmd = h
+            .command
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| h.command.display().to_string());
+        let cmd_truncated: String = cmd.chars().take(22).collect();
+        writeln!(
+            out.stdout,
+            "  {event:<26} {mode:<8} {cmd_truncated:<22} {:>5} {:>7} {:>7}",
+            0, 0, 0,
+        )?;
+    }
+    writeln!(out.stdout)?;
+    writeln!(
+        out.stdout,
+        "  note: live metrics land when G7-G11 wires the executor into the daemon."
+    )?;
+    Ok(())
 }
 
 /// Entry point. Returns the process exit code as a `i32` (0/1/2). The
@@ -1935,6 +2062,7 @@ mod tests {
             json: true,
             raw_table: false,
             profile: Some("graph".to_string()),
+            hooks: false,
         };
         let (exit, stdout, _) = run_tokens_capture(args);
         assert_eq!(exit, 0);
@@ -1968,6 +2096,7 @@ mod tests {
             json: false,
             raw_table: true,
             profile: None,
+            hooks: false,
         };
         let (exit, stdout, _) = run_tokens_capture(args);
         assert_eq!(exit, 0);
@@ -1994,6 +2123,7 @@ mod tests {
             json: false,
             raw_table: false,
             profile: Some("Core".to_string()),
+            hooks: false,
         };
         let (exit, _stdout, stderr) = run_tokens_capture(args);
         assert_eq!(exit, 2, "malformed profile must exit 2");

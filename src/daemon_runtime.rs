@@ -318,6 +318,16 @@ pub struct DoctorCliArgs {
     /// truth size data without parsing the rendered report.
     #[arg(long)]
     pub raw_table: bool,
+    /// v0.7-G3 — emit hook-executor backpressure metrics
+    /// (`events_fired`, `events_dropped`, `mean_latency_us`)
+    /// per loaded hook. Routed through the same reporter bucket
+    /// as `--tokens`. The runtime registry isn't reachable from
+    /// the CLI process, so this surface reports the loaded
+    /// `hooks.toml` shape + zeroed metric placeholders until
+    /// G7-G11 wires the executor into the running daemon's
+    /// snapshot.
+    #[arg(long)]
+    pub hooks: bool,
 }
 
 #[derive(Args)]
@@ -786,7 +796,24 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                         json: a.json,
                         raw_table: a.raw_table,
                         profile: a.profile,
+                        hooks: a.hooks,
                     },
+                    &mut out,
+                )?;
+                std::process::exit(exit);
+            }
+            // v0.7-G3 — `--hooks` standalone routes to the hook
+            // executor metrics reporter. Same dispatch shape as
+            // `--tokens` so both share the "tokens reporter
+            // bucket" the G3 prompt called out.
+            if a.hooks {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                let exit = cli::doctor::run_hooks(
+                    cli::doctor::HooksReportArgs { json: a.json },
                     &mut out,
                 )?;
                 std::process::exit(exit);
