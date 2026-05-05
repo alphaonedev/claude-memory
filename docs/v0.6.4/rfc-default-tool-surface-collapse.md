@@ -10,9 +10,9 @@
 
 ## TL;DR
 
-ai-memory's MCP server currently registers ~42 tools. On every coding-agent harness except Claude Code, every request pre-pays **~25,000 input tokens of tool schemas** before the user types a word. That makes ai-memory the single largest contributor to "Pattern 6 / 'just-in-case' tool definitions" in Boris Cherny's 73%-waste taxonomy across Codex, Grok CLI, and Gemini CLI.
+ai-memory's MCP server currently registers **43** tools (verified at `src/mcp.rs::tool_definitions()` 2026-05-04 — earlier RFC drafts said 42, off-by-one missed `memory_stats`). On every coding-agent harness except Claude Code, every request pre-pays **~25,000 input tokens of tool schemas** before the user types a word. That makes ai-memory the single largest contributor to "Pattern 6 / 'just-in-case' tool definitions" in Boris Cherny's 73%-waste taxonomy across Codex, Grok CLI, and Gemini CLI.
 
-This RFC proposes collapsing the **default tool surface to 5** (`store`, `recall`, `list`, `get`, `search`) and gating the remaining 37 behind named profiles + a discovery dance. Net effect on naïve harnesses: drop tool-def overhead from ~25K tokens/request to ~3K tokens/request — an 88% cut that lands on ~95% of agent traffic.
+This RFC proposes collapsing the **default tool surface to 5** (`store`, `recall`, `list`, `get`, `search`) and gating the remaining 38 behind named profiles + a discovery dance. Net effect on naïve harnesses: drop tool-def overhead from ~25K tokens/request to ~3K tokens/request — an 88% cut that lands on ~95% of agent traffic.
 
 This is the highest-EV single change available in the project for cross-harness adoption.
 
@@ -20,8 +20,8 @@ This is the highest-EV single change available in the project for cross-harness 
 
 ## Background
 
-### Current state — 42 tools, all eagerly loaded
-Verified inventory (2026-05-02 capabilities probe):
+### Current state — 43 tools, all eagerly loaded
+Verified inventory (2026-05-04, source-anchored at `src/mcp.rs::tool_definitions()`):
 
 ```
 Core read/write (5):       store, recall, list, get, search
@@ -34,11 +34,13 @@ Governance / approvals (8): pending_list, pending_approve, pending_reject,
                            namespace_clear_standard, subscribe, unsubscribe
 Power features (6):        consolidate, detect_contradiction,
                            check_duplicate, auto_tag, expand_query, inbox
-Discovery / meta (4):      capabilities, agent_register, agent_list,
-                           session_start
+Discovery / meta (5):      capabilities, agent_register, agent_list,
+                           session_start, stats
 Archive (4):               archive_list, archive_purge, archive_restore,
                            archive_stats
 Other (2):                 list_subscriptions, notify
+                           ────────────────────────────────────────
+TOTAL:                     43
 ```
 
 Average schema size: ~600 input tokens per tool (measured against MiniLM tokenizer; OpenAI tokenizer is within 5%).
@@ -95,7 +97,7 @@ ai-memory mcp --profile core    # default — 5 tools
 ai-memory mcp --profile graph   # core + 8 KG tools (13 total)
 ai-memory mcp --profile admin   # core + lifecycle + governance (18)
 ai-memory mcp --profile power   # core + power features (11)
-ai-memory mcp --profile full    # all 42 (today's behavior)
+ai-memory mcp --profile full    # all 43 (today's behavior)
 ai-memory mcp --profile <comma,separated,family,list>  # custom
 ```
 
@@ -134,7 +136,7 @@ SDK consumers get a clean error path instead of "tool not found."
 ## Token economics (projected)
 
 ### Baseline (today, "full" profile, eager-load harness)
-- 42 tools × ~600 tokens = **~25,200 input tokens per request**
+- 43 tools × ~600 tokens = **~25,800 input tokens per request**
 - At Sonnet 4.6 input pricing (~$3/MT): **~$0.076 per request just for tool defs**
 - Boris's average session: 30 turns/day × 250 working-days = 7,500 turns/year
 - **~$570/year per heavy user, just for ai-memory tool schemas**
@@ -208,7 +210,7 @@ Reference: cert campaign tracking in #511.
 | ID | Scenario | Expected behavior |
 |---|---|---|
 | S25 | `--profile core` registers exactly 5 tools | Pass: 5 tools present, 37 absent |
-| S26 | `--profile full` matches v0.6.3 baseline | Pass: 42 tools, no regressions |
+| S26 | `--profile full` matches v0.6.3 baseline | Pass: 43 tools, no regressions |
 | S27 | `memory_capabilities` always available regardless of profile | Pass |
 | S28 | Calling unloaded tool returns `tool_not_found` with profile hint | Pass: error includes "set --profile <name>" |
 | S29 | Token-def cost per harness measured + recorded | Cross-harness budget table populated |
@@ -255,13 +257,13 @@ On sign-off: convert RFC into v0.6.4 epic, decompose into tracking issues per ph
 
 ## Appendix A — One-liner for users
 
-> ai-memory v0.6.4 ships 5 tools by default, not 42. Saves ~22,000 tokens per request on Codex / Grok / Gemini / Claude Desktop. Run `ai-memory mcp --profile full` to keep the v0.6.3 behavior.
+> ai-memory v0.6.4 ships 5 tools by default, not 43. Saves ~22,000 tokens per request on Codex / Grok / Gemini / Claude Desktop. Run `ai-memory mcp --profile full` to keep the v0.6.3 behavior.
 
 ## Appendix B — Why now
 
 Three signals converged in the last week of April 2026:
 1. Boris Cherny's published instrumentation data quantified pattern 6 at 6% of total tokens for 12-MCP setups.
 2. v0.6.3.1 A2A certification (#511) is the first real cross-harness test campaign — exactly when tool-surface bloat becomes visible cross-platform.
-3. Anthropic's late-March cache-bug remediation made users pattern-match all token bloat onto Claude Code rather than the MCP servers downstream. ai-memory's surface size is a credibility issue: shipping 42 tools when 5 cover 95% of traffic looks careless even if technically defensible.
+3. Anthropic's late-March cache-bug remediation made users pattern-match all token bloat onto Claude Code rather than the MCP servers downstream. ai-memory's surface size is a credibility issue: shipping 43 tools when 5 cover 95% of traffic looks careless even if technically defensible.
 
 The cost of doing this in v0.6.4 is one engineer-week. The cost of not doing it is ~$500/year/user at scale plus a competitive narrative cost as Codex/Grok/Gemini users notice the bill.

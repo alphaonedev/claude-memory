@@ -54,11 +54,11 @@ use std::time::Instant;
 pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 
 /// Upper bound of the DB-schema range this binary supports. Mirrors
-/// `db::CURRENT_SCHEMA_VERSION` (19 today). When a DB's
-/// `schema_version` exceeds this, the binary is too old for a newer
-/// DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497
-/// req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 19;
+/// `db::CURRENT_SCHEMA_VERSION` (20 in v0.6.4 — bumped by v0.6.4-009
+/// `audit_log` table). When a DB's `schema_version` exceeds this, the
+/// binary is too old for a newer DB and we surface a warning.
+/// v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 20;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

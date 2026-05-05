@@ -133,6 +133,14 @@ pub enum Command {
         /// Feature tier: keyword (FTS only) or semantic (embeddings + FTS)
         #[arg(long, default_value = "semantic")]
         tier: String,
+        /// v0.6.4 — Tool surface profile. One of `core`, `graph`, `admin`,
+        /// `power`, `full`, or a comma-separated custom list (e.g.,
+        /// `core,graph,archive`). Default `core` (5 tools). Resolution
+        /// order: this CLI flag > `AI_MEMORY_PROFILE` env > `[mcp].profile`
+        /// in config.toml > `core`. Set `--profile full` to reproduce
+        /// v0.6.3 surface 1:1 (43 tools).
+        #[arg(long, env = "AI_MEMORY_PROFILE")]
+        profile: Option<String>,
     },
     /// Store a new memory
     Store(StoreArgs),
@@ -276,6 +284,23 @@ pub struct DoctorCliArgs {
     /// this flag, warnings keep exit 0; criticals always exit 2.
     #[arg(long)]
     pub fail_on_warn: bool,
+    /// v0.6.4-004 — print per-tool, per-family, and per-profile token
+    /// costs (`cl100k_base`) instead of the regular health report.
+    /// Combined with `--json` returns a structured payload for CI.
+    /// Combined with `--profile <name>` reports the cost under that
+    /// hypothetical profile in addition to the active default.
+    #[arg(long)]
+    pub tokens: bool,
+    /// v0.6.4-004 — when used with `--tokens`, evaluate cost under this
+    /// hypothetical profile. Defaults to `core` (the v0.6.4 default).
+    /// Accepts the same vocabulary as `ai-memory mcp --profile`.
+    #[arg(long, value_name = "PROFILE")]
+    pub profile: Option<String>,
+    /// v0.6.4-004 — dump the full per-tool size table as JSON. Implies
+    /// `--tokens`. Used by CI and benchmarks to capture the source-of-
+    /// truth size data without parsing the rendered report.
+    #[arg(long)]
+    pub raw_table: bool,
 }
 
 #[derive(Args)]
@@ -450,9 +475,20 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
 
     let result = match cli.command {
         Command::Serve(a) => serve(db_path, a, app_config).await,
-        Command::Mcp { tier } => {
+        Command::Mcp { tier, profile } => {
             let feature_tier = app_config.effective_tier(Some(&tier));
-            mcp::run_mcp_server(&db_path, feature_tier, app_config)?;
+            // v0.6.4-001 — resolve profile (CLI/env > config > default core).
+            // Surface parse errors to stderr with the diagnostic that
+            // ProfileParseError already produces (lists valid profiles +
+            // valid families) before exiting.
+            let resolved_profile = match app_config.effective_profile(profile.as_deref()) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("ai-memory mcp: invalid profile: {e}");
+                    std::process::exit(2);
+                }
+            };
+            mcp::run_mcp_server(&db_path, feature_tier, app_config, &resolved_profile)?;
             Ok(())
         }
         Command::Store(a) => {
@@ -707,6 +743,26 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             // panics when dropped on a tokio runtime thread, so the
             // entire doctor pass runs inside `spawn_blocking`.
             let db_path_doctor = db_path.clone();
+            // v0.6.4-004 — `--tokens` (and its alias `--raw-table`) bypass
+            // the regular health pass. Routes to a dedicated tokens
+            // reporter that consumes `crate::sizes::tool_sizes()` and
+            // `crate::profile::Family::for_tool` to roll up cost.
+            if a.tokens || a.raw_table {
+                let stdout = std::io::stdout();
+                let stderr = std::io::stderr();
+                let mut so = stdout.lock();
+                let mut se = stderr.lock();
+                let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+                let exit = cli::doctor::run_tokens(
+                    cli::doctor::TokensArgs {
+                        json: a.json,
+                        raw_table: a.raw_table,
+                        profile: a.profile,
+                    },
+                    &mut out,
+                )?;
+                std::process::exit(exit);
+            }
             let args = cli::doctor::DoctorArgs {
                 remote: a.remote,
                 json: a.json,
@@ -1911,7 +1967,8 @@ mod tests {
         assert!(!is_write_command(&Command::Shell));
         assert!(!is_write_command(&Command::Man));
         assert!(!is_write_command(&Command::Mcp {
-            tier: "keyword".to_string()
+            tier: "keyword".to_string(),
+            profile: None,
         }));
     }
 

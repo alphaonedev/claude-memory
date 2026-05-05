@@ -49,9 +49,15 @@ from ai_memory.models import (
     Tier,
     UpdateMemory,
 )
+from ai_memory.profile import (
+    ProfileNotLoaded,
+    require_profile,
+    require_profile_async,
+    resolve_required_families,
+)
 from ai_memory.webhooks import verify_webhook_signature
 
-__version__ = "0.6.0-alpha.0"
+__version__ = "0.6.4"
 
 __all__ = [
     "AgentRegistration",
@@ -72,6 +78,7 @@ __all__ = [
     "NotFoundError",
     "NotifyRequest",
     "PendingAction",
+    "ProfileNotLoaded",
     "RateLimitError",
     "RecallRequest",
     "RecallResponse",
@@ -84,5 +91,8 @@ __all__ = [
     "UpdateMemory",
     "ValidationError",
     "__version__",
+    "require_profile",
+    "require_profile_async",
+    "resolve_required_families",
     "verify_webhook_signature",
 ]

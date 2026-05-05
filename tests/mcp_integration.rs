@@ -47,7 +47,20 @@ impl Drop for McpChild {
 fn spawn_mcp(db: &std::path::Path) -> (McpChild, mpsc::Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ai-memory"))
         .env("AI_MEMORY_NO_CONFIG", "1")
-        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        // v0.6.4-002: tests written against the v0.6.3 full surface
+        // (43 tools) — pin --profile full so the v0.6.4 default flip
+        // (--profile core, 6 tools) doesn't shrink what these tests
+        // can exercise. Tests for the new family-scoped behavior live
+        // in src/mcp.rs::tests + tests/webhook_http_parity.rs.
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+            "--tier",
+            "keyword",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

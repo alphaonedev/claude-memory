@@ -1202,6 +1202,34 @@ pub async fn delete_memory(
     }
 
     let delete_outcome = db::delete(&lock.0, &target.id);
+    // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_delete` after
+    // the row is gone (mirrors the MCP pattern at mcp.rs:2227). Snapshot
+    // fields come from the pre-delete `target`. Best-effort,
+    // fire-and-forget: dispatch does a quick subscriber lookup on the
+    // current connection and spawns a thread for the HTTP POST so the
+    // response is never blocked. Held inside the lock so the subscriber
+    // list query has a connection — release happens after.
+    if matches!(delete_outcome, Ok(true)) {
+        let details = serde_json::to_value(crate::subscriptions::DeleteEventDetails {
+            title: target.title.clone(),
+            tier: target.tier.to_string(),
+        })
+        .ok();
+        let owner_aid = target
+            .metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        crate::subscriptions::dispatch_event_with_details(
+            &lock.0,
+            "memory_delete",
+            &target.id,
+            &target.namespace,
+            owner_aid.as_deref(),
+            &lock.1,
+            details,
+        );
+    }
     // Drop DB lock before fanning out — peers POST back to our
     // sync_push and we'd deadlock on the shared Mutex if we held it.
     drop(lock);
@@ -1404,6 +1432,30 @@ pub async fn promote_memory(
             // v0.6.0.1: fan out the promoted memory so peers pick up the
             // new tier + cleared expiry via insert_if_newer's newer-wins merge.
             let promoted_mem = db::get(&lock.0, &resolved_id).ok().flatten();
+            // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_promote`
+            // (tier mode — HTTP only does tier promotion, MCP also does
+            // vertical). Mirrors mcp.rs:2369 pattern.
+            let owner_aid = target
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let details = serde_json::to_value(crate::subscriptions::PromoteEventDetails {
+                mode: "tier".to_string(),
+                tier: Some("long".to_string()),
+                to_namespace: None,
+                clone_id: None,
+            })
+            .ok();
+            crate::subscriptions::dispatch_event_with_details(
+                &lock.0,
+                "memory_promote",
+                &resolved_id,
+                &target.namespace,
+                owner_aid.as_deref(),
+                &lock.1,
+                details,
+            );
             drop(lock);
             if let (Some(fed), Some(m)) = (app.federation.as_ref(), promoted_mem.as_ref())
                 && let Ok(tracker) = crate::federation::broadcast_store_quorum(fed, m).await
@@ -2603,6 +2655,41 @@ pub async fn create_link(
     }
     let lock = app.db.lock().await;
     let create_result = db::create_link(&lock.0, &body.source_id, &body.target_id, &body.relation);
+    // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_link_created`
+    // after db::create_link commits (mirrors mcp.rs:2569). The link
+    // itself does not carry a namespace; we look up the source memory
+    // for the namespace + owner agent_id so the event payload matches
+    // the MCP contract.
+    if create_result.is_ok() {
+        let (link_namespace, link_owner) = db::get(&lock.0, &body.source_id)
+            .ok()
+            .flatten()
+            .map_or_else(
+                || ("global".to_string(), None),
+                |m| {
+                    let owner = m
+                        .metadata
+                        .get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string);
+                    (m.namespace, owner)
+                },
+            );
+        let details = serde_json::to_value(crate::subscriptions::LinkCreatedEventDetails {
+            target_id: body.target_id.clone(),
+            relation: body.relation.clone(),
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            &lock.0,
+            "memory_link_created",
+            &body.source_id,
+            &link_namespace,
+            link_owner.as_deref(),
+            &lock.1,
+            details,
+        );
+    }
     // Drop DB lock before fanning out — peers POST back to our sync_push
     // and we'd deadlock on the shared Mutex if we held it.
     drop(lock);
@@ -2853,6 +2940,25 @@ pub async fn consolidate_memories(
         Ok(new_id) => db::get(&lock.0, new_id).ok().flatten(),
         Err(_) => None,
     };
+    // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_consolidated`
+    // after db::consolidate commits (mirrors mcp.rs:2723). The new
+    // memory's id goes in the outer envelope; source ids in details.
+    if let Ok(new_id) = &consolidate_result {
+        let details = serde_json::to_value(crate::subscriptions::ConsolidatedEventDetails {
+            source_ids: source_ids.clone(),
+            source_count: source_ids.len(),
+        })
+        .ok();
+        crate::subscriptions::dispatch_event_with_details(
+            &lock.0,
+            "memory_consolidated",
+            new_id,
+            &body.namespace,
+            Some(&consolidator_agent_id),
+            &lock.1,
+            details,
+        );
+    }
     // Drop DB lock before fanning out — peers POST back to our sync_push
     // and we'd deadlock on the shared Mutex if we held it.
     drop(lock);

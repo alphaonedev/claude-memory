@@ -152,8 +152,182 @@ fn audit_emit_for_mcp_dispatch(
 /// and does NOT require a bump. Ultrareview #351.
 const TOOLS_VERSION: &str = "2026-04-26";
 
+/// v0.6.4-006 — Build the `families` overview included in the v2
+/// `memory_capabilities` response. Each entry carries:
+///
+/// - `name` — family identifier (`core`, `graph`, …)
+/// - `tool_count` — expected tool count per the family map
+/// - `loaded` — whether the family is loaded under the active profile
+/// - `tools` — the canonical tool-name list for that family
+///
+/// This is the v0.6.4 NHI runtime-discovery surface: an agent reading
+/// the response sees which families are reachable AND can decide which
+/// to opt into (via `memory_capabilities --include-schema family=<f>`)
+/// without restarting the MCP server.
+pub(crate) fn families_overview(profile: &crate::profile::Profile) -> Value {
+    use crate::profile::Family;
+    let defs = tool_definitions();
+    let all_tools = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let entries: Vec<Value> = Family::all()
+        .iter()
+        .map(|fam| {
+            let tools_in_family: Vec<&str> = all_tools
+                .iter()
+                .filter_map(|t| t.get("name").and_then(Value::as_str))
+                .filter(|n| Family::for_tool(n) == Some(*fam))
+                .collect();
+            json!({
+                "name": fam.name(),
+                "tool_count": tools_in_family.len(),
+                "loaded": profile.includes(*fam),
+                "tools": tools_in_family,
+            })
+        })
+        .collect();
+    json!({
+        "schema_version": "v0.6.4-families-1",
+        "always_on": crate::profile::ALWAYS_ON_TOOLS,
+        "families": entries,
+    })
+}
+
+/// v0.6.4-006 — Handle `memory_capabilities` invocations that pass a
+/// `family=<name>` parameter. When `include_schema=false` (default),
+/// returns the canonical tool-name list. When `include_schema=true`,
+/// returns the full MCP-style tool definitions for each tool — the
+/// caller (an NHI agent or a host like Claude Code's deferred-tools
+/// path) can register them at runtime without restarting the server.
+///
+/// v0.6.4-008 — when `include_schema=true` AND the daemon's
+/// `[mcp.allowlist]` is configured, the requesting `agent_id` must be
+/// permitted by the allowlist for the requested family. Permissive
+/// (no-allowlist) default preserves Tier-1 single-process behavior —
+/// operators opt into the gate by writing the table.
+///
+/// Errors:
+/// - Unknown family → `Err` with diagnostic listing valid families.
+/// - Empty family name → `Err`.
+/// - Allowlist deny → `Err` with structured reason.
+pub(crate) fn handle_capabilities_family(
+    family_name: &str,
+    include_schema: bool,
+    profile: &crate::profile::Profile,
+    allowlist_cfg: Option<&crate::config::McpConfig>,
+    agent_id: Option<&str>,
+    audit_conn: Option<&rusqlite::Connection>,
+) -> Result<Value, String> {
+    use crate::profile::Family;
+    if family_name.is_empty() {
+        return Err("memory_capabilities: 'family' must not be empty".to_string());
+    }
+    let family = Family::all()
+        .iter()
+        .find(|f| f.name() == family_name)
+        .copied()
+        .ok_or_else(|| {
+            let valid: Vec<&str> = Family::all().iter().map(|f| f.name()).collect();
+            format!(
+                "unknown family '{family_name}'. Valid families: {}.",
+                valid.join(", ")
+            )
+        })?;
+
+    // v0.6.4-008 — allowlist gate, only on the runtime-expansion path.
+    if include_schema && let Some(mcp_cfg) = allowlist_cfg {
+        use crate::config::AllowlistDecision;
+        match mcp_cfg.allowlist_decision(agent_id, family.name()) {
+            AllowlistDecision::Disabled | AllowlistDecision::Allow => {}
+            AllowlistDecision::Deny => {
+                // v0.6.4-009 — record the deny so operators can see
+                // attempted-but-blocked expansion patterns.
+                if let Some(conn) = audit_conn {
+                    crate::db::record_capability_expansion(
+                        conn,
+                        agent_id,
+                        family.name(),
+                        false,
+                        None,
+                    );
+                }
+                return Err(format!(
+                    "agent '{}' is not permitted to expand family '{}' under \
+                     [mcp.allowlist]. Ask an operator to add a matching rule \
+                     to config.toml or pass an allowed agent_id.",
+                    agent_id.unwrap_or("<anonymous>"),
+                    family.name()
+                ));
+            }
+        }
+    }
+
+    // v0.6.4-009 — record the grant on the include_schema=true path.
+    // Lightweight name-list calls are not audited (they're informational
+    // only — no schema material released).
+    if include_schema && let Some(conn) = audit_conn {
+        crate::db::record_capability_expansion(conn, agent_id, family.name(), true, None);
+    }
+
+    let defs = tool_definitions();
+    let all_tools = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let in_family: Vec<Value> = all_tools
+        .into_iter()
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .and_then(Family::for_tool)
+                == Some(family)
+        })
+        .collect();
+
+    if include_schema {
+        Ok(json!({
+            "schema_version": "v0.6.4-family-schemas-1",
+            "family": family.name(),
+            "loaded_under_active_profile": profile.includes(family),
+            "tools": in_family,
+        }))
+    } else {
+        let names: Vec<&str> = in_family
+            .iter()
+            .filter_map(|t| t.get("name").and_then(Value::as_str))
+            .collect();
+        Ok(json!({
+            "schema_version": "v0.6.4-family-list-1",
+            "family": family.name(),
+            "loaded_under_active_profile": profile.includes(family),
+            "tools": names,
+        }))
+    }
+}
+
+/// v0.6.4-002 — Filter `tool_definitions()` down to the tools loaded
+/// under `profile`. Tools whose family is not in the profile's family
+/// list are dropped from `tools[]`. `memory_capabilities` and any
+/// other [`crate::profile::ALWAYS_ON_TOOLS`] are kept regardless of
+/// profile so the runtime-discovery dance still works on
+/// `--profile core`.
+pub(crate) fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
+    let mut defs = tool_definitions();
+    if let Some(arr) = defs.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        arr.retain(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|name| profile.loads(name))
+        });
+    }
+    defs
+}
+
 #[allow(clippy::too_many_lines)]
-fn tool_definitions() -> Value {
+pub(crate) fn tool_definitions() -> Value {
     json!({
         "toolsVersion": TOOLS_VERSION,
         "tools": [
@@ -438,7 +612,7 @@ fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1.",
+                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1. v0.6.4 — pass family=<name> to enumerate that family's tools; add include_schema=true to retrieve full schemas inline (NHI runtime-expansion path).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -447,6 +621,16 @@ fn tool_definitions() -> Value {
                             "enum": ["v1", "v2"],
                             "default": "v2",
                             "description": "Capabilities-schema version. v2 is the honest, runtime-overlaid shape (default). v1 returns the legacy pre-v0.6.3.1 shape for backward compat."
+                        },
+                        "family": {
+                            "type": "string",
+                            "enum": ["core", "lifecycle", "graph", "governance", "power", "meta", "archive", "other"],
+                            "description": "v0.6.4 — when set, returns the tool list (or full schemas with include_schema=true) for that family instead of the global capabilities document. Used by NHI agents to opt into a tool family at runtime without restarting the MCP server."
+                        },
+                        "include_schema": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "v0.6.4 — when true, return full MCP-style tool definitions for each tool in the requested family. Requires family=<name>."
                         }
                     }
                 }
@@ -3393,6 +3577,7 @@ pub(crate) fn handle_session_start(
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -3407,6 +3592,8 @@ fn handle_request(
     archive_on_gc: bool,
     autonomous_hooks: bool,
     mcp_client: Option<&str>,
+    profile: &crate::profile::Profile,
+    mcp_config: Option<&crate::config::McpConfig>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -3432,7 +3619,7 @@ fn handle_request(
             }),
         ),
         "notifications/initialized" | "ping" => ok_response(id, json!({})),
-        "tools/list" => ok_response(id, tool_definitions()),
+        "tools/list" => ok_response(id, tool_definitions_for_profile(profile)),
         "prompts/list" => ok_response(id, prompt_definitions()),
         "prompts/get" => {
             let prompt_name = match req.params["name"].as_str() {
@@ -3449,6 +3636,32 @@ fn handle_request(
                 Some(name) if !name.is_empty() => name,
                 _ => return err_response(id, -32602, "missing or empty tool name".into()),
             };
+
+            // v0.6.4-002 (RFC S28) — reject calls to tools that are not
+            // loaded under the active profile. The error message names
+            // the profile that would load the tool, so a confused agent
+            // can self-correct via `--profile <hint>` or use
+            // `memory_capabilities --include-schema family=<f>` to opt in
+            // at runtime (Track C, v0.6.4-006).
+            if !profile.loads(tool_name) {
+                let owning_family = crate::profile::Family::for_tool(tool_name);
+                let hint = match owning_family {
+                    Some(f) => format!(
+                        "tool '{tool_name}' is in family '{}' which is not loaded under \
+                         the active profile. Restart with `--profile <name>` or \
+                         `--profile core,{}` to load it, or call `memory_capabilities \
+                         --include-schema family={}` to expand at runtime.",
+                        f.name(),
+                        f.name(),
+                        f.name()
+                    ),
+                    None => format!(
+                        "tool '{tool_name}' is not registered in this build. Call \
+                         `memory_capabilities` to see available tools."
+                    ),
+                };
+                return err_response(id, -32601, hint);
+            }
 
             // Pillar 3 / Stream E — emit a structured tracing span around
             // every MCP tool dispatch so production observability can
@@ -3524,20 +3737,60 @@ fn handle_request(
                     mcp_client,
                 ),
                 "memory_capabilities" => {
-                    // P1 honesty patch: optional `accept` argument lets MCP
-                    // clients opt into the legacy v1 shape, mirroring the
-                    // HTTP `Accept-Capabilities` header.
-                    let accept = arguments
-                        .get("accept")
-                        .and_then(Value::as_str)
-                        .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
-                    handle_capabilities_with_conn(
-                        tier_config,
-                        reranker,
-                        embedder.is_some(),
-                        Some(conn),
-                        accept,
-                    )
+                    // v0.6.4-006 — runtime expansion via family enumeration.
+                    // When `family` is set, route to the family-listing path
+                    // and short-circuit the global capabilities document.
+                    if let Some(fam_name) = arguments.get("family").and_then(Value::as_str) {
+                        let include_schema = arguments
+                            .get("include_schema")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        // v0.6.4-008 — agent_id resolution for the
+                        // allowlist gate. Caller's explicit
+                        // `arguments.agent_id` wins; otherwise fall
+                        // back to the MCP `clientInfo.name` captured
+                        // at initialize time.
+                        let aid = arguments
+                            .get("agent_id")
+                            .and_then(Value::as_str)
+                            .or(mcp_client);
+                        handle_capabilities_family(
+                            fam_name,
+                            include_schema,
+                            profile,
+                            mcp_config,
+                            aid,
+                            Some(conn),
+                        )
+                    } else {
+                        // P1 honesty patch: optional `accept` argument lets MCP
+                        // clients opt into the legacy v1 shape, mirroring the
+                        // HTTP `Accept-Capabilities` header.
+                        let accept = arguments
+                            .get("accept")
+                            .and_then(Value::as_str)
+                            .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
+                        // v0.6.4-006 — when no family is requested, augment
+                        // the v2 response with a top-level `families` field
+                        // describing the family taxonomy and which families
+                        // the active profile loads. Backward-compat: v1
+                        // shape never gets the families overlay.
+                        let result = handle_capabilities_with_conn(
+                            tier_config,
+                            reranker,
+                            embedder.is_some(),
+                            Some(conn),
+                            accept,
+                        );
+                        result.map(|mut value| {
+                            if matches!(accept, CapabilitiesAccept::V2) {
+                                if let Some(obj) = value.as_object_mut() {
+                                    obj.insert("families".to_string(), families_overview(profile));
+                                }
+                            }
+                            value
+                        })
+                    }
                 }
                 "memory_expand_query" => handle_expand_query(llm, arguments),
                 "memory_auto_tag" => handle_auto_tag(conn, llm, arguments),
@@ -3644,11 +3897,20 @@ fn handle_request(
 
 /// Run the MCP server over stdio. Blocks until stdin closes.
 /// Initializes components based on the requested feature tier.
+///
+/// `profile` (v0.6.4-001) selects the tool surface advertised through
+/// `tools/list`. Today the parameter is plumbed through and recorded in
+/// the boot manifest; the family-scoped registration filter that
+/// actually gates which tools land in `tools/list` is wired in
+/// v0.6.4-002 (#522). Until that lands, every profile shows the full
+/// 43-tool surface — the resolution step still runs so the parse error
+/// path is exercised (and asserted in the integration tests).
 #[allow(clippy::too_many_lines)]
 pub fn run_mcp_server(
     db_path: &Path,
     tier: FeatureTier,
     app_config: &AppConfig,
+    profile: &crate::profile::Profile,
 ) -> anyhow::Result<()> {
     // Pillar 3 / Stream E — wire `tracing` for the MCP entrypoint so the
     // per-tool spans added in `handle_request` actually surface. The
@@ -3670,6 +3932,16 @@ pub fn run_mcp_server(
 
     let mut tier_config = tier.config();
     eprintln!("ai-memory: requested tier = {}", tier.as_str());
+    // v0.6.4-001 — log resolved profile so an operator inspecting MCP
+    // boot stderr can immediately see which tool surface is active.
+    // Family-scoped filtering of tools/list arrives in v0.6.4-002.
+    let family_names: Vec<&'static str> = profile.families().iter().map(|f| f.name()).collect();
+    eprintln!(
+        "ai-memory: profile = {} families ({}); expected tool count = {}",
+        profile.families().len(),
+        family_names.join(", "),
+        profile.expected_tool_count()
+    );
 
     // Apply config.toml overrides — tiers gate features, models are independently configurable
     // Only override if the tier actually uses an LLM (smart/autonomous)
@@ -3899,6 +4171,8 @@ pub fn run_mcp_server(
             archive_on_gc,
             autonomous_hooks,
             mcp_client_name.as_deref(),
+            profile,
+            app_config.mcp.as_ref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -3926,6 +4200,147 @@ mod tests {
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 43);
+    }
+
+    /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
+    /// registers exactly 5 family tools + 1 always-on bootstrap
+    /// (memory_capabilities) = 6 visible tools. `--profile full`
+    /// registers all 43.
+    #[test]
+    fn tool_definitions_for_profile_core_registers_5_plus_capabilities() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
+        let tools = defs["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        // Exactly the 5 core tools + memory_capabilities bootstrap.
+        assert_eq!(
+            tools.len(),
+            6,
+            "core profile should register 5 core tools + memory_capabilities; got {names:?}"
+        );
+        for required in [
+            "memory_store",
+            "memory_recall",
+            "memory_list",
+            "memory_get",
+            "memory_search",
+            "memory_capabilities",
+        ] {
+            assert!(
+                names.contains(&required),
+                "core profile missing {required}; got {names:?}"
+            );
+        }
+        // None of the non-core tools should leak through.
+        for excluded in [
+            "memory_kg_query",
+            "memory_consolidate",
+            "memory_archive_list",
+            "memory_subscribe",
+            "memory_promote",
+        ] {
+            assert!(
+                !names.contains(&excluded),
+                "core profile leaked {excluded}; got {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_definitions_for_profile_full_registers_43() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
+        let tools = defs["tools"].as_array().unwrap();
+        assert_eq!(
+            tools.len(),
+            43,
+            "full profile must reproduce v0.6.3 surface 1:1"
+        );
+    }
+
+    #[test]
+    fn tool_definitions_for_profile_graph_registers_thirteen_plus_capabilities() {
+        let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
+        let tools = defs["tools"].as_array().unwrap();
+        // 5 core + 8 graph + 1 always-on capabilities = 14 (capabilities
+        // is in meta but loaded as bootstrap; without it we'd have 13).
+        assert_eq!(
+            tools.len(),
+            14,
+            "graph profile = core(5) + graph(8) + capabilities-bootstrap(1)"
+        );
+    }
+
+    /// RFC §S30: custom comma-list `core,graph` registers union.
+    #[test]
+    fn tool_definitions_for_profile_custom_core_comma_graph_registers_union() {
+        let p = crate::profile::Profile::parse("core,graph").unwrap();
+        let defs = tool_definitions_for_profile(&p);
+        let tools = defs["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 14, "core,graph = 5 + 8 + capabilities");
+    }
+
+    // ---- v0.6.4-006 — capabilities family enum + include_schema ----
+
+    #[test]
+    fn families_overview_lists_all_eight_with_correct_loaded_flags() {
+        let p = crate::profile::Profile::core();
+        let v = families_overview(&p);
+        let families = v["families"].as_array().unwrap();
+        assert_eq!(families.len(), 8, "all eight families must appear");
+
+        let core_row = families.iter().find(|r| r["name"] == "core").unwrap();
+        assert_eq!(core_row["loaded"], true);
+        assert_eq!(core_row["tool_count"], 5);
+        let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
+        assert_eq!(graph_row["loaded"], false);
+        assert_eq!(graph_row["tool_count"], 8);
+
+        let always_on = v["always_on"].as_array().unwrap();
+        assert_eq!(always_on.len(), 1);
+        assert_eq!(always_on[0], "memory_capabilities");
+    }
+
+    #[test]
+    fn handle_capabilities_family_lists_tool_names() {
+        let p = crate::profile::Profile::core();
+        let v = handle_capabilities_family("graph", false, &p, None, None, None).unwrap();
+        assert_eq!(v["family"], "graph");
+        assert_eq!(v["loaded_under_active_profile"], false);
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        // Spot-check known graph tool present.
+        assert!(tools.iter().any(|t| t == "memory_kg_query"));
+    }
+
+    #[test]
+    fn handle_capabilities_family_include_schema_returns_full_definitions() {
+        let p = crate::profile::Profile::core();
+        let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
+        assert_eq!(v["family"], "graph");
+        let tools = v["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 8);
+        // Each row must carry the full MCP tool definition shape.
+        for tool in tools {
+            assert!(tool.get("name").is_some(), "missing name");
+            assert!(tool.get("description").is_some(), "missing description");
+            assert!(tool.get("inputSchema").is_some(), "missing inputSchema");
+        }
+    }
+
+    #[test]
+    fn handle_capabilities_family_unknown_returns_diagnostic_err() {
+        let p = crate::profile::Profile::core();
+        let err = handle_capabilities_family("xyz", false, &p, None, None, None).unwrap_err();
+        assert!(err.contains("xyz"));
+        assert!(err.contains("Valid families"));
+        assert!(err.contains("core"));
+        assert!(err.contains("graph"));
+    }
+
+    #[test]
+    fn handle_capabilities_family_empty_name_errors() {
+        let p = crate::profile::Profile::core();
+        let err = handle_capabilities_family("", false, &p, None, None, None).unwrap_err();
+        assert!(err.contains("must not be empty"));
     }
 
     #[test]
@@ -4181,6 +4596,8 @@ mod tests {
                 true,
                 false,
                 None,
+                &crate::profile::Profile::full(),
+                None,
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -4230,6 +4647,8 @@ mod tests {
                 &resolved_scoring,
                 true,
                 false,
+                None,
+                &crate::profile::Profile::full(),
                 None,
             );
             // Handler errs are returned as ok_response with isError=true,
@@ -4507,6 +4926,8 @@ mod tests {
                 true,
                 false,
                 None,
+                &crate::profile::Profile::full(),
+                None,
             );
             assert!(
                 resp.error.is_none(),
@@ -4542,6 +4963,8 @@ mod tests {
                     &resolved_scoring,
                     true,
                     false,
+                    None,
+                    &crate::profile::Profile::full(),
                     None,
                 );
 
@@ -4595,6 +5018,8 @@ mod tests {
             &resolved_scoring,
             true,
             false,
+            None,
+            &crate::profile::Profile::full(),
             None,
         )
     }

@@ -91,6 +91,24 @@ pub enum TargetCmd {
     /// Windsurf (Codeium) MCP servers. Writes
     /// `~/.codeium/windsurf/mcp_config.json`.
     Windsurf(TargetArgs),
+
+    // ---- v0.6.4-010 — cross-harness install profiles ----
+    /// Claude Desktop MCP servers (writes the macOS/Windows config;
+    /// pass `--config <path>` on Linux). Args include
+    /// `--profile core` (the v0.6.4 default).
+    ClaudeDesktop(TargetArgs),
+    /// OpenAI Codex CLI MCP servers. Pass `--config <path>` since the
+    /// canonical Codex config path varies by Codex version. Args
+    /// include `--profile core`.
+    Codex(TargetArgs),
+    /// xAI Grok CLI MCP servers. Pass `--config <path>` since the
+    /// Grok CLI config path varies by version. Args include
+    /// `--profile core`.
+    GrokCli(TargetArgs),
+    /// Google Gemini CLI MCP servers. Pass `--config <path>` since the
+    /// Gemini CLI config path varies by version. Args include
+    /// `--profile core`.
+    GeminiCli(TargetArgs),
 }
 
 /// Shared per-target args. Constructed identically for every target so
@@ -140,6 +158,11 @@ pub enum Target {
     Cline,
     Continue,
     Windsurf,
+    // v0.6.4-010 — additional MCP harnesses.
+    ClaudeDesktop,
+    Codex,
+    GrokCli,
+    GeminiCli,
 }
 
 impl Target {
@@ -152,6 +175,10 @@ impl Target {
             Self::Cline => "cline",
             Self::Continue => "continue",
             Self::Windsurf => "windsurf",
+            Self::ClaudeDesktop => "claude-desktop",
+            Self::Codex => "codex",
+            Self::GrokCli => "grok-cli",
+            Self::GeminiCli => "gemini-cli",
         }
     }
 }
@@ -165,6 +192,10 @@ impl TargetCmd {
             Self::Cline(_) => Target::Cline,
             Self::Continue(_) => Target::Continue,
             Self::Windsurf(_) => Target::Windsurf,
+            Self::ClaudeDesktop(_) => Target::ClaudeDesktop,
+            Self::Codex(_) => Target::Codex,
+            Self::GrokCli(_) => Target::GrokCli,
+            Self::GeminiCli(_) => Target::GeminiCli,
         }
     }
 
@@ -175,7 +206,11 @@ impl TargetCmd {
             | Self::Cursor(a)
             | Self::Cline(a)
             | Self::Continue(a)
-            | Self::Windsurf(a) => a,
+            | Self::Windsurf(a)
+            | Self::ClaudeDesktop(a)
+            | Self::Codex(a)
+            | Self::GrokCli(a)
+            | Self::GeminiCli(a) => a,
         }
     }
 }
@@ -336,6 +371,62 @@ fn resolve_config_path(target: Target, args: &TargetArgs) -> Result<PathBuf> {
             .join(".codeium")
             .join("windsurf")
             .join("mcp_config.json"),
+        // v0.6.4-010 — claude-desktop has documented OS-specific paths.
+        // Linux is unstable (depends on AppImage / Flatpak distribution),
+        // so require --config there.
+        Target::ClaudeDesktop => {
+            #[cfg(target_os = "macos")]
+            {
+                home.join("Library")
+                    .join("Application Support")
+                    .join("Claude")
+                    .join("claude_desktop_config.json")
+            }
+            #[cfg(target_os = "windows")]
+            {
+                std::env::var_os("APPDATA")
+                    .map(|p| {
+                        std::path::PathBuf::from(p)
+                            .join("Claude")
+                            .join("claude_desktop_config.json")
+                    })
+                    .unwrap_or_else(|| {
+                        home.join("AppData")
+                            .join("Roaming")
+                            .join("Claude")
+                            .join("claude_desktop_config.json")
+                    })
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                bail!(
+                    "claude-desktop config path is OS-specific and not auto-discovered \
+                     on Linux; pass --config <path>. Common location: \
+                     ~/.config/Claude/claude_desktop_config.json"
+                );
+            }
+        }
+        // v0.6.4-010 — codex, grok-cli, gemini-cli configs vary by version.
+        // Mirror the openclaw/cline pattern: require --config explicitly
+        // to avoid writing to the wrong file.
+        Target::Codex => {
+            bail!(
+                "codex config path varies by version; pass --config <path>. \
+                 Common location: ~/.codex/config.json or ~/.config/codex/mcp.json"
+            );
+        }
+        Target::GrokCli => {
+            bail!(
+                "grok-cli config path varies by version; pass --config <path>. \
+                 Common location: ~/.grok/mcp.json"
+            );
+        }
+        Target::GeminiCli => {
+            bail!(
+                "gemini-cli config path varies by version; pass --config <path>. \
+                 Common location: ~/.gemini/mcp.json"
+            );
+        }
     };
     Ok(p)
 }
@@ -417,6 +508,11 @@ fn apply_managed_block(target: Target, mut cfg: Value, binary: &str) -> Result<V
         Target::Cline => apply_cline(obj, binary),
         Target::Continue => apply_continue(obj, binary),
         Target::Windsurf => apply_windsurf(obj, binary),
+        // v0.6.4-010 — these four harnesses use the canonical
+        // `mcpServers.ai-memory.{command, args, env}` shape.
+        Target::ClaudeDesktop | Target::Codex | Target::GrokCli | Target::GeminiCli => {
+            apply_mcp_standard(obj, binary);
+        }
     }
     Ok(cfg)
 }
@@ -434,8 +530,57 @@ fn remove_managed_block(target: Target, mut cfg: Value) -> Result<Value> {
         Target::Cline => remove_cline(obj),
         Target::Continue => remove_continue(obj),
         Target::Windsurf => remove_windsurf(obj),
+        // v0.6.4-010 — shared mcpServers.ai-memory shape (claude-desktop,
+        // codex, grok-cli, gemini-cli).
+        Target::ClaudeDesktop | Target::Codex | Target::GrokCli | Target::GeminiCli => {
+            remove_mcp_standard(obj);
+        }
     }
     Ok(cfg)
+}
+
+// --- v0.6.4-010 shared MCP-standard writer --------------------------------
+//
+// claude-desktop, codex, grok-cli, and gemini-cli all consume the
+// canonical `mcpServers.<name>.{command,args,env}` shape — the
+// MCP-spec-defined server-config form. `apply_mcp_standard` writes the
+// ai-memory entry with `--profile core` baked into the args (the v0.6.4
+// default). Operators who want the v0.6.3 surface 1:1 can hand-edit the
+// args to `["mcp", "--profile", "full"]`; the install dry-run + diff
+// makes that change visible before they apply it.
+
+fn apply_mcp_standard(obj: &mut Map<String, Value>, binary: &str) {
+    let mcp_servers = obj
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !mcp_servers.is_object() {
+        *mcp_servers = Value::Object(Map::new());
+    }
+    let mcp_obj = mcp_servers.as_object_mut().expect("just-inserted object");
+    mcp_obj.insert(
+        "ai-memory".to_string(),
+        serde_json::json!({
+            MARKER_START_KEY: MARKER_PAYLOAD,
+            MANAGED_KEYS_PROPERTY: ["command", "args", "env"],
+            "command": binary,
+            // v0.6.4-010 — explicitly request the v0.6.4 default surface.
+            // The runtime would default to `core` anyway via
+            // effective_profile(), but having it written here makes the
+            // selection self-documenting in the user's config file.
+            "args": ["mcp", "--profile", "core"],
+            "env": {},
+            MARKER_END_KEY: MARKER_PAYLOAD,
+        }),
+    );
+}
+
+fn remove_mcp_standard(obj: &mut Map<String, Value>) {
+    if let Some(mcp_servers) = obj.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
+        mcp_servers.remove("ai-memory");
+        if mcp_servers.is_empty() {
+            obj.remove("mcpServers");
+        }
+    }
 }
 
 fn ensure_object(v: &mut Value) -> Result<&mut Map<String, Value>> {
@@ -716,6 +861,10 @@ mod tests {
             Target::Cline => TargetCmd::Cline(t),
             Target::Continue => TargetCmd::Continue(t),
             Target::Windsurf => TargetCmd::Windsurf(t),
+            Target::ClaudeDesktop => TargetCmd::ClaudeDesktop(t),
+            Target::Codex => TargetCmd::Codex(t),
+            Target::GrokCli => TargetCmd::GrokCli(t),
+            Target::GeminiCli => TargetCmd::GeminiCli(t),
         };
         InstallArgs { target: target_cmd }
     }
@@ -728,7 +877,11 @@ mod tests {
             | TargetCmd::Cursor(t)
             | TargetCmd::Cline(t)
             | TargetCmd::Continue(t)
-            | TargetCmd::Windsurf(t) => {
+            | TargetCmd::Windsurf(t)
+            | TargetCmd::ClaudeDesktop(t)
+            | TargetCmd::Codex(t)
+            | TargetCmd::GrokCli(t)
+            | TargetCmd::GeminiCli(t) => {
                 t.apply = true;
             }
         }
@@ -743,7 +896,11 @@ mod tests {
             | TargetCmd::Cursor(t)
             | TargetCmd::Cline(t)
             | TargetCmd::Continue(t)
-            | TargetCmd::Windsurf(t) => {
+            | TargetCmd::Windsurf(t)
+            | TargetCmd::ClaudeDesktop(t)
+            | TargetCmd::Codex(t)
+            | TargetCmd::GrokCli(t)
+            | TargetCmd::GeminiCli(t) => {
                 t.uninstall = true;
                 t.apply = true;
             }
@@ -1567,5 +1724,106 @@ mod tests {
         let p = std::path::PathBuf::from("/custom/path/ai-memory");
         let resolved = resolve_binary(Some(&p));
         assert_eq!(resolved, "/custom/path/ai-memory");
+    }
+
+    // ---- v0.6.4-010 — per-harness install profiles ----
+    //
+    // The four MCP-standard harnesses (claude-desktop, codex, grok-cli,
+    // gemini-cli) use the same `mcpServers.ai-memory.{command,args,env}`
+    // shape. We test all four with a single shared assertion fixture
+    // since the writer is shared.
+
+    fn assert_mcp_standard_apply(target: Target, fname: &str) {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, fname);
+        seed(&path, "{}\n");
+        run(&args_for_apply(target, path.clone()), &mut env.output()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // Standard MCP shape.
+        assert!(
+            parsed["mcpServers"]["ai-memory"][MARKER_START_KEY].is_string(),
+            "{} missing managed-block marker",
+            target.name()
+        );
+        // v0.6.4 default profile baked into args.
+        let args = parsed["mcpServers"]["ai-memory"]["args"]
+            .as_array()
+            .unwrap();
+        let strs: Vec<&str> = args.iter().filter_map(Value::as_str).collect();
+        assert_eq!(
+            strs,
+            vec!["mcp", "--profile", "core"],
+            "{} should write `mcp --profile core` args",
+            target.name()
+        );
+        let cmd = parsed["mcpServers"]["ai-memory"]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(cmd, "/usr/local/bin/ai-memory");
+    }
+
+    #[test]
+    fn claude_desktop_apply_writes_mcp_standard_with_profile_core() {
+        assert_mcp_standard_apply(Target::ClaudeDesktop, "claude_desktop_config.json");
+    }
+
+    #[test]
+    fn codex_apply_writes_mcp_standard_with_profile_core() {
+        assert_mcp_standard_apply(Target::Codex, "codex_config.json");
+    }
+
+    #[test]
+    fn grok_cli_apply_writes_mcp_standard_with_profile_core() {
+        assert_mcp_standard_apply(Target::GrokCli, "grok_mcp.json");
+    }
+
+    #[test]
+    fn gemini_cli_apply_writes_mcp_standard_with_profile_core() {
+        assert_mcp_standard_apply(Target::GeminiCli, "gemini_mcp.json");
+    }
+
+    #[test]
+    fn mcp_standard_uninstall_round_trip_restores_empty() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "claude_desktop_config.json");
+        seed(&path, "{}\n");
+        run(
+            &args_for_apply(Target::ClaudeDesktop, path.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        run(
+            &args_for_uninstall_apply(Target::ClaudeDesktop, path.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // Empty mcpServers should be removed entirely.
+        assert!(
+            !parsed.as_object().unwrap().contains_key("mcpServers"),
+            "uninstall should remove the empty mcpServers wrapper"
+        );
+    }
+
+    #[test]
+    fn mcp_standard_apply_preserves_user_keys() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "codex_config.json");
+        seed(
+            &path,
+            r#"{"mcpServers":{"other-mcp":{"command":"x","args":[]}},"unrelated":42}"#,
+        );
+        run(
+            &args_for_apply(Target::Codex, path.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        // Sibling server preserved.
+        assert_eq!(parsed["mcpServers"]["other-mcp"]["command"], "x");
+        // Sibling top-level key preserved.
+        assert_eq!(parsed["unrelated"], 42);
+        // ai-memory entry written.
+        assert!(parsed["mcpServers"]["ai-memory"].is_object());
     }
 }
