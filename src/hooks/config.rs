@@ -89,6 +89,46 @@ pub enum HookMode {
 }
 
 // ---------------------------------------------------------------------------
+// FailMode
+// ---------------------------------------------------------------------------
+
+/// Hook crash-handling posture, consumed by G5's chain runner.
+///
+/// * [`FailMode::Open`] — when the executor returns `Err` (spawn
+///   failure, decode failure, timeout, daemon unavailable, …) the
+///   chain logs a warning and treats the failed fire as `Allow`. This
+///   is the v0.7 default because the bias on the request path is
+///   "fail open, log loudly" — a buggy hook must not brick recall.
+/// * [`FailMode::Closed`] — the chain converts the executor error
+///   into `ChainResult::Deny` and short-circuits the chain. Reserved
+///   for hooks that gate compliance-critical paths (PII redaction,
+///   regulated-tenant access control) where a silent fail-open is
+///   worse than a hard refusal.
+///
+/// The field is optional in `hooks.toml`; missing entries default to
+/// [`FailMode::Open`] so G3-era configs keep their behaviour after
+/// G5 lands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FailMode {
+    Open,
+    Closed,
+}
+
+impl Default for FailMode {
+    fn default() -> Self {
+        FailMode::Open
+    }
+}
+
+/// Serde default helper — `serde(default)` only reaches for `Default::default`
+/// on the *field type*; this named function lets the
+/// `#[serde(default = "...")]` form work without a wrapper newtype.
+fn default_fail_mode() -> FailMode {
+    FailMode::Open
+}
+
+// ---------------------------------------------------------------------------
 // HookConfig
 // ---------------------------------------------------------------------------
 
@@ -107,6 +147,14 @@ pub struct HookConfig {
     pub mode: HookMode,
     pub enabled: bool,
     pub namespace: String,
+    /// G5 — chain crash-handling posture. Defaults to
+    /// [`FailMode::Open`] so existing G3-era configs keep firing
+    /// fail-open even after G5 wires the chain runner in. Hooks
+    /// that gate compliance-critical paths set
+    /// `fail_mode = "closed"` to convert executor errors into a
+    /// chain-level `Deny`.
+    #[serde(default = "default_fail_mode")]
+    pub fail_mode: FailMode,
 }
 
 /// Top-level TOML shape: `[[hook]]` blocks collect into
