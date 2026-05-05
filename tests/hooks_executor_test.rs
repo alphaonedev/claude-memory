@@ -303,6 +303,10 @@ printf '%s\n' '{"action":"deny","reason":"redact required","code":451}'
             assert_eq!(reason, "redact required");
             assert_eq!(code, 451);
         }
-        HookDecision::Allow => panic!("expected Deny, got Allow"),
+        // G4 lifted HookDecision into a 4-variant enum; the match
+        // arm below covers the non-Deny shapes the integration
+        // script can never produce, but it keeps the match
+        // exhaustive against the new wire contract.
+        other => panic!("expected Deny, got {other:?}"),
     }
 }
