@@ -1022,6 +1022,183 @@ impl ResolvedTtl {
 }
 
 // ---------------------------------------------------------------------------
+// Transcript lifecycle (v0.7.0 I3) — per-namespace TTL + archive→prune
+// ---------------------------------------------------------------------------
+
+/// Compiled-in default for the transcript TTL: 30 days. After this
+/// many seconds elapse from `created_at` AND every memory that links
+/// the transcript has expired (or been deleted), the I3 background
+/// sweeper marks the transcript archived.
+pub const DEFAULT_TRANSCRIPT_TTL_SECS: i64 = 2_592_000;
+
+/// Compiled-in default for the post-archive grace window: 7 days.
+/// A transcript whose `archived_at` is older than this is hard-deleted
+/// by the prune phase; the I2 join table is cleaned up via
+/// `ON DELETE CASCADE`.
+pub const DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS: i64 = 604_800;
+
+/// Maximum transcript TTL / grace clamp: 10 years in seconds. Mirrors
+/// [`MAX_TTL_SECS`] above so the same overflow guard applies to the
+/// transcript lifecycle math when the resolved value flows into a
+/// `chrono::Duration`.
+const MAX_TRANSCRIPT_LIFECYCLE_SECS: i64 = 315_360_000;
+
+/// `[transcripts]` block in `config.toml` — per-namespace TTL and
+/// archive grace overrides for the I3 lifecycle sweeper.
+///
+/// ```toml
+/// [transcripts]
+/// default_ttl_secs   = 2592000   # 30 days; archive after this when memories all expired
+/// archive_grace_secs = 604800    # 7 days; prune this long after archive
+///
+/// [transcripts.namespaces."team/audit"]
+/// default_ttl_secs = 31536000    # 1 year — compliance retention override
+///
+/// [transcripts.namespaces."ephemeral/*"]
+/// default_ttl_secs = 86400       # 1 day — short-lived scratchpad
+/// ```
+///
+/// Resolution: the sweeper picks the longest-prefix matching namespace
+/// override (with literal `"*"` patterns last), falls back to the
+/// global `default_ttl_secs` / `archive_grace_secs` on this struct,
+/// and finally to the compiled defaults above.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptsConfig {
+    /// Global default seconds-since-creation before the sweeper
+    /// considers a transcript archive-eligible. `None` → compiled
+    /// default ([`DEFAULT_TRANSCRIPT_TTL_SECS`] = 30 days).
+    pub default_ttl_secs: Option<i64>,
+    /// Global default seconds an archived transcript lingers before
+    /// the prune phase deletes it. `None` → compiled default
+    /// ([`DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS`] = 7 days).
+    pub archive_grace_secs: Option<i64>,
+    /// Per-namespace overrides keyed by namespace pattern. Patterns
+    /// are matched literally first; a trailing `/*` selects every
+    /// child namespace under the prefix; the bare `"*"` is the
+    /// catch-all and is consulted last.
+    pub namespaces: Option<std::collections::HashMap<String, TranscriptNamespaceConfig>>,
+}
+
+/// Per-namespace overrides nested under
+/// `[transcripts.namespaces."<pattern>"]`. Each field independently
+/// overrides the [`TranscriptsConfig`] global default; an unset field
+/// inherits.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TranscriptNamespaceConfig {
+    /// Namespace-specific TTL override.
+    pub default_ttl_secs: Option<i64>,
+    /// Namespace-specific archive-grace override.
+    pub archive_grace_secs: Option<i64>,
+}
+
+/// Resolved transcript-lifecycle parameters for a single namespace.
+/// Produced by [`TranscriptsConfig::resolve`] and consumed by the I3
+/// sweeper to drive the archive + prune SQL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolvedTranscriptLifecycle {
+    /// Seconds-since-creation before archive eligibility. Always
+    /// positive and `<= MAX_TRANSCRIPT_LIFECYCLE_SECS`.
+    pub default_ttl_secs: i64,
+    /// Seconds an archived row lingers before prune. Always
+    /// positive and `<= MAX_TRANSCRIPT_LIFECYCLE_SECS`.
+    pub archive_grace_secs: i64,
+}
+
+impl Default for ResolvedTranscriptLifecycle {
+    fn default() -> Self {
+        Self {
+            default_ttl_secs: DEFAULT_TRANSCRIPT_TTL_SECS,
+            archive_grace_secs: DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS,
+        }
+    }
+}
+
+impl TranscriptsConfig {
+    /// Resolve the lifecycle parameters for `namespace`.
+    ///
+    /// Precedence:
+    /// 1. Exact match in `namespaces` (e.g. `"team/audit"`).
+    /// 2. Longest matching prefix pattern ending in `/*` (e.g.
+    ///    `"team/*"` matches `"team/eng"` and `"team/eng/inner"`).
+    /// 3. Bare `"*"` wildcard.
+    /// 4. The struct-level `default_ttl_secs` / `archive_grace_secs`.
+    /// 5. The compiled defaults
+    ///    ([`DEFAULT_TRANSCRIPT_TTL_SECS`] / [`DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS`]).
+    ///
+    /// Each field is resolved independently — a per-namespace override
+    /// that only sets `default_ttl_secs` inherits the global
+    /// `archive_grace_secs`. Non-positive values fall through to the
+    /// next layer; positive values are clamped to
+    /// `MAX_TRANSCRIPT_LIFECYCLE_SECS` so the resolved `Duration`
+    /// addition can never overflow `chrono`.
+    #[must_use]
+    pub fn resolve(&self, namespace: &str) -> ResolvedTranscriptLifecycle {
+        let ns_table = self.namespaces.as_ref();
+
+        // Walk the namespace overrides in precedence order, returning
+        // the first that names the field. `None` means "fall through".
+        let pick_ns = |field: fn(&TranscriptNamespaceConfig) -> Option<i64>| -> Option<i64> {
+            let table = ns_table?;
+            // 1. Exact literal match.
+            if let Some(ns) = table.get(namespace) {
+                if let Some(v) = field(ns) {
+                    return Some(v);
+                }
+            }
+            // 2. Longest-prefix `prefix/*` match.
+            let mut prefix_hits: Vec<(&str, &TranscriptNamespaceConfig)> = table
+                .iter()
+                .filter_map(|(k, v)| {
+                    let prefix = k.strip_suffix("/*")?;
+                    if namespace == prefix || namespace.starts_with(&format!("{prefix}/")) {
+                        Some((prefix, v))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            prefix_hits.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+            for (_, ns) in &prefix_hits {
+                if let Some(v) = field(ns) {
+                    return Some(v);
+                }
+            }
+            // 3. Bare wildcard.
+            if let Some(ns) = table.get("*") {
+                if let Some(v) = field(ns) {
+                    return Some(v);
+                }
+            }
+            None
+        };
+
+        let clamp = |v: i64, fallback: i64| -> i64 {
+            if v <= 0 {
+                fallback
+            } else {
+                v.min(MAX_TRANSCRIPT_LIFECYCLE_SECS)
+            }
+        };
+
+        let ttl = pick_ns(|n| n.default_ttl_secs)
+            .or(self.default_ttl_secs)
+            .map_or(DEFAULT_TRANSCRIPT_TTL_SECS, |v| {
+                clamp(v, DEFAULT_TRANSCRIPT_TTL_SECS)
+            });
+        let grace = pick_ns(|n| n.archive_grace_secs)
+            .or(self.archive_grace_secs)
+            .map_or(DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS, |v| {
+                clamp(v, DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS)
+            });
+
+        ResolvedTranscriptLifecycle {
+            default_ttl_secs: ttl,
+            archive_grace_secs: grace,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Recall scoring (time-decay half-life) — v0.6.0.0
 // ---------------------------------------------------------------------------
 
@@ -1203,6 +1380,11 @@ pub struct AppConfig {
     /// gate). New installs that want the strict gate set
     /// `[permissions] mode = "enforce"` explicitly.
     pub permissions: Option<PermissionsConfig>,
+    /// v0.7.0 I3 — `[transcripts]` block. Per-namespace TTL and
+    /// archive-grace overrides for the transcript lifecycle sweeper.
+    /// Unset → compiled defaults apply globally
+    /// ([`DEFAULT_TRANSCRIPT_TTL_SECS`] / [`DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS`]).
+    pub transcripts: Option<TranscriptsConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1923,6 +2105,14 @@ impl AppConfig {
     /// (disabled) instance when the config file omits it.
     pub fn effective_audit(&self) -> AuditConfig {
         self.audit.clone().unwrap_or_default()
+    }
+
+    /// v0.7.0 I3 — resolve the [`TranscriptsConfig`] block, returning
+    /// a default (no namespace overrides → compiled global defaults)
+    /// instance when the config file omits it.
+    #[must_use]
+    pub fn effective_transcripts(&self) -> TranscriptsConfig {
+        self.transcripts.clone().unwrap_or_default()
     }
 
     /// Resolve the [`BootConfig`] block, returning a default
