@@ -84,6 +84,16 @@ const GC_INTERVAL_SECS: u64 = 1800;
 /// WAL auto-checkpoint cadence in the HTTP daemon. Bounds `*-wal`
 /// file growth between `SQLite`'s internal page-count checkpoints.
 const WAL_CHECKPOINT_INTERVAL_SECS: u64 = 600;
+/// v0.7.0 K2 — pending_actions timeout sweeper cadence. Fires every
+/// 60s and transitions `status='pending'` rows whose age exceeds the
+/// per-row `default_timeout_seconds` (or the global default below) to
+/// `status='expired'`.
+const PENDING_TIMEOUT_SWEEP_INTERVAL_SECS: u64 = 60;
+/// Default per-row TTL applied when a `pending_actions` row has a NULL
+/// `default_timeout_seconds`. 24 hours — matches the operator-facing
+/// `doctor` warning window so a row already classed CRITICAL by
+/// `doctor_oldest_pending_age_secs` is also a sweeper candidate.
+const PENDING_TIMEOUT_DEFAULT_SECS: i64 = 86_400;
 
 // ---------------------------------------------------------------------------
 // Clap-derived CLI surface
@@ -1060,6 +1070,70 @@ pub fn spawn_gc_loop(
     })
 }
 
+/// v0.7.0 K2 — spawn the periodic `pending_actions` timeout sweeper.
+///
+/// Sleeps `interval`, then calls [`db::sweep_pending_action_timeouts`]
+/// against the daemon's shared connection. Per-row
+/// `default_timeout_seconds` overrides the global `default_secs` when
+/// non-NULL. A non-positive `default_secs` disables the sweeper.
+///
+/// Returned [`JoinHandle`] is owned by the caller; `serve()` aborts it
+/// on shutdown — same lifecycle as [`spawn_gc_loop`].
+///
+/// Closes the v0.6.3.1 honest-Capabilities-v2 disclosure that the
+/// `default_timeout_seconds` field was advertised but unused.
+#[must_use]
+pub fn spawn_pending_timeout_sweep_loop(
+    state: Db,
+    db_path: PathBuf,
+    default_secs: i64,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Hold the lock just long enough for the sweep call. The
+            // expired ids returned by the sweeper are dispatched to
+            // subscribers AFTER the lock drops so a slow webhook can
+            // never starve write traffic.
+            let expired = {
+                let lock = state.lock().await;
+                match db::sweep_pending_action_timeouts(&lock.0, default_secs) {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!("pending_actions sweep failed: {e}");
+                        Vec::new()
+                    }
+                }
+            };
+            if expired.is_empty() {
+                continue;
+            }
+            tracing::info!(
+                "pending_actions sweep: marked {} row(s) expired",
+                expired.len()
+            );
+            // Best-effort fan-out via the existing subscription
+            // dispatcher. K2 piggybacks on the lifecycle event
+            // shape — the namespace + id are enough for downstream
+            // webhook consumers to look the row up. The full
+            // approval-event surface (typed payloads, retry, DLQ)
+            // arrives in K4 / K7.
+            for (id, namespace) in expired {
+                let lock = state.lock().await;
+                crate::subscriptions::dispatch_event(
+                    &lock.0,
+                    "pending_action_expired",
+                    &id,
+                    &namespace,
+                    None,
+                    &db_path,
+                );
+            }
+        }
+    })
+}
+
 /// Spawn the periodic WAL checkpoint loop. First checkpoint runs
 /// `interval / 2` after start (staggered from the GC loop to avoid
 /// lock-contention bursts on cold start), then on a fixed cadence.
@@ -1205,6 +1279,20 @@ pub async fn bootstrap_serve(
     task_handles.push(spawn_wal_checkpoint_loop(
         db_state.clone(),
         Duration::from_secs(WAL_CHECKPOINT_INTERVAL_SECS),
+    ));
+
+    // v0.7.0 K2: pending_actions timeout sweeper. Closes the v0.6.3.1
+    // honest-Capabilities-v2 disclosure that `default_timeout_seconds`
+    // was advertised in v1 but unused. 60-second cadence; per-row
+    // override via the `default_timeout_seconds` column. The global
+    // default below is the fall-through when the per-row column is
+    // NULL — matches the `doctor_oldest_pending_age_secs` 24h CRIT
+    // window so a row that would already be flagged red also expires.
+    task_handles.push(spawn_pending_timeout_sweep_loop(
+        db_state.clone(),
+        db_path.to_path_buf(),
+        PENDING_TIMEOUT_DEFAULT_SECS,
+        Duration::from_secs(PENDING_TIMEOUT_SWEEP_INTERVAL_SECS),
     ));
 
     let api_key_state = ApiKeyState {
@@ -2174,6 +2262,71 @@ mod tests {
         assert!(err.is_cancelled());
     }
 
+    // v0.7.0 K2 — pending_actions timeout sweeper integration test.
+    //
+    // Pre-seed a stale `pending_actions` row, spawn the sweep loop with
+    // a very short interval, await long enough for at least one tick to
+    // run on the real runtime, and assert the row was transitioned to
+    // `status='expired'`. This is the daemon-side end-to-end check that
+    // complements the per-function unit tests in `db::tests`. We use a
+    // real (non-paused) runtime here because the SQL sweep query
+    // (`julianday('now')`) consults the OS wall clock, not tokio's
+    // virtual time — a `start_paused=true` test never observes ticks
+    // against a back-dated row.
+    #[tokio::test]
+    async fn test_spawn_pending_timeout_sweep_loop_marks_stale_expired() {
+        let env = TestEnv::fresh();
+        let conn = db::open(&env.db_path).unwrap();
+        // Seed a 2-hour-old pending row.
+        let two_h_ago = (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339();
+        conn.execute(
+            "INSERT INTO pending_actions
+             (id, action_type, namespace, payload, requested_by, requested_at,
+              status)
+             VALUES ('sweeper-1', 'store', 'ns/a', '{}', 'tester', ?1, 'pending')",
+            rusqlite::params![two_h_ago],
+        )
+        .unwrap();
+        let state: Db = Arc::new(Mutex::new((
+            conn,
+            env.db_path.clone(),
+            ResolvedTtl::default(),
+            true,
+        )));
+        // 1-hour global default; the seeded 2h-old row is stale.
+        // Tick every 50ms so the test wraps in well under a second.
+        let h = spawn_pending_timeout_sweep_loop(
+            state.clone(),
+            env.db_path.clone(),
+            3_600,
+            Duration::from_millis(50),
+        );
+        // Poll the row up to 2s; succeed as soon as the sweep flips it.
+        let mut flipped = false;
+        for _ in 0..40 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let lock = state.lock().await;
+            let status: String = lock
+                .0
+                .query_row(
+                    "SELECT status FROM pending_actions WHERE id = 'sweeper-1'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if status == "expired" {
+                flipped = true;
+                break;
+            }
+        }
+        h.abort();
+        let _ = h.await;
+        assert!(
+            flipped,
+            "sweeper must transition the stale row to 'expired' within 2s"
+        );
+    }
+
     // ----- passphrase_from_file -----------------------------------------
 
     #[test]
@@ -2294,8 +2447,9 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Two task handles spawned (gc + wal_checkpoint).
-        assert_eq!(bs.task_handles.len(), 2);
+        // Three task handles spawned (gc + wal_checkpoint + v0.7 K2
+        // pending_actions timeout sweep).
+        assert_eq!(bs.task_handles.len(), 3);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();

@@ -64,6 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v0.7.0 K2 — `pending_actions` timeout sweeper.** Closes the
+  v0.6.3.1 honest-Capabilities-v2 disclosure that
+  `default_timeout_seconds` was advertised in v1 but unused. Schema
+  bumped to v21: `pending_actions` gains nullable
+  `default_timeout_seconds` (per-row TTL) and `expired_at` (RFC3339
+  stamp set when the sweeper fires) plus a composite
+  `(status, requested_at)` index. New `db::sweep_pending_action_timeouts`
+  helper is driven by a 60-second background tokio task spawned from
+  `daemon_runtime::bootstrap_serve`; per-row override beats the
+  cluster default (24h, matching `doctor`'s CRIT window). Each
+  expired row fires a `pending_action_expired` event through the
+  existing subscription dispatcher. A non-positive global default
+  disables the sweeper entirely (operator escape hatch). 7 new
+  tests cover the unit + integration paths.
 - **Boot follow-ups folded from v0.6.4 into v0.6.3.1 (PR-9h, issue #487
   PR #497 reqs #72 + #73)** — version-drift detection adds
   `MIN_SUPPORTED_SCHEMA = 16` / `MAX_SUPPORTED_SCHEMA = 19` constants in
