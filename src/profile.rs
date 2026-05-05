@@ -25,11 +25,11 @@
 //! ## Profile vocabulary
 //!
 //! - `core` — 5 tools, the new v0.6.4 default. Always loaded.
-//! - `graph` — adds the 8 KG/entity tools. ~13 tools.
+//! - `graph` — adds the 9 KG/entity/replay tools. ~14 tools.
 //! - `admin` — adds lifecycle (5) + governance (8). ~18 tools.
 //! - `power` — adds the 6 LLM-augmented tools (consolidate, auto_tag, …).
 //!   ~11 tools.
-//! - `full` — every family. 43 tools, 1:1 v0.6.3 surface.
+//! - `full` — every family. 44 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -55,7 +55,8 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-04. Counts must sum to 43 (the v0.6.3.1 baseline).
+/// 2026-05-05. Counts must sum to 44 (the v0.6.3.1 baseline of 43 +
+/// v0.7.0 I4 `memory_replay` in `Family::Graph`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     /// store, recall, list, get, search — 5
@@ -63,7 +64,9 @@ pub enum Family {
     /// update, delete, forget, gc, promote — 5
     Lifecycle,
     /// kg_query, kg_timeline, kg_invalidate, link, get_links,
-    /// entity_register, entity_get_by_alias, get_taxonomy — 8
+    /// entity_register, entity_get_by_alias, get_taxonomy, replay — 9
+    /// (replay added in v0.7.0 I4 — joins to the I2 transcript-link
+    /// substrate to reconstruct a memory's source transcript chain.)
     Graph,
     /// pending_list/approve/reject, namespace_set/get/clear_standard,
     /// subscribe, unsubscribe — 8
@@ -103,7 +106,7 @@ impl Family {
             // lifecycle (5)
             "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
             | "memory_promote" => Some(Self::Lifecycle),
-            // graph (8)
+            // graph (9 — v0.7.0 I4 added memory_replay)
             "memory_kg_query"
             | "memory_kg_timeline"
             | "memory_kg_invalidate"
@@ -111,7 +114,8 @@ impl Family {
             | "memory_get_links"
             | "memory_entity_register"
             | "memory_entity_get_by_alias"
-            | "memory_get_taxonomy" => Some(Self::Graph),
+            | "memory_get_taxonomy"
+            | "memory_replay" => Some(Self::Graph),
             // governance (8)
             "memory_pending_list"
             | "memory_pending_approve"
@@ -182,7 +186,9 @@ impl Family {
     pub const fn expected_tool_count(self) -> usize {
         match self {
             Self::Core | Self::Lifecycle | Self::Meta => 5,
-            Self::Graph | Self::Governance => 8,
+            // Graph: 8 baseline + memory_replay (v0.7.0 I4) = 9.
+            Self::Graph => 9,
+            Self::Governance => 8,
             Self::Power => 6,
             Self::Archive => 4,
             Self::Other => 2,
@@ -227,6 +233,9 @@ impl Family {
                 "memory_entity_register",
                 "memory_entity_get_by_alias",
                 "memory_get_taxonomy",
+                // v0.7.0 I4 — traverses memory_transcript_links (I2) to
+                // reconstruct the source-transcript chain for a memory.
+                "memory_replay",
             ],
             Self::Governance => &[
                 "memory_pending_list",
@@ -310,7 +319,7 @@ impl Profile {
         }
     }
 
-    /// `graph` — core + graph. 13 tools.
+    /// `graph` — core + graph. 14 tools (v0.7.0 I4 added `memory_replay`).
     #[must_use]
     pub fn graph() -> Self {
         Self {
@@ -334,7 +343,8 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 43 tools, 1:1 v0.6.3 surface.
+    /// `full` — every family. 44 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `memory_replay`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -513,12 +523,13 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_43() {
+    fn family_expected_tool_counts_sum_to_44() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 43,
-            "v0.6.3.1 baseline is 43 tools — if this drifts, update \
-             Family::expected_tool_count and the family map docs together"
+            total, 44,
+            "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` = 44. If this \
+             drifts, update Family::expected_tool_count and the family map docs \
+             together."
         );
     }
 
@@ -566,15 +577,19 @@ mod tests {
     }
 
     #[test]
-    fn profile_graph_has_thirteen_tools() {
+    fn profile_graph_has_fourteen_tools() {
         let p = Profile::graph();
-        assert_eq!(p.expected_tool_count(), 5 + 8);
+        // v0.7.0 I4 — Graph now ships 9 tools (8 baseline + memory_replay).
+        assert_eq!(p.expected_tool_count(), 5 + 9);
         assert!(p.includes(Family::Graph));
     }
 
     #[test]
     fn profile_admin_has_eighteen_tools() {
         let p = Profile::admin();
+        // admin = core (5) + lifecycle (5) + governance (8). Graph isn't
+        // in admin so the v0.7.0 I4 memory_replay addition doesn't change
+        // this count.
         assert_eq!(p.expected_tool_count(), 5 + 5 + 8);
     }
 
@@ -585,9 +600,10 @@ mod tests {
     }
 
     #[test]
-    fn profile_full_has_forty_three_tools() {
+    fn profile_full_has_forty_four_tools() {
         let p = Profile::full();
-        assert_eq!(p.expected_tool_count(), 43);
+        // v0.7.0 I4 — full surface = 43 baseline + memory_replay.
+        assert_eq!(p.expected_tool_count(), 44);
     }
 
     // ---------- Profile::parse ----------
@@ -609,14 +625,14 @@ mod tests {
 
     #[test]
     fn parse_custom_comma_list_dedup() {
-        // `core,graph` → core (5) + graph (8) = 13 tools.
+        // `core,graph` → core (5) + graph (9, after v0.7.0 I4) = 14 tools.
         // Meta is NOT included — `memory_capabilities` is always-on
         // bootstrapped outside the family map (v0.6.4-002).
         let p = Profile::parse("core,graph").unwrap();
         assert!(p.includes(Family::Core));
         assert!(!p.includes(Family::Meta));
         assert!(p.includes(Family::Graph));
-        assert_eq!(p.expected_tool_count(), 13);
+        assert_eq!(p.expected_tool_count(), 14);
     }
 
     #[test]
@@ -722,6 +738,8 @@ mod tests {
             "memory_entity_register",
             "memory_entity_get_by_alias",
             "memory_get_taxonomy",
+            // graph (v0.7.0 I4 addition)
+            "memory_replay",
             // governance
             "memory_pending_list",
             "memory_pending_approve",
@@ -753,7 +771,11 @@ mod tests {
             "memory_list_subscriptions",
             "memory_notify",
         ];
-        assert_eq!(baseline.len(), 43, "baseline list itself must be 43");
+        assert_eq!(
+            baseline.len(),
+            44,
+            "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) = 44"
+        );
         for name in baseline {
             assert!(
                 Family::for_tool(name).is_some(),

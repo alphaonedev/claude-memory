@@ -145,6 +145,39 @@ pub fn fetch(conn: &Connection, id: &str) -> Result<Option<String>> {
     Ok(Some(text))
 }
 
+/// v0.7.0 I4 — fetch the lightweight metadata for a transcript without
+/// pulling the (potentially multi-MB) decompressed content blob.
+/// Returns `Ok(None)` when no row matches, mirroring [`fetch`]. The
+/// `Transcript` handle carries `created_at`, `compressed_size`, and
+/// `original_size`, which I4's `memory_replay` joins with the I2
+/// link spans to assemble a per-transcript metadata block.
+///
+/// # Errors
+///
+/// Returns an error when the SELECT fails (disk I/O, schema drift).
+pub fn fetch_metadata(conn: &Connection, id: &str) -> Result<Option<Transcript>> {
+    let row = conn
+        .query_row(
+            "SELECT id, namespace, created_at, expires_at,
+                    compressed_size, original_size
+               FROM memory_transcripts WHERE id = ?1",
+            params![id],
+            |r| {
+                Ok(Transcript {
+                    id: r.get(0)?,
+                    namespace: r.get(1)?,
+                    created_at: r.get(2)?,
+                    expires_at: r.get(3)?,
+                    compressed_size: r.get(4)?,
+                    original_size: r.get(5)?,
+                })
+            },
+        )
+        .optional()
+        .context("SELECT memory_transcripts metadata failed")?;
+    Ok(row)
+}
+
 /// Delete every row whose `expires_at` is in the past (relative to
 /// "now"). Returns the number of rows removed.
 ///

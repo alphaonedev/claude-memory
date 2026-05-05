@@ -1865,7 +1865,11 @@ fn test_mcp_tools_list() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools should be array");
-    assert_eq!(tools.len(), 43, "expected 43 MCP tools");
+    assert_eq!(
+        tools.len(),
+        44,
+        "expected 44 MCP tools (v0.6.3 baseline 43 + v0.7.0 I4 memory_replay)"
+    );
 
     let tool_names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert!(tool_names.contains(&"memory_store"));

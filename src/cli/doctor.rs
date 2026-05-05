@@ -2057,8 +2057,8 @@ mod tests {
             "default profile should be core; got: {stdout}"
         );
         assert!(
-            stdout.contains("Full   (43 tools loaded)"),
-            "report should include full-profile baseline"
+            stdout.contains("Full   (44 tools loaded)"),
+            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay)"
         );
         assert!(
             stdout.contains("Tokenizer: cl100k_base"),
@@ -2114,8 +2114,8 @@ mod tests {
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            43,
-            "raw_table must include all 43 baseline tools"
+            44,
+            "raw_table must include all 44 baseline tools (43 + v0.7.0 I4 memory_replay)"
         );
         // memory_store is in core and must be loaded under the default
         // (core) profile.

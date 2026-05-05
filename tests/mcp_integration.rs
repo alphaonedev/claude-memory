@@ -48,9 +48,9 @@ fn spawn_mcp(db: &std::path::Path) -> (McpChild, mpsc::Receiver<String>) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_ai-memory"))
         .env("AI_MEMORY_NO_CONFIG", "1")
         // v0.6.4-002: tests written against the v0.6.3 full surface
-        // (43 tools) — pin --profile full so the v0.6.4 default flip
-        // (--profile core, 6 tools) doesn't shrink what these tests
-        // can exercise. Tests for the new family-scoped behavior live
+        // (43 tools, now 44 with v0.7.0 I4 memory_replay) — pin
+        // --profile full so the v0.6.4 default flip (--profile core,
+        // 6 tools) doesn't shrink what these tests can exercise. Tests for the new family-scoped behavior live
         // in src/mcp.rs::tests + tests/webhook_http_parity.rs.
         .args([
             "--db",
@@ -189,9 +189,10 @@ fn mcp_list_tools_returns_expected_count() {
     let tools = resp["result"]["tools"]
         .as_array()
         .expect("tools array missing");
-    // The lib tests assert exactly 43 in v0.6.3 (`tool_definitions_returns_43_tools`).
-    // We assert a lower bound so this test doesn't regress every time
-    // a new tool ships, while still catching an empty/missing list.
+    // The lib tests assert exactly 44 (v0.6.3 baseline 43 + v0.7.0 I4
+    // memory_replay) in `tool_definitions_returns_44_tools`. We assert a
+    // lower bound so this test doesn't regress every time a new tool
+    // ships, while still catching an empty/missing list.
     assert!(
         tools.len() >= 40,
         "expected >=40 tools, got {} ({})",
