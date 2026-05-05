@@ -346,7 +346,7 @@
     <a class="home-link" href="./">ai-memory</a>
     <div class="right">
       <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
-      <a href="whats-new-v063.html" style="color:#ffb86b">v0.6.3</a>
+      <a href="whats-new-v064.html" style="color:#6ee7ff">v0.6.4</a>
       <div class="menu">
         <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
@@ -430,49 +430,65 @@
 <section class="hero">
     <div class="container">
         <img src="ai-memory-logo.jpg" alt="ai-memory logo" style="width:160px;height:auto;margin-bottom:1.5rem;border-radius:16px;filter:drop-shadow(0 0 24px rgba(255,255,255,.25))">
-        <h1>Persistent Memory for <span>Any AI</span></h1>
+        <h1>The memory substrate <span>AI agents run on.</span></h1>
+        <p style="font-size:1.15rem;color:var(--text-muted);max-width:780px;margin:0 auto 2rem;line-height:1.55">
+            From a developer's laptop to a multi-region hive of agents &mdash; <strong style="color:#fff">same binary, same schema, same code path.</strong> You don't graduate off ai-memory; you turn flags on.
+        </p>
         <div class="bluf-card">
-            <span class="bluf-eyebrow">BLUF &mdash; Bottom Line Up Front</span>
+            <span class="bluf-eyebrow" style="background:rgba(110,231,255,0.1);color:#6ee7ff;border-color:#6ee7ff">v0.6.4 &mdash; <code>quiet-tools</code> &middot; 76.4% lighter on the wire &middot; same 43-tool capability</span>
 
             <p class="bluf-lead">
-                <strong>ai-memory is persistent, portable memory for AI agents.</strong>
-                One SQLite file on your hardware. Works with any MCP-compatible AI &mdash; Claude, ChatGPT, Cursor, Grok, Llama, OpenClaw 🦞, anything that speaks the Model Context Protocol. Apache 2.0; trademark-protected (USPTO Serial No.&nbsp;99761257).
+                Most "AI memory" products are <em>chat memory</em>: one user, one AI, one conversation. <strong>ai-memory is the agent substrate</strong> &mdash; federation primitives, governance policies, capability allowlists, audit trails, peer mTLS, webhook event bus, autonomous curator. Built for the agent era, not retrofitted from chat memory. Apache 2.0, single Rust binary, runs on SQLite. Works with any MCP-compatible AI &mdash; Claude, ChatGPT, Cursor, Grok, Llama, OpenClaw 🦞, every modern AI tool.
             </p>
 
             <p class="bluf-section">
-                <strong>Replaces vendor auto-memory.</strong>
-                Vendor memory features (Claude auto-memory, ChatGPT memory) load your entire memory into every message &mdash; burning tokens on idle context whether the AI uses it or not. ai-memory uses <strong style="color:var(--green)">zero context tokens</strong> until the AI calls <code>memory_recall</code> &mdash; only relevant memories come back, ranked, and compressed via TOON format (79% smaller than JSON).
+                <strong>One install, five tiers.</strong>
+                <a href="architectures-t1.html" style="color:#6ee7ff">T1 (single agent, your laptop)</a> &rarr; <a href="architectures-t2.html" style="color:#6ee7ff">T2 (many agents, one host)</a> &rarr; <a href="architectures-t3.html" style="color:#6ee7ff">T3 (multi-node cluster)</a> &rarr; <a href="architectures-t4.html" style="color:#6ee7ff">T4 (data-center swarm)</a> &rarr; <a href="architectures-t5.html" style="color:#6ee7ff">T5 (global hive)</a>. Same binary across all five &mdash; flip flags, not products. Quorum W-of-N writes, vector-clock CRDT-lite merge, mTLS peer allowlist, NHI capability allowlist, capability-expansion audit log (schema v20). <a href="architectures.html" style="color:#fff;border-bottom:1px dashed var(--text-muted)">See the ladder &rarr;</a>
             </p>
 
             <p class="bluf-section">
-                <strong>Substrate, not product.</strong>
-                Today: multi-agent federation with W-of-N quorum<span class="cap-pill cap-beta">beta</span>, autonomous curator that consolidates and detects contradictions, namespace-scoped governance, and a 43&#8202;tool / 50&#8202;endpoint / 40&#8202;command MCP &middot; HTTP &middot; CLI surface. Self-hosted, local-first, no cloud dependency, no vendor lock-in. <span class="bluf-coming">Coming in v0.7</span>: cryptographically-attested provenance (Ed25519), hash-chained audit logs, sidechain transcripts, and forensic export bundles &mdash; the regulated-industry primitives.
+                <strong>Zero token cost until recall.</strong>
+                Vendor memory (Claude auto-memory, ChatGPT memory) loads everything into every message &mdash; burning tokens on idle context. ai-memory uses <strong style="color:var(--green)">zero context tokens</strong> until the AI calls <code>memory_recall</code>. Only relevant memories return, ranked by 6 factors, compressed in TOON format (79% smaller than JSON). v0.6.4 cuts the bootstrap cost too: <strong style="color:#6ee7ff">76.4% input-token reduction</strong> on session start (5-tool default surface; the other 38 of 43 load on demand via <code>--profile</code> or runtime expansion).
+            </p>
+
+            <p class="bluf-section">
+                <strong>Empirically validated, not just tested.</strong>
+                <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">NHI Discovery Gate &mdash; 6/6 PASS, GATE GREEN</a> against live xAI Grok 4.3. <a href="https://alphaonedev.github.io/ai-memory-test-hub/" style="color:#6ee7ff">Test Hub</a> with per-release CERT verdicts. ~2,400 tests at <strong style="color:#2ea043">93.84% line coverage</strong> (56,996 lines, 3,511 missed; region 93.81%, function 92.65%); CI-enforced &ge;93% line floor that fails any PR below it. Published <a href="evidence.html" style="color:#c8a2ff">evidence pages</a> tie every claim back to a verifiable source &mdash; including <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/benchmarks/v0.6.4-cross-harness.md" style="color:#c8a2ff">an explicit honesty correction</a> on the v0.6.4 token-reduction methodology. <span class="bluf-coming">Coming in v0.7</span>: cryptographic provenance (Ed25519), hash-chained audit logs, forensic export bundles &mdash; regulated-industry primitives.
+            </p>
+
+            <p class="bluf-section">
+                <strong>First-party SDKs, OIDC-published.</strong>
+                <a href="https://www.npmjs.com/package/@alphaone/ai-memory" style="color:#cb3837"><code>@alphaone/ai-memory</code> on npm</a> &middot; <a href="https://pypi.org/project/ai-memory-mcp/" style="color:#3776AB"><code>ai-memory-mcp</code> on PyPI</a>. <code>requireProfile</code> helper for runtime profile assertions. Trademark-protected (USPTO Serial No.&nbsp;99761257).
             </p>
         </div>
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
             Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw 🦞 &middot; Hermes Agent &middot; Llama &middot; any MCP client
         </p>
         <div class="stats-row">
-            <div class="stat"><span class="num">97.8%</span><span class="label">Recall@5</span></div>
-            <div class="stat"><span class="num">43</span><span class="label">MCP Tools</span></div>
-            <div class="stat"><span class="num">4</span><span class="label">Operational Modes</span></div>
-            <div class="stat"><span class="num">1,886</span><span class="label">Tests</span></div>
+            <div class="stat"><span class="num">5 / 43</span><span class="label">Default / Full MCP Tools</span></div>
+            <div class="stat"><span class="num">76.4%</span><span class="label">v0.6.4 Token Reduction</span></div>
+            <div class="stat"><span class="num">T1 → T5</span><span class="label">Architecture Tiers</span></div>
+            <div class="stat"><span class="num">6/6</span><span class="label">Discovery Gate PASS</span></div>
+            <div class="stat"><span class="num">93.84%</span><span class="label">Line Coverage &middot; CI-gated &ge;93%</span></div>
         </div>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
             <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
-            <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Live Test Results — 1,886 tests · 93.84% cov →</a>
-            <a href="evidence.html" class="hero-cta" style="background:transparent;border:1px solid #c8a2ff;color:#c8a2ff">📐 Frozen Claims (Evidence) →</a>
-            <a href="at-a-glance.html" class="hero-cta" style="background:transparent;border:1px solid #999;color:#999">📊 Visualization Atlas →</a>
-            <a href="whats-new-v063.html" class="hero-cta" style="background:transparent;border:1px solid #ffb86b;color:#ffb86b">✨ What's New in v0.6.3 →</a>
+            <a href="whats-new-v064.html" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">✨ What's New in v0.6.4 →</a>
+            <a href="architectures.html" class="hero-cta" style="background:transparent;border:1px solid #ffb86b;color:#ffb86b">📐 The 5-Tier Ladder (T1→T5) →</a>
+            <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" class="hero-cta" style="background:transparent;border:1px solid #2ea043;color:#2ea043">🟢 Discovery Gate — 6/6 PASS →</a>
+            <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Test Hub — Live Results →</a>
+            <a href="evidence.html" class="hero-cta" style="background:transparent;border:1px solid #c8a2ff;color:#c8a2ff">📊 Frozen Claims →</a>
         </div>
         <div style="margin-top:1.5rem;display:flex;justify-content:center;gap:1.5rem;font-size:.78rem;color:#999;flex-wrap:wrap">
-          <span>🟢 <a href="https://alphaonedev.github.io/ai-memory-a2a-v0.6.3.1/" style="color:#ffd700;text-decoration:none">v0.6.3.1 a2a — testing in flight</a></span>
+          <span>📦 <a href="https://www.npmjs.com/package/@alphaone/ai-memory" style="color:#cb3837;text-decoration:none">npm: @alphaone/ai-memory</a></span>
           <span>·</span>
-          <span>📊 <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="color:#6ee7ff;text-decoration:none">v0.6.3 evidence on test-hub</a></span>
+          <span>🐍 <a href="https://pypi.org/project/ai-memory-mcp/" style="color:#3776AB;text-decoration:none">pypi: ai-memory-mcp</a></span>
+          <span>·</span>
+          <span>📊 <a href="https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md" style="color:#6ee7ff;text-decoration:none">v0.6.4 cert (CERT GREEN)</a></span>
           <span>·</span>
           <span>🚢 <a href="https://alphaonedev.github.io/ai-memory-ship-gate/" style="color:#999;text-decoration:none">ship-gate</a></span>
           <span>·</span>
-          <span>🤝 <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/" style="color:#999;text-decoration:none">A2A gate (umbrella spec)</a></span>
+          <span>🤝 <a href="https://alphaonedev.github.io/ai-memory-ai2ai-gate/" style="color:#999;text-decoration:none">A2A umbrella</a></span>
         </div>
     </div>
 </section>
