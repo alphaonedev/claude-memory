@@ -5495,6 +5495,65 @@ pub fn count_active_governance_rules(conn: &Connection) -> Result<usize> {
     Ok(usize::try_from(count.max(0)).unwrap_or(0))
 }
 
+/// v0.7.0 K5 — enumerate every namespace whose standard memory carries an
+/// explicit `metadata.governance` policy and return `(namespace, policy)`
+/// pairs sorted lexicographically by namespace.
+///
+/// Companion to [`count_active_governance_rules`] (which returns just the
+/// count). Powers the `permissions.rule_summary` field surfaced by
+/// capabilities v3 — the K5 increment closes the v0.6.3.1 honesty
+/// disclosure that the field was previously dropped from the wire because
+/// no per-rule serializer existed.
+///
+/// Rows whose `metadata.governance` payload fails to round-trip through
+/// `GovernancePolicy::from_metadata` are silently skipped — the
+/// capabilities surface is best-effort and a malformed policy must not
+/// take down the entire response. The wider gate
+/// (`enforce_governance` → `read_namespace_policy`) already swallows the
+/// same parse failures, so the surfaces stay consistent.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures (e.g. table missing); the
+/// row-level parse failures noted above are handled internally.
+pub fn list_active_governance_policies(
+    conn: &Connection,
+) -> Result<Vec<(String, GovernancePolicy)>> {
+    // Pull the raw `(namespace, metadata)` tuples for every namespace
+    // whose standard memory has a non-null `metadata.governance`. We
+    // ORDER BY at the SQL layer so the lex sort comes free and the
+    // caller doesn't have to re-sort.
+    let mut stmt = conn.prepare(
+        "SELECT nm.namespace, m.metadata
+         FROM namespace_meta nm
+         INNER JOIN memories m ON m.id = nm.standard_id
+         WHERE json_extract(m.metadata, '$.governance') IS NOT NULL
+         ORDER BY nm.namespace ASC",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        let ns: String = r.get(0)?;
+        let meta_str: String = r.get(1)?;
+        Ok((ns, meta_str))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows.flatten() {
+        let (ns, meta_str) = row;
+        // Parse the metadata blob; skip rows that don't deserialize.
+        let Ok(meta) = serde_json::from_str::<serde_json::Value>(&meta_str) else {
+            continue;
+        };
+        // `from_metadata` returns `None` when the field is missing/null
+        // (the SQL filter already excludes that path) and
+        // `Some(Err(_))` on a malformed policy payload — skip both.
+        match GovernancePolicy::from_metadata(&meta) {
+            Some(Ok(policy)) => out.push((ns, policy)),
+            _ => continue,
+        }
+    }
+    Ok(out)
+}
+
 /// v0.6.3 (capabilities schema v2): count rows in the `subscriptions`
 /// table. Used by `handle_capabilities` as a proxy for "registered
 /// hooks" — the hook pipeline itself is v0.7 Bucket 0 work.

@@ -261,6 +261,13 @@ impl TierConfig {
                 // `[permissions].mode` is unset in `config.toml`.
                 mode: active_permissions_mode().as_str().to_string(),
                 active_rules: 0,
+                // v0.7.0 K5: zero-state — no policies known until the
+                // overlay queries the live DB. `Vec::is_empty` means
+                // the field is omitted from the wire entirely (matches
+                // the v0.6.3.1 honesty disclosure that this field was
+                // previously dropped because no per-rule serializer
+                // existed; K5 ships the serializer).
+                rule_summary: Vec::new(),
                 // v0.6.3.1 (P4, G1): chain-walking enforcement landed
                 // in this release. Surface "enforced" so consumers can
                 // distinguish a governed deployment from the historical
@@ -503,8 +510,26 @@ pub struct CapabilityPermissions {
     /// Number of namespace standards whose `metadata.governance` is
     /// non-null. Counts policies, not memories.
     pub active_rules: usize,
-    // P1 honesty patch: `rule_summary` was always empty — no per-rule
-    // serializer existed. Dropped from the v2 wire schema.
+    /// v0.7.0 K5: ordered list of one-line summaries — one entry per
+    /// active governance policy, sorted lexicographically by namespace.
+    /// Each entry names the namespace plus the policy's `write`,
+    /// `promote`, `delete`, `approver`, and `inherit` values so an
+    /// operator (or LLM) can see the live ruleset at a glance without
+    /// fanning out per-namespace `memory_namespace_get_standard` calls.
+    ///
+    /// **Wire shape.** `skip_serializing_if = "Vec::is_empty"` keeps the
+    /// field absent from v2 responses (which historically had no per-rule
+    /// serializer — the v0.6.3.1 honesty patch dropped the field from
+    /// the v2 wire entirely) when no policies are configured. v3 callers
+    /// see the field on every response with policies, matching the K5
+    /// spec contract that v3 brings the field back with a backing
+    /// implementation.
+    ///
+    /// Closes the v0.6.3.1 honest-Capabilities-v2 disclosure that this
+    /// field was a placeholder — the K5 increment ships the per-rule
+    /// serializer that was previously missing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rule_summary: Vec<String>,
     /// v0.6.3.1 (P4, audit G1): governance-inheritance posture.
     /// `"enforced"` = `resolve_governance_policy` walks the namespace
     /// chain leaf-first and returns the most-specific policy (with

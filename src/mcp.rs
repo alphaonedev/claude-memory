@@ -1905,6 +1905,22 @@ fn build_capabilities_overlay(
         if let Ok(n) = db::count_active_governance_rules(c) {
             caps.permissions.active_rules = n;
         }
+        // v0.7.0 K5 — populate `permissions.rule_summary` with a
+        // one-line summary per active governance policy, sorted lex by
+        // namespace. The DB layer returns the rows already sorted, so
+        // the format pass preserves order. Failure is silent (best-
+        // effort): a malformed policy must not take down the whole
+        // capabilities response. `Vec::is_empty` + `skip_serializing_if`
+        // means an unconfigured deployment sees the field omitted from
+        // the wire entirely (matching the v0.6.3.1 honesty disclosure
+        // that the field was previously dropped because no per-rule
+        // serializer existed).
+        if let Ok(rules) = db::list_active_governance_policies(c) {
+            caps.permissions.rule_summary = rules
+                .into_iter()
+                .map(|(ns, p)| format_rule_summary(&ns, &p))
+                .collect();
+        }
         if let Ok(n) = db::count_subscriptions(c) {
             caps.hooks.registered_count = n;
         }
@@ -1914,6 +1930,39 @@ fn build_capabilities_overlay(
     }
 
     caps
+}
+
+/// v0.7.0 K5 — format a single [`GovernancePolicy`] as a one-line
+/// human-readable summary, prefixed with the namespace it governs.
+///
+/// Output shape:
+/// ```text
+/// "alphaone/eng — write=approve, promote=any, delete=owner, approver=human, inherit=true"
+/// ```
+///
+/// The `approver` rendering follows the [`ApproverType`] discriminator
+/// tag (`human` / `agent:<id>` / `consensus:<n>`) so an operator can tell
+/// apart a `Human` policy from a `Consensus(3)` policy without fanning
+/// out to `memory_namespace_get_standard`. `inherit` is rendered as a
+/// boolean string so the line stays scan-friendly.
+///
+/// Public so the capabilities-v3 integration tests (track A, K5) can
+/// pin the exact wire shape without re-implementing the formatter.
+#[must_use]
+pub fn format_rule_summary(namespace: &str, policy: &crate::models::GovernancePolicy) -> String {
+    use crate::models::ApproverType;
+    let approver = match &policy.approver {
+        ApproverType::Human => "human".to_string(),
+        ApproverType::Agent(id) => format!("agent:{id}"),
+        ApproverType::Consensus(n) => format!("consensus:{n}"),
+    };
+    format!(
+        "{namespace} — write={write}, promote={promote}, delete={delete}, approver={approver}, inherit={inherit}",
+        write = policy.write.as_str(),
+        promote = policy.promote.as_str(),
+        delete = policy.delete.as_str(),
+        inherit = policy.inherit,
+    )
 }
 
 /// v0.7.0 A1 — build the capabilities-v3 `summary` string from the live

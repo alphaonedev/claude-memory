@@ -848,3 +848,265 @@ fn cap_v3_b4_v2_callers_unaffected() {
         "v2 must not gain the B4 field"
     );
 }
+
+// ---------------------------------------------------------------------------
+// K5 — `permissions.rule_summary` is populated from the live governance
+// configuration: ordered (lex) one-line summaries, one per active
+// policy. The field is omitted from the wire when no policies exist
+// (skip_serializing_if = "Vec::is_empty") so v2 callers continue to see
+// the v0.6.3.1 honesty disclosure shape, and v3 callers gain a real
+// per-rule serializer (closes the K5 spec).
+// ---------------------------------------------------------------------------
+
+/// Helper: seed a namespace standard memory with an explicit
+/// `metadata.governance` policy attached. Mirrors the production path
+/// (`db::insert` + `db::set_namespace_standard`) used by the
+/// ship-gate scenarios so the capabilities surface walks the same
+/// rows the gate would.
+fn seed_governance_policy(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    policy: &ai_memory::models::GovernancePolicy,
+) {
+    use ai_memory::models::{Memory, Tier, default_metadata};
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut metadata = default_metadata();
+    if let Some(obj) = metadata.as_object_mut() {
+        obj.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String("test-owner".to_string()),
+        );
+        obj.insert(
+            "governance".to_string(),
+            serde_json::to_value(policy).unwrap(),
+        );
+    }
+    let standard = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier: Tier::Long,
+        namespace: format!("_standards-{namespace}"),
+        title: format!("standard for {namespace}"),
+        content: "policy".to_string(),
+        tags: vec![],
+        priority: 9,
+        confidence: 1.0,
+        source: "test".to_string(),
+        access_count: 0,
+        created_at: now.clone(),
+        updated_at: now,
+        last_accessed_at: None,
+        expires_at: None,
+        metadata,
+    };
+    let standard_id = ai_memory::db::insert(conn, &standard).unwrap();
+    ai_memory::db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();
+}
+
+/// K5 — empty governance state: `permissions.rule_summary` is absent
+/// from the wire (`skip_serializing_if = "Vec::is_empty"`). This is the
+/// v0.6.3.1 honesty-disclosure shape preserved when no policies are
+/// configured.
+#[test]
+fn cap_v3_k5_rule_summary_empty_state_omits_field() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
+
+    assert!(
+        val["permissions"].get("rule_summary").is_none(),
+        "K5: empty governance state must omit `rule_summary` from the wire \
+         (skip_serializing_if = Vec::is_empty); got: {val}"
+    );
+    // `active_rules` still surfaces (it's a count, not a per-rule list)
+    // and must be zero in the empty state.
+    assert_eq!(val["permissions"]["active_rules"], 0);
+}
+
+/// K5 — single policy at `team`: `rule_summary` carries one entry
+/// naming the namespace plus all five policy levels. Pins the wire
+/// format an LLM/operator can parse without an extra round-trip.
+#[test]
+fn cap_v3_k5_rule_summary_single_policy_carries_one_entry() {
+    use ai_memory::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let policy = GovernancePolicy {
+        write: GovernanceLevel::Approve,
+        promote: GovernanceLevel::Any,
+        delete: GovernanceLevel::Owner,
+        approver: ApproverType::Human,
+        inherit: true,
+    };
+    seed_governance_policy(&conn, "team", &policy);
+
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
+
+    let arr = val["permissions"]["rule_summary"]
+        .as_array()
+        .expect("rule_summary must be present and an array under K5; got missing/non-array");
+    assert_eq!(
+        arr.len(),
+        1,
+        "K5: single policy must surface as exactly one rule_summary entry; got: {arr:?}"
+    );
+    let line = arr[0].as_str().expect("entry is a stringy summary");
+    assert!(
+        line.starts_with("team — "),
+        "K5: rule_summary entry must lead with the namespace; got: {line}"
+    );
+    assert!(
+        line.contains("write=approve"),
+        "missing write=; got: {line}"
+    );
+    assert!(
+        line.contains("promote=any"),
+        "missing promote=; got: {line}"
+    );
+    assert!(
+        line.contains("delete=owner"),
+        "missing delete=; got: {line}"
+    );
+    assert!(
+        line.contains("approver=human"),
+        "missing approver=; got: {line}"
+    );
+    assert!(
+        line.contains("inherit=true"),
+        "missing inherit=; got: {line}"
+    );
+    // `active_rules` count must agree with the per-rule list length.
+    assert_eq!(val["permissions"]["active_rules"], 1);
+}
+
+/// K5 — multiple policies: `rule_summary` is sorted lexicographically
+/// by namespace. The DB layer returns rows already ORDER BY-sorted, so
+/// this test pins the contract end-to-end through the capabilities
+/// builder.
+#[test]
+fn cap_v3_k5_rule_summary_multiple_policies_lex_ordered() {
+    use ai_memory::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    // Seed in deliberately non-lex order so a buggy implementation
+    // that preserves insertion order would fail this test.
+    let zeta = GovernancePolicy {
+        write: GovernanceLevel::Owner,
+        promote: GovernanceLevel::Any,
+        delete: GovernanceLevel::Owner,
+        approver: ApproverType::Agent("maintainer".to_string()),
+        inherit: false,
+    };
+    let alpha = GovernancePolicy {
+        write: GovernanceLevel::Any,
+        promote: GovernanceLevel::Approve,
+        delete: GovernanceLevel::Owner,
+        approver: ApproverType::Consensus(3),
+        inherit: true,
+    };
+    let middle = GovernancePolicy::default();
+    seed_governance_policy(&conn, "zeta", &zeta);
+    seed_governance_policy(&conn, "alpha", &alpha);
+    seed_governance_policy(&conn, "middle", &middle);
+
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
+
+    let arr = val["permissions"]["rule_summary"]
+        .as_array()
+        .expect("rule_summary must be present and an array under K5");
+    assert_eq!(arr.len(), 3, "expected 3 rule entries; got: {arr:?}");
+
+    // Lex order: alpha < middle < zeta.
+    let lines: Vec<&str> = arr.iter().map(|v| v.as_str().unwrap()).collect();
+    assert!(
+        lines[0].starts_with("alpha — "),
+        "first entry must be alpha; got: {lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("middle — "),
+        "second entry must be middle; got: {lines:?}"
+    );
+    assert!(
+        lines[2].starts_with("zeta — "),
+        "third entry must be zeta; got: {lines:?}"
+    );
+
+    // Spot-check the discriminator-tagged approver rendering — the
+    // `Consensus(N)` and `Agent(id)` variants must surface their inner
+    // value so an operator can tell them apart from `Human`.
+    assert!(
+        lines[0].contains("approver=consensus:3"),
+        "Consensus approver must render with the count; got: {}",
+        lines[0]
+    );
+    assert!(
+        lines[2].contains("approver=agent:maintainer"),
+        "Agent approver must render with the id; got: {}",
+        lines[2]
+    );
+    // `inherit=false` must round-trip so the no-inherit override is
+    // visible at a glance.
+    assert!(
+        lines[2].contains("inherit=false"),
+        "inherit=false override must surface; got: {}",
+        lines[2]
+    );
+
+    // Active count agrees.
+    assert_eq!(val["permissions"]["active_rules"], 3);
+}
+
+/// K5 — v2 callers continue to see the field omitted from the wire
+/// when no policies are configured (the v0.6.3.1 honesty-disclosure
+/// shape). When policies *are* configured, v2 surfaces the same field
+/// (the permissions block is shared between v2 + v3) — the contract
+/// is "no drift in the empty case", not "v2 hides it forever".
+#[test]
+fn cap_v3_k5_v2_callers_see_omitted_field_when_empty() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        CapabilitiesAccept::V2,
+    )
+    .expect("v2 capabilities serialize");
+    assert!(
+        val["permissions"].get("rule_summary").is_none(),
+        "K5: v2 wire shape must keep the empty-state honesty disclosure \
+         (rule_summary omitted when no policies); got: {val}"
+    );
+}
