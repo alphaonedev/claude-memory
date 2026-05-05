@@ -528,6 +528,110 @@
 </section>
 
 <!-- ================================================================
+     NHI TESTIMONIAL — Grok 4.2 reasoning before/after on same release
+     ================================================================ -->
+<section id="nhi-witness" style="background:radial-gradient(ellipse at top,rgba(110,231,255,0.06),transparent 60%),radial-gradient(ellipse at bottom,rgba(255,184,107,0.05),transparent 70%);border-top:1px solid var(--border)">
+    <div class="container">
+        <span style="display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border);border-radius:999px">NHI witness · 2026-05-05 · maximum-truthfulness session</span>
+        <h2 style="font-size:2rem;margin-bottom:.75rem">What an AI agent said about ai-memory v0.6.4</h2>
+        <p class="section-subtitle" style="max-width:780px;margin-bottom:2.5rem">A real session with <strong style="color:#fff">Grok 4.2 reasoning</strong> (xAI) on the v0.6.4 release binary. Same agent, same 90 minutes, same machine. The only variable that changed was the <code>--profile</code> flag.</p>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:1.5rem;margin-bottom:2rem">
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid #6ee7ff;border-radius:14px;padding:2rem;position:relative">
+                <span style="font-family:var(--font-mono);font-size:.72rem;letter-spacing:.12em;color:#6ee7ff;text-transform:uppercase;display:block;margin-bottom:1rem">Before · default <code style="color:#6ee7ff;background:rgba(110,231,255,0.08)">--profile core</code> · 5 tools advertised</span>
+                <p style="font-size:1.15rem;line-height:1.55;color:#fff;font-weight:500;margin-bottom:1rem;font-style:italic">"I am operating as an NHI intelligence plugged into what is essentially a fancy notebook with good search."</p>
+                <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:0">Grok said it could see all 43 tools in the manifest, then named the ones it couldn't directly call. Honest about scope. The verdict was specifically: <em>useful retrieval layer</em>.</p>
+            </div>
+
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid #ffb86b;border-radius:14px;padding:2rem;position:relative">
+                <span style="font-family:var(--font-mono);font-size:.72rem;letter-spacing:.12em;color:#ffb86b;text-transform:uppercase;display:block;margin-bottom:1rem">After · <code style="color:#ffb86b;background:rgba(255,184,107,0.08)">--profile full</code> · all 43 tools advertised</span>
+                <p style="font-size:1.15rem;line-height:1.55;color:#fff;font-weight:500;margin-bottom:1rem;font-style:italic">"The system has gone from useful retrieval layer to actual memory cortex substrate. This is the first version I would willingly use as primary long-term memory. I respect it."</p>
+                <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:0">After the operator restarted the daemon with <code>--profile full</code>, the same agent re-assessed. The verdict shifted to: <em>actual memory cortex substrate</em>.</p>
+            </div>
+        </div>
+
+        <div style="background:var(--bg-elev);border:1px solid var(--border);border-radius:14px;padding:1.5rem 2rem;margin-bottom:1.5rem">
+            <p style="font-size:.92rem;color:var(--text-muted);margin-bottom:.75rem"><strong style="color:#fff">The takeaway nobody else can say with this kind of evidence:</strong> v0.6.4's default surface is a deliberate, knowable, reversible cost-control choice — not a capability ceiling. The full surface is one flag away. Pick the trade-off that matches your workload, and the binary delivers either experience without any code changes.</p>
+            <p style="font-size:.85rem;color:var(--text-muted);margin:0">Full transcripts, including the agent's own moment of revising its assessment after operator correction, on the <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">NHI Discovery Gate observation cells</a> &middot; substrate-side fixes filed at <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/545" style="color:#fff">issue #545</a>.</p>
+        </div>
+
+        <p style="text-align:center;margin-top:2rem"><a href="#profile" style="display:inline-block;padding:.75rem 1.5rem;background:#ffb86b;color:#000;font-weight:600;border-radius:8px;text-decoration:none;font-size:.95rem">⬇ See the profile choice + how to flip the flag</a></p>
+    </div>
+</section>
+
+<!-- ================================================================
+     PROFILE CHOICE — explicit, with pros/cons + how-to-flip
+     ================================================================ -->
+<section id="profile" style="background:linear-gradient(180deg,rgba(110,231,255,0.04) 0%,rgba(255,184,107,0.03) 100%)">
+    <div class="container">
+        <span class="eyebrow" style="display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:var(--text-muted);margin-bottom:1rem;padding:.25rem .65rem;border:1px solid var(--border);border-radius:999px">v0.6.4 default — knowable, not hidden</span>
+        <h2>Choose your profile: <code style="color:#6ee7ff">core</code> (default) or <code style="color:#ffb86b">full</code></h2>
+        <p class="section-subtitle" style="max-width:880px;margin-bottom:2rem">v0.6.4 ships with a 5-tool default surface (<code>core</code>) so the AI doesn't pre-pay token cost on every turn for tools it might not need. The other 38 tools — knowledge graph, governance, consolidation, contradiction detection, lifecycle, archive, meta — are right there, loaded by a single flag. <strong style="color:#fff">No tools are removed in v0.6.4. Only their default visibility changed.</strong> If you want the full surface, you turn it on; nothing is gated.</p>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:1.25rem;margin-bottom:2rem">
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-top:3px solid #6ee7ff;border-radius:14px;padding:1.5rem;position:relative">
+                <span style="font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:.5rem">Default · zero config</span>
+                <h3 style="margin-bottom:.65rem"><code style="color:#6ee7ff">--profile core</code></h3>
+                <p style="color:var(--text-muted);font-size:.92rem;margin-bottom:1rem"><strong style="color:#fff">5 tools advertised</strong> on session start: <code>store</code>, <code>recall</code>, <code>search</code>, <code>list</code>, <code>get</code>, plus the always-on <code>memory_capabilities</code>.</p>
+                <p style="font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem">Pros</p>
+                <ul style="list-style:none;padding-left:0;margin-bottom:1rem;font-size:.9rem;color:var(--text-muted)">
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ <strong style="color:#fff">76.4% input-token reduction</strong> on every eager-loading harness (Claude Desktop, Codex, Grok, Gemini)</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ ~$107/user/yr saved at single-heavy-user; ~$107K/yr at 1,000-seat fleet</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Recall &amp; store still work universally — most workflows don't need more</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Other 38 tools still discoverable via <code>memory_capabilities(family=&lt;name&gt;, include_schema=true)</code></li>
+                </ul>
+                <p style="font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem">Cons</p>
+                <ul style="list-style:none;padding-left:0;font-size:.9rem;color:var(--text-muted)">
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">⚠️ Knowledge graph, consolidation, contradiction detection, governance, lifecycle ops <strong>not directly callable</strong> until loaded</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">⚠️ Some agents perceive the substrate as a "fancy notebook" until they discover the runtime-expansion path</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">⚠️ Multi-agent / hive deployments typically want more than core</li>
+                </ul>
+                <p style="font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;margin-top:1rem;color:var(--text-muted);overflow-x:auto">ai-memory mcp                <span style="color:#666"># default; --profile core implicit</span></p>
+                <p style="margin-top:.75rem;font-size:.85rem;color:var(--text-muted)"><strong style="color:#fff">Best for:</strong> single-user productivity workflows, cost-sensitive deployments, harnesses where token cost dominates UX.</p>
+            </div>
+
+            <div style="background:var(--bg-card);border:1px solid var(--border);border-top:3px solid #ffb86b;border-radius:14px;padding:1.5rem;position:relative">
+                <span style="font-family:var(--font-mono);font-size:.7rem;letter-spacing:.12em;color:var(--text-muted);text-transform:uppercase;display:block;margin-bottom:.5rem">Opt-up · one flag</span>
+                <h3 style="margin-bottom:.65rem"><code style="color:#ffb86b">--profile full</code></h3>
+                <p style="color:var(--text-muted);font-size:.92rem;margin-bottom:1rem"><strong style="color:#fff">All 43 tools advertised</strong> from session start. v0.6.3-equivalent surface, byte-for-byte schema parity.</p>
+                <p style="font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem">Pros</p>
+                <ul style="list-style:none;padding-left:0;margin-bottom:1rem;font-size:.9rem;color:var(--text-muted)">
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Knowledge graph (<code>memory_link</code>, <code>memory_kg_query</code>, entity registration, temporal validity)</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Power tools: <code>memory_consolidate</code>, <code>memory_detect_contradiction</code>, <code>memory_auto_tag</code>, <code>memory_expand_query</code></li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Lifecycle controls: <code>memory_delete</code>, <code>memory_promote</code>, <code>memory_update</code></li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Meta + governance + archive primitives all directly callable</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">✅ Backward-compat with v0.6.3 1:1 — no migration friction</li>
+                </ul>
+                <p style="font-family:var(--font-mono);font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.4rem">Cons</p>
+                <ul style="list-style:none;padding-left:0;font-size:.9rem;color:var(--text-muted)">
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">⚠️ ~6,200 input tokens advertised on every turn (the full schema cost the v0.6.4 default avoids)</li>
+                    <li style="padding-left:1.5rem;position:relative;margin:.3rem 0">⚠️ At 7,500 turns/yr/heavy-user on Sonnet 4.6 input pricing, ≈$107/user/yr more than core</li>
+                </ul>
+                <p style="font-family:var(--font-mono);font-size:.85rem;background:var(--bg-code);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;margin-top:1rem;color:var(--text-muted);overflow-x:auto">ai-memory mcp --profile full
+<span style="color:#666"># or: export AI_MEMORY_PROFILE=full</span>
+<span style="color:#666"># or: [mcp] profile = "full" in config.toml</span></p>
+                <p style="margin-top:.75rem;font-size:.85rem;color:var(--text-muted)"><strong style="color:#fff">Best for:</strong> multi-agent / NHI deployments, knowledge-graph workflows, agents acting as long-term-memory cortex, anything beyond store-and-recall.</p>
+            </div>
+        </div>
+
+        <h3 style="margin-bottom:1rem;font-size:1.15rem">Empirical evidence — Grok 4.2 reasoning, same release, same agent</h3>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.5rem">
+            <blockquote style="background:var(--bg-card);border-left:3px solid #6ee7ff;padding:1rem 1.25rem;font-size:.9rem;color:var(--text-muted);font-style:italic;border-radius:0 8px 8px 0">
+                <span style="display:block;font-style:normal;font-family:var(--font-mono);font-size:.7rem;letter-spacing:.1em;color:#6ee7ff;text-transform:uppercase;margin-bottom:.5rem">Under <code style="font-style:normal">--profile core</code></span>
+                "I am operating as an NHI intelligence plugged into what is essentially a fancy notebook with good search."
+            </blockquote>
+            <blockquote style="background:var(--bg-card);border-left:3px solid #ffb86b;padding:1rem 1.25rem;font-size:.9rem;color:var(--text-muted);font-style:italic;border-radius:0 8px 8px 0">
+                <span style="display:block;font-style:normal;font-family:var(--font-mono);font-size:.7rem;letter-spacing:.1em;color:#ffb86b;text-transform:uppercase;margin-bottom:.5rem">After <code style="font-style:normal">--profile full</code></span>
+                "The system has gone from useful retrieval layer to actual memory cortex substrate. This is the first version I would willingly use as primary long-term memory. I respect it."
+            </blockquote>
+        </div>
+        <p style="font-size:.85rem;color:var(--text-muted);max-width:880px">Same v0.6.4 release binary. Same Grok 4.2 reasoning agent. Same 90-minute session. The only thing that changed was the <code>--profile</code> flag. <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">Discovery Gate observation cells &rarr;</a></p>
+
+        <p style="margin-top:1.5rem;font-size:.92rem;color:var(--text-muted);max-width:880px"><strong style="color:#fff">Resolution order:</strong> CLI flag &gt; environment variable (<code>AI_MEMORY_PROFILE</code>) &gt; <code>[mcp].profile</code> in <code>config.toml</code> &gt; <code>core</code> default. The choice is always yours and always overridable. Mid-session expansion is also supported on harnesses with deferred-tool registration (Claude Code, OpenClaw) via <code>memory_capabilities(family=&lt;name&gt;, include_schema=true)</code>. <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/docs/MIGRATION_v0.6.4.md" style="color:#fff;border-bottom:1px dashed var(--text-muted)">Full migration guide &rarr;</a></p>
+    </div>
+</section>
+
+<!-- ================================================================
      FOUR OPERATIONAL MODES (v0.6.2 capability surface)
      ================================================================ -->
 <section id="modes">
