@@ -28,6 +28,7 @@ pub mod forget;
 pub mod gc;
 pub mod governance;
 pub mod helpers;
+pub mod identity;
 pub mod install;
 pub mod io;
 pub mod io_writer;

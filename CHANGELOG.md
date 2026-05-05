@@ -672,6 +672,49 @@ certification run (v3r30 DO + local-docker r3).
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### Added — v0.7 attested-cortex (Track H, Task H1)
+
+- **Per-agent Ed25519 keypair CLI (`ai-memory identity`).** OSS substrate
+  for the v0.7 attested-cortex epic. New `src/identity/keypair.rs`
+  exposes the four-verb lifecycle (`generate / save / load / list`) plus
+  a `save_public_only` path for importing peer allowlist entries. Keys
+  are persisted under `<config>/ai-memory/keys/<agent_id>.{pub,priv}` —
+  `~/.config/ai-memory/keys/` on Linux, `~/Library/Application
+  Support/ai-memory/keys/` on macOS, `%APPDATA%\ai-memory\keys\` on
+  Windows. On Unix the public file is written with mode `0o644` and
+  the private file with mode `0o600`; on Windows the files inherit the
+  parent ACL. The on-disk format is the raw 32-byte key (no PEM/DER
+  wrapper) so the format is byte-identical to the COSE/CBOR shape H2
+  will sign with.
+- **`ai-memory identity` clap subcommand** wires the lifecycle into
+  the CLI: `generate --agent-id <id>` (defaults to the same NHI-hardened
+  id the rest of the CLI synthesizes via `identity::resolve_agent_id`),
+  `import --agent-id <id> --pub <path> --priv <path>` (private optional;
+  cross-checks `.priv` derives `.pub` and refuses mismatches),
+  `list` (public-only — never loads private material, safe for
+  dashboards), and `export-pub --agent-id <id>` (URL-safe-no-padding
+  base64 of the 32-byte public key, pipe-friendly for peer-allowlist
+  bootstrapping). `--key-dir <path>` is a global override for the
+  default key directory.
+- **Hardware-backed key storage is OUT of OSS scope.** TPM 2.0,
+  PKCS#11 HSMs, Apple Secure Enclave / TEE, and AWS/GCP/Azure cloud
+  KMS adapters are intentionally **not** implemented in this crate. The
+  OSS path stops at file-based 0600 storage; certified hardware-backed
+  deployments live in the AgenticMem™ commercial layer per
+  `ROADMAP2.md`. The OSS code never imports a hardware-token library.
+- **New deps (pure-Rust, MIT/Apache):** `ed25519-dalek = "2"` (with
+  the `rand_core` feature for `SigningKey::generate`), `rand_core =
+  "0.6"` (CSPRNG bound — we use `OsRng`), `base64 = "0.22"` (for the
+  `export-pub` wire format).
+- **16 new unit tests in `src/identity/keypair`** — generate-save-load
+  round-trip with sign+verify, Unix mode 0600 / 0644 enforcement, list
+  enumeration + sort + private-skip semantics, list-on-missing-dir
+  returns empty, truncated/mismatched key file rejection, base64
+  round-trip (URL-safe and padded), and a `save_public_only` happy
+  path. **5 new unit tests in `src/cli/identity`** drive the four CLI
+  verbs through the standard `CliOutput` capture harness, including
+  `generate --no-overwrite` refusal and JSON-mode emission.
+
 ### Fixed — v0.6.0 pre-tag SAL blocker punchlist (#293)
 
 Five correctness blockers surfaced by the v0.6.0 code-review (meta
