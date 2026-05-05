@@ -592,6 +592,7 @@ fn default_webhook_events() -> Vec<String> {
         "memory_promote".to_string(),
         "memory_delete".to_string(),
         "memory_link_created".to_string(),
+        "memory_link_invalidated".to_string(),
         "memory_consolidated".to_string(),
         "approval_requested".to_string(),
     ]
@@ -2432,16 +2433,17 @@ mod tests {
         // lifecycle events so integrators can pin a subscribe filter
         // against them.
         //
-        // v0.7.0 K4 — `approval_requested` joined the list (six total).
-        // Closes the v0.6.3.1 honest-Capabilities-v2 disclosure that
-        // `approval.subscribers` was advertised but unwired.
+        // v0.7.0 K4 — `approval_requested` joined the list.
+        // v0.7 J4 / G14 — `memory_link_invalidated` also joined.
+        // Total: seven canonical event types.
         let events = val["hooks"]["webhook_events"].as_array().unwrap();
-        assert_eq!(events.len(), 6);
+        assert_eq!(events.len(), 7);
         for expected in [
             "memory_store",
             "memory_promote",
             "memory_delete",
             "memory_link_created",
+            "memory_link_invalidated",
             "memory_consolidated",
             "approval_requested",
         ] {

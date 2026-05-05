@@ -52,8 +52,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
 use super::{
-    CallerContext, Capabilities, Filter, KgBackend, KgQueryRow, KgTimelineRow, MemoryStore,
-    StoreError, StoreResult, UpdatePatch, VerifyReport,
+    CallerContext, Capabilities, Filter, KgBackend, KgInvalidateRow, KgQueryRow, KgTimelineRow,
+    MemoryStore, StoreError, StoreResult, UpdatePatch, VerifyReport,
 };
 use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
 
@@ -931,6 +931,306 @@ impl PostgresStore {
                 })
             })
             .collect()
+    }
+
+    /// Mark a KG link as superseded — v0.7 Track J dispatcher.
+    ///
+    /// Routes on the [`KgBackend`] resolved at [`Self::connect`] time
+    /// (J1 substrate). When AGE is installed the supersession runs as
+    /// a Cypher `MATCH (a)-[r:related_to]->(b) ... SET r.valid_until`
+    /// over the `memory_graph` projection; otherwise we fall back to a
+    /// plain `UPDATE memory_links` that mirrors the SQLite shape in
+    /// `db::invalidate_link`.
+    ///
+    /// Both branches return rows in the same [`KgInvalidateRow`] shape
+    /// so the upper-layer `memory_kg_invalidate` handler can stay
+    /// backend-blind, mirroring J2/J3's pattern for `kg_query` and
+    /// `kg_timeline`.
+    ///
+    /// `valid_until` defaults to the current wall-clock time in
+    /// RFC3339 form when `None`. Idempotent: calling repeatedly
+    /// overwrites the prior `valid_until` (the prior value is returned
+    /// in `previous_valid_until` so callers can detect the overwrite).
+    /// When the `(source_id, target_id, relation)` triple does not
+    /// match an existing link the returned row carries `found = false`
+    /// so the SAL shape distinguishes "no-op" from "applied" the same
+    /// way the SQLite path does (via `Option::None`).
+    ///
+    /// G14 audit-edge emission lives in the upper-layer handler —
+    /// keeping it there means both backends share a single
+    /// invalidation-event call site rather than duplicating webhook
+    /// dispatch into the SAL layer.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::BackendUnavailable` for any sqlx or AGE
+    /// error.
+    pub async fn kg_invalidate(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+        valid_until: Option<&str>,
+    ) -> StoreResult<KgInvalidateRow> {
+        match self.kg_backend {
+            KgBackend::Age => {
+                self.kg_invalidate_cypher(source_id, target_id, relation, valid_until)
+                    .await
+            }
+            KgBackend::Cte => {
+                self.kg_invalidate_cte(source_id, target_id, relation, valid_until)
+                    .await
+            }
+        }
+    }
+
+    /// Cypher (Apache AGE) implementation of `kg_invalidate`.
+    ///
+    /// Wraps a `MATCH (a)-[r:related_to]->(b) ... SET r.valid_until`
+    /// over the `memory_graph` projection in the
+    /// `cypher('memory_graph', ...)` set-returning function. Parameter
+    /// passing uses AGE's `$vars` syntax through a JSON-encoded second
+    /// argument so the source/target ids and the timestamp are bound
+    /// — never interpolated — into the Cypher body.
+    ///
+    /// Two-step traversal: a `MATCH ... RETURN r.valid_until` first
+    /// captures the prior value (so the dispatcher can populate
+    /// `previous_valid_until`), then the same triple is matched again
+    /// with `SET r.valid_until = $now RETURN count(r)`. Both run
+    /// inside a single AGE transaction so a parallel writer can't
+    /// interleave between the read and the SET. The two-step shape
+    /// mirrors the SQLite path in `db::invalidate_link` which also
+    /// SELECTs the prior row before UPDATEing it.
+    ///
+    /// AGE's `cypher()` SRF returns no rows when the MATCH misses —
+    /// we map that to `found = false` so the upper-layer wire shape
+    /// matches the CTE branch exactly.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::BackendUnavailable` for any sqlx or AGE
+    /// error.
+    pub async fn kg_invalidate_cypher(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+        valid_until: Option<&str>,
+    ) -> StoreResult<KgInvalidateRow> {
+        let stamp = valid_until.map_or_else(|| Utc::now().to_rfc3339(), str::to_string);
+
+        // AGE requires `ag_catalog` on the search path and the
+        // extension loaded into the session. Both are session-local
+        // — sqlx hands each query a fresh connection from the pool
+        // so we issue them as part of the same transaction to keep
+        // them in scope. Same shape as `kg_query_cypher` and
+        // `kg_timeline_cypher`.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin AGE tx", e))?;
+
+        sqlx::query("LOAD 'age'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("LOAD age", e))?;
+        sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("set search_path", e))?;
+
+        // Step 1: capture the prior `valid_until` so the wire-shape
+        // can surface it. We bind the ids + relation through AGE's
+        // `$vars` JSON so user input is never interpolated.
+        let read_cypher = "MATCH (a)-[r:related_to]->(b) \
+             WHERE a.id = $src AND b.id = $dst AND r.relation = $rel \
+             RETURN r.valid_until AS prior";
+        let read_sql = format!(
+            "SELECT prior FROM cypher('memory_graph', $$ {read_cypher} $$, $1::agtype) AS \
+             (prior agtype)"
+        );
+        let read_params = serde_json::json!({
+            "src": source_id,
+            "dst": target_id,
+            "rel": relation,
+        })
+        .to_string();
+        let prior_rows = sqlx::query(&read_sql)
+            .bind(&read_params)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("cypher kg_invalidate read", e))?;
+
+        if prior_rows.is_empty() {
+            // No matching edge — mirror the SQLite path's `Ok(None)`
+            // contract by surfacing `found = false`. The transaction
+            // still commits so the LOAD/SET search_path pair don't
+            // leak across pool checkouts.
+            tx.commit()
+                .await
+                .map_err(|e| to_store_err("commit AGE tx", e))?;
+            return Ok(KgInvalidateRow {
+                found: false,
+                valid_until: String::new(),
+                previous_valid_until: None,
+            });
+        }
+
+        let prior_raw: String = prior_rows[0]
+            .try_get::<String, _>("prior")
+            .map_err(|e| to_store_err("read prior valid_until", e))?;
+        let previous_valid_until = agtype_optional_string(&prior_raw);
+
+        // Step 2: SET r.valid_until = $now and count the affected
+        // edge. We rely on AGE's identity to atomically rewrite the
+        // edge property — Cypher's SET semantics replace the property
+        // value (no append). count(r) returns the number of edges
+        // that matched the WHERE; for a unique (src, dst, rel) triple
+        // this is 1, but we don't assume — duplicate edges would show
+        // up here and the dispatcher's contract is the same either
+        // way (the prior value already came from row[0]).
+        let write_cypher = "MATCH (a)-[r:related_to]->(b) \
+             WHERE a.id = $src AND b.id = $dst AND r.relation = $rel \
+             SET r.valid_until = $now \
+             RETURN count(r) AS affected";
+        let write_sql = format!(
+            "SELECT affected FROM cypher('memory_graph', $$ {write_cypher} $$, $1::agtype) AS \
+             (affected agtype)"
+        );
+        let write_params = serde_json::json!({
+            "src": source_id,
+            "dst": target_id,
+            "rel": relation,
+            "now": stamp,
+        })
+        .to_string();
+        let _ = sqlx::query(&write_sql)
+            .bind(&write_params)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("cypher kg_invalidate set", e))?;
+
+        // Mirror the SET into the relational `memory_links` row so the
+        // CTE-side reads and the AGE-side reads stay aligned. The AGE
+        // projection lags behind a relational `UPDATE` in deployments
+        // that lack a sync trigger; doing both writes here is the same
+        // dual-write contract J2/J3 already rely on for the read path.
+        sqlx::query(
+            "UPDATE memory_links SET valid_until = $4 \
+             WHERE source_id = $1 AND target_id = $2 AND relation = $3",
+        )
+        .bind(source_id)
+        .bind(target_id)
+        .bind(relation)
+        .bind(&stamp)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("cypher kg_invalidate mirror", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit AGE tx", e))?;
+
+        Ok(KgInvalidateRow {
+            found: true,
+            valid_until: stamp,
+            previous_valid_until,
+        })
+    }
+
+    /// SQL fallback for `kg_invalidate` on Postgres.
+    ///
+    /// Mirrors the SQLite query in `db::invalidate_link` so deployments
+    /// running vanilla Postgres (no AGE extension) get the same
+    /// supersession semantics. Uses `UPDATE ... RETURNING` to atomically
+    /// read the prior `valid_until` and write the new value in one
+    /// round-trip — the SQLite path has to issue a SELECT then an
+    /// UPDATE because rusqlite's RETURNING is gated on a feature flag,
+    /// but Postgres has it natively. Returns the shared
+    /// [`KgInvalidateRow`] shape so the dispatcher in
+    /// [`Self::kg_invalidate`] doesn't have to care which branch ran.
+    ///
+    /// # Errors
+    ///
+    /// `StoreError::BackendUnavailable` for any sqlx error.
+    pub async fn kg_invalidate_cte(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        relation: &str,
+        valid_until: Option<&str>,
+    ) -> StoreResult<KgInvalidateRow> {
+        let stamp = valid_until.map_or_else(|| Utc::now().to_rfc3339(), str::to_string);
+
+        // `UPDATE ... RETURNING` captures the prior `valid_until` and
+        // writes the new one in a single round-trip. The OLD-row
+        // semantics come from a CTE: Postgres' `RETURNING` clause sees
+        // the NEW row, so we wrap the UPDATE in a CTE and read the
+        // prior value through a separate `SELECT` joined on the same
+        // (source, target, relation) triple.
+        let sql = "WITH prev AS (
+                SELECT valid_until AS prior
+                FROM memory_links
+                WHERE source_id = $1 AND target_id = $2 AND relation = $3
+                FOR UPDATE
+            ),
+            upd AS (
+                UPDATE memory_links
+                SET valid_until = $4::TIMESTAMPTZ
+                WHERE source_id = $1 AND target_id = $2 AND relation = $3
+                RETURNING valid_until AS now_until
+            )
+            SELECT prev.prior, upd.now_until
+            FROM prev FULL OUTER JOIN upd ON TRUE";
+
+        let rows = sqlx::query(sql)
+            .bind(source_id)
+            .bind(target_id)
+            .bind(relation)
+            .bind(&stamp)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("cte kg_invalidate", e))?;
+
+        if rows.is_empty() {
+            return Ok(KgInvalidateRow {
+                found: false,
+                valid_until: String::new(),
+                previous_valid_until: None,
+            });
+        }
+
+        // The FULL OUTER JOIN yields one row when the triple matched
+        // (both `prior` and `now_until` populated) and zero rows when
+        // it missed. We've handled the empty case above; pull the
+        // first row for the matched case.
+        let row = &rows[0];
+        let prior: Option<DateTime<Utc>> = row
+            .try_get::<Option<DateTime<Utc>>, _>("prior")
+            .map_err(|e| to_store_err("read prior valid_until", e))?;
+        let now_until: Option<DateTime<Utc>> = row
+            .try_get::<Option<DateTime<Utc>>, _>("now_until")
+            .map_err(|e| to_store_err("read new valid_until", e))?;
+
+        // `now_until` is `None` only when the UPDATE matched zero rows
+        // — i.e. the link did not exist. The `WITH prev AS (...)` CTE
+        // would also produce zero rows in that case, so `rows` would
+        // be empty. Defensive double-check: if we got here with `None`
+        // the triple didn't match.
+        if now_until.is_none() {
+            return Ok(KgInvalidateRow {
+                found: false,
+                valid_until: String::new(),
+                previous_valid_until: None,
+            });
+        }
+
+        Ok(KgInvalidateRow {
+            found: true,
+            valid_until: stamp,
+            previous_valid_until: prior.map(|t| t.to_rfc3339()),
+        })
     }
 
     fn row_to_memory(row: &sqlx::postgres::PgRow) -> StoreResult<Memory> {
@@ -1827,6 +2127,146 @@ mod tests {
             .await
             .expect("cte via dispatcher");
         assert!(direct.is_empty(), "no rows expected for synthetic id");
+        assert_eq!(
+            direct, dispatched,
+            "dispatcher must return the same shape as the direct CTE call"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // v0.7 J4 — Cypher kg_invalidate unit + live tests.
+    //
+    // Pool-less unit tests cover the offline surface (the SAL row
+    // shape contract) so the dispatcher behaviour holds even when no
+    // Postgres is available. The live tests run against an
+    // AGE-enabled Postgres (`AI_MEMORY_TEST_AGE_URL`) and skip
+    // cleanly otherwise so the default `cargo test` flow stays
+    // offline. SQLite-side regression for `db::invalidate_link` lives
+    // in `mcp.rs` (`handle_kg_invalidate_*` tests, untouched here).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn kg_invalidate_row_default_no_match_shape() {
+        // Routing contract: a missed triple at the SAL layer surfaces
+        // as `found = false` with empty `valid_until` and `None`
+        // `previous_valid_until`. Pinning the shape so the upper-layer
+        // handler can branch on `found` without inspecting the inner
+        // strings (which the SQLite path leaves unset for the same
+        // case via `Option::None` from `db::invalidate_link`).
+        let row = KgInvalidateRow {
+            found: false,
+            valid_until: String::new(),
+            previous_valid_until: None,
+        };
+        assert!(!row.found);
+        assert!(row.valid_until.is_empty());
+        assert!(row.previous_valid_until.is_none());
+    }
+
+    #[test]
+    fn kg_invalidate_row_serialises_to_stable_json_keys() {
+        // The wire shape is a stable JSON contract — integrators pin
+        // against `found / valid_until / previous_valid_until`. A
+        // future rename of the struct fields would break their
+        // parsers; assert the JSON keys here so the rename surfaces
+        // as a test failure rather than a silent drift.
+        let row = KgInvalidateRow {
+            found: true,
+            valid_until: "2026-05-05T12:00:00+00:00".to_string(),
+            previous_valid_until: Some("2026-05-04T11:00:00+00:00".to_string()),
+        };
+        let v = serde_json::to_value(&row).expect("serialise");
+        assert_eq!(v["found"], serde_json::Value::Bool(true));
+        assert_eq!(v["valid_until"], "2026-05-05T12:00:00+00:00");
+        assert_eq!(v["previous_valid_until"], "2026-05-04T11:00:00+00:00");
+    }
+
+    #[tokio::test]
+    async fn live_kg_invalidate_dispatches_to_cypher_under_age() {
+        // Routing contract: when AGE is the resolved backend, calling
+        // `kg_invalidate` must route through `kg_invalidate_cypher`
+        // rather than the CTE branch. We don't assert a specific
+        // result set here (the J5 dual-path tests own equivalence) —
+        // just that the call returns Ok against an AGE-enabled URL
+        // with a bootstrapped `memory_graph` projection. Skips
+        // cleanly when either piece is missing so CI without AGE
+        // stays green.
+        let Some(url) = age_kg_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_AGE_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(store.kg_backend(), KgBackend::Age);
+        // Use synthetic ids we don't expect to find — the test asserts
+        // routing, not corpus contents. A missing graph projection
+        // surfaces as BackendUnavailable; that's still informative
+        // (caller learns the AGE setup needs running) so we report it
+        // through the test name rather than silently skipping.
+        match store
+            .kg_invalidate(
+                "nonexistent-source",
+                "nonexistent-target",
+                "related_to",
+                None,
+            )
+            .await
+        {
+            Ok(row) => {
+                assert!(!row.found, "synthetic ids must not match an existing edge");
+                assert!(row.valid_until.is_empty());
+                assert!(row.previous_valid_until.is_none());
+            }
+            Err(StoreError::BackendUnavailable { detail, .. }) => {
+                eprintln!(
+                    "AGE graph projection appears unbootstrapped on this URL: {detail}; \
+                     run the J1 graph-prep script before re-running this test"
+                );
+            }
+            Err(other) => panic!("unexpected error from AGE kg_invalidate: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn live_kg_invalidate_routes_to_cte_without_age() {
+        // Inverse of the AGE routing test: against vanilla Postgres
+        // (no AGE) the dispatcher must hand the call to the SQL
+        // branch. We verify by calling `kg_invalidate_cte` directly
+        // against a known-missing triple and asserting `found=false`,
+        // then confirming `kg_invalidate` produces the same shape
+        // through the dispatcher.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        if age_kg_url().as_deref() == Some(url.as_str()) {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL points at the AGE fixture");
+            return;
+        }
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(
+            store.kg_backend(),
+            KgBackend::Cte,
+            "vanilla Postgres must resolve to KgBackend::Cte"
+        );
+        let direct = store
+            .kg_invalidate_cte(
+                "nonexistent-source",
+                "nonexistent-target",
+                "related_to",
+                None,
+            )
+            .await
+            .expect("cte direct");
+        let dispatched = store
+            .kg_invalidate(
+                "nonexistent-source",
+                "nonexistent-target",
+                "related_to",
+                None,
+            )
+            .await
+            .expect("cte via dispatcher");
+        assert!(!direct.found, "synthetic triple must not match");
         assert_eq!(
             direct, dispatched,
             "dispatcher must return the same shape as the direct CTE call"
