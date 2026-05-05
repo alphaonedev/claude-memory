@@ -72,6 +72,15 @@ pub struct AppState {
     /// the AppState stays cheap; absent allowlist (the v0.6.4 default)
     /// shows up as `Arc<None>`.
     pub mcp_config: Arc<Option<crate::config::McpConfig>>,
+    /// v0.7 Track H — H2 outbound link signing. The keypair loaded at
+    /// daemon startup (or `None` when the operator hasn't generated
+    /// one yet). When `Some`, every `db::create_link_signed` call from
+    /// HTTP handlers signs the link with this key and stamps
+    /// `attest_level = "self_signed"`; when `None`, links go in
+    /// unsigned, preserving v0.6.4 behaviour for unmigrated deployments.
+    /// H3 will reuse this handle for outbound writes that need to
+    /// carry the same signing identity.
+    pub active_keypair: Arc<Option<crate::identity::keypair::AgentKeypair>>,
 }
 
 impl FromRef<AppState> for Db {
@@ -2668,7 +2677,18 @@ pub async fn create_link(
             .into_response();
     }
     let lock = app.db.lock().await;
-    let create_result = db::create_link(&lock.0, &body.source_id, &body.target_id, &body.relation);
+    // v0.7 H2 — sign with the active keypair when one was loaded at
+    // startup. Falls back to unsigned (signature NULL, attest_level
+    // "unsigned") when no keypair is configured. Either way the chosen
+    // attest level is surfaced on the wire response so callers can
+    // observe whether their link was signed without re-querying.
+    let create_result = db::create_link_signed(
+        &lock.0,
+        &body.source_id,
+        &body.target_id,
+        &body.relation,
+        app.active_keypair.as_ref().as_ref(),
+    );
     // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_link_created`
     // after db::create_link commits (mirrors mcp.rs:2569). The link
     // itself does not carry a namespace; we look up the source memory
@@ -2708,7 +2728,7 @@ pub async fn create_link(
     // and we'd deadlock on the shared Mutex if we held it.
     drop(lock);
     match create_result {
-        Ok(()) => {
+        Ok(attest_level) => {
             // v0.6.2 (#325): propagate link to peers.
             if let Some(fed) = app.federation.as_ref() {
                 let link = crate::models::MemoryLink {
@@ -2734,7 +2754,13 @@ pub async fn create_link(
                     }
                 }
             }
-            (StatusCode::CREATED, Json(json!({"linked": true}))).into_response()
+            // v0.7 H2 — surface attest_level on the wire so callers
+            // can tell signed vs unsigned without re-querying.
+            (
+                StatusCode::CREATED,
+                Json(json!({"linked": true, "attest_level": attest_level})),
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::error!("handler error: {e}");
@@ -5208,6 +5234,7 @@ mod tests {
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
+            active_keypair: Arc::new(None),
         }
     }
 
@@ -5704,6 +5731,7 @@ mod tests {
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
+            active_keypair: Arc::new(None),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -13399,6 +13427,7 @@ mod tests {
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
+            active_keypair: Arc::new(None),
         }
     }
 

@@ -87,6 +87,13 @@ sha2 = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand_core = { version = "0.6", features = ["std"] }
 base64 = "0.22"
+# v0.7 Track H — H2 outbound link signing. `ciborium` 0.2 provides
+# RFC 8949 §4.2.1 deterministic CBOR encoding via `into_writer`
+# (canonical sort of map keys + smallest-int encoding), the byte
+# shape we sign over for Ed25519 attestation. Already pulled in
+# transitively via the candle stack — promoted to a direct dep here
+# so `src/identity/sign.rs` can rely on a stable version pin.
+ciborium = "0.2"
 
 # Semantic embedding support
 candle-core = "0.10"
