@@ -8,16 +8,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>ai-memory&trade; -- Persistent Memory for Any AI</title>
-    <meta name="description" content="The memory substrate AI agents run on. v0.6.4 (quiet-tools) ships a 5-tool default MCP surface (43 full) at 76.4% input-token reduction on session start, NHI guardrails phase 1 (per-agent capability allowlist + audit_log schema v20), first-party SDKs on npm + PyPI. Single Rust binary; four operational modes (stdio MCP, HTTP/mTLS, autonomous curator, quorum sync). Five-tier architecture (T1 single agent → T5 multi-region hive). Empirically validated 6/6 PASS on the NHI Discovery Gate vs. live xAI Grok 4.3. SQLite-backed, local-first, zero cloud dependencies, Apache-2.0.">
+    <meta name="description" content="The memory substrate AI agents run on. v0.7.0 (attested-cortex) builds on the v0.6.4 quiet-tools 5-tool default MCP surface (43 full) at 76.4% input-token reduction with capabilities v3 (pre-computed calibration strings), per-agent Ed25519 attestation + append-only signed_events audit chain, a programmable 20-event hook pipeline, sidechain transcripts (zstd-3 BLOBs + memory_replay), opt-in Apache AGE acceleration, the K1/G1 namespace-inheritance fix, and a real permission system. Single Rust binary; four operational modes (stdio MCP, HTTP/mTLS, autonomous curator, quorum sync). Five-tier architecture (T1 single agent → T5 multi-region hive). Empirically validated 6/6 PASS on the NHI Discovery Gate vs. live xAI Grok 4.3. SQLite-backed, local-first, zero cloud dependencies, Apache-2.0.">
     <meta name="theme-color" content="#0d1117">
     <meta property="og:title" content="ai-memory — The memory substrate AI agents run on">
-    <meta property="og:description" content="v0.6.4 (quiet-tools): 5-tool default MCP surface, 76.4% token reduction, NHI guardrails phase 1, first-party SDKs (npm + PyPI). One binary scales T1→T5 (laptop → multi-region hive). Empirically validated 6/6 PASS vs. live xAI Grok 4.3.">
+    <meta property="og:description" content="v0.7.0 (attested-cortex): capabilities v3, Ed25519 attestation + signed_events chain, programmable hook pipeline, sidechain transcripts, Apache AGE, namespace-inheritance fix, real permission system — on top of the v0.6.4 76.4% token-reduction baseline. One binary scales T1→T5 (laptop → multi-region hive). Empirically validated 6/6 PASS vs. live xAI Grok 4.3.">
     <meta property="og:url" content="https://alphaonedev.github.io/ai-memory-mcp/">
     <meta property="og:type" content="website">
     <meta property="og:site_name" content="ai-memory">
     <meta name="twitter:card" content="summary">
     <meta name="twitter:title" content="ai-memory — The memory substrate AI agents run on">
-    <meta name="twitter:description" content="v0.6.4 (quiet-tools): 5-tool default surface, 76.4% token reduction, NHI guardrails phase 1, first-party SDKs (npm + PyPI). One binary scales T1→T5. 6/6 PASS Discovery Gate vs. live Grok 4.3.">
+    <meta name="twitter:description" content="v0.7.0 (attested-cortex): capabilities v3, Ed25519 attestation, hook pipeline, sidechain transcripts, Apache AGE, real permission system. Builds on v0.6.4 76.4% token-reduction baseline. One binary scales T1→T5. 6/6 PASS Discovery Gate vs. live Grok 4.3.">
     <link rel="canonical" href="https://alphaonedev.github.io/ai-memory-mcp/">
     <style>
         /* ============================================================
@@ -104,7 +104,9 @@
         .hero .bluf{color:var(--text-muted);font-size:1.2rem;max-width:720px;margin:0 auto 2.5rem;line-height:1.6}
 
         /* ==========================================================
-           BLUF CARD — top-shelf hero block, v0.6.4-reality framed
+           BLUF CARD — top-shelf hero block, v0.7.0-reality framed
+           (was v0.6.4-reality framed; bumped in F3. Metric numbers below
+           still reflect v0.6.4 baseline pending F5 release-time refresh.)
            ========================================================== */
         .bluf-card{max-width:860px;margin:0 auto 2.25rem;background:linear-gradient(135deg,rgba(255,255,255,.05) 0%,rgba(255,255,255,.015) 100%);border:1px solid var(--border-hl);border-radius:14px;padding:1.75rem 2rem;text-align:left;box-shadow:0 8px 32px rgba(0,0,0,.18)}
         .bluf-eyebrow{display:inline-block;font-family:var(--font-mono);font-size:.68rem;text-transform:uppercase;letter-spacing:.2em;color:var(--orange);font-weight:700;padding:.35em .85em;border:1px solid rgba(210,153,34,.45);background:rgba(255,184,107,.07);border-radius:4px;margin-bottom:1.15rem}
@@ -346,7 +348,7 @@
     <a class="home-link" href="./">ai-memory</a>
     <div class="right">
       <a href="at-a-glance.html" style="color:#6ee7ff">Atlas</a>
-      <a href="whats-new-v064.html" style="color:#6ee7ff">v0.6.4</a>
+      <a href="whats-new-v07.html" style="color:#6ee7ff">v0.7.0</a>
       <div class="menu">
         <button class="menu-btn">Audiences<span class="caret">▾</span></button>
         <div class="menu-pane">
@@ -401,6 +403,10 @@
         <div class="menu-pane">
           <a href="evidence.html">Frozen Claims</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/">Test Hub</a>
+          <!-- F3 NOTE: v0.7.0 cert badge intentionally NOT yet linked here -- per-release CERT campaigns
+               are published only after the release tag lands. F5 will swap this to v0.7.0 cert
+               (CERT GREEN) at release time. Until then, the v0.6.4 cert (CERT GREEN) remains
+               the most recent published certification. -->
           <a href="https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md" style="color:#2ea043">v0.6.4 cert (CERT GREEN)</a>
           <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">NHI Discovery Gate (6/6 PASS)</a>
           <a href="https://alphaonedev.github.io/ai-memory-test-hub/releases/v0.6.3/" style="color:#999">v0.6.3 evidence (historical)</a>
@@ -437,7 +443,7 @@
             From a developer's laptop to a multi-region hive of agents &mdash; <strong style="color:#fff">same binary, same schema, same code path.</strong> You don't graduate off ai-memory; you turn flags on.
         </p>
         <div class="bluf-card">
-            <span class="bluf-eyebrow" style="background:rgba(110,231,255,0.1);color:#6ee7ff;border-color:#6ee7ff">v0.6.4 &mdash; <code>quiet-tools</code> &middot; 76.4% lighter on the wire &middot; same 43-tool capability</span>
+            <span class="bluf-eyebrow" style="background:rgba(110,231,255,0.1);color:#6ee7ff;border-color:#6ee7ff">v0.7.0 &mdash; <code>attested-cortex</code> &middot; capabilities v3 &middot; Ed25519 attestation &middot; programmable hooks &middot; sidechain transcripts (built on v0.6.4 76.4%-lighter baseline)</span>
 
             <p class="bluf-lead">
                 Most "AI memory" products are <em>chat memory</em>: one user, one AI, one conversation. <strong>ai-memory is the agent substrate</strong> &mdash; federation primitives, governance policies, capability allowlists, audit trails, peer mTLS, webhook event bus, autonomous curator. Built for the agent era, not retrofitted from chat memory. Apache 2.0, single Rust binary, runs on SQLite. Works with any MCP-compatible AI &mdash; Claude, ChatGPT, Cursor, Grok, Llama, OpenClaw 🦞, every modern AI tool.
@@ -466,6 +472,10 @@
         <p style="font-size:.85rem;color:var(--text-muted);margin-bottom:2rem">
             Works with Claude &middot; ChatGPT &middot; <a href="https://github.com/alphaonedev/grok-cli" style="color:var(--accent);text-decoration:none;">Grok CLI</a> &middot; Grok API &middot; Cursor &middot; Windsurf &middot; Continue.dev &middot; OpenClaw 🦞 &middot; Hermes Agent &middot; Llama &middot; any MCP client
         </p>
+        <!-- F3 TODO (F5 to refresh): the metric numbers below (tool count, token-reduction %,
+             discovery-gate PASS, line coverage) still reflect the v0.6.4 baseline. v0.7.0
+             release-time numbers (final test count, refreshed coverage, v0.7.0 cert verdict)
+             will be published as part of F5 (CHANGELOG + version bumps + tag + CI release). -->
         <div class="stats-row">
             <div class="stat"><span class="num">5 / 43</span><span class="label">Default / Full MCP Tools</span></div>
             <div class="stat"><span class="num">76.4%</span><span class="label">v0.6.4 Token Reduction</span></div>
@@ -475,7 +485,7 @@
         </div>
         <div style="display:flex;gap:1rem;flex-wrap:wrap;justify-content:center;">
             <a href="#install" class="hero-cta">Get Started in 60 Seconds</a>
-            <a href="whats-new-v064.html" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">✨ What's New in v0.6.4 →</a>
+            <a href="whats-new-v07.html" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">✨ What's New in v0.7.0 →</a>
             <a href="architectures.html" class="hero-cta" style="background:transparent;border:1px solid #ffb86b;color:#ffb86b">📐 The 5-Tier Ladder (T1→T5) →</a>
             <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" class="hero-cta" style="background:transparent;border:1px solid #2ea043;color:#2ea043">🟢 Discovery Gate — 6/6 PASS →</a>
             <a href="https://alphaonedev.github.io/ai-memory-test-hub/" class="hero-cta" style="background:transparent;border:1px solid #6ee7ff;color:#6ee7ff">🧪 Test Hub — Live Results →</a>
@@ -486,6 +496,9 @@
           <span>·</span>
           <span>🐍 <a href="https://pypi.org/project/ai-memory-mcp/" style="color:#3776AB;text-decoration:none">pypi: ai-memory-mcp</a></span>
           <span>·</span>
+          <!-- F3 NOTE: v0.7.0 cert campaign not yet published; conservative
+               choice is to leave the most recent published cert (v0.6.4 CERT GREEN)
+               linked. F5 will swap this once the v0.7.0 cert campaign is up. -->
           <span>📊 <a href="https://github.com/alphaonedev/ai-memory-test-hub/blob/main/campaigns/v0.6.4.md" style="color:#6ee7ff;text-decoration:none">v0.6.4 cert (CERT GREEN)</a></span>
           <span>·</span>
           <span>🚢 <a href="https://alphaonedev.github.io/ai-memory-ship-gate/" style="color:#999;text-decoration:none">ship-gate</a></span>
@@ -2548,7 +2561,7 @@ ai-memory list -n my-project                                         <span class
             <a href="https://github.com/alphaonedev/ai-memory-mcp/blob/main/README.md">README</a>
         </div>
         <p>
-            <strong>ai-memory&trade;</strong> v0.6.4 &mdash; AI-Agnostic MCP Memory Server
+            <strong>ai-memory&trade;</strong> v0.7.0 &mdash; AI-Agnostic MCP Memory Server
         </p>
         <p style="margin-top:.5rem">
             Copyright &copy; 2026 <strong>AlphaOne LLC</strong>. ai-memory is a trademark of AlphaOne LLC (USPTO Serial No.&nbsp;99761257).
