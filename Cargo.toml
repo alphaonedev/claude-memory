@@ -73,6 +73,21 @@ rustls = { version = "0.23", features = ["ring"] }
 # for Layer 3 E2E encryption (#228).
 sha2 = "0.10"
 
+# v0.7 Track H — per-agent Ed25519 attested identity (H1). `ed25519-dalek`
+# 2.x is the RustCrypto-maintained, pure-Rust, audit-friendly Ed25519
+# implementation; same crate Solana, Diem, and the IETF COSE crowd use.
+# Pulled in for the keypair lifecycle (`generate / save / load / list /
+# export-pub`) under `src/identity/keypair.rs`. `rand_core = "0.6"` is
+# its CSPRNG bound; we use its `OsRng` for keygen (matches the rest of
+# RustCrypto's expectations). `base64` (URL-safe, no-padding) is the
+# wire format for `export-pub` so an operator can paste a key into a
+# remote allowlist without binary copy hazards. Hardware-backed key
+# storage (TPM/HSM/Secure Enclave) is out of OSS scope per ROADMAP2.md
+# and lives in the AgenticMem commercial layer.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand_core = { version = "0.6", features = ["std"] }
+base64 = "0.22"
+
 # Semantic embedding support
 candle-core = "0.10"
 candle-nn = "0.10"

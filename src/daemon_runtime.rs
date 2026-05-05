@@ -58,6 +58,7 @@ use crate::cli::consolidate::{AutoConsolidateArgs, ConsolidateArgs};
 use crate::cli::crud::{DeleteArgs, GetArgs, ListArgs};
 use crate::cli::curator::CuratorArgs;
 use crate::cli::forget::ForgetArgs;
+use crate::cli::identity::IdentityArgs;
 use crate::cli::install::InstallArgs;
 use crate::cli::io::{ImportArgs, MineArgs};
 use crate::cli::link::{LinkArgs, ResolveArgs};
@@ -207,6 +208,12 @@ pub enum Command {
     Archive(ArchiveArgs),
     /// Register or list agents (Task 1.3)
     Agents(AgentsArgs),
+    /// v0.7 (Track H, Task H1) — per-agent Ed25519 keypair lifecycle.
+    /// `generate` / `import` / `list` / `export-pub` against the local
+    /// key directory (default `<config>/ai-memory/keys`). Hardware-backed
+    /// key storage (TPM/HSM/Secure Enclave) is out of OSS scope and
+    /// lives in the AgenticMem commercial layer.
+    Identity(IdentityArgs),
     /// List / approve / reject governance-pending actions (Task 1.9)
     Pending(PendingArgs),
     /// v0.6.0.0: snapshot the `SQLite` database to a timestamped backup
@@ -707,6 +714,17 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             cli::agents::run_agents(&db_path, a, j, &mut out)
+        }
+        Command::Identity(a) => {
+            // v0.7 H1 — keypair lifecycle is DB-free. The handler
+            // resolves the key directory itself (via --key-dir or the
+            // default <config>/ai-memory/keys).
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::identity::run(a, j, &mut out)
         }
         Command::Pending(a) => {
             let stdout = std::io::stdout();

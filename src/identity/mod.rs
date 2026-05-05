@@ -37,6 +37,13 @@ use anyhow::Result;
 
 use crate::validate;
 
+// v0.7 Track H — Ed25519 attested identity. The keypair lifecycle
+// (generate / save / load / list / export-pub) lives in its own
+// submodule so this file stays focused on `agent_id` resolution. H2+
+// will plumb the loaded `AgentKeypair` through `AppState` for outbound
+// link signing.
+pub mod keypair;
+
 /// Environment variable override for `agent_id` (used by CLI via clap's
 /// `env = "AI_MEMORY_AGENT_ID"`; read directly for MCP fallback).
 const ENV_AGENT_ID: &str = "AI_MEMORY_AGENT_ID";
