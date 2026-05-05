@@ -55,8 +55,52 @@ pub mod sqlite;
 pub mod postgres;
 
 use bitflags::bitflags;
+use serde::{Deserialize, Serialize};
 
 use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
+
+/// Knowledge-graph backend resolved at adapter init.
+///
+/// v0.7 Track J substrate: Postgres adapters detect Apache AGE at
+/// connect time and dispatch knowledge-graph traversals (J2 `kg_query`,
+/// J3 `kg_timeline`, J4 `kg_invalidate`, J7 `find_paths`) on the
+/// resolved value. SQLite-class adapters always report
+/// [`KgBackend::Cte`] — they fall back to the recursive-CTE path that
+/// has been the production wire-format since v0.6.3.
+///
+/// Wire shape: serialised as snake-case (`"age"` / `"cte"`) to match
+/// the `kg_backend` field projected through `memory_capabilities` and
+/// `ai-memory doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KgBackend {
+    /// Recursive-CTE traversal over `memory_links`. The default path
+    /// for SQLite and for Postgres deployments without Apache AGE.
+    Cte,
+    /// Apache AGE Cypher traversal over the `memory_graph` projection.
+    /// Resolved when the Postgres adapter detects the `age` extension
+    /// installed at connect time.
+    Age,
+}
+
+impl KgBackend {
+    /// Stable string tag for logs, capabilities surface, and the
+    /// `ai-memory doctor` report. Mirrors the snake-case serde rename
+    /// above so the wire and log shapes never drift.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cte => "cte",
+            Self::Age => "age",
+        }
+    }
+}
+
+impl std::fmt::Display for KgBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// The single error type returned by every `MemoryStore` method.
 ///
@@ -356,5 +400,33 @@ mod tests {
         assert!(f.namespace.is_none());
         assert!(f.tier.is_none());
         assert!(f.tags_any.is_empty());
+    }
+
+    #[test]
+    fn kg_backend_serializes_snake_case() {
+        // Wire-shape contract: `kg_backend` is always projected as the
+        // lowercase tag so the capabilities surface, doctor report, and
+        // log lines can never drift from the enum.
+        let cte = serde_json::to_string(&KgBackend::Cte).unwrap();
+        let age = serde_json::to_string(&KgBackend::Age).unwrap();
+        assert_eq!(cte, "\"cte\"");
+        assert_eq!(age, "\"age\"");
+
+        // Round-trip via deserialize so the same strings parse back.
+        let cte_round: KgBackend = serde_json::from_str("\"cte\"").unwrap();
+        let age_round: KgBackend = serde_json::from_str("\"age\"").unwrap();
+        assert_eq!(cte_round, KgBackend::Cte);
+        assert_eq!(age_round, KgBackend::Age);
+    }
+
+    #[test]
+    fn kg_backend_as_str_matches_display() {
+        // `Display` and `as_str` must agree — log lines and the doctor
+        // report use whichever is closer to hand and must produce the
+        // same bytes.
+        assert_eq!(KgBackend::Cte.as_str(), "cte");
+        assert_eq!(KgBackend::Age.as_str(), "age");
+        assert_eq!(format!("{}", KgBackend::Cte), "cte");
+        assert_eq!(format!("{}", KgBackend::Age), "age");
     }
 }

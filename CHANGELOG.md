@@ -88,6 +88,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the memory operation points — that's G3-G11. New round-trip JSON
   tests cover all 20 variants and one representative payload per
   family.
+- **v0.7.0 J1 — Apache AGE detection in Postgres SAL.** New
+  `KgBackend { Cte, Age }` enum (snake-case serde) lives at
+  `src/store/mod.rs`; the Postgres adapter probes
+  `SELECT 1 FROM pg_extension WHERE extname='age'` at connect time and
+  records the resolved tag on the `PostgresStore` handle. AGE is
+  opt-in: a missing extension OR a probe error falls back to
+  `KgBackend::Cte` (logged at `debug`, never blocks bootstrap). The
+  resolved backend is exposed via `PostgresStore::kg_backend()` so
+  Track J's downstream tasks (J2 `kg_query`, J3 `kg_timeline`,
+  J4 `kg_invalidate`, J7 `find_paths`) can dispatch on it. Added an
+  optional `kg_backend: Option<String>` field on the v2 + v3
+  `Capabilities` documents (skipped from the JSON wire when `None`)
+  so `ai-memory doctor` and `memory_capabilities` can surface the
+  active path once the SAL adapter is threaded through `AppState` in
+  J2. Substrate only — no behavioural change to existing
+  `memory_kg_*` MCP tools in this PR. New tests: 4 unit
+  (snake-case wire shape, default tag pin, accessor wiring) plus 3
+  live tests gated on `AI_MEMORY_TEST_AGE_URL` /
+  `AI_MEMORY_TEST_POSTGRES_URL`.
 - **v0.7.0 K2 — `pending_actions` timeout sweeper.** Closes the
   v0.6.3.1 honest-Capabilities-v2 disclosure that
   `default_timeout_seconds` was advertised in v1 but unused. Schema
