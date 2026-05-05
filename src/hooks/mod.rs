@@ -20,6 +20,7 @@
 // against a sandbox, or implement the executor. Those land in
 // follow-up PRs on this same `feat/v0.7-g-*` track.
 
+pub mod chain;
 pub mod config;
 pub mod decision;
 pub mod events;
@@ -29,7 +30,8 @@ pub mod executor;
 // attached payload structs to every variant. The re-export keeps
 // G1's `use crate::hooks::HookEvent` (and the
 // `crate::hooks::config::HookEvent` compatibility alias) resolving.
-pub use config::{HookConfig, HookMode, HooksConfigError};
+pub use chain::{AskUserPrompt, ChainResult, HookChain};
+pub use config::{FailMode, HookConfig, HookMode, HooksConfigError};
 pub use events::HookEvent;
 // G4 — full HookDecision contract. G3 shipped a local `Allow +
 // Deny` prototype inside `executor.rs`; G4 lifts the type into

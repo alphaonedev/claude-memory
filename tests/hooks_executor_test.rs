@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ai_memory::hooks::{
-    DaemonExecutor, ExecExecutor, ExecutorRegistry, HookConfig, HookDecision, HookEvent,
+    DaemonExecutor, ExecExecutor, ExecutorRegistry, FailMode, HookConfig, HookDecision, HookEvent,
     HookExecutor, HookMode,
 };
 use serde_json::json;
@@ -49,6 +49,7 @@ fn cfg_for(command: PathBuf, mode: HookMode, timeout_ms: u32) -> HookConfig {
         mode,
         enabled: true,
         namespace: "*".into(),
+        fail_mode: FailMode::Open,
     }
 }
 

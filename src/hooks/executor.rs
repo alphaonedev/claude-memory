@@ -702,6 +702,7 @@ mod tests {
             mode,
             enabled: true,
             namespace: "*".into(),
+            fail_mode: crate::hooks::config::FailMode::Open,
         }
     }
 
