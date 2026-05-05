@@ -763,10 +763,7 @@ fn migrate(conn: &Connection) -> Result<()> {
                 .prepare("SELECT expired_at FROM pending_actions LIMIT 0")
                 .is_ok();
             if !has_expired_at {
-                conn.execute(
-                    "ALTER TABLE pending_actions ADD COLUMN expired_at TEXT",
-                    [],
-                )?;
+                conn.execute("ALTER TABLE pending_actions ADD COLUMN expired_at TEXT", [])?;
             }
             conn.execute_batch(MIGRATION_V21_SQLITE)?;
         }
@@ -8687,8 +8684,7 @@ mod tests {
         age_secs: i64,
         per_row_timeout: Option<i64>,
     ) {
-        let requested_at =
-            (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
+        let requested_at = (chrono::Utc::now() - chrono::Duration::seconds(age_secs)).to_rfc3339();
         conn.execute(
             "INSERT INTO pending_actions
              (id, action_type, namespace, payload, requested_by, requested_at,
