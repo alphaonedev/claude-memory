@@ -86,6 +86,32 @@ pub struct MemoryLink {
     pub target_id: String,
     pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from"
     pub created_at: String,
+    /// v0.7 H3 — optional 64-byte Ed25519 signature carried over the
+    /// federation wire. `None` for legacy peers (pre-v0.7) that do not
+    /// sign outbound links; receivers in that case land the row with
+    /// `attest_level = "unsigned"`. When `Some`, it is verified against
+    /// the public key associated with `observed_by` before insert.
+    /// `skip_serializing_if` keeps the wire shape byte-identical to
+    /// pre-H3 for unsigned rows so v0.6.x peers continue to deserialize
+    /// without surprise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Vec<u8>>,
+    /// v0.7 H3 — agent_id that asserts this link. Mirrors the H2
+    /// `SignableLink.observed_by` field. Required when `signature` is
+    /// `Some` (it is the lookup key for the verifying public key);
+    /// `None` is treated as "no claim" and short-circuits to unsigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_by: Option<String>,
+    /// v0.7 H3 — RFC3339 instant the link became true (matches the
+    /// homonymous column in `memory_links`). Part of the signed bundle;
+    /// must round-trip byte-identical with what the sender signed for
+    /// verification to succeed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    /// v0.7 H3 — RFC3339 instant the link was invalidated, or `None` if
+    /// still valid. Part of the signed bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

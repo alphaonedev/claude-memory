@@ -627,6 +627,10 @@ mod tests {
             target_id: "tgt".into(),
             relation: "related_to".into(),
             created_at: "2026-05-05T00:00:00Z".into(),
+            signature: None,
+            observed_by: None,
+            valid_from: None,
+            valid_until: None,
         };
         let json = serde_json::to_string(&post).expect("encode Link");
         let back: Link = serde_json::from_str(&json).expect("decode Link");
