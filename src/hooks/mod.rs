@@ -21,5 +21,11 @@
 // follow-up PRs on this same `feat/v0.7-g-*` track.
 
 pub mod config;
+pub mod events;
 
-pub use config::{HookConfig, HookEvent, HookMode, HooksConfigError};
+// G2 lifted `HookEvent` out of `config.rs` into `events.rs` and
+// attached payload structs to every variant. The re-export keeps
+// G1's `use crate::hooks::HookEvent` (and the
+// `crate::hooks::config::HookEvent` compatibility alias) resolving.
+pub use config::{HookConfig, HookMode, HooksConfigError};
+pub use events::HookEvent;
