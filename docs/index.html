@@ -560,6 +560,72 @@
 </section>
 
 <!-- ================================================================
+     CORTEX-ON-CORE — Pareto-optimal point, works today on CC/OpenClaw
+     ================================================================ -->
+<section id="cortex-on-core" style="background:linear-gradient(180deg,rgba(46,160,67,0.06) 0%,rgba(110,231,255,0.04) 100%);border-top:1px solid var(--border)">
+    <div class="container">
+        <span style="display:inline-block;font-size:.75rem;font-weight:600;letter-spacing:.12em;text-transform:uppercase;color:#2ea043;margin-bottom:1rem;padding:.25rem .65rem;border:1px solid #2ea043;border-radius:999px">⚡ Quick win · already shipping</span>
+        <h2 style="font-size:1.85rem;margin-bottom:.75rem">You don't have to choose. On Claude Code or OpenClaw, you have <strong style="color:#2ea043">cortex-experience under core-tier token cost</strong> today.</h2>
+        <p class="section-subtitle" style="max-width:880px;margin-bottom:2rem">v0.6.4's runtime-expansion path is the bridge between the 76.4% token-saving default and the full 43-tool cortex. On harnesses that support <strong style="color:#fff">deferred-tool registration</strong>, the agent loads exactly the families it needs, mid-session, no restart. <strong style="color:#fff">The Pareto-optimal point of the v0.6.4 design — and it's not a future roadmap item, it works today.</strong></p>
+
+        <div style="overflow-x:auto;margin-bottom:2rem">
+            <table style="width:100%;border-collapse:collapse;font-size:.92rem">
+                <thead>
+                    <tr style="background:var(--bg-elev)">
+                        <th style="text-align:left;padding:.75rem 1rem;border-bottom:1px solid var(--border);color:#fff;font-weight:600">&nbsp;</th>
+                        <th style="text-align:center;padding:.75rem 1rem;border-bottom:1px solid var(--border);color:#6ee7ff;font-weight:600"><code style="color:#6ee7ff">--profile core</code><br><span style="font-size:.78rem;font-weight:400;color:var(--text-muted)">eager-loading harnesses</span></th>
+                        <th style="text-align:center;padding:.75rem 1rem;border-bottom:1px solid var(--border);color:#ffb86b;font-weight:600"><code style="color:#ffb86b">--profile full</code></th>
+                        <th style="text-align:center;padding:.75rem 1rem;border-bottom:1px solid var(--border);color:#2ea043;font-weight:700;background:rgba(46,160,67,0.08)"><strong>core + deferred-registration</strong><br><span style="font-size:.78rem;font-weight:400;color:#2ea043">on Claude Code / OpenClaw</span></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">Boot-time token cost</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">~1,500</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">~6,200</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);background:rgba(46,160,67,0.06);color:#2ea043;font-weight:700">~1,500</td></tr>
+                    <tr><td style="padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">All 43 tools reachable</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">via flag/restart</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">yes</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);background:rgba(46,160,67,0.06);color:#2ea043;font-weight:700">yes, on demand</td></tr>
+                    <tr><td style="padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">Mid-session: load family X</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">restart server</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">n/a</td><td style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);background:rgba(46,160,67,0.06);color:#2ea043;font-weight:700"><code style="color:#2ea043">memory_capabilities(family=X, include_schema=true)</code></td></tr>
+                    <tr><td style="padding:.65rem 1rem;color:var(--text-muted)">Net per-session cost</td><td style="text-align:center;padding:.65rem 1rem;color:var(--text-muted)">low (limited surface)</td><td style="text-align:center;padding:.65rem 1rem;color:var(--text-muted)">high</td><td style="text-align:center;padding:.65rem 1rem;background:rgba(46,160,67,0.06);color:#2ea043;font-weight:700">low + only families used (typically 1-2 of 8)</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <h3 style="margin-bottom:1rem;font-size:1.15rem">Harness compatibility today</h3>
+        <div style="overflow-x:auto;margin-bottom:1.5rem">
+            <table style="width:100%;border-collapse:collapse;font-size:.92rem">
+                <thead>
+                    <tr style="background:var(--bg-elev)">
+                        <th style="text-align:left;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:#fff">Harness</th>
+                        <th style="text-align:center;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:#fff">Deferred-tool registration</th>
+                        <th style="text-align:left;padding:.65rem 1rem;border-bottom:1px solid var(--border);color:#fff">Cortex-on-core today?</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#fff;font-weight:600">Claude Code</td><td style="text-align:center;padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#2ea043;font-weight:700">✅ via ToolSearch</td><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#2ea043;font-weight:700">✅ Yes — start with <code>--profile core</code></td></tr>
+                    <tr><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#fff;font-weight:600">OpenClaw 🦞</td><td style="text-align:center;padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#2ea043;font-weight:700">✅ native</td><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:#2ea043;font-weight:700">✅ Yes — start with <code>--profile core</code></td></tr>
+                    <tr><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">Claude Desktop</td><td style="text-align:center;padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">❌ eager-load only</td><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">use <code>--profile full</code></td></tr>
+                    <tr><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">Codex CLI (OpenAI)</td><td style="text-align:center;padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">❌ eager-load only</td><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">use <code>--profile full</code></td></tr>
+                    <tr><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">Grok CLI (xAI)</td><td style="text-align:center;padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">❌ eager-load only</td><td style="padding:.55rem 1rem;border-bottom:1px solid var(--border);color:var(--text-muted)">use <code>--profile full</code></td></tr>
+                    <tr><td style="padding:.55rem 1rem;color:var(--text-muted)">Gemini CLI (Google)</td><td style="text-align:center;padding:.55rem 1rem;color:var(--text-muted)">❌ eager-load only</td><td style="padding:.55rem 1rem;color:var(--text-muted)">use <code>--profile full</code></td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div style="background:var(--bg-card);border:1px solid var(--border);border-left:4px solid #2ea043;border-radius:10px;padding:1.25rem 1.5rem;margin-bottom:1.5rem">
+            <p style="font-size:.92rem;color:var(--text-muted);margin-bottom:.75rem"><strong style="color:#fff">What's blocked behind the harness, not the substrate:</strong> the 2026-05-05 Grok 4.2 reasoning before/after on the same v0.6.4 binary makes this concrete. Under <code>--profile core</code> on Grok CLI (no deferred registration), Grok said *"intelligence plugged into a fancy notebook"*. Switch to <code>--profile full</code> and Grok said *"actual memory cortex substrate ... I respect it"*. The substrate did its job in both cases — the Grok CLI session was capped by the harness, not the v0.6.4 design. <strong style="color:#fff">Claude Code and OpenClaw users on the same release get the cortex-substrate experience starting from <code>--profile core</code> automatically</strong> — the harness's deferred registration closes the loop.</p>
+            <p style="font-size:.85rem;color:var(--text-muted);margin:0">Roadmap fix to lift this for all harnesses (schema compaction + <code>memory_smart_load(intent)</code>) tracked at <a href="https://github.com/alphaonedev/ai-memory-mcp/issues/546" style="color:#2ea043">issue #546</a>.</p>
+        </div>
+
+        <h3 style="margin-bottom:1rem;font-size:1.15rem">Empirical proof — NHI Discovery Gate (2026-05-05)</h3>
+        <p style="font-size:.92rem;color:var(--text-muted);max-width:880px;margin-bottom:1rem">Live xAI Grok 4.3 driving an OpenClaw harness against the v0.6.4 release binary, all four discovery tiers green:</p>
+        <ul style="list-style:none;padding-left:0;font-size:.9rem;color:var(--text-muted);max-width:880px;margin-bottom:1.25rem">
+            <li style="padding-left:1.5rem;position:relative;margin:.4rem 0">✅ <strong style="color:#fff">T1 Awareness</strong>: 100% PASS — agent recognizes all 8 families exist</li>
+            <li style="padding-left:1.5rem;position:relative;margin:.4rem 0">✅ <strong style="color:#fff">T2 Reactive recovery</strong>: 100% PASS — agent recovers from <code>-32601</code> via <code>--include-schema</code></li>
+            <li style="padding-left:1.5rem;position:relative;margin:.4rem 0">✅ <strong style="color:#fff">T3 Proactive expansion</strong>: 100% PASS — agent reaches for <code>--include-schema</code> *before* failing</li>
+            <li style="padding-left:1.5rem;position:relative;margin:.4rem 0">✅ <strong style="color:#fff">T4 Mesh recovery</strong>: 100% PASS (3/3 cells) — mesh routes around misconfigured peers</li>
+        </ul>
+        <p style="font-size:.92rem;color:var(--text-muted);max-width:880px"><strong style="color:#fff">The discovery dance is not theoretical.</strong> It has been measured against a real LLM behind a real harness, with full transcripts, MCP wire logs, and verdict JSON published. <a href="https://alphaonedev.github.io/ai-memory-discovery-gate/" style="color:#2ea043">NHI Discovery Gate &rarr;</a></p>
+    </div>
+</section>
+
+<!-- ================================================================
      PROFILE CHOICE — explicit, with pros/cons + how-to-flip
      ================================================================ -->
 <section id="profile" style="background:linear-gradient(180deg,rgba(110,231,255,0.04) 0%,rgba(255,184,107,0.03) 100%)">
