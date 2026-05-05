@@ -1719,40 +1719,53 @@ pub fn handle_recall(
     Ok(resp)
 }
 
-/// Capabilities schema selector (v0.6.3.1 P1 honesty patch; extended for
-/// v0.7.0 A1).
+/// Capabilities schema selector (v0.6.3.1 P1 honesty patch; extended
+/// through v0.7.0 A1–A5).
 ///
 /// HTTP callers send `Accept-Capabilities: v1`/`v2`/`v3` to request a
 /// shape; MCP callers pass `accept: "v1"`/`"v2"`/`"v3"` to
-/// `memory_capabilities`. Default remains v2 in the A1 increment;
-/// v0.7.0 A5 will flip the default to v3 once the full A1–A4 surface
-/// is in place.
+/// `memory_capabilities`. **As of v0.7.0 A5, the default is v3.** v2
+/// stays supported indefinitely for backward compat — clients that
+/// pin v2 explicitly continue to get the v2 shape unchanged.
 ///
-/// v3 carries pre-computed calibration fields (top-level `summary` from
-/// A1; `to_describe_to_user`, per-tool `callable_now`, and
-/// `agent_permitted_families` land in A2–A4). v3 requires the live
-/// `Profile` for summary computation, so callers that opt in must reach
-/// for [`handle_capabilities_with_conn_v3`] instead of the v1/v2 entry
-/// point.
+/// v3 carries pre-computed calibration fields stacked from the A1–A4
+/// increments (top-level `summary` from A1; `to_describe_to_user`
+/// from A2; per-tool `tools[].callable_now` from A3;
+/// `agent_permitted_families` from A4). v3 is **additive** over v2 —
+/// no v2 fields are removed or retyped — so v0.6.4 SDK clients
+/// reading v3 by name still resolve every field they used to. The
+/// `schema_version` discriminator does change from `"2"` to `"3"`,
+/// which is why clients that strict-equality-asserted on it must
+/// either relax that or pin `accept="v2"` explicitly.
+///
+/// v3 requires the live `Profile` (and optionally `McpConfig` +
+/// `agent_id`) for the new pre-computed fields, so callers that opt
+/// in must reach for [`handle_capabilities_with_conn_v3`] instead of
+/// the v1/v2 entry point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CapabilitiesAccept {
     V1,
     V2,
-    /// v0.7.0 A1 — additive on top of v2 (top-level `summary`). Requires
-    /// profile context; opt-in via `accept="v3"` or
-    /// `Accept-Capabilities: v3`.
+    /// v0.7.0 A1–A4 — additive on top of v2: `summary`,
+    /// `to_describe_to_user`, per-tool `tools[].callable_now`,
+    /// optional `agent_permitted_families`. **Default since A5.**
     V3,
 }
 
 impl CapabilitiesAccept {
-    /// Parse the wire value sent by the client. Unknown values fall back
-    /// to v2 (the default). Whitespace and case insensitive.
+    /// Parse the wire value sent by the client. Unknown / missing
+    /// values fall back to v3 (the default since v0.7.0 A5).
+    /// Whitespace and case insensitive. Explicit `"v2"`/`"2"` still
+    /// returns `V2`; explicit `"v1"`/`"1"` still returns `V1`.
     #[must_use]
     pub fn parse(s: &str) -> Self {
         match s.trim().to_ascii_lowercase().as_str() {
             "v1" | "1" => Self::V1,
-            "v3" | "3" => Self::V3,
-            _ => Self::V2,
+            "v2" | "2" => Self::V2,
+            // v0.7.0 A5 — unknown / missing default flips from V2 → V3.
+            // Explicit `"v2"` above keeps the v2 wire shape for clients
+            // that pin it; everyone else gets v3 (additive over v2).
+            _ => Self::V3,
         }
     }
 }
@@ -4099,13 +4112,14 @@ fn handle_request(
                     } else {
                         // P1 honesty patch: optional `accept` argument lets MCP
                         // clients opt into the legacy v1 shape, mirroring the
-                        // HTTP `Accept-Capabilities` header. v0.7.0 A1 adds
-                        // `accept="v3"` for the additive v3 schema (top-level
-                        // `summary` + future A2-A4 fields).
+                        // HTTP `Accept-Capabilities` header. v0.7.0 A5 makes
+                        // v3 the default (additive over v2); explicit
+                        // `accept="v2"` keeps the v2 wire shape unchanged
+                        // for clients that pin it.
                         let accept = arguments
                             .get("accept")
                             .and_then(Value::as_str)
-                            .map_or(CapabilitiesAccept::V2, CapabilitiesAccept::parse);
+                            .map_or(CapabilitiesAccept::V3, CapabilitiesAccept::parse);
                         // v0.6.4-006 — when no family is requested, augment
                         // the v2/v3 response with a top-level `families` field
                         // describing the family taxonomy and which families
@@ -5729,10 +5743,14 @@ mod tests {
     /// Every new top-level block is present with the expected shape.
     /// Dropped fields (`rule_summary`, `by_event`, `subscribers`,
     /// `default_timeout_seconds`) must be absent from v2 output.
+    ///
+    /// v0.7.0 A5: this test pins v2 explicitly via `accept="v2"` since
+    /// the default is now v3. v2 backward-compat is preserved
+    /// indefinitely; this test is the contract that proves it.
     #[test]
     fn mcp_capabilities_v2_schema_includes_all_blocks() {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-        let req = make_tools_call("memory_capabilities", json!({}));
+        let req = make_tools_call("memory_capabilities", json!({"accept": "v2"}));
         let resp = invoke_handle_request(&conn, &req);
         let text = resp.result.unwrap()["content"][0]["text"]
             .as_str()

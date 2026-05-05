@@ -89,6 +89,8 @@ impl HttpHarness {
             federation: Arc::new(None),
             tier_config: Arc::new(FeatureTier::Keyword.config()),
             scoring: Arc::new(ResolvedScoring::default()),
+            profile: Arc::new(ai_memory::profile::Profile::core()),
+            mcp_config: Arc::new(None),
         };
         let api_key_state = ApiKeyState { key: None };
         let router = ai_memory::build_router(api_key_state, app_state);

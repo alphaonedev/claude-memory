@@ -58,6 +58,20 @@ pub struct AppState {
     /// Prior to this, HTTP recall was keyword-only regardless of
     /// embedder availability — scenario-18 surfaced the gap.
     pub scoring: Arc<crate::config::ResolvedScoring>,
+    /// v0.7.0 A5 — resolved tool [`Profile`] for this daemon. The
+    /// HTTP `/capabilities` endpoint needs it to compute the v3
+    /// `summary` / `to_describe_to_user` / `tools[].callable_now`
+    /// fields, which reflect the profile the running server actually
+    /// advertises in `tools/list`. Mirrors the MCP-dispatch threading
+    /// at `src/mcp.rs:3760`.
+    pub profile: Arc<crate::profile::Profile>,
+    /// v0.7.0 A5 — resolved [`McpConfig`] for this daemon. Carries
+    /// the optional `[mcp.allowlist]` table that v3's per-tool
+    /// `callable_now` and top-level `agent_permitted_families` honor.
+    /// `Arc<Option<...>>` rather than `Option<Arc<...>>` so cloning
+    /// the AppState stays cheap; absent allowlist (the v0.6.4 default)
+    /// shows up as `Arc<None>`.
+    pub mcp_config: Arc<Option<crate::config::McpConfig>>,
 }
 
 impl FromRef<AppState> for Db {
@@ -4155,28 +4169,40 @@ pub async fn get_capabilities(
     let accept = headers
         .get("accept-capabilities")
         .and_then(|v| v.to_str().ok())
-        .map_or(crate::mcp::CapabilitiesAccept::V2, |raw| {
+        .map_or(crate::mcp::CapabilitiesAccept::V3, |raw| {
             crate::mcp::CapabilitiesAccept::parse(raw)
         });
-    // v0.7.0 A1 — HTTP wiring for v3 lands with A5 (which threads the
-    // active `Profile` through `AppState`). Until then, downgrade
-    // `Accept-Capabilities: v3` to v2 over HTTP so a curious client
-    // doesn't 500 the endpoint. MCP callers reach v3 directly via
-    // `accept="v3"`; the HTTP path is a documented A5 gap.
-    let accept = match accept {
-        crate::mcp::CapabilitiesAccept::V3 => crate::mcp::CapabilitiesAccept::V2,
-        other => other,
-    };
+    // v0.7.0 A5 — HTTP path now serves v3 by default (A5 flips the
+    // default + threads `Profile` + `McpConfig` through `AppState`).
+    // Old clients that pinned `Accept-Capabilities: v2` keep getting
+    // the v2 shape unchanged; everyone else gets v3 (additive over
+    // v2, so reading-by-name stays compatible).
+    //
+    // v0.7.0 A4 — `agent_permitted_families` requires an `agent_id`.
+    // HTTP doesn't yet thread one (it would come from a future
+    // session-bound auth header); for now pass None and the field is
+    // omitted from the wire per the A4 contract.
     let embedder_loaded = app.embedder.as_ref().is_some();
     let lock = app.db.lock().await;
     let conn = &lock.0;
-    let result = crate::mcp::handle_capabilities_with_conn(
-        app.tier_config.as_ref(),
-        None,
-        embedder_loaded,
-        Some(conn),
-        accept,
-    );
+    let result = match accept {
+        crate::mcp::CapabilitiesAccept::V3 => crate::mcp::handle_capabilities_with_conn_v3(
+            app.tier_config.as_ref(),
+            None,
+            embedder_loaded,
+            Some(conn),
+            app.profile.as_ref(),
+            app.mcp_config.as_ref().as_ref(),
+            None,
+        ),
+        _ => crate::mcp::handle_capabilities_with_conn(
+            app.tier_config.as_ref(),
+            None,
+            embedder_loaded,
+            Some(conn),
+            accept,
+        ),
+    };
     drop(lock);
     match result {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
@@ -5180,6 +5206,8 @@ mod tests {
             federation: Arc::new(None),
             tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
+            profile: Arc::new(crate::profile::Profile::core()),
+            mcp_config: Arc::new(None),
         }
     }
 
@@ -5674,6 +5702,8 @@ mod tests {
             federation: Arc::new(Some(fed)),
             tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
+            profile: Arc::new(crate::profile::Profile::core()),
+            mcp_config: Arc::new(None),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -13165,10 +13195,15 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/capabilities", axum_get(get_capabilities))
             .with_state(test_app_state(state));
+        // v0.7.0 A5: HTTP `/capabilities` defaults to v3 now; pin v2
+        // explicitly via `Accept-Capabilities` to keep this test
+        // exercising the v2 backward-compat contract. v2 wire shape
+        // stays unchanged indefinitely; this test is the proof.
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/v1/capabilities")
+                    .header("accept-capabilities", "v2")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -13362,6 +13397,8 @@ mod tests {
             federation: Arc::new(Some(fed)),
             tier_config: Arc::new(crate::config::FeatureTier::Keyword.config()),
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
+            profile: Arc::new(crate::profile::Profile::core()),
+            mcp_config: Arc::new(None),
         }
     }
 

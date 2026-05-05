@@ -1270,6 +1270,16 @@ pub async fn bootstrap_serve(
         }
     }
 
+    // v0.7.0 A5 — resolve the effective MCP tool profile for the HTTP
+    // path so `/capabilities` v3 reports honest loaded/total counts.
+    // Mirrors the MCP-mode resolution at src/daemon_runtime.rs:501;
+    // unresolvable profile (e.g., bad config.toml) falls back to
+    // Profile::core() rather than blocking HTTP boot.
+    let resolved_profile = app_config
+        .effective_profile(None)
+        .unwrap_or_else(|_| crate::profile::Profile::core());
+    let mcp_config_for_http = app_config.mcp.clone();
+
     let app_state = AppState {
         db: db_state.clone(),
         embedder: Arc::new(embedder),
@@ -1277,6 +1287,8 @@ pub async fn bootstrap_serve(
         federation: Arc::new(federation),
         tier_config: Arc::new(tier_config),
         scoring: Arc::new(app_config.effective_scoring()),
+        profile: Arc::new(resolved_profile),
+        mcp_config: Arc::new(mcp_config_for_http),
     };
 
     // Automatic GC.
@@ -1965,6 +1977,8 @@ mod tests {
             federation: Arc::new(None),
             tier_config: Arc::new(FeatureTier::Keyword.config()),
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
+            profile: Arc::new(crate::profile::Profile::core()),
+            mcp_config: Arc::new(None),
         }
     }
 

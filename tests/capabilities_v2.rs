@@ -302,20 +302,22 @@ fn cap_v2_recall_mode_degraded_when_embedder_configured_but_not_loaded() {
 }
 
 // ---------------------------------------------------------------------------
-// Accept-string parsing: case + whitespace tolerant; unknown values fall
-// back to v2 (the default).
+// Accept-string parsing: case + whitespace tolerant. Explicit `"v1"`/`"v2"`
+// still resolve to V1/V2; v0.7.0 A5 flips the unknown/missing default from
+// V2 to V3, so any non-explicit value now resolves to V3 instead.
 // ---------------------------------------------------------------------------
 #[test]
-fn cap_accept_parse_is_case_insensitive_and_defaults_to_v2() {
+fn cap_accept_parse_is_case_insensitive_and_defaults_to_v3() {
     assert_eq!(CapabilitiesAccept::parse("v1"), CapabilitiesAccept::V1);
     assert_eq!(CapabilitiesAccept::parse(" V1 "), CapabilitiesAccept::V1);
     assert_eq!(CapabilitiesAccept::parse("1"), CapabilitiesAccept::V1);
     assert_eq!(CapabilitiesAccept::parse("v2"), CapabilitiesAccept::V2);
     assert_eq!(CapabilitiesAccept::parse("V2"), CapabilitiesAccept::V2);
-    // Unknown / empty falls back to v2.
-    assert_eq!(CapabilitiesAccept::parse(""), CapabilitiesAccept::V2);
-    assert_eq!(CapabilitiesAccept::parse("v9"), CapabilitiesAccept::V2);
-    assert_eq!(CapabilitiesAccept::parse("garbage"), CapabilitiesAccept::V2);
+    assert_eq!(CapabilitiesAccept::parse("2"), CapabilitiesAccept::V2);
+    // v0.7.0 A5: unknown / empty falls back to v3 (was v2 pre-A5).
+    assert_eq!(CapabilitiesAccept::parse(""), CapabilitiesAccept::V3);
+    assert_eq!(CapabilitiesAccept::parse("v9"), CapabilitiesAccept::V3);
+    assert_eq!(CapabilitiesAccept::parse("garbage"), CapabilitiesAccept::V3);
 }
 
 // ---------------------------------------------------------------------------
