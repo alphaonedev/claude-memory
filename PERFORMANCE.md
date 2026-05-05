@@ -142,6 +142,75 @@ don't belong on the hot path of a `cargo test` run. They land in a
 follow-up Stream E iteration alongside the canonical 1000-memory
 workload at `benchmarks/v063/canonical_workload.json`.
 
+## v0.7 — Apache AGE backend (KG queries)
+
+v0.7.0 introduces an optional **Apache AGE** (Cypher-on-Postgres) backend
+for `memory_kg_query` and `memory_find_paths`, selectable at runtime via
+`KgBackend::Age`. The default `KgBackend::Cte` (recursive SQLite CTE)
+remains unchanged and is the supported single-binary path; AGE is opt-in
+for deployments that already run Postgres and benefit from native
+graph-traversal acceleration.
+
+The table below records the **v0.7.0 target budgets** for both backends
+on the canonical 1000-memory fixture (`benchmarks/v063/canonical_workload.json`).
+These are aspirational p95 budgets, not measured numbers — they define
+the contract the J8 CI gate enforces against the AGE-vs-CTE bench.
+
+| depth | CTE p95 | AGE p95 | speedup |
+|---|---|---|---|
+| 1 | 8 ms   | 6 ms  | 1.3x |
+| 3 | 35 ms  | 18 ms | 1.9x |
+| 5 | 120 ms | 70 ms | 1.7x |
+
+> The **J8 CI gate** (see `.github/workflows/bench.yml`, AGE job)
+> enforces **≥ 30% AGE-over-CTE speedup at depth=5** on every PR that
+> touches the KG path. If AGE ever fails to clear that bar, the AGE
+> backend is dropped per the v0.7 epic exit criteria — the complexity
+> only earns its keep when it pays for itself.
+
+**Workload:** 1k canonical memories, fan-out fixture (50 × 4) for
+depth=1, chain fixture (50 × 5 hops) for depth=3 / depth=5. Same
+fixtures the SQLite-CTE bench rows above use, so the two backends are
+measured against an identical traversal shape.
+
+**Reproduce locally:**
+
+```bash
+# CTE (default, no extra services)
+cargo bench --bench kg_bench
+
+# AGE (requires Postgres + AGE extension on PG_DSN)
+cargo bench --bench kg_bench --features=age
+```
+
+The AGE bench skips cleanly when the `age` feature is not enabled or
+when no `PG_DSN` is exported, so the default CI matrix is unaffected.
+
+Design rationale, dual-path test strategy, and the rollback criterion
+live in [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md)
+and the v0.7 epic Track J entries.
+
+### When to enable AGE
+
+Stay on `KgBackend::Cte` for:
+
+- Single-binary / SQLite-only deployments (the supported default).
+- KG depth ≤ 2 workloads, where the recursive CTE is already well
+  inside its budget and the AGE round-trip overhead dominates.
+- Graphs under ~10 k nodes — CTE comfortably handles these with no
+  Postgres dependency.
+
+Consider switching to `KgBackend::Age` when **both** apply:
+
+- Typical `memory_kg_query` depth is **≥ 3** (chain-following workloads,
+  multi-hop provenance, `memory_find_paths` over wide graphs).
+- The graph has grown past **~10 k nodes** (or ~50 k links), where the
+  recursive CTE starts paying for the lack of native graph indexes.
+
+Operators already running Postgres for federation or attestation
+audit chains pay near-zero marginal cost to enable AGE; pure-SQLite
+operators should not adopt it just to chase the speedup.
+
 ## Why Publish These at All
 
 Three reasons, in order of importance:
