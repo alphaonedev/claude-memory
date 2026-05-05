@@ -47,6 +47,12 @@ pub mod keypair;
 // six signable link fields. Consumed by `db::create_link_signed` to
 // fill the previously-dead `signature` BLOB column on `memory_links`.
 pub mod sign;
+// H3 — inbound link verification. Mirror of `sign`: re-derives the
+// canonical CBOR bytes from a wire `SignableLink` and verifies the
+// 64-byte signature against the public key associated with the link's
+// `observed_by` claim. Consumed by federation `sync_push` link replay
+// so tampered or forged links never land in `memory_links`.
+pub mod verify;
 
 /// Environment variable override for `agent_id` (used by CLI via clap's
 /// `env = "AI_MEMORY_AGENT_ID"`; read directly for MCP fallback).

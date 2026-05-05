@@ -2736,6 +2736,17 @@ pub async fn create_link(
                     target_id: body.target_id.clone(),
                     relation: body.relation.clone(),
                     created_at: chrono::Utc::now().to_rfc3339(),
+                    // H3 wire fields are populated by `export_links`
+                    // on the next bulk re-sync; the immediate fanout
+                    // path stays unsigned to avoid a redundant DB
+                    // round-trip just to fish out the freshly-written
+                    // signature row. Receivers will land this as
+                    // `unsigned` until a periodic reconciliation pulls
+                    // the signed row via `export_links`.
+                    signature: None,
+                    observed_by: None,
+                    valid_from: None,
+                    valid_until: None,
                 };
                 match crate::federation::broadcast_link_quorum(fed, &link).await {
                     Ok(tracker) => {
@@ -3790,6 +3801,14 @@ pub async fn sync_push(
     // retry / re-sync and collapse to a no-op via the unique index on
     // (source_id, target_id, relation). Invalid ids are skipped silently
     // — same posture as deletions.
+    //
+    // v0.7 H3: when a link arrives with a signature + observed_by claim,
+    // verify it against the public key associated with that claim before
+    // landing the row. Tampered signatures → reject with a warn log.
+    // Unknown observed_by (no enrolled key on this host) → accept-and-
+    // flag as `unsigned` so federation back-compat holds for peers that
+    // haven't enrolled yet. Successful verify → land with attest_level
+    // `peer_attested`.
     let mut links_applied = 0usize;
     for link in &body.links {
         if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
@@ -3800,11 +3819,62 @@ pub async fn sync_push(
             noop += 1;
             continue;
         }
-        match db::create_link(&lock.0, &link.source_id, &link.target_id, &link.relation) {
+
+        // Decide attest_level via the H3 verify path before insert.
+        let attest_level = match (link.signature.as_deref(), link.observed_by.as_deref()) {
+            (Some(sig_bytes), Some(observed_by)) => {
+                match crate::identity::verify::lookup_peer_public_key(observed_by) {
+                    Some(pubkey) => {
+                        let signable = crate::identity::sign::SignableLink {
+                            src_id: &link.source_id,
+                            dst_id: &link.target_id,
+                            relation: &link.relation,
+                            observed_by: Some(observed_by),
+                            valid_from: link.valid_from.as_deref(),
+                            valid_until: link.valid_until.as_deref(),
+                        };
+                        match crate::identity::verify::verify(&pubkey, &signable, sig_bytes) {
+                            Ok(()) => "peer_attested",
+                            Err(e) => {
+                                // Tampered / malformed-sig: refuse to land
+                                // the row. The receiver-side warn log is
+                                // the operator's signal that a peer is
+                                // misbehaving (or that a key rotation
+                                // got out of sync).
+                                tracing::warn!(
+                                    "sync_push: signature rejected for link \
+                                     ({} -> {} / {}) from observed_by={}: {e}",
+                                    link.source_id,
+                                    link.target_id,
+                                    link.relation,
+                                    observed_by
+                                );
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    None => {
+                        // No public key enrolled for this peer →
+                        // accept-and-flag as unsigned. Operators can
+                        // later enroll the key (`identity import`) and
+                        // re-sync to upgrade the row's attest_level on
+                        // a subsequent re-send.
+                        "unsigned"
+                    }
+                }
+            }
+            // No signature on the wire (legacy v0.6.x peer) or no
+            // observed_by claim → treat as unsigned. Same posture as
+            // pre-H3 federation.
+            _ => "unsigned",
+        };
+
+        match db::create_link_inbound(&lock.0, link, attest_level) {
             Ok(()) => links_applied += 1,
             Err(e) => {
                 tracing::warn!(
-                    "sync_push: create_link failed ({} -> {} / {}): {e}",
+                    "sync_push: create_link_inbound failed ({} -> {} / {}): {e}",
                     link.source_id,
                     link.target_id,
                     link.relation

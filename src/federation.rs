@@ -2051,6 +2051,10 @@ mod tests {
             target_id: "mem-b".to_string(),
             relation: "related_to".to_string(),
             created_at: chrono::Utc::now().to_rfc3339(),
+            signature: None,
+            observed_by: None,
+            valid_from: None,
+            valid_until: None,
         }
     }
 

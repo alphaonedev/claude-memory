@@ -2017,29 +2017,139 @@ pub fn create_link_signed(
     // outright write error (vs. a silent partial-write). The signed
     // payload includes `valid_from = now` and matching `observed_by`
     // so H3's verifier can re-derive the same bytes from the row.
-    let (signature, attest_level): (Option<Vec<u8>>, &'static str) = match keypair {
-        Some(kp) if kp.can_sign() => {
-            let link = crate::identity::sign::SignableLink {
-                src_id: source_id,
-                dst_id: target_id,
-                relation,
-                observed_by: Some(kp.agent_id.as_str()),
-                valid_from: Some(now.as_str()),
-                valid_until: None,
-            };
-            let sig = crate::identity::sign::sign(kp, &link)?;
-            (Some(sig), "self_signed")
-        }
-        _ => (None, "unsigned"),
+    //
+    // v0.7 H3 follow-up: the `observed_by` *column* is now populated
+    // from the keypair's `agent_id` on signed inserts so federation
+    // export (`export_links`) ships the same claim the signature
+    // commits to. Receivers re-derive `SignableLink` from the wire
+    // record (see `verify::verify`); without populating the column,
+    // verification would always fail with `Tampered` because the
+    // sender signed `Some(agent_id)` but exported `None`.
+    let (signature, attest_level, observed_by_col): (Option<Vec<u8>>, &'static str, Option<&str>) =
+        match keypair {
+            Some(kp) if kp.can_sign() => {
+                let link = crate::identity::sign::SignableLink {
+                    src_id: source_id,
+                    dst_id: target_id,
+                    relation,
+                    observed_by: Some(kp.agent_id.as_str()),
+                    valid_from: Some(now.as_str()),
+                    valid_until: None,
+                };
+                let sig = crate::identity::sign::sign(kp, &link)?;
+                (Some(sig), "self_signed", Some(kp.agent_id.as_str()))
+            }
+            _ => (None, "unsigned", None),
+        };
+
+    conn.execute(
+        "INSERT OR IGNORE INTO memory_links \
+            (source_id, target_id, relation, created_at, valid_from, signature, attest_level, observed_by) \
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
+        params![
+            source_id,
+            target_id,
+            relation,
+            now,
+            signature,
+            attest_level,
+            observed_by_col
+        ],
+    )?;
+    Ok(attest_level)
+}
+
+/// v0.7 H3 — insert an inbound (federation-replicated) link with a
+/// pre-computed signature and attest level.
+///
+/// Distinct from [`create_link_signed`] because the receiver is *not*
+/// the signer: it must persist whatever bytes the peer signed
+/// (signature + observed_by + valid_from + valid_until) verbatim, so a
+/// later `memory_verify` (H4) can re-derive the same canonical CBOR
+/// from the stored row and re-check against the peer's public key. We
+/// can't re-sign on the receiver — we don't hold the peer's private
+/// key, by design.
+///
+/// The caller (federation `sync_push` link loop) is responsible for:
+/// 1. Looking up the peer's public key via
+///    [`crate::identity::verify::lookup_peer_public_key`].
+/// 2. Calling [`crate::identity::verify::verify`] when a public key is
+///    known, and rejecting the link when verification fails.
+/// 3. Choosing the `attest_level` literal:
+///    - `"peer_attested"` — verified successfully against an enrolled key,
+///    - `"unsigned"` — no public key enrolled for `observed_by`, or the
+///      sender shipped no signature (legacy peer).
+///
+/// Idempotent on the unique `(source_id, target_id, relation)` index —
+/// duplicate inbound replays collapse to a no-op without error.
+///
+/// Both `source_id` and `target_id` must already exist locally; the
+/// receiver is expected to apply incoming `memories` *before* incoming
+/// `links` in the same `sync_push` request, which the existing handler
+/// already does.
+///
+/// `valid_from` defaults to "now" only when the inbound row carries
+/// `None` (legacy peer that never populated the column); otherwise the
+/// peer's value is preserved so the signature still verifies.
+///
+/// # Errors
+///
+/// Bubbles up the same DB / FK errors as `create_link_signed`. Pre-flight
+/// existence checks mirror the outbound path so the receiver fails loud
+/// on missing memories rather than silently dropping the link.
+pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &str) -> Result<()> {
+    // Same FK guard as create_link_signed — a missing memory means the
+    // peer raced ahead of us; we surface that to the caller's warn log
+    // rather than papering over with INSERT OR IGNORE silently.
+    let source_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+            params![link.source_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !source_exists {
+        anyhow::bail!("source memory not found: {}", link.source_id);
+    }
+    let target_exists: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+            params![link.target_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !target_exists {
+        anyhow::bail!("target memory not found: {}", link.target_id);
+    }
+
+    let now = Utc::now().to_rfc3339();
+    // Preserve peer's `valid_from` byte-identical so `memory_verify`
+    // (H4) can re-derive the signed payload from the stored row.
+    let valid_from = link.valid_from.clone().unwrap_or_else(|| now.clone());
+    let created_at = if link.created_at.is_empty() {
+        now
+    } else {
+        link.created_at.clone()
     };
 
     conn.execute(
         "INSERT OR IGNORE INTO memory_links \
-            (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
-         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
-        params![source_id, target_id, relation, now, signature, attest_level],
+            (source_id, target_id, relation, created_at, valid_from, valid_until, \
+             signature, attest_level, observed_by) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            link.source_id,
+            link.target_id,
+            link.relation,
+            created_at,
+            valid_from,
+            link.valid_until,
+            link.signature,
+            attest_level,
+            link.observed_by,
+        ],
     )?;
-    Ok(attest_level)
+    Ok(())
 }
 
 pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
@@ -2053,6 +2163,16 @@ pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
             target_id: row.get(1)?,
             relation: row.get(2)?,
             created_at: row.get(3)?,
+            // get_links is a local read-only view; the H3 wire-extra
+            // fields stay None here. Federation export uses
+            // `export_links` (which mirrors the same shape) and inbound
+            // verification consumes the wire shape directly via
+            // `SyncPushBody.links`. Plumbing signature/observed_by into
+            // this read path is an H4 concern (memory_verify MCP tool).
+            signature: None,
+            observed_by: None,
+            valid_from: None,
+            valid_until: None,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -3621,8 +3741,14 @@ pub fn export_all(conn: &Connection) -> Result<Vec<Memory>> {
 
 pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
     let now = Utc::now().to_rfc3339();
+    // v0.7 H3 — also pull the signature blob, the `observed_by` claim,
+    // and the temporal-validity columns. Federation peers consume these
+    // through `verify::verify` to gate inbound replication; legacy
+    // unsigned rows surface NULL for `signature` / `observed_by` and
+    // the inbound path falls back to `attest_level = "unsigned"`.
     let mut stmt = conn.prepare(
-        "SELECT ml.source_id, ml.target_id, ml.relation, ml.created_at
+        "SELECT ml.source_id, ml.target_id, ml.relation, ml.created_at,
+                ml.signature, ml.observed_by, ml.valid_from, ml.valid_until
          FROM memory_links ml
          JOIN memories ms ON ms.id = ml.source_id AND (ms.expires_at IS NULL OR ms.expires_at > ?1)
          JOIN memories mt ON mt.id = ml.target_id AND (mt.expires_at IS NULL OR mt.expires_at > ?1)",
@@ -3633,6 +3759,10 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
             target_id: row.get(1)?,
             relation: row.get(2)?,
             created_at: row.get(3)?,
+            signature: row.get::<_, Option<Vec<u8>>>(4)?,
+            observed_by: row.get::<_, Option<String>>(5)?,
+            valid_from: row.get::<_, Option<String>>(6)?,
+            valid_until: row.get::<_, Option<String>>(7)?,
         })
     })?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
