@@ -597,6 +597,18 @@ pub(crate) fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_replay",
+                "description": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "string", "description": "Memory ID whose transcript chain should be reconstructed."},
+                        "verbose": {"type": "boolean", "default": false, "description": "v0.7.0 I4 — when false (default), any single transcript exceeding 100KB has its content omitted and is flagged with truncated=true. Set to true to opt into a full dump (use with care: transcripts can be multi-MB)."}
+                    },
+                    "required": ["memory_id"]
+                }
+            },
+            {
                 "name": "memory_consolidate",
                 "description": "Consolidate multiple memories into one long-term summary. Deletes source memories and creates derived_from links. If summary is omitted and LLM is available (smart/autonomous tier), auto-generates a summary.",
                 "inputSchema": {
@@ -2060,7 +2072,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(43);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(44);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -3144,6 +3156,133 @@ fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value
     Ok(json!({"links": links, "count": links.len()}))
 }
 
+/// v0.7.0 I4 — single-transcript content threshold above which the
+/// replay tool omits decompressed text unless the caller opted into
+/// `verbose=true`. 100 KB matches the "operators must opt into large
+/// dumps" carve-out called out in the I4 prompt; below that, even a
+/// long chat fits comfortably in an LLM context window without
+/// truncation surprise.
+const REPLAY_VERBOSE_THRESHOLD_BYTES: i64 = 100 * 1024;
+
+/// v0.7.0 I4 — `memory_replay(memory_id, verbose=false)`.
+///
+/// Walks the I2 `memory_transcript_links` join table for `memory_id`,
+/// fetches each linked transcript via I1's [`crate::transcripts::fetch`]
+/// (which transparently decompresses the zstd blob), and returns a
+/// chronologically-sorted JSON array of transcripts with their span
+/// metadata.
+///
+/// Sort order: ascending `created_at` so the replay reads as the
+/// memory's source chain in the order the conversation actually
+/// happened. The I2 helper [`crate::transcripts::transcripts_for_memory`]
+/// orders by `transcript_id` (deterministic but arbitrary), so this
+/// handler re-sorts after pulling per-transcript metadata.
+///
+/// Truncation rule: when `verbose=false` (default) and a transcript's
+/// `original_size` exceeds [`REPLAY_VERBOSE_THRESHOLD_BYTES`], its
+/// `content` field is omitted and `truncated` is set to `true`. Forces
+/// operators to opt into `verbose=true` for multi-MB dumps so an
+/// accidental call from a small-context client doesn't blow the
+/// session budget. The metadata block (`compressed_size`,
+/// `original_size`, `span_start`, `span_end`, `created_at`) is always
+/// returned regardless of truncation so the caller can decide whether
+/// to re-issue with `verbose=true`.
+fn handle_replay(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let memory_id = params["memory_id"]
+        .as_str()
+        .ok_or("memory_id is required")?;
+    validate::validate_id(memory_id).map_err(|e| e.to_string())?;
+    let verbose = params
+        .get("verbose")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    // I2 substrate — pull every (transcript_id, span_start, span_end)
+    // row tied to this memory. The helper orders by `transcript_id` for
+    // determinism; we re-order by `created_at` below for chronological
+    // replay semantics.
+    let links = crate::transcripts::transcripts_for_memory(conn, memory_id)
+        .map_err(|e| format!("transcripts_for_memory failed: {e}"))?;
+
+    // (link, metadata) pairs — `fetch_metadata` is the cheap path that
+    // skips the BLOB. We keep links whose transcript row has vanished
+    // (e.g. pruned by I3 between the join-table read and now) out of
+    // the response so callers never see an id they can't fetch back.
+    let mut entries: Vec<(
+        crate::transcripts::TranscriptLink,
+        crate::transcripts::Transcript,
+    )> = Vec::with_capacity(links.len());
+    for link in links {
+        match crate::transcripts::fetch_metadata(conn, &link.transcript_id) {
+            Ok(Some(meta)) => entries.push((link, meta)),
+            Ok(None) => {
+                // I3 may have pruned the transcript out from under us
+                // since the link row was written. Drop it silently —
+                // surfacing a dangling id to the caller is worse than
+                // returning the live subset.
+                tracing::warn!(
+                    target: "memory_replay",
+                    "dangling transcript_id {} for memory {memory_id}",
+                    link.transcript_id
+                );
+            }
+            Err(e) => return Err(format!("fetch_metadata failed: {e}")),
+        }
+    }
+
+    // Chronological order (oldest first). Ties on `created_at` fall
+    // back to `transcript_id` so the result is fully deterministic
+    // even when two transcripts land in the same RFC3339 millisecond.
+    entries.sort_by(|a, b| {
+        a.1.created_at
+            .cmp(&b.1.created_at)
+            .then_with(|| a.1.id.cmp(&b.1.id))
+    });
+
+    let mut transcripts_json: Vec<Value> = Vec::with_capacity(entries.len());
+    for (link, meta) in entries {
+        let truncate = !verbose && meta.original_size > REPLAY_VERBOSE_THRESHOLD_BYTES;
+        let mut obj = serde_json::Map::new();
+        obj.insert("id".into(), Value::String(meta.id.clone()));
+        obj.insert("created_at".into(), Value::String(meta.created_at.clone()));
+        obj.insert("compressed_size".into(), json!(meta.compressed_size));
+        obj.insert("original_size".into(), json!(meta.original_size));
+        obj.insert(
+            "span_start".into(),
+            link.span_start
+                .map_or(Value::Null, |v| Value::Number(v.into())),
+        );
+        obj.insert(
+            "span_end".into(),
+            link.span_end
+                .map_or(Value::Null, |v| Value::Number(v.into())),
+        );
+        if truncate {
+            // Honest gate: announce the omission so the caller knows to
+            // re-issue with `verbose=true` rather than silently
+            // assuming the transcript is empty.
+            obj.insert("truncated".into(), Value::Bool(true));
+        } else {
+            let content = crate::transcripts::fetch(conn, &meta.id)
+                .map_err(|e| format!("transcripts::fetch failed: {e}"))?
+                .ok_or_else(|| {
+                    format!(
+                        "transcript {} disappeared between metadata read and content fetch",
+                        meta.id
+                    )
+                })?;
+            obj.insert("content".into(), Value::String(content));
+        }
+        transcripts_json.push(Value::Object(obj));
+    }
+
+    Ok(json!({
+        "memory_id": memory_id,
+        "transcripts": transcripts_json,
+        "count": transcripts_json.len(),
+    }))
+}
+
 fn handle_consolidate(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -4112,6 +4251,7 @@ fn handle_request(
                 "memory_get" => handle_get(conn, arguments),
                 "memory_link" => handle_link(conn, db_path, arguments, active_keypair),
                 "memory_get_links" => handle_get_links(conn, arguments),
+                "memory_replay" => handle_replay(conn, arguments),
                 "memory_consolidate" => handle_consolidate(
                     conn,
                     db_path,
@@ -4652,16 +4792,17 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_43_tools() {
+    fn tool_definitions_returns_44_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
         // (Pillar 2 / Stream B), and memory_kg_timeline +
         // memory_kg_invalidate + memory_kg_query (Pillar 2 / Stream C)
-        // on top of the 36-tool v0.6.0.0 surface.
+        // on top of the 36-tool v0.6.0.0 surface = 43.
+        // v0.7.0 I4 adds memory_replay (Family::Graph) → 44.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 43);
+        assert_eq!(tools.len(), 44);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -4708,26 +4849,27 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_43() {
+    fn tool_definitions_for_profile_full_registers_44() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            43,
-            "full profile must reproduce v0.6.3 surface 1:1"
+            44,
+            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay = 44"
         );
     }
 
     #[test]
-    fn tool_definitions_for_profile_graph_registers_thirteen_plus_capabilities() {
+    fn tool_definitions_for_profile_graph_registers_fourteen_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
         let tools = defs["tools"].as_array().unwrap();
-        // 5 core + 8 graph + 1 always-on capabilities = 14 (capabilities
-        // is in meta but loaded as bootstrap; without it we'd have 13).
+        // 5 core + 9 graph (v0.7.0 I4 added memory_replay) + 1 always-on
+        // capabilities = 15 (capabilities is in meta but loaded as
+        // bootstrap; without it we'd have 14).
         assert_eq!(
             tools.len(),
-            14,
-            "graph profile = core(5) + graph(8) + capabilities-bootstrap(1)"
+            15,
+            "graph profile = core(5) + graph(9, with memory_replay) + capabilities-bootstrap(1)"
         );
     }
 
@@ -4737,7 +4879,11 @@ mod tests {
         let p = crate::profile::Profile::parse("core,graph").unwrap();
         let defs = tool_definitions_for_profile(&p);
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14, "core,graph = 5 + 8 + capabilities");
+        assert_eq!(
+            tools.len(),
+            15,
+            "core,graph = 5 + 9 (v0.7.0 I4 memory_replay) + capabilities"
+        );
     }
 
     // ---- v0.6.4-006 — capabilities family enum + include_schema ----
@@ -4754,7 +4900,8 @@ mod tests {
         assert_eq!(core_row["tool_count"], 5);
         let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
         assert_eq!(graph_row["loaded"], false);
-        assert_eq!(graph_row["tool_count"], 8);
+        // v0.7.0 I4 — graph now ships 9 tools (8 baseline + memory_replay).
+        assert_eq!(graph_row["tool_count"], 9);
 
         let always_on = v["always_on"].as_array().unwrap();
         assert_eq!(always_on.len(), 1);
@@ -4768,9 +4915,11 @@ mod tests {
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        // v0.7.0 I4 — graph now lists 9 tools (8 baseline + memory_replay).
+        assert_eq!(tools.len(), 9);
         // Spot-check known graph tool present.
         assert!(tools.iter().any(|t| t == "memory_kg_query"));
+        assert!(tools.iter().any(|t| t == "memory_replay"));
     }
 
     #[test]
@@ -4779,7 +4928,8 @@ mod tests {
         let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        // v0.7.0 I4 — graph now ships 9 schemas (8 baseline + memory_replay).
+        assert_eq!(tools.len(), 9);
         // Each row must carry the full MCP tool definition shape.
         for tool in tools {
             assert!(tool.get("name").is_some(), "missing name");
@@ -5140,7 +5290,8 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 43 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 44 MCP tools (Justice of MCP pathway).
+    /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay.
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5252,6 +5403,15 @@ mod tests {
                 name: "memory_get_links",
                 valid_args: json!({"id": "fake-id-for-test"}),
                 required_arg: Some("id"),
+            },
+            // v0.7.0 I4 — memory_replay walks the I2 join table; an
+            // unknown memory_id yields an empty `transcripts` list
+            // rather than an error, so the happy path works without
+            // pre-seeding the DB.
+            ToolCase {
+                name: "memory_replay",
+                valid_args: json!({"memory_id": "fake-id-for-test"}),
+                required_arg: Some("memory_id"),
             },
             ToolCase {
                 name: "memory_consolidate",
@@ -9042,5 +9202,266 @@ mod tests {
         assert_eq!(memories.len(), 2);
         assert_eq!(memories[0]["id"], "first");
         assert_eq!(memories[1]["id"], "third");
+    }
+
+    // =====================================================================
+    // v0.7.0 I4 — `memory_replay` tool. Tests cover the four documented
+    // shapes: empty / single / multiple / truncation (verbose=false vs
+    // verbose=true). Each test seeds the I1 transcript table + I2 join
+    // table directly via the public helpers, then dispatches a real
+    // `tools/call` request through the MCP envelope so the response goes
+    // through the JSON wrapping layer the daemon emits in production.
+    // =====================================================================
+
+    /// I4 test helper — INSERT a stub `memories` row so the I2 join
+    /// table FK is satisfied. Mirrors the same helper in
+    /// `transcripts::tests::insert_test_memory` so the I4 test suite
+    /// doesn't need to import the test-only path.
+    fn i4_insert_test_memory(conn: &rusqlite::Connection, id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (
+                id, tier, namespace, title, content, created_at, updated_at
+             ) VALUES (?1, 'short_term', 'team/eng', ?2, 'body', ?3, ?3)",
+            rusqlite::params![id, format!("title-{id}"), now],
+        )
+        .unwrap();
+    }
+
+    /// I4 test helper — pull the inner JSON out of an MCP wire response
+    /// (which wraps the handler's payload as `result.content[0].text`).
+    fn i4_decode_response_payload(resp: &RpcResponse) -> Value {
+        let text = resp
+            .result
+            .as_ref()
+            .expect("expected ok response")
+            .get("content")
+            .and_then(|c| c.get(0))
+            .and_then(|c| c.get("text"))
+            .and_then(Value::as_str)
+            .expect("response wrapper must have content[0].text");
+        serde_json::from_str(text).expect("response payload must be JSON")
+    }
+
+    /// I4-EMPTY — a memory with no linked transcripts returns an empty
+    /// `transcripts` array (and `count: 0`). Documents the lower
+    /// boundary of the replay surface so an LLM that calls
+    /// `memory_replay` on a memory with no provenance gets an honest
+    /// "nothing to replay" response instead of an error.
+    #[test]
+    fn i4_replay_no_links_returns_empty_array() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-empty");
+
+        let req = make_tools_call("memory_replay", json!({"memory_id": "mem-empty"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["memory_id"], "mem-empty");
+        assert_eq!(payload["count"], 0);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert!(transcripts.is_empty());
+    }
+
+    /// I4-SINGLE — one linked transcript flows through with
+    /// decompressed content and full span metadata
+    /// (`compressed_size`, `original_size`, `span_start`, `span_end`,
+    /// `created_at`).
+    #[test]
+    fn i4_replay_single_transcript_returns_content_and_metadata() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-single");
+        let body = "the canonical conversation that produced this memory";
+        let t = crate::transcripts::store(&conn, "team/eng", body, None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-single", &t.id, Some(2), Some(20)).unwrap();
+
+        let req = make_tools_call("memory_replay", json!({"memory_id": "mem-single"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["memory_id"], "mem-single");
+        assert_eq!(payload["count"], 1);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let entry = &transcripts[0];
+        assert_eq!(entry["id"], t.id);
+        assert_eq!(entry["content"], body);
+        assert_eq!(entry["span_start"], 2);
+        assert_eq!(entry["span_end"], 20);
+        assert_eq!(entry["original_size"].as_i64().unwrap(), body.len() as i64);
+        // compressed_size is whatever zstd-3 emits; assert it's positive
+        // so a future encoder swap that emits zero-byte blobs gets caught.
+        assert!(entry["compressed_size"].as_i64().unwrap() > 0);
+        assert!(entry["created_at"].is_string());
+        // No truncation flag on a sub-threshold transcript.
+        assert!(entry.get("truncated").is_none());
+    }
+
+    /// I4-MULTI — two linked transcripts come back in chronological
+    /// order (oldest first) regardless of the order they were linked.
+    /// Pins the chronological-replay contract so a future refactor
+    /// can't silently fall back to insertion order.
+    #[test]
+    fn i4_replay_multiple_transcripts_chronological_order() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-multi");
+
+        // Insert the OLDER transcript first, then backdate it so its
+        // `created_at` is unambiguously earlier than the SECOND insert.
+        let older = crate::transcripts::store(&conn, "team/eng", "older body", None).unwrap();
+        let backdate = (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339();
+        conn.execute(
+            "UPDATE memory_transcripts SET created_at = ?1 WHERE id = ?2",
+            rusqlite::params![backdate, older.id],
+        )
+        .unwrap();
+
+        let newer = crate::transcripts::store(&conn, "team/eng", "newer body", None).unwrap();
+
+        // Link the NEWER one first so the I2 helper's
+        // ORDER-BY-transcript-id natural ordering doesn't already
+        // happen to give us the right result by accident.
+        crate::transcripts::link_transcript(&conn, "mem-multi", &newer.id, None, None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-multi", &older.id, None, None).unwrap();
+
+        let req = make_tools_call("memory_replay", json!({"memory_id": "mem-multi"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert_eq!(transcripts.len(), 2);
+        // Older first, newer second.
+        assert_eq!(transcripts[0]["id"], older.id);
+        assert_eq!(transcripts[0]["content"], "older body");
+        assert_eq!(transcripts[1]["id"], newer.id);
+        assert_eq!(transcripts[1]["content"], "newer body");
+    }
+
+    /// I4-TRUNCATE-DEFAULT — a > 100 KB transcript with the default
+    /// `verbose=false` returns the metadata block + `truncated: true`
+    /// and OMITS the content field, forcing operators to opt into the
+    /// large-dump path.
+    #[test]
+    fn i4_replay_large_transcript_truncates_when_verbose_false() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-large");
+
+        // 200 KB body — well past the 100 KB threshold.
+        let body: String = "abcdefghij".repeat(20_000); // 200_000 bytes
+        assert!(body.len() > REPLAY_VERBOSE_THRESHOLD_BYTES as usize);
+        let t = crate::transcripts::store(&conn, "team/eng", &body, None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-large", &t.id, None, None).unwrap();
+
+        let req = make_tools_call("memory_replay", json!({"memory_id": "mem-large"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let entry = &transcripts[0];
+        assert_eq!(entry["truncated"], true);
+        assert!(
+            entry.get("content").is_none(),
+            "content must be OMITTED when truncated; got: {entry}"
+        );
+        // Metadata is still present so the caller can decide whether
+        // to re-issue with verbose=true.
+        assert_eq!(entry["original_size"].as_i64().unwrap(), body.len() as i64);
+        assert!(entry["compressed_size"].as_i64().unwrap() > 0);
+    }
+
+    /// I4-TRUNCATE-VERBOSE — the same > 100 KB transcript with
+    /// `verbose=true` returns the full content (no `truncated` flag).
+    /// Pins the opt-in-large-dump escape hatch.
+    #[test]
+    fn i4_replay_large_transcript_returns_content_when_verbose_true() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-large-verbose");
+
+        let body: String = "abcdefghij".repeat(20_000);
+        let t = crate::transcripts::store(&conn, "team/eng", &body, None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-large-verbose", &t.id, None, None).unwrap();
+
+        let req = make_tools_call(
+            "memory_replay",
+            json!({"memory_id": "mem-large-verbose", "verbose": true}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert_eq!(transcripts.len(), 1);
+        let entry = &transcripts[0];
+        assert!(
+            entry.get("truncated").is_none(),
+            "verbose=true must NOT set truncated"
+        );
+        assert_eq!(entry["content"].as_str().unwrap(), body);
+    }
+
+    /// I4-MISSING-ARG — omitting the required `memory_id` argument
+    /// returns a handler-level error (wrapped as an isError result),
+    /// not a JSON-RPC -32601. Same shape as the rest of the smoke
+    /// matrix for required-arg validation.
+    #[test]
+    fn i4_replay_missing_memory_id_yields_handler_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_replay", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        // Handler errors come back as ok_response with isError=true.
+        // The RPC error field stays None so a downstream client can
+        // distinguish "method not found" from "the method ran and
+        // failed".
+        assert!(
+            resp.error.is_none(),
+            "expected handler-level error, not RPC error"
+        );
+        let result = resp.result.expect("must surface a result envelope");
+        assert_eq!(result["isError"], true);
+    }
+
+    /// I4-DANGLING-LINK — a link row whose target transcript was
+    /// pruned (I3) is silently dropped from the replay output.
+    /// Documents the contract so a future refactor that surfaces
+    /// dangling ids to the caller fails this test loudly.
+    #[test]
+    fn i4_replay_skips_dangling_transcript_link() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        i4_insert_test_memory(&conn, "mem-dangling");
+
+        let live = crate::transcripts::store(&conn, "team/eng", "live body", None).unwrap();
+        let pruned = crate::transcripts::store(&conn, "team/eng", "pruned body", None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-dangling", &live.id, None, None).unwrap();
+        crate::transcripts::link_transcript(&conn, "mem-dangling", &pruned.id, None, None).unwrap();
+
+        // Sneak past the I2 ON DELETE CASCADE by disabling foreign keys
+        // for this single DELETE — production won't get here (cascade
+        // would clean up the link), but the handler must still be
+        // robust if the substrate ever surfaces a dangling row.
+        conn.execute("PRAGMA foreign_keys = OFF", []).unwrap();
+        conn.execute(
+            "DELETE FROM memory_transcripts WHERE id = ?1",
+            rusqlite::params![pruned.id],
+        )
+        .unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+
+        let req = make_tools_call("memory_replay", json!({"memory_id": "mem-dangling"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+
+        let payload = i4_decode_response_payload(&resp);
+        let transcripts = payload["transcripts"].as_array().unwrap();
+        assert_eq!(
+            transcripts.len(),
+            1,
+            "only the live transcript should appear; pruned id is silently dropped"
+        );
+        assert_eq!(transcripts[0]["id"], live.id);
     }
 }
