@@ -716,25 +716,29 @@ impl Capabilities {
         }
     }
 
-    /// v0.7.0 (A1): project the report into the v3 shape.
+    /// v0.7.0 (A1+A2): project the report into the v3 shape.
     ///
-    /// v3 = v2 + a top-level `summary` string carrying a pre-computed,
-    /// plain-language description of the LLM's operational tool surface
-    /// (loaded count, total count, the three named recovery paths an LLM
-    /// can take to reach unloaded families). The summary is computed by
-    /// the caller from the live `Profile` state because the
-    /// [`Capabilities`] struct itself doesn't know which families the
-    /// MCP server actually advertised in `tools/list`.
+    /// v3 = v2 +
+    ///   - top-level `summary` (A1) — terse description of operational
+    ///     access plus the three named recovery paths.
+    ///   - top-level `to_describe_to_user` (A2) — plain-English
+    ///     end-user-facing sentence the LLM should repeat verbatim
+    ///     when asked "what tools do you have?". No MCP jargon.
     ///
-    /// Future v0.7.0 increments (A2–A4) extend this struct with
-    /// `to_describe_to_user`, per-tool `callable_now`, and
-    /// `agent_permitted_families`. A5 bumps the default wire shape to v3.
-    /// v2 stays supported indefinitely.
+    /// Both strings are computed by the caller from the live `Profile`
+    /// state because the [`Capabilities`] struct itself doesn't know
+    /// which families the MCP server actually advertised in
+    /// `tools/list`.
+    ///
+    /// Future v0.7.0 increments (A3–A4) extend this struct with
+    /// per-tool `callable_now` and `agent_permitted_families`. A5 bumps
+    /// the default wire shape to v3. v2 stays supported indefinitely.
     #[must_use]
-    pub fn to_v3(&self, summary: String) -> CapabilitiesV3 {
+    pub fn to_v3(&self, summary: String, to_describe_to_user: String) -> CapabilitiesV3 {
         CapabilitiesV3 {
             schema_version: "3".to_string(),
             summary,
+            to_describe_to_user,
             tier: self.tier.clone(),
             version: self.version.clone(),
             features: self.features.clone(),
@@ -780,6 +784,15 @@ pub struct CapabilitiesV3 {
     /// because the count of advertised tools depends on the running
     /// server's `--profile` flag.
     pub summary: String,
+
+    /// v0.7.0 A2 — pre-computed end-user-facing sentence the LLM should
+    /// repeat verbatim when an end-user asks "what tools do you have?".
+    /// Distinct in tone from [`Self::summary`]: no MCP jargon, no
+    /// `--profile` references, no JSON-RPC vocabulary. Reads as a
+    /// normal sentence a human would say. See
+    /// `docs/v0.7/canonical-phrasings.md` for the canonical
+    /// substitution template + worked examples per profile.
+    pub to_describe_to_user: String,
 
     pub tier: String,
     pub version: String,

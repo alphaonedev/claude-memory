@@ -188,6 +188,80 @@ impl Family {
             Self::Other => 2,
         }
     }
+
+    /// v0.7.0 A2 — tool names belonging to this family. Forward of the
+    /// `Family::for_tool` reverse map; source-anchored at
+    /// `src/mcp.rs::tool_definitions()` 2026-05-04 (same anchor as
+    /// [`Family::for_tool`] and [`Family::expected_tool_count`]).
+    /// Order is the order each tool appears in
+    /// `tool_definitions_for_profile`'s registration walk, so an
+    /// LLM-facing preview ("the first three tools loaded") aligns with
+    /// the actual `tools/list` output.
+    ///
+    /// The slice length must match [`Family::expected_tool_count`]; the
+    /// `family_tool_names_match_expected_count` unit test pins both in
+    /// sync.
+    #[must_use]
+    pub const fn tool_names(self) -> &'static [&'static str] {
+        match self {
+            Self::Core => &[
+                "memory_store",
+                "memory_recall",
+                "memory_list",
+                "memory_get",
+                "memory_search",
+            ],
+            Self::Lifecycle => &[
+                "memory_update",
+                "memory_delete",
+                "memory_forget",
+                "memory_gc",
+                "memory_promote",
+            ],
+            Self::Graph => &[
+                "memory_kg_query",
+                "memory_kg_timeline",
+                "memory_kg_invalidate",
+                "memory_link",
+                "memory_get_links",
+                "memory_entity_register",
+                "memory_entity_get_by_alias",
+                "memory_get_taxonomy",
+            ],
+            Self::Governance => &[
+                "memory_pending_list",
+                "memory_pending_approve",
+                "memory_pending_reject",
+                "memory_namespace_set_standard",
+                "memory_namespace_get_standard",
+                "memory_namespace_clear_standard",
+                "memory_subscribe",
+                "memory_unsubscribe",
+            ],
+            Self::Power => &[
+                "memory_consolidate",
+                "memory_detect_contradiction",
+                "memory_check_duplicate",
+                "memory_auto_tag",
+                "memory_expand_query",
+                "memory_inbox",
+            ],
+            Self::Meta => &[
+                "memory_capabilities",
+                "memory_agent_register",
+                "memory_agent_list",
+                "memory_session_start",
+                "memory_stats",
+            ],
+            Self::Archive => &[
+                "memory_archive_list",
+                "memory_archive_purge",
+                "memory_archive_restore",
+                "memory_archive_stats",
+            ],
+            Self::Other => &["memory_list_subscriptions", "memory_notify"],
+        }
+    }
 }
 
 impl FromStr for Family {
