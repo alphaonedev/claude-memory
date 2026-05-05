@@ -33,7 +33,9 @@
     "README.md",
     "LICENSE"
   ],
-  "private": true,
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
