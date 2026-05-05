@@ -122,6 +122,40 @@ pub struct KgQueryRow {
     pub path: String,
 }
 
+/// One row returned by a knowledge-graph timeline scan at the SAL layer.
+///
+/// v0.7 Track J substrate: J3 (`memory_kg_timeline`) projects rows from
+/// either the Cypher (AGE) backend or the SQL fallback into this shared
+/// shape, mirroring [`crate::models::KgTimelineEvent`] (the SQLite-side
+/// row used by `db::kg_timeline`). The fields are the intersection of
+/// what AGE returns through `cypher()` and what the SQL path already
+/// projects, keeping the upper-layer handler backend-blind.
+///
+/// `valid_from` is the authoritative ordering key — the timeline drops
+/// rows with NULL `valid_from` at the SAL layer to match the SQLite
+/// contract (a link without a valid-from anchor cannot be ordered).
+/// `title` and `target_namespace` are projected for caller display
+/// convenience so the upper layer doesn't need a second round-trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KgTimelineRow {
+    /// The asserted target memory's id.
+    pub target_id: String,
+    /// The link's relation tag (e.g. `"related_to"`).
+    pub relation: String,
+    /// RFC3339 timestamp marking when the assertion became valid.
+    pub valid_from: String,
+    /// RFC3339 timestamp marking when the assertion was superseded,
+    /// or `None` if still in force.
+    pub valid_until: Option<String>,
+    /// Agent id that observed/asserted the link, or `None` for legacy
+    /// rows that predate observability tracking.
+    pub observed_by: Option<String>,
+    /// The target memory's display title.
+    pub title: String,
+    /// The target memory's namespace.
+    pub target_namespace: String,
+}
+
 impl std::fmt::Display for KgBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())

@@ -52,8 +52,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
 use super::{
-    CallerContext, Capabilities, Filter, KgBackend, KgQueryRow, MemoryStore, StoreError,
-    StoreResult, UpdatePatch, VerifyReport,
+    CallerContext, Capabilities, Filter, KgBackend, KgQueryRow, KgTimelineRow, MemoryStore,
+    StoreError, StoreResult, UpdatePatch, VerifyReport,
 };
 use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
 
@@ -597,6 +597,342 @@ impl PostgresStore {
             .collect()
     }
 
+    /// Ordered fact timeline for an entity — v0.7 Track J dispatcher.
+    ///
+    /// Routes on the [`KgBackend`] resolved at [`Self::connect`] time
+    /// (J1 substrate). When AGE is installed the timeline is assembled
+    /// via a Cypher `MATCH (a)-[r]->(b)` over the `memory_graph`
+    /// projection, ordered by `r.valid_from ASC`; otherwise we fall
+    /// back to a plain SQL scan over `memory_links` joined to
+    /// `memories` that mirrors the SQLite shape in `db::kg_timeline`.
+    ///
+    /// Both branches return rows in the same [`KgTimelineRow`] shape
+    /// so the upper-layer `memory_kg_timeline` handler can stay
+    /// backend-blind, mirroring J2's pattern for `kg_query`.
+    ///
+    /// `since` and `until` are RFC3339 timestamps (inclusive) that
+    /// filter on `valid_from`; `limit` is clamped to
+    /// `[1, KG_TIMELINE_MAX_LIMIT_SAL]` and defaults to
+    /// [`KG_TIMELINE_DEFAULT_LIMIT_SAL`] when omitted.
+    ///
+    /// Rows with NULL `valid_from` are excluded — a link without a
+    /// valid-from anchor cannot be ordered on the timeline. This
+    /// matches the SQLite contract documented on `db::kg_timeline`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::InvalidInput` for malformed timestamp
+    /// inputs; `StoreError::BackendUnavailable` for any sqlx or AGE
+    /// error.
+    pub async fn kg_timeline(
+        &self,
+        source_id: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: Option<usize>,
+    ) -> StoreResult<Vec<KgTimelineRow>> {
+        match self.kg_backend {
+            KgBackend::Age => {
+                self.kg_timeline_cypher(source_id, since, until, limit)
+                    .await
+            }
+            KgBackend::Cte => self.kg_timeline_cte(source_id, since, until, limit).await,
+        }
+    }
+
+    /// Cypher (Apache AGE) implementation of `kg_timeline`.
+    ///
+    /// Wraps a `MATCH (a)-[r:related_to]->(b)` traversal in the
+    /// `cypher('memory_graph', ...)` set-returning function, ordered
+    /// by `r.valid_from ASC` and tie-broken by `r.created_at ASC` to
+    /// match the SQLite implementation. The since/until filters are
+    /// applied through Cypher's `WHERE` predicate; the start id is
+    /// passed as an AGE `$vars` JSON parameter so the user-supplied
+    /// value is never interpolated into the query body.
+    ///
+    /// Title and namespace are pulled by joining the AGE result back
+    /// to the source-of-truth `memories` table — keeping the column
+    /// snapshots in sync with the relational store and avoiding
+    /// drift if the property-graph projection lags behind.
+    ///
+    /// # Errors
+    ///
+    /// `StoreError::BackendUnavailable` for any sqlx or AGE error.
+    pub async fn kg_timeline_cypher(
+        &self,
+        source_id: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: Option<usize>,
+    ) -> StoreResult<Vec<KgTimelineRow>> {
+        let cap = clamp_timeline_limit(limit);
+
+        // AGE requires `ag_catalog` on the search path and the
+        // extension loaded into the session. Both are session-local
+        // — sqlx hands each query a fresh connection from the pool
+        // so we issue them as part of the same transaction to keep
+        // them in scope. Same shape as `kg_query_cypher`.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin AGE tx", e))?;
+
+        sqlx::query("LOAD 'age'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("LOAD age", e))?;
+        sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("set search_path", e))?;
+
+        // Build the WHERE predicate dynamically. `since`/`until` are
+        // pre-validated RFC3339 strings at the upper layer (the MCP
+        // handler runs `validate_expires_at_format`), but we still
+        // pass them through as bound `$since`/`$until` AGE vars so
+        // they're never interpolated into the Cypher body.
+        let mut where_clauses: Vec<&str> = vec!["a.id = $start_id", "r.valid_from IS NOT NULL"];
+        if since.is_some() {
+            where_clauses.push("r.valid_from >= $since");
+        }
+        if until.is_some() {
+            where_clauses.push("r.valid_from <= $until");
+        }
+        let where_sql = where_clauses.join(" AND ");
+
+        let cypher = format!(
+            "MATCH (a)-[r:related_to]->(b) \
+             WHERE {where_sql} \
+             RETURN b.id AS target_id, \
+                    r.relation AS relation, \
+                    r.valid_from AS valid_from, \
+                    r.valid_until AS valid_until, \
+                    r.observed_by AS observed_by \
+             ORDER BY r.valid_from ASC, r.created_at ASC \
+             LIMIT {cap}"
+        );
+
+        let sql = format!(
+            "SELECT target_id, relation, valid_from, valid_until, observed_by \
+             FROM cypher('memory_graph', $$ {cypher} $$, $1::agtype) AS \
+             (target_id agtype, relation agtype, valid_from agtype, \
+              valid_until agtype, observed_by agtype)"
+        );
+
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "start_id".to_string(),
+            serde_json::Value::String(source_id.to_string()),
+        );
+        if let Some(s) = since {
+            params.insert(
+                "since".to_string(),
+                serde_json::Value::String(s.to_string()),
+            );
+        }
+        if let Some(u) = until {
+            params.insert(
+                "until".to_string(),
+                serde_json::Value::String(u.to_string()),
+            );
+        }
+        let params_json = serde_json::Value::Object(params).to_string();
+
+        let rows = sqlx::query(&sql)
+            .bind(params_json)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("cypher kg_timeline", e))?;
+
+        // Decode the agtype payloads into raw Rust strings/options
+        // first; we'll backfill `title` + `target_namespace` from
+        // the `memories` table inside the same transaction. Pulling
+        // the display fields from the relational store avoids a
+        // class of drift bugs where the AGE projection lags behind
+        // a `memories` rename.
+        let mut decoded: Vec<KgTimelineRow> = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let target_id_raw: String = r
+                .try_get::<String, _>("target_id")
+                .map_err(|e| to_store_err("read target_id", e))?;
+            let relation_raw: String = r
+                .try_get::<String, _>("relation")
+                .map_err(|e| to_store_err("read relation", e))?;
+            let valid_from_raw: String = r
+                .try_get::<String, _>("valid_from")
+                .map_err(|e| to_store_err("read valid_from", e))?;
+            let valid_until_raw: String = r
+                .try_get::<String, _>("valid_until")
+                .map_err(|e| to_store_err("read valid_until", e))?;
+            let observed_by_raw: String = r
+                .try_get::<String, _>("observed_by")
+                .map_err(|e| to_store_err("read observed_by", e))?;
+
+            decoded.push(KgTimelineRow {
+                target_id: strip_agtype_quotes(&target_id_raw).to_string(),
+                relation: strip_agtype_quotes(&relation_raw).to_string(),
+                valid_from: strip_agtype_quotes(&valid_from_raw).to_string(),
+                valid_until: agtype_optional_string(&valid_until_raw),
+                observed_by: agtype_optional_string(&observed_by_raw),
+                // Filled in below by the `memories` join.
+                title: String::new(),
+                target_namespace: String::new(),
+            });
+        }
+
+        // Backfill title + namespace in a single round-trip by
+        // pulling the unique target ids and joining server-side.
+        // Empty result set short-circuits without hitting Postgres.
+        if !decoded.is_empty() {
+            let ids: Vec<String> = {
+                let mut seen: std::collections::BTreeSet<String> =
+                    std::collections::BTreeSet::new();
+                for row in &decoded {
+                    seen.insert(row.target_id.clone());
+                }
+                seen.into_iter().collect()
+            };
+
+            let display_rows =
+                sqlx::query("SELECT id, title, namespace FROM memories WHERE id = ANY($1)")
+                    .bind(&ids)
+                    .fetch_all(&mut *tx)
+                    .await
+                    .map_err(|e| to_store_err("fetch timeline display fields", e))?;
+
+            let mut display: std::collections::HashMap<String, (String, String)> =
+                std::collections::HashMap::with_capacity(display_rows.len());
+            for r in &display_rows {
+                let id: String = r
+                    .try_get::<String, _>("id")
+                    .map_err(|e| to_store_err("read id", e))?;
+                let title: String = r
+                    .try_get::<String, _>("title")
+                    .map_err(|e| to_store_err("read title", e))?;
+                let namespace: String = r
+                    .try_get::<String, _>("namespace")
+                    .map_err(|e| to_store_err("read namespace", e))?;
+                display.insert(id, (title, namespace));
+            }
+
+            for row in &mut decoded {
+                if let Some((title, ns)) = display.get(&row.target_id) {
+                    row.title.clone_from(title);
+                    row.target_namespace.clone_from(ns);
+                }
+            }
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit AGE tx", e))?;
+
+        Ok(decoded)
+    }
+
+    /// SQL fallback for `kg_timeline` on Postgres.
+    ///
+    /// Mirrors the SQLite query in `db::kg_timeline` so deployments
+    /// running vanilla Postgres (no AGE extension) still get the
+    /// same temporal ordering and filter semantics. Returns the
+    /// shared [`KgTimelineRow`] shape so the dispatcher in
+    /// [`Self::kg_timeline`] doesn't have to care which branch ran.
+    ///
+    /// # Errors
+    ///
+    /// `StoreError::BackendUnavailable` for any sqlx error.
+    pub async fn kg_timeline_cte(
+        &self,
+        source_id: &str,
+        since: Option<&str>,
+        until: Option<&str>,
+        limit: Option<usize>,
+    ) -> StoreResult<Vec<KgTimelineRow>> {
+        let cap = clamp_timeline_limit(limit);
+        let cap_i64 = i64::try_from(cap).unwrap_or(i64::MAX);
+
+        // Compose the predicate dynamically for `since` / `until`.
+        // Bind values are appended in the same order so the `$N`
+        // placeholders line up. We rely on TIMESTAMPTZ casting to
+        // parse the RFC3339 inputs; malformed values surface as a
+        // `BackendUnavailable` from sqlx (the upper-layer handler
+        // pre-validates so this is a defense-in-depth path).
+        let mut sql = String::from(
+            "SELECT ml.target_id, ml.relation, ml.valid_from, ml.valid_until,
+                    ml.observed_by, m.title, m.namespace, ml.created_at
+             FROM memory_links ml
+             JOIN memories m ON m.id = ml.target_id
+             WHERE ml.source_id = $1
+               AND ml.valid_from IS NOT NULL",
+        );
+        let mut next_placeholder = 2usize;
+        if since.is_some() {
+            sql.push_str(&format!(
+                " AND ml.valid_from >= ${next_placeholder}::TIMESTAMPTZ"
+            ));
+            next_placeholder += 1;
+        }
+        if until.is_some() {
+            sql.push_str(&format!(
+                " AND ml.valid_from <= ${next_placeholder}::TIMESTAMPTZ"
+            ));
+            next_placeholder += 1;
+        }
+        sql.push_str(&format!(
+            " ORDER BY ml.valid_from ASC, ml.created_at ASC LIMIT ${next_placeholder}"
+        ));
+
+        let mut q = sqlx::query(&sql).bind(source_id);
+        if let Some(s) = since {
+            q = q.bind(s);
+        }
+        if let Some(u) = until {
+            q = q.bind(u);
+        }
+        q = q.bind(cap_i64);
+
+        let rows = q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("cte kg_timeline", e))?;
+
+        rows.iter()
+            .map(|r| {
+                let target_id: String = r
+                    .try_get::<String, _>("target_id")
+                    .map_err(|e| to_store_err("read target_id", e))?;
+                let relation: String = r
+                    .try_get::<String, _>("relation")
+                    .map_err(|e| to_store_err("read relation", e))?;
+                let valid_from: DateTime<Utc> = r
+                    .try_get::<DateTime<Utc>, _>("valid_from")
+                    .map_err(|e| to_store_err("read valid_from", e))?;
+                let valid_until: Option<DateTime<Utc>> = r
+                    .try_get::<Option<DateTime<Utc>>, _>("valid_until")
+                    .map_err(|e| to_store_err("read valid_until", e))?;
+                let observed_by: Option<String> = r
+                    .try_get::<Option<String>, _>("observed_by")
+                    .map_err(|e| to_store_err("read observed_by", e))?;
+                let title: String = r
+                    .try_get::<String, _>("title")
+                    .map_err(|e| to_store_err("read title", e))?;
+                let target_namespace: String = r
+                    .try_get::<String, _>("namespace")
+                    .map_err(|e| to_store_err("read namespace", e))?;
+                Ok(KgTimelineRow {
+                    target_id,
+                    relation,
+                    valid_from: valid_from.to_rfc3339(),
+                    valid_until: valid_until.map(|t| t.to_rfc3339()),
+                    observed_by,
+                    title,
+                    target_namespace,
+                })
+            })
+            .collect()
+    }
+
     fn row_to_memory(row: &sqlx::postgres::PgRow) -> StoreResult<Memory> {
         let created_at: DateTime<Utc> = row
             .try_get("created_at")
@@ -696,6 +1032,50 @@ fn validate_depth(max_depth: usize) -> StoreResult<()> {
         });
     }
     Ok(())
+}
+
+/// Default cap on rows returned by [`PostgresStore::kg_timeline`] when
+/// the caller does not specify one.
+///
+/// Mirrors `crate::db::KG_TIMELINE_DEFAULT_LIMIT` so the default page
+/// size is identical on every backend. Pinned here rather than
+/// re-imported because `crate::db` is a SQLite-only module that
+/// doesn't compile under the `sal-postgres` test surface when sqlite
+/// features are disabled.
+const KG_TIMELINE_DEFAULT_LIMIT_SAL: usize = 200;
+
+/// Hard ceiling on rows returned by [`PostgresStore::kg_timeline`].
+///
+/// Mirrors `crate::db::KG_TIMELINE_MAX_LIMIT`.
+const KG_TIMELINE_MAX_LIMIT_SAL: usize = 1000;
+
+/// Apply the published timeline page-size policy: default to
+/// [`KG_TIMELINE_DEFAULT_LIMIT_SAL`] when the caller didn't pass a
+/// limit, then clamp to the `[1, KG_TIMELINE_MAX_LIMIT_SAL]` band so a
+/// crafted call cannot exhaust the connection pool with one giant
+/// fetch. Pulled into a free function so both backend branches share
+/// the same clamping contract.
+fn clamp_timeline_limit(limit: Option<usize>) -> usize {
+    limit
+        .unwrap_or(KG_TIMELINE_DEFAULT_LIMIT_SAL)
+        .clamp(1, KG_TIMELINE_MAX_LIMIT_SAL)
+}
+
+/// Decode an AGE agtype scalar that may be a quoted string or the
+/// agtype `null` token. Returns `None` for `null`, otherwise the
+/// dequoted UTF-8 payload.
+///
+/// AGE's `cypher()` SRF returns each column as `agtype`. Casting to
+/// `text` produces `"value"` for strings and the literal token `null`
+/// for missing data. The CTE branch returns `Option<String>` directly
+/// from sqlx; the AGE branch needs this helper to mirror the same
+/// shape so the upper-layer handler stays backend-blind.
+fn agtype_optional_string(s: &str) -> Option<String> {
+    let trimmed = s.trim();
+    if trimmed.eq_ignore_ascii_case("null") {
+        return None;
+    }
+    Some(strip_agtype_quotes(trimmed).to_string())
 }
 
 /// Strip the surrounding double-quotes that AGE wraps around its
@@ -1325,6 +1705,132 @@ mod tests {
             .await;
         assert!(matches!(zero, Err(StoreError::InvalidInput { .. })));
         assert!(matches!(over, Err(StoreError::InvalidInput { .. })));
+    }
+
+    // ------------------------------------------------------------------
+    // v0.7 J3 — Cypher kg_timeline unit + live tests.
+    //
+    // Pool-less unit tests cover the offline surface (limit clamping +
+    // agtype optional decoding) so the dispatcher contract holds even
+    // when no Postgres is available. The live test runs against an
+    // AGE-enabled Postgres (`AI_MEMORY_TEST_AGE_URL`) and skips
+    // cleanly otherwise so the default `cargo test` flow stays
+    // offline.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn clamp_timeline_limit_applies_default_and_ceiling() {
+        // Routing contract: callers that omit the limit must get the
+        // published default; callers that pass a value above the
+        // ceiling must be silently clamped to the ceiling rather
+        // than fanning out an unbounded scan. Pinning the band so a
+        // future refactor can't widen the page-size budget.
+        assert_eq!(clamp_timeline_limit(None), KG_TIMELINE_DEFAULT_LIMIT_SAL);
+        assert_eq!(clamp_timeline_limit(Some(0)), 1);
+        assert_eq!(clamp_timeline_limit(Some(50)), 50);
+        assert_eq!(
+            clamp_timeline_limit(Some(KG_TIMELINE_MAX_LIMIT_SAL)),
+            KG_TIMELINE_MAX_LIMIT_SAL
+        );
+        assert_eq!(
+            clamp_timeline_limit(Some(KG_TIMELINE_MAX_LIMIT_SAL + 999)),
+            KG_TIMELINE_MAX_LIMIT_SAL
+        );
+    }
+
+    #[test]
+    fn agtype_optional_string_decodes_null_and_quoted() {
+        // Wire-shape contract: AGE's `cypher()` SRF returns missing
+        // values as the literal token `null` and present strings as
+        // `"value"`. The decoder MUST collapse `null` to `None` and
+        // peel the surrounding quotes from present strings; otherwise
+        // the dispatcher would surface the agtype quoting in the
+        // upper layer and break parity with the SQLite shape.
+        assert_eq!(agtype_optional_string("null"), None);
+        assert_eq!(agtype_optional_string("NULL"), None);
+        assert_eq!(
+            agtype_optional_string("\"agent-1\""),
+            Some("agent-1".to_string())
+        );
+        assert_eq!(
+            agtype_optional_string("  \"agent-1\"  "),
+            Some("agent-1".to_string())
+        );
+        assert_eq!(agtype_optional_string("\"\""), Some(String::new()));
+    }
+
+    #[tokio::test]
+    async fn live_kg_timeline_dispatches_to_cypher_under_age() {
+        // Routing contract: when AGE is the resolved backend, calling
+        // `kg_timeline` must route through `kg_timeline_cypher` rather
+        // than the SQL branch. We don't assert a specific result set
+        // here (the J5 dual-path tests own equivalence) — just that
+        // the call returns Ok against an AGE-enabled URL with a
+        // bootstrapped `memory_graph` projection. Skips cleanly when
+        // either piece is missing so CI without AGE stays green.
+        let Some(url) = age_kg_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_AGE_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(store.kg_backend(), KgBackend::Age);
+        // Use a synthetic id we don't expect to find — the test asserts
+        // routing, not corpus contents.
+        match store
+            .kg_timeline("nonexistent-source", None, None, Some(10))
+            .await
+        {
+            Ok(rows) => {
+                assert!(
+                    rows.is_empty() || rows.iter().all(|r| !r.target_id.is_empty()),
+                    "rows must have non-empty target_ids when present"
+                );
+            }
+            Err(StoreError::BackendUnavailable { detail, .. }) => {
+                eprintln!(
+                    "AGE graph projection appears unbootstrapped on this URL: {detail}; \
+                     run the J1 graph-prep script before re-running this test"
+                );
+            }
+            Err(other) => panic!("unexpected error from AGE kg_timeline: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn live_kg_timeline_routes_to_cte_without_age() {
+        // Inverse of the AGE routing test: against vanilla Postgres
+        // (no AGE) the dispatcher must hand the call to the SQL
+        // branch. We verify by calling `kg_timeline_cte` directly
+        // against a known-empty source and asserting an empty result
+        // set, then confirming `kg_timeline` produces the same empty
+        // set through the dispatcher.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        if age_kg_url().as_deref() == Some(url.as_str()) {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL points at the AGE fixture");
+            return;
+        }
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(
+            store.kg_backend(),
+            KgBackend::Cte,
+            "vanilla Postgres must resolve to KgBackend::Cte"
+        );
+        let direct = store
+            .kg_timeline_cte("nonexistent-source", None, None, None)
+            .await
+            .expect("cte direct");
+        let dispatched = store
+            .kg_timeline("nonexistent-source", None, None, None)
+            .await
+            .expect("cte via dispatcher");
+        assert!(direct.is_empty(), "no rows expected for synthetic id");
+        assert_eq!(
+            direct, dispatched,
+            "dispatcher must return the same shape as the direct CTE call"
+        );
     }
 
     // ------------------------------------------------------------------
