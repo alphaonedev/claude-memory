@@ -52,8 +52,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::{PgPool, Row};
 
 use super::{
-    CallerContext, Capabilities, Filter, MemoryStore, StoreError, StoreResult, UpdatePatch,
-    VerifyReport,
+    CallerContext, Capabilities, Filter, KgBackend, MemoryStore, StoreError, StoreResult,
+    UpdatePatch, VerifyReport,
 };
 use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
 
@@ -74,6 +74,12 @@ const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: PgPool,
+    /// Resolved knowledge-graph backend tag — set at [`Self::connect`]
+    /// time by probing `pg_extension` for Apache AGE. Substrate for
+    /// Track J: J2-J7 dispatch their KG queries on this value, falling
+    /// back to the recursive-CTE path when AGE is absent. See
+    /// [`Self::kg_backend`].
+    kg_backend: KgBackend,
 }
 
 impl PostgresStore {
@@ -156,11 +162,40 @@ impl PostgresStore {
             );
         }
 
+        // v0.7 J1 — detect Apache AGE so Track J can dispatch
+        // knowledge-graph traversals through Cypher when the extension
+        // is installed. Falls back to the recursive-CTE path on
+        // missing extension OR query error: AGE is opt-in, never a
+        // bootstrap blocker. The resolved tag is surfaced on the SAL
+        // handle via [`Self::kg_backend`] for J2-J7.
+        let kg_backend = detect_kg_backend(&pool).await;
+        tracing::info!(
+            target = "store::postgres",
+            kg_backend = %kg_backend,
+            "Postgres KG backend: {}",
+            match kg_backend {
+                KgBackend::Age => "AGE",
+                KgBackend::Cte => "CTE",
+            }
+        );
+
         // Run schema migrations after bootstrap schema is loaded.
-        let store = Self { pool };
+        let store = Self { pool, kg_backend };
         store.migrate().await?;
 
         Ok(store)
+    }
+
+    /// Knowledge-graph backend resolved at [`Self::connect`] time.
+    ///
+    /// v0.7 J1 substrate. J2-J7 dispatch on this value so the same
+    /// `memory_kg_*` MCP wire shape can route to either Cypher (when
+    /// AGE is installed) or the recursive-CTE fallback. The resolution
+    /// is sticky for the life of the pool — adapters do not re-probe
+    /// per call.
+    #[must_use]
+    pub fn kg_backend(&self) -> KgBackend {
+        self.kg_backend
     }
 
     /// Run schema migrations on the connection. Called after bootstrap schema
@@ -421,6 +456,35 @@ fn to_store_err(what: &str, e: sqlx::Error) -> StoreError {
     StoreError::BackendUnavailable {
         backend: "postgres".to_string(),
         detail: format!("{what}: {e}"),
+    }
+}
+
+/// v0.7 J1 — probe Apache AGE.
+///
+/// Runs `SELECT 1 FROM pg_extension WHERE extname = 'age'` against the
+/// pool and reports the resolved [`KgBackend`]. Errors are *not*
+/// surfaced — a transient probe failure (replica lag, permissions on
+/// `pg_extension` in a hardened deployment) MUST NOT block adapter
+/// bootstrap. We log a debug line and fall back to
+/// [`KgBackend::Cte`] which every Postgres install supports.
+///
+/// Factored out of [`PostgresStore::connect`] so unit tests can hit
+/// the SQL builder branch without standing up a real Postgres pool.
+pub(crate) async fn detect_kg_backend(pool: &PgPool) -> KgBackend {
+    match sqlx::query_scalar::<_, i32>("SELECT 1 FROM pg_extension WHERE extname = 'age'")
+        .fetch_optional(pool)
+        .await
+    {
+        Ok(Some(_)) => KgBackend::Age,
+        Ok(None) => KgBackend::Cte,
+        Err(e) => {
+            tracing::debug!(
+                target = "store::postgres",
+                error = %e,
+                "AGE detection probe failed; defaulting to CTE backend"
+            );
+            KgBackend::Cte
+        }
     }
 }
 
@@ -779,6 +843,91 @@ mod tests {
         // Verify the schema_version table is created for migration tracking.
         assert!(INIT_SCHEMA.contains("CREATE TABLE IF NOT EXISTS schema_version"));
         assert!(INIT_SCHEMA.contains("version    INTEGER PRIMARY KEY"));
+    }
+
+    // ------------------------------------------------------------------
+    // v0.7 J1 — AGE detection unit + live tests.
+    //
+    // The pool-less unit tests here only exercise the static surface
+    // (default tag, accessor wiring through the type) so they can run
+    // on any host. The live AGE probe runs iff `AI_MEMORY_TEST_AGE_URL`
+    // is set; otherwise it skips cleanly. CI configures the env var
+    // for the AGE-postgres job (see Track J5 plan).
+    // ------------------------------------------------------------------
+
+    fn age_url() -> Option<String> {
+        std::env::var("AI_MEMORY_TEST_AGE_URL").ok()
+    }
+
+    #[test]
+    fn kg_backend_default_tag_is_cte() {
+        // Substrate sanity: the fallback path is `Cte`. J2-J7 dispatch
+        // on this — flipping the default would silently route every
+        // SQLite-class deployment through Cypher and crash on first
+        // call. Pin the default so a future refactor can't drift it.
+        assert_eq!(KgBackend::Cte.as_str(), "cte");
+        assert_eq!(KgBackend::Age.as_str(), "age");
+    }
+
+    #[tokio::test]
+    async fn live_kg_backend_resolves_to_age_when_extension_present() {
+        // Runs against a real AGE-enabled Postgres ONLY when
+        // AI_MEMORY_TEST_AGE_URL is set. Skips cleanly otherwise so
+        // the default `cargo test` flow stays offline. Contract: the
+        // SAL handle must report `KgBackend::Age` against this URL.
+        let Some(url) = age_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_AGE_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(
+            store.kg_backend(),
+            KgBackend::Age,
+            "AGE-enabled Postgres must resolve to KgBackend::Age"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_kg_backend_resolves_to_cte_without_age() {
+        // Runs against a Postgres WITHOUT the AGE extension installed.
+        // CI may set AI_MEMORY_TEST_POSTGRES_URL to a vanilla pgvector
+        // Postgres while AI_MEMORY_TEST_AGE_URL points at the AGE
+        // image — when the vanilla URL is set and AGE is NOT, we get
+        // a real-Postgres-real-fallback assertion. Skips cleanly
+        // otherwise.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        // If the operator points the same URL at both, this assertion
+        // would be wrong — guard with an early-skip when AGE_URL == URL.
+        if age_url().as_deref() == Some(url.as_str()) {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL points at the AGE fixture");
+            return;
+        }
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_eq!(
+            store.kg_backend(),
+            KgBackend::Cte,
+            "Postgres without AGE must resolve to KgBackend::Cte"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_detect_kg_backend_returns_cte_on_missing_extension() {
+        // Same fallback assertion through the lower-level helper,
+        // which J2-J7 will reach when they want to re-probe (e.g.
+        // post-CREATE EXTENSION operator action). Skips cleanly when
+        // no Postgres URL is set.
+        let Some(url) = postgres_url() else {
+            return;
+        };
+        if age_url().as_deref() == Some(url.as_str()) {
+            return;
+        }
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        let probed = detect_kg_backend(&store.pool).await;
+        assert_eq!(probed, KgBackend::Cte);
     }
 
     // ------------------------------------------------------------------

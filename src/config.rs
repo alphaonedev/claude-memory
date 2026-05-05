@@ -270,6 +270,12 @@ impl TierConfig {
             },
             transcripts: CapabilityTranscripts::planned(),
             hnsw: CapabilityHnsw::default(),
+            // v0.7 J1 — populated by the SAL wrapper at runtime when a
+            // Postgres adapter is active. None at config-construction
+            // time (no SAL handle here); the MCP/HTTP wrapper overlays
+            // the live tag from `PostgresStore::kg_backend()` once
+            // J2 wires the SAL into AppState.
+            kg_backend: None,
         }
     }
 }
@@ -341,6 +347,19 @@ pub struct Capabilities {
     /// has run an eviction.
     #[serde(default)]
     pub hnsw: CapabilityHnsw,
+
+    /// v0.7 J1 — knowledge-graph backend tag. `"age"` when a Postgres
+    /// SAL adapter probed Apache AGE successfully at connect time;
+    /// `"cte"` when the deployment falls back to the recursive-CTE
+    /// path (every SQLite deployment + Postgres without AGE
+    /// installed). `None` when no SAL adapter is wired (the active
+    /// dispatch path through the legacy `crate::db` free functions
+    /// pre-J2). Operators consult this through `ai-memory doctor` and
+    /// `memory_capabilities` to verify which traversal path their
+    /// daemon actually runs. Skipped from the JSON wire when `None`
+    /// so v1 / v2 clients that don't know the field round-trip cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kg_backend: Option<String>,
 }
 
 /// Live recall-mode tag (P1 honesty patch). Reflects the *runtime*
@@ -769,6 +788,10 @@ impl Capabilities {
             approval: self.approval.clone(),
             transcripts: self.transcripts.clone(),
             hnsw: self.hnsw.clone(),
+            // v0.7 J1 — propagate the resolved KG backend tag verbatim.
+            // None when no SAL adapter is wired (every pre-J2 build);
+            // `Some("age" | "cte")` once the SAL handle is threaded.
+            kg_backend: self.kg_backend.clone(),
         }
     }
 }
@@ -879,6 +902,14 @@ pub struct CapabilitiesV3 {
 
     #[serde(default)]
     pub hnsw: CapabilityHnsw,
+
+    /// v0.7 J1 — knowledge-graph backend tag forwarded from the v2
+    /// projection. `Some("age" | "cte")` once the SAL handle is
+    /// threaded through `AppState`; `None` while no SAL adapter is
+    /// wired. Skipped from the JSON wire when `None` so older clients
+    /// that don't know the field round-trip cleanly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kg_backend: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1938,6 +1969,14 @@ mod tests {
         assert_eq!(val["features"]["recall_mode_active"], "disabled");
         assert_eq!(val["features"]["reranker_active"], "off");
 
+        // v0.7 J1 — kg_backend zero-state: no SAL adapter wired yet,
+        // so the field is None and elided from the JSON wire. Older
+        // clients that don't know the field round-trip cleanly.
+        assert!(
+            val.get("kg_backend").is_none(),
+            "kg_backend must be skipped from JSON when None (pre-J2 zero-state)"
+        );
+
         // Round-trip back to a typed Capabilities and confirm field
         // identity (proves Deserialize works for all reshaped structs).
         let restored: Capabilities = serde_json::from_value(val).unwrap();
@@ -1947,6 +1986,28 @@ mod tests {
         assert!(restored.transcripts.status.planned);
         assert_eq!(restored.features.recall_mode_active, RecallMode::Disabled);
         assert_eq!(restored.features.reranker_active, RerankerMode::Off);
+        assert!(restored.kg_backend.is_none());
+    }
+
+    /// v0.7 J1 — when a SAL adapter populates `kg_backend`, the wire
+    /// shape must serialise the literal snake-case tag and round-trip
+    /// cleanly. Operators read this through `ai-memory doctor` and
+    /// `memory_capabilities` to verify which traversal path their
+    /// daemon actually runs.
+    #[test]
+    fn capabilities_kg_backend_serialises_when_set() {
+        let mut caps = FeatureTier::Keyword.config().capabilities();
+        caps.kg_backend = Some("age".to_string());
+        let val: serde_json::Value = serde_json::to_value(&caps).unwrap();
+        assert_eq!(val["kg_backend"], "age");
+
+        caps.kg_backend = Some("cte".to_string());
+        let val: serde_json::Value = serde_json::to_value(&caps).unwrap();
+        assert_eq!(val["kg_backend"], "cte");
+
+        // Round-trip the populated field for Deserialize coverage.
+        let restored: Capabilities = serde_json::from_value(val).unwrap();
+        assert_eq!(restored.kg_backend.as_deref(), Some("cte"));
     }
 
     /// P1 honesty patch: legacy v1 projection preserves the old shape
