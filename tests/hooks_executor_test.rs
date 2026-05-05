@@ -31,9 +31,20 @@ use tempfile::TempDir;
 /// Tests rely on /bin/sh being available — true on every supported
 /// deployment target (Linux containers, macOS dev hosts).
 fn write_script(dir: &TempDir, name: &str, body: &str) -> PathBuf {
+    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     let path = dir.path().join(name);
-    std::fs::write(&path, body).expect("write script");
+    // Explicit File::create + write_all + sync_all + drop so the file is
+    // fully flushed and the writer fd is released BEFORE exec. Linux
+    // returns ETXTBSY ("Text file busy") if any process still holds the
+    // file open for write at exec time; `std::fs::write` doesn't sync
+    // and is racy on fast multi-thread CI runners (observed on
+    // Check (ubuntu-latest) for the v0.7-g5 PR before this fix).
+    {
+        let mut f = std::fs::File::create(&path).expect("create script");
+        f.write_all(body.as_bytes()).expect("write script");
+        f.sync_all().expect("sync script");
+    } // explicit drop closes the writer fd here
     let mut perms = std::fs::metadata(&path).expect("stat").permissions();
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).expect("chmod");
