@@ -95,6 +95,14 @@ const PENDING_TIMEOUT_SWEEP_INTERVAL_SECS: u64 = 60;
 /// `doctor` warning window so a row already classed CRITICAL by
 /// `doctor_oldest_pending_age_secs` is also a sweeper candidate.
 const PENDING_TIMEOUT_DEFAULT_SECS: i64 = 86_400;
+/// v0.7.0 I3 — transcript archive→prune sweeper cadence. The lifecycle
+/// scan walks every transcript row plus a per-candidate join into
+/// `memories`, so we run it less aggressively than the K2 60-second
+/// pending-actions sweeper. 10 minutes is fast enough that operator-
+/// visible drift between TTL expiry and archive is bounded by one
+/// tick, and slow enough that the scan never dominates a busy
+/// daemon's wall-clock.
+const TRANSCRIPT_LIFECYCLE_SWEEP_INTERVAL_SECS: u64 = 600;
 
 // ---------------------------------------------------------------------------
 // Clap-derived CLI surface
@@ -1256,6 +1264,55 @@ pub fn spawn_pending_timeout_sweep_loop(
     })
 }
 
+/// v0.7.0 I3 — spawn the periodic transcript archive→prune sweeper.
+///
+/// Sleeps `interval`, then calls
+/// [`crate::transcripts::sweep_transcript_lifecycle`] against the
+/// daemon's shared connection. The per-namespace TTL configuration
+/// is captured by `cfg` once at spawn time (operators editing
+/// `[transcripts]` in `config.toml` after boot must restart the
+/// daemon — same model as the K2 pending sweeper).
+///
+/// The returned [`JoinHandle`] is owned by the caller; `serve()`
+/// aborts it on shutdown — same lifecycle as
+/// [`spawn_pending_timeout_sweep_loop`].
+#[must_use]
+pub fn spawn_transcript_lifecycle_sweep_loop(
+    state: Db,
+    cfg: crate::config::TranscriptsConfig,
+    interval: Duration,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            // Hold the connection lock for the whole sweep: the
+            // archive + prune phases share one `now` and the
+            // archive-then-prune semantics require sequential
+            // execution against the same view of the table. A 10-
+            // minute cadence means the lock window is at most a few
+            // ms even on busy databases.
+            let report = {
+                let lock = state.lock().await;
+                match crate::transcripts::sweep_transcript_lifecycle(&lock.0, &cfg) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!("transcript lifecycle sweep failed: {e}");
+                        continue;
+                    }
+                }
+            };
+            if report.archived > 0 || report.pruned > 0 || report.errors > 0 {
+                tracing::info!(
+                    "transcript lifecycle sweep: archived={} pruned={} errors={}",
+                    report.archived,
+                    report.pruned,
+                    report.errors,
+                );
+            }
+        }
+    })
+}
+
 /// Spawn the periodic WAL checkpoint loop. First checkpoint runs
 /// `interval / 2` after start (staggered from the GC loop to avoid
 /// lock-contention bursts on cold start), then on a fixed cadence.
@@ -1436,6 +1493,19 @@ pub async fn bootstrap_serve(
         db_path.to_path_buf(),
         PENDING_TIMEOUT_DEFAULT_SECS,
         Duration::from_secs(PENDING_TIMEOUT_SWEEP_INTERVAL_SECS),
+    ));
+
+    // v0.7.0 I3: transcript archive→prune lifecycle sweeper. Resolves
+    // per-namespace TTL + grace from `[transcripts]` in config.toml
+    // (compiled defaults: 30-day TTL, 7-day grace) and runs every 10
+    // minutes — heavier than K2's 60s scan because phase 1 walks the
+    // I2 join table per candidate. Companion to the K2 sweeper above:
+    // both follow the same spawn-per-interval shape so shutdown +
+    // observability behave identically.
+    task_handles.push(spawn_transcript_lifecycle_sweep_loop(
+        db_state.clone(),
+        app_config.effective_transcripts(),
+        Duration::from_secs(TRANSCRIPT_LIFECYCLE_SWEEP_INTERVAL_SECS),
     ));
 
     let api_key_state = ApiKeyState {
@@ -2593,9 +2663,10 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Three task handles spawned (gc + wal_checkpoint + v0.7 K2
-        // pending_actions timeout sweep).
-        assert_eq!(bs.task_handles.len(), 3);
+        // Four task handles spawned (gc + wal_checkpoint + v0.7 K2
+        // pending_actions timeout sweep + v0.7 I3 transcript
+        // archive→prune lifecycle sweep).
+        assert_eq!(bs.task_handles.len(), 4);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();
