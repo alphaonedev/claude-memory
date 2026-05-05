@@ -30,13 +30,29 @@
 //!   so a miswired caller fails loud rather than serving a stale shape.
 //! - v2 callers see no behavior change (backward compat).
 
-use ai_memory::config::{Capabilities, CapabilitiesV3, FeatureTier, TierConfig};
+use ai_memory::config::{Capabilities, CapabilitiesV3, FeatureTier, McpConfig, TierConfig};
 use ai_memory::mcp::{
     CapabilitiesAccept, build_capabilities_describe_to_user, build_capabilities_summary,
-    handle_capabilities_with_conn, handle_capabilities_with_conn_v3,
+    build_capabilities_tools, handle_capabilities_with_conn, handle_capabilities_with_conn_v3,
 };
 use ai_memory::profile::Profile;
 use serde_json::Value;
+use std::collections::HashMap;
+
+/// v0.7.0 A3 — build a minimal `[mcp.allowlist]` table for tests.
+fn allowlist(rows: &[(&str, &[&str])]) -> McpConfig {
+    let mut map = HashMap::new();
+    for (agent, fams) in rows {
+        map.insert(
+            (*agent).to_string(),
+            fams.iter().map(|s| (*s).to_string()).collect(),
+        );
+    }
+    McpConfig {
+        profile: None,
+        allowlist: Some(map),
+    }
+}
 
 /// Build a fresh in-memory `rusqlite::Connection` so each test gets a
 /// clean DB state for the live-count overlays.
@@ -104,9 +120,16 @@ fn cap_v3_legacy_entry_point_refuses_v3() {
 fn cap_v3_response_carries_schema_version_and_summary() {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
-    let val =
-        handle_capabilities_with_conn_v3(&tier_config, None, false, Some(&conn), &Profile::core())
-            .expect("v3 capabilities serialize");
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
 
     assert_eq!(
         val["schema_version"], "3",
@@ -202,7 +225,11 @@ fn cap_v3_summary_graph_profile_counts() {
 fn cap_v3_struct_round_trips_through_serde() {
     let tier_config = semantic_tier();
     let caps: Capabilities = tier_config.capabilities();
-    let v3 = caps.to_v3("hello operator".to_string(), "hello human".to_string());
+    let v3 = caps.to_v3(
+        "hello operator".to_string(),
+        "hello human".to_string(),
+        Vec::new(),
+    );
 
     let json = serde_json::to_value(&v3).expect("serialize v3");
     let back: CapabilitiesV3 = serde_json::from_value(json.clone()).expect("deserialize v3");
@@ -230,9 +257,16 @@ fn cap_v3_struct_round_trips_through_serde() {
 fn cap_v3_response_carries_to_describe_to_user() {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
-    let val =
-        handle_capabilities_with_conn_v3(&tier_config, None, false, Some(&conn), &Profile::core())
-            .expect("v3 capabilities serialize");
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::core(),
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
 
     let describe = val["to_describe_to_user"]
         .as_str()
@@ -345,6 +379,8 @@ fn cap_v3_preserves_v2_sub_blocks() {
         true, // embedder loaded
         Some(&conn),
         &Profile::full(),
+        None,
+        None,
     )
     .expect("v3 capabilities serialize");
 
@@ -378,4 +414,154 @@ fn cap_v3_v2_callers_unaffected_by_a1() {
         val.get("summary").is_none(),
         "v2 must not gain the v3 summary field"
     );
+    assert!(
+        val.get("to_describe_to_user").is_none(),
+        "v2 must not gain the v3 to_describe_to_user field"
+    );
+    assert!(
+        val.get("tools").is_none(),
+        "v2 must not gain the v3 tools array"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A3 matrix cell — allowlist OFF, loaded TRUE → callable_now=TRUE.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a3_allowlist_off_loaded_true_callable_now_true() {
+    let tools = build_capabilities_tools(&Profile::core(), None, None);
+    let entry = tools
+        .iter()
+        .find(|t| t.name == "memory_store")
+        .expect("memory_store present");
+    assert!(entry.loaded, "core profile loads memory_store");
+    assert!(
+        entry.callable_now,
+        "allowlist OFF + loaded TRUE → callable_now must be TRUE; got {entry:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A3 matrix cell — allowlist OFF, loaded FALSE → callable_now=FALSE.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a3_allowlist_off_loaded_false_callable_now_false() {
+    let tools = build_capabilities_tools(&Profile::core(), None, None);
+    let entry = tools
+        .iter()
+        .find(|t| t.name == "memory_kg_query")
+        .expect("memory_kg_query present in manifest even when not loaded");
+    assert!(!entry.loaded, "core profile does NOT load memory_kg_query");
+    assert!(
+        !entry.callable_now,
+        "allowlist OFF + loaded FALSE → callable_now must be FALSE; got {entry:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A3 matrix cell — allowlist ON, agent in pattern, loaded TRUE →
+// callable_now=TRUE.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a3_allowlist_on_agent_in_pattern_callable_now_true() {
+    // Allowlist grants "alice" the core family.
+    let cfg = allowlist(&[("alice", &["core"]), ("*", &["core"])]);
+    let tools = build_capabilities_tools(&Profile::core(), Some(&cfg), Some("alice"));
+    let entry = tools
+        .iter()
+        .find(|t| t.name == "memory_store")
+        .expect("memory_store present");
+    assert!(entry.loaded);
+    assert!(
+        entry.callable_now,
+        "allowlist ON + agent in pattern + loaded TRUE → callable_now TRUE; got {entry:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A3 matrix cell — allowlist ON, agent NOT in pattern, loaded TRUE →
+// callable_now=FALSE.
+//
+// Setup: allowlist grants "alice" the graph family, falls back to "*"
+// granting only `core`. Agent "bob" hits the wildcard and asks about
+// memory_kg_query (graph family). The graph family is loaded under
+// `Profile::full()` (so loaded=TRUE), but the wildcard rule denies bob
+// access to graph → callable_now=FALSE.
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_a3_allowlist_on_agent_denied_callable_now_false() {
+    let cfg = allowlist(&[("alice", &["graph"]), ("*", &["core"])]);
+    let tools = build_capabilities_tools(&Profile::full(), Some(&cfg), Some("bob"));
+    let entry = tools
+        .iter()
+        .find(|t| t.name == "memory_kg_query")
+        .expect("memory_kg_query present");
+    assert!(entry.loaded, "full profile loads memory_kg_query");
+    assert!(
+        !entry.callable_now,
+        "allowlist ON + agent NOT in pattern + loaded TRUE → callable_now FALSE; got {entry:?}"
+    );
+
+    // Sanity check: the same agent IS allowed core tools per the
+    // wildcard, so memory_store should still be callable.
+    let core_entry = tools
+        .iter()
+        .find(|t| t.name == "memory_store")
+        .expect("memory_store present");
+    assert!(core_entry.loaded);
+    assert!(
+        core_entry.callable_now,
+        "wildcard grants core to bob → memory_store callable_now TRUE"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// A3 — the v3 response surfaces the `tools` array at the top level
+// with one entry per registered tool (43 + always-on bootstrap counted
+// once = 43, since the bootstrap already lives in Family::Meta).
+// ---------------------------------------------------------------------------
+#[test]
+fn cap_v3_response_carries_tools_array_with_43_entries() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::full(),
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
+
+    let tools = val["tools"]
+        .as_array()
+        .expect("top-level tools must be present and an array under v3");
+    assert_eq!(
+        tools.len(),
+        43,
+        "v3 must surface all 43 tools regardless of profile; got {}",
+        tools.len()
+    );
+
+    // Every entry must have name + family + loaded + callable_now.
+    for entry in tools {
+        assert!(entry["name"].is_string(), "tool entry needs name: {entry}");
+        assert!(entry["family"].is_string(), "tool entry needs family");
+        assert!(entry["loaded"].is_boolean(), "tool entry needs loaded bool");
+        assert!(
+            entry["callable_now"].is_boolean(),
+            "tool entry needs callable_now bool"
+        );
+    }
+
+    // Spot-check that under --profile full + no allowlist, every tool
+    // is callable_now.
+    for entry in tools {
+        assert!(
+            entry["callable_now"].as_bool().unwrap(),
+            "full profile + no allowlist → every tool callable_now: {entry}"
+        );
+    }
 }
