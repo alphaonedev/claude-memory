@@ -43,6 +43,10 @@ use crate::validate;
 // will plumb the loaded `AgentKeypair` through `AppState` for outbound
 // link signing.
 pub mod keypair;
+// H2 — outbound link signing. Canonical CBOR + Ed25519 sign over the
+// six signable link fields. Consumed by `db::create_link_signed` to
+// fill the previously-dead `signature` BLOB column on `memory_links`.
+pub mod sign;
 
 /// Environment variable override for `agent_id` (used by CLI via clap's
 /// `env = "AI_MEMORY_AGENT_ID"`; read directly for MCP fallback).

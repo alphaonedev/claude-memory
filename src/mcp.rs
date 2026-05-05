@@ -3064,6 +3064,7 @@ fn handle_link(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<Value, String> {
     let source_id = params["source_id"]
         .as_str()
@@ -3074,7 +3075,12 @@ fn handle_link(
     let relation = params["relation"].as_str().unwrap_or("related_to");
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
-    db::create_link(conn, source_id, target_id, relation).map_err(|e| e.to_string())?;
+    // v0.7 H2 — sign with active keypair when present; falls through
+    // to attest_level="unsigned" otherwise. The chosen attest_level is
+    // surfaced in the wire response so callers can tell signed vs
+    // unsigned without re-querying.
+    let attest_level = db::create_link_signed(conn, source_id, target_id, relation, active_keypair)
+        .map_err(|e| e.to_string())?;
 
     // P5 (G9): fire `memory_link_created` webhook AFTER the link is
     // persisted. Resolve the source memory to populate `namespace` /
@@ -3107,9 +3113,17 @@ fn handle_link(
         details,
     );
 
-    Ok(
-        json!({"linked": true, "source_id": source_id, "target_id": target_id, "relation": relation}),
-    )
+    Ok(json!({
+        "linked": true,
+        "source_id": source_id,
+        "target_id": target_id,
+        "relation": relation,
+        // v0.7 H2 — wire-level visibility into whether the link was
+        // signed by an Ed25519 keypair on this writer. "self_signed"
+        // when active_keypair was Some + signing succeeded;
+        // "unsigned" when no keypair was loaded.
+        "attest_level": attest_level,
+    }))
 }
 
 fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
@@ -3925,6 +3939,7 @@ pub(crate) fn handle_session_start(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -3941,6 +3956,11 @@ fn handle_request(
     mcp_client: Option<&str>,
     profile: &crate::profile::Profile,
     mcp_config: Option<&crate::config::McpConfig>,
+    // v0.7 Track H — H2 outbound link signing. When `Some`, every
+    // `memory_link` call signs the link with this keypair. When `None`
+    // (operator hasn't generated one), links go in unsigned, preserving
+    // v0.6.4 behaviour.
+    active_keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -4072,7 +4092,7 @@ fn handle_request(
                 "memory_stats" => handle_stats(conn, db_path),
                 "memory_update" => handle_update(conn, arguments, embedder, vector_index),
                 "memory_get" => handle_get(conn, arguments),
-                "memory_link" => handle_link(conn, db_path, arguments),
+                "memory_link" => handle_link(conn, db_path, arguments, active_keypair),
                 "memory_get_links" => handle_get_links(conn, arguments),
                 "memory_consolidate" => handle_consolidate(
                     conn,
@@ -4263,6 +4283,31 @@ fn handle_request(
             }
         }
         _ => err_response(id, -32601, format!("method not found: {}", req.method)),
+    }
+}
+
+/// v0.7 Track H — H2: best-effort load of the active Ed25519 keypair
+/// for the MCP daemon. Mirrors `daemon_runtime::load_active_keypair_for_serve`
+/// but logs to stderr (the MCP convention — stdout owns JSON-RPC).
+/// Missing keypair returns `None` and link writes go in unsigned;
+/// operator opts in by running `ai-memory identity generate`.
+fn load_active_keypair_for_mcp() -> Option<crate::identity::keypair::AgentKeypair> {
+    let dir = crate::identity::keypair::default_key_dir().ok()?;
+    let agent_id = crate::identity::resolve_agent_id(None, None).ok()?;
+    if !dir.exists() {
+        return None;
+    }
+    match crate::identity::keypair::load(&agent_id, &dir) {
+        Ok(kp) if kp.can_sign() => Some(kp),
+        Ok(_) => None,
+        Err(e) => {
+            // WARN on malformed key files; quiet on common file-not-found.
+            let msg = format!("{e:#}");
+            if !(msg.contains("No such file") || msg.contains("not found")) {
+                eprintln!("ai-memory: keypair load failed for {agent_id}: {msg}");
+            }
+            None
+        }
     }
 }
 
@@ -4489,6 +4534,16 @@ pub fn run_mcp_server(
     };
     eprintln!("ai-memory MCP server started (stdio, tier={effective_tier})");
 
+    // v0.7 Track H — H2 outbound link signing. Best-effort load of the
+    // active agent's Ed25519 keypair from the default key dir. Missing
+    // keypair = unsigned link writes (preserves v0.6.4 behaviour);
+    // operator opts in by running `ai-memory identity generate`.
+    let active_keypair: Option<crate::identity::keypair::AgentKeypair> =
+        load_active_keypair_for_mcp();
+    if active_keypair.is_some() {
+        eprintln!("ai-memory: link signing enabled (Ed25519)");
+    }
+
     // Captured from the MCP `initialize` handshake's `clientInfo.name`.
     // Used by `crate::identity` to synthesize an `ai:<client>@<host>:pid-<pid>`
     // agent_id when the caller doesn't supply one explicitly.
@@ -4544,6 +4599,7 @@ pub fn run_mcp_server(
             mcp_client_name.as_deref(),
             profile,
             app_config.mcp.as_ref(),
+            active_keypair.as_ref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -4969,6 +5025,7 @@ mod tests {
                 None,
                 &crate::profile::Profile::full(),
                 None,
+                None,
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -5020,6 +5077,7 @@ mod tests {
                 false,
                 None,
                 &crate::profile::Profile::full(),
+                None,
                 None,
             );
             // Handler errs are returned as ok_response with isError=true,
@@ -5299,6 +5357,7 @@ mod tests {
                 None,
                 &crate::profile::Profile::full(),
                 None,
+                None,
             );
             assert!(
                 resp.error.is_none(),
@@ -5336,6 +5395,7 @@ mod tests {
                     false,
                     None,
                     &crate::profile::Profile::full(),
+                    None,
                     None,
                 );
 
@@ -5391,6 +5451,7 @@ mod tests {
             false,
             None,
             &crate::profile::Profile::full(),
+            None,
             None,
         )
     }
@@ -5686,6 +5747,91 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(val["linked"], true);
+        // v0.7 H2 — wire response carries attest_level. Default
+        // `invoke_handle_request` passes `active_keypair = None` so
+        // the level is "unsigned" — the v0.6.4 backward-compat shape.
+        assert_eq!(val["attest_level"], "unsigned");
+    }
+
+    // v0.7 H2 — when an active keypair is plumbed through to the
+    // memory_link MCP handler, the wire response reports
+    // attest_level = "self_signed" and the underlying row carries a
+    // 64-byte signature.
+    #[test]
+    fn handle_link_with_active_keypair_returns_self_signed() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let mut ids = Vec::new();
+        for tag in ["a", "b"] {
+            let mem = Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: Tier::Mid,
+                namespace: "h2-link".into(),
+                title: tag.into(),
+                content: "c".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".into(),
+                access_count: 0,
+                created_at: chrono::Utc::now().to_rfc3339(),
+                updated_at: chrono::Utc::now().to_rfc3339(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: json!({}),
+            };
+            ids.push(db::insert(&conn, &mem).unwrap());
+        }
+        let req = make_tools_call(
+            "memory_link",
+            json!({"source_id": ids[0], "target_id": ids[1], "relation": "related_to"}),
+        );
+
+        // Drive handle_request directly so we can pass an active keypair.
+        let kp = crate::identity::keypair::generate("alice").unwrap();
+        let tier_config = FeatureTier::Keyword.config();
+        let resolved_ttl = crate::config::ResolvedTtl::default();
+        let resolved_scoring = crate::config::ResolvedScoring::default();
+        let resp = handle_request(
+            &conn,
+            std::path::Path::new(":memory:"),
+            &req,
+            None,
+            None,
+            None,
+            &tier_config,
+            None,
+            &resolved_ttl,
+            &resolved_scoring,
+            true,
+            false,
+            None,
+            &crate::profile::Profile::full(),
+            None,
+            Some(&kp),
+        );
+        assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["linked"], true);
+        assert_eq!(
+            val["attest_level"], "self_signed",
+            "active keypair path must surface self_signed"
+        );
+
+        // The signature column is now populated and 64 bytes.
+        let sig: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT signature FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                rusqlite::params![&ids[0], &ids[1]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let sig_bytes = sig.expect("signed link must persist a signature blob");
+        assert_eq!(sig_bytes.len(), 64);
     }
 
     #[test]

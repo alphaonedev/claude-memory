@@ -1058,6 +1058,83 @@ pub fn build_vector_index(conn: &Connection, embedder_present: bool) -> Option<V
 }
 
 // ---------------------------------------------------------------------------
+// v0.7 Track H — H2 active keypair loading
+// ---------------------------------------------------------------------------
+
+/// Best-effort load of the daemon's active Ed25519 signing keypair.
+///
+/// Resolution order:
+///   1. `AI_MEMORY_AGENT_ID` environment variable (set explicitly by
+///      operators who want a specific identity at serve time).
+///   2. Otherwise, `crate::identity::resolve_agent_id(None, None)` —
+///      same NHI-default an HTTP request without `X-Agent-Id` would
+///      resolve to. This produces the `host:` / `anonymous:` shape;
+///      that file is rarely on disk, which is fine — we simply degrade
+///      to unsigned.
+///
+/// Errors at every step are swallowed (logged at INFO/WARN). Missing
+/// keypairs are the common first-run state — we don't want a failed
+/// `keypair::load` to make the daemon refuse to start. Malformed key
+/// files DO log at `WARN` so an operator with a corrupt
+/// `~/.config/ai-memory/keys/<id>.priv` notices.
+fn load_active_keypair_for_serve() -> Option<crate::identity::keypair::AgentKeypair> {
+    let dir = match crate::identity::keypair::default_key_dir() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::info!("identity: no default key dir available, link signing disabled: {e}");
+            return None;
+        }
+    };
+    let agent_id = match crate::identity::resolve_agent_id(None, None) {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::info!("identity: agent_id resolution failed, link signing disabled: {e}");
+            return None;
+        }
+    };
+    // Common first-run state: directory doesn't exist yet because the
+    // operator hasn't run `ai-memory identity generate`. Silent skip.
+    if !dir.exists() {
+        tracing::info!(
+            "identity: key dir {} not present, link signing disabled (run \
+             `ai-memory identity generate --agent-id {agent_id}` to enable)",
+            dir.display()
+        );
+        return None;
+    }
+    match crate::identity::keypair::load(&agent_id, &dir) {
+        Ok(kp) if kp.can_sign() => {
+            tracing::info!(
+                "identity: loaded signing keypair for {agent_id} from {}",
+                dir.display()
+            );
+            Some(kp)
+        }
+        Ok(_) => {
+            tracing::info!(
+                "identity: only public key on disk for {agent_id}; link signing disabled"
+            );
+            None
+        }
+        Err(e) => {
+            // File-not-found for the .pub file produces an Err; treat it
+            // the same as missing dir (common first-run). For other
+            // failures (malformed bytes, priv/pub mismatch) WARN so the
+            // operator notices.
+            let msg = format!("{e:#}");
+            if msg.contains("No such file") || msg.contains("not found") {
+                tracing::info!(
+                    "identity: no keypair on disk for {agent_id}; link signing disabled"
+                );
+            } else {
+                tracing::warn!("identity: keypair load failed for {agent_id}: {msg}");
+            }
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Background tasks (GC, WAL checkpoint)
 // ---------------------------------------------------------------------------
 
@@ -1279,6 +1356,14 @@ pub async fn bootstrap_serve(
         .effective_profile(None)
         .unwrap_or_else(|_| crate::profile::Profile::core());
     let mcp_config_for_http = app_config.mcp.clone();
+    // v0.7 Track H — H2: load the active agent's Ed25519 keypair so
+    // outbound link writes can sign. Best-effort: if the keypair file
+    // doesn't exist (operator hasn't run `ai-memory identity generate`
+    // yet) we leave `active_keypair = None` and links go in unsigned —
+    // preserving v0.6.4 behaviour for unmigrated deployments. Errors
+    // other than "file not found" are logged and degraded the same way
+    // so a malformed keypair file doesn't take down the daemon.
+    let active_keypair = load_active_keypair_for_serve();
 
     let app_state = AppState {
         db: db_state.clone(),
@@ -1289,6 +1374,7 @@ pub async fn bootstrap_serve(
         scoring: Arc::new(app_config.effective_scoring()),
         profile: Arc::new(resolved_profile),
         mcp_config: Arc::new(mcp_config_for_http),
+        active_keypair: Arc::new(active_keypair),
     };
 
     // Automatic GC.
@@ -1979,6 +2065,7 @@ mod tests {
             scoring: Arc::new(crate::config::ResolvedScoring::default()),
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
+            active_keypair: Arc::new(None),
         }
     }
 

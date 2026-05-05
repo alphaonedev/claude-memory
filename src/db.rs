@@ -205,7 +205,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       store with zstd-3 content blobs. Substrate for I2 (join
 //       table), I3 (archive→prune lifecycle), I4 (memory_replay),
 //       I5/R5 (pre_store extraction hook).
-const CURRENT_SCHEMA_VERSION: i64 = 22;
+// v23 = v0.7.0 H2 (attested-cortex epic, outbound link signing)
+//       `memory_links.attest_level` TEXT column ("unsigned" |
+//       "self_signed" | "peer_attested"). The companion `signature`
+//       BLOB column shipped dead in v15 and is now live. H3+H4 will
+//       layer inbound verification + the `memory_verify` MCP tool on
+//       top of this column.
+const CURRENT_SCHEMA_VERSION: i64 = 23;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -285,6 +291,12 @@ const MIGRATION_V21_SQLITE: &str =
 // for I2 (join table), I3 (archive→prune lifecycle), I4 (memory_replay),
 // and I5/R5 (pre_store extraction hook).
 const MIGRATION_V22_SQLITE: &str = include_str!("../migrations/sqlite/0016_v07_transcripts.sql");
+// v0.7.0 H2 — outbound link signing. ALTER TABLE adding the
+// `attest_level` column is emitted from Rust (SQLite has no
+// `ADD COLUMN IF NOT EXISTS`); this file holds the idempotent
+// backfill ("unsigned" for legacy rows) plus the supporting index.
+const MIGRATION_V23_SQLITE: &str =
+    include_str!("../migrations/sqlite/0017_v07_link_attest_level.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -783,6 +795,24 @@ fn migrate(conn: &Connection) -> Result<()> {
             // table, I3 archive→prune, I4 memory_replay, I5/R5 pre_store
             // hook) layer on top of this substrate.
             conn.execute_batch(MIGRATION_V22_SQLITE)?;
+        }
+        if version < 23 {
+            // v0.7.0 H2 — outbound link signing. Adds the `attest_level`
+            // TEXT column to `memory_links` ("unsigned" | "self_signed"
+            // | "peer_attested"); the companion `signature` BLOB column
+            // shipped dead in v15 (Stream B) and is now live. ALTER
+            // TABLE done inline (SQLite has no `ADD COLUMN IF NOT
+            // EXISTS`); the SQL file holds the idempotent backfill +
+            // index. H3 will populate `peer_attested` on the inbound
+            // verification path; H4 layers `memory_verify` on top of
+            // this column.
+            let has_attest_level = conn
+                .prepare("SELECT attest_level FROM memory_links LIMIT 0")
+                .is_ok();
+            if !has_attest_level {
+                conn.execute("ALTER TABLE memory_links ADD COLUMN attest_level TEXT", [])?;
+            }
+            conn.execute_batch(MIGRATION_V23_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -1885,12 +1915,52 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
 
 // --- Links ---
 
+/// Insert a directional `(source_id, target_id, relation)` link.
+///
+/// Backward-compat shim around [`create_link_signed`] with no active
+/// keypair — every call here writes `signature = NULL` and
+/// `attest_level = "unsigned"`. New code that wants signing should
+/// route through [`create_link_signed`] directly.
 pub fn create_link(
     conn: &Connection,
     source_id: &str,
     target_id: &str,
     relation: &str,
 ) -> Result<()> {
+    create_link_signed(conn, source_id, target_id, relation, None).map(|_| ())
+}
+
+/// v0.7 H2 — link write that optionally signs with the active agent's
+/// Ed25519 keypair.
+///
+/// When `keypair` carries a private key, the six signable fields
+/// (`src_id`, `dst_id`, `relation`, `observed_by`, `valid_from`,
+/// `valid_until`) are encoded to deterministic CBOR per RFC 8949
+/// §4.2.1, signed, and the 64-byte signature is persisted in the
+/// existing `signature` BLOB column with `attest_level = "self_signed"`.
+///
+/// When `keypair` is `None` or carries only a public key, the row is
+/// written with `signature = NULL` and `attest_level = "unsigned"` —
+/// preserving v0.6.4 behaviour for callers that haven't generated a
+/// keypair yet.
+///
+/// `observed_by` on the signed payload is set to the keypair's
+/// `agent_id` when a keypair is present (the writer is, by definition,
+/// the observer). The `observed_by` *column* itself is intentionally
+/// left at the v0.6.3 default (NULL on this insert path) so existing
+/// KG queries that join on `observed_by` keep their current shape; H4's
+/// `memory_verify` will surface the signing identity from the keypair
+/// + signature, not from this column.
+///
+/// Returns the chosen attest level so callers (HTTP/MCP wrappers) can
+/// surface it in the wire response without re-querying the row.
+pub fn create_link_signed(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+    keypair: Option<&crate::identity::keypair::AgentKeypair>,
+) -> Result<&'static str> {
     // Verify both IDs exist before creating link
     let source_exists: bool = conn
         .query_row(
@@ -1917,11 +1987,35 @@ pub fn create_link(
     // populate it on the insert path so newly created links are
     // visible to `memory_kg_timeline` without a downstream backfill.
     let now = Utc::now().to_rfc3339();
+
+    // v0.7 H2 — sign if we have a private key. We compute the signature
+    // BEFORE issuing INSERT so a CBOR/sign failure surfaces as an
+    // outright write error (vs. a silent partial-write). The signed
+    // payload includes `valid_from = now` and matching `observed_by`
+    // so H3's verifier can re-derive the same bytes from the row.
+    let (signature, attest_level): (Option<Vec<u8>>, &'static str) = match keypair {
+        Some(kp) if kp.can_sign() => {
+            let link = crate::identity::sign::SignableLink {
+                src_id: source_id,
+                dst_id: target_id,
+                relation,
+                observed_by: Some(kp.agent_id.as_str()),
+                valid_from: Some(now.as_str()),
+                valid_until: None,
+            };
+            let sig = crate::identity::sign::sign(kp, &link)?;
+            (Some(sig), "self_signed")
+        }
+        _ => (None, "unsigned"),
+    };
+
     conn.execute(
-        "INSERT OR IGNORE INTO memory_links (source_id, target_id, relation, created_at, valid_from) VALUES (?1, ?2, ?3, ?4, ?4)",
-        params![source_id, target_id, relation, now],
+        "INSERT OR IGNORE INTO memory_links \
+            (source_id, target_id, relation, created_at, valid_from, signature, attest_level) \
+         VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6)",
+        params![source_id, target_id, relation, now, signature, attest_level],
     )?;
-    Ok(())
+    Ok(attest_level)
 }
 
 pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
@@ -7556,6 +7650,96 @@ mod tests {
             valid_from.is_some(),
             "create_link must populate valid_from so kg_timeline can see new links"
         );
+    }
+
+    // v0.7 H2 — schema v23: `attest_level` column present + populated.
+    #[test]
+    fn schema_v23_memory_links_has_attest_level_column() {
+        let conn = test_db();
+        assert!(
+            column_exists(&conn, "memory_links", "attest_level"),
+            "v23 must add attest_level column to memory_links"
+        );
+    }
+
+    // v0.7 H2 — no-keypair path: signature stays NULL, attest_level
+    // is recorded as "unsigned". This is the v0.6.4 backward-compat
+    // contract — operators that haven't generated a keypair keep the
+    // pre-H2 behaviour.
+    #[test]
+    fn create_link_signed_without_keypair_is_unsigned() {
+        let conn = test_db();
+        let src = make_memory("h2-src-unsigned", "test", Tier::Long, 5);
+        let tgt = make_memory("h2-tgt-unsigned", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let level = create_link_signed(&conn, &src.id, &tgt.id, "related_to", None).unwrap();
+        assert_eq!(level, "unsigned");
+
+        let (sig, attest): (Option<Vec<u8>>, Option<String>) = conn
+            .query_row(
+                "SELECT signature, attest_level FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                params![&src.id, &tgt.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert!(sig.is_none(), "no keypair → signature must be NULL");
+        assert_eq!(attest.as_deref(), Some("unsigned"));
+    }
+
+    // v0.7 H2 — happy path: with an active keypair, every link write
+    // gets a 64-byte Ed25519 signature in the `signature` column and
+    // attest_level = "self_signed". The signature must verify against
+    // the keypair's public key over the canonical CBOR payload.
+    #[test]
+    fn create_link_signed_with_keypair_persists_valid_signature() {
+        use crate::identity::{keypair, sign as link_sign};
+        use ed25519_dalek::Verifier;
+
+        let conn = test_db();
+        let src = make_memory("h2-src-signed", "test", Tier::Long, 5);
+        let tgt = make_memory("h2-tgt-signed", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let kp = keypair::generate("alice").unwrap();
+        let level = create_link_signed(&conn, &src.id, &tgt.id, "supersedes", Some(&kp)).unwrap();
+        assert_eq!(level, "self_signed");
+
+        // Read back the persisted row and confirm the signature shape.
+        let (sig, attest, valid_from): (Option<Vec<u8>>, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT signature, attest_level, valid_from FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                params![&src.id, &tgt.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        let sig_bytes = sig.expect("signature must be present when keypair is provided");
+        assert_eq!(sig_bytes.len(), 64, "Ed25519 signature is 64 bytes");
+        assert_eq!(attest.as_deref(), Some("self_signed"));
+        let valid_from = valid_from.expect("valid_from must be set on the insert path");
+
+        // Re-derive the canonical bytes the writer signed over and
+        // verify with the keypair's public key. This is what H3's
+        // inbound verifier will do on every received link.
+        let signable = link_sign::SignableLink {
+            src_id: &src.id,
+            dst_id: &tgt.id,
+            relation: "supersedes",
+            observed_by: Some(kp.agent_id.as_str()),
+            valid_from: Some(valid_from.as_str()),
+            valid_until: None,
+        };
+        let payload = link_sign::canonical_cbor(&signable).unwrap();
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig_obj = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        kp.public
+            .verify(&payload, &sig_obj)
+            .expect("persisted signature must verify against the writer's public key");
     }
 
     #[test]

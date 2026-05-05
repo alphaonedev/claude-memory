@@ -46,6 +46,7 @@ dependencies = [
  "candle-nn",
  "candle-transformers",
  "chrono",
+ "ciborium",
  "clap",
  "clap_complete",
  "clap_mangen",
