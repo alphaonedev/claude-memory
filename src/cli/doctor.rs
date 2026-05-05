@@ -631,6 +631,16 @@ fn section_governance(conn: &rusqlite::Connection) -> ReportSection {
     let mut severity = Severity::Info;
     let mut note: Option<String> = None;
 
+    // v0.7.0 K3 — surface the active permissions.mode + per-mode
+    // decision counts so operators can verify the gate is wired and
+    // observe drift between advertised and enforced policy.
+    let mode = crate::config::active_permissions_mode();
+    facts.push(("permissions_mode".into(), mode.as_str().to_string()));
+    let counts = crate::config::permissions_decision_counts();
+    facts.push(("decisions::enforce".into(), counts.enforce.to_string()));
+    facts.push(("decisions::advisory".into(), counts.advisory.to_string()));
+    facts.push(("decisions::off".into(), counts.off.to_string()));
+
     let (with, without) = db::doctor_governance_coverage(conn).unwrap_or((0, 0));
     facts.push(("namespaces_with_policy".into(), with.to_string()));
     facts.push(("namespaces_without_policy".into(), without.to_string()));

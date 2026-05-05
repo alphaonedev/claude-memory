@@ -5895,6 +5895,11 @@ mod tests {
     /// indefinitely; this test is the contract that proves it.
     #[test]
     fn mcp_capabilities_v2_schema_includes_all_blocks() {
+        // v0.7.0 K3: serialize on the gate-mode atomic + clear any
+        // sibling-test override so `permissions.mode` reflects the
+        // documented `advisory` zero-state.
+        let _gate = crate::config::lock_permissions_mode_for_test();
+        crate::config::clear_permissions_mode_override_for_test();
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let req = make_tools_call("memory_capabilities", json!({"accept": "v2"}));
         let resp = invoke_handle_request(&conn, &req);

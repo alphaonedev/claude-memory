@@ -13219,6 +13219,11 @@ mod tests {
     /// present, `schema_version="2"`, and dropped fields are absent.
     #[tokio::test]
     async fn http_capabilities_v2_schema_includes_all_blocks() {
+        // v0.7.0 K3: serialize against the gate-mode atomic and clear
+        // any sibling-test override so `permissions.mode` reflects
+        // the documented zero-state default (`advisory`).
+        let _gate = crate::config::lock_permissions_mode_for_test();
+        crate::config::clear_permissions_mode_override_for_test();
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/capabilities", axum_get(get_capabilities))
@@ -16528,6 +16533,27 @@ mod tests {
     // `GovernanceDecision::Pending` arm — exercising the queue+202 response
     // path that the federation-disabled tests cannot otherwise reach.
 
+    /// v0.7.0 K3 — pin the process-wide governance gate to
+    /// [`crate::config::PermissionsMode::Enforce`] so the suite's
+    /// historical Pending/Deny assertions still drive the strict
+    /// path. The K3 work flipped the v0.7.0 default to `Advisory`
+    /// (log + Allow) so upgrading operators do not get
+    /// surprise-blocked. These HTTP scenarios test the strict gate
+    /// behavior so they opt into Enforce explicitly.
+    ///
+    /// Returns the central gate-mode Mutex guard. Hold it for the
+    /// duration of the test so no parallel test (in any module) can
+    /// flip the gate out from under this scenario. The lock is
+    /// process-wide because the active mode lives in a process-wide
+    /// atomic.
+    fn pin_governance_enforce_for_test() -> std::sync::MutexGuard<'static, ()> {
+        let guard = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        guard
+    }
+
     /// Seed a `_namespace_standard` memory with the supplied governance
     /// policy and wire `namespace_meta` to it. Returns nothing — caller
     /// just queries the namespace afterward.
@@ -16560,6 +16586,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_create_memory_governance_pending_returns_202() {
+        let _gate = pin_governance_enforce_for_test();
         let state = test_state();
         seed_governance_policy(
             &state,
@@ -16610,6 +16637,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_create_memory_governance_deny_returns_403() {
+        let _gate = pin_governance_enforce_for_test();
         // write: registered → unregistered caller is denied without queueing.
         let state = test_state();
         seed_governance_policy(
@@ -16654,6 +16682,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_delete_memory_governance_pending_returns_202() {
+        let _gate = pin_governance_enforce_for_test();
         let state = test_state();
         seed_governance_policy(
             &state,
@@ -16696,6 +16725,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_delete_memory_governance_deny_returns_403() {
+        let _gate = pin_governance_enforce_for_test();
         let state = test_state();
         seed_governance_policy(
             &state,
@@ -16731,6 +16761,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_promote_memory_governance_pending_returns_202() {
+        let _gate = pin_governance_enforce_for_test();
         let state = test_state();
         seed_governance_policy(
             &state,

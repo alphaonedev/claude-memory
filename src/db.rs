@@ -4789,6 +4789,29 @@ fn namespace_owner(conn: &Connection, namespace: &str) -> Option<String> {
 /// Enforce governance for a `GovernedAction`. On [`GovernanceDecision::Pending`],
 /// a row is inserted into `pending_actions` and the returned `pending_id` is
 /// embedded in the decision.
+///
+/// v0.7.0 K3 — the gate now consults
+/// [`crate::config::active_permissions_mode`] and branches on the
+/// active [`crate::config::PermissionsMode`]:
+///
+/// - [`PermissionsMode::Off`]: skip the gate entirely. Returns `Allow`
+///   without touching `resolve_governance_policy` or `pending_actions`.
+/// - [`PermissionsMode::Advisory`]: resolve the policy, log any
+///   would-be `Deny`/`Pending` outcome at `WARN`, then return `Allow`.
+///   No `pending_actions` row is queued. This is the v0.7.0 default —
+///   it preserves the v0.6.x posture for upgrading operators where
+///   governance metadata was advertised but the wider permission
+///   system was honest-disclosed as advisory.
+/// - [`PermissionsMode::Enforce`]: the historical strict path.
+///   `Deny`/`Pending` decisions surface verbatim and the
+///   `pending_actions` row is queued. Audit-ready posture; opt in via
+///   `[permissions] mode = "enforce"` in `config.toml`.
+///
+/// Every consult increments the per-mode counter exposed via
+/// [`crate::config::permissions_decision_counts`] so doctor +
+/// capabilities can surface gate activity.
+///
+/// [`PermissionsMode`]: crate::config::PermissionsMode
 pub fn enforce_governance(
     conn: &Connection,
     action: GovernedAction,
@@ -4798,6 +4821,16 @@ pub fn enforce_governance(
     memory_owner: Option<&str>,
     payload: &serde_json::Value,
 ) -> Result<GovernanceDecision> {
+    use crate::config::{PermissionsMode, active_permissions_mode, record_permissions_decision};
+
+    let mode = active_permissions_mode();
+    record_permissions_decision(mode);
+
+    // K3 — `Off` short-circuits before any policy lookup.
+    if mode == PermissionsMode::Off {
+        return Ok(GovernanceDecision::Allow);
+    }
+
     // Opt-in enforcement: namespaces without an explicit policy are unaffected.
     let Some(policy) = resolve_governance_policy(conn, namespace) else {
         return Ok(GovernanceDecision::Allow);
@@ -4814,6 +4847,39 @@ pub fn enforce_governance(
     };
 
     let decision = evaluate_level(conn, level, agent_id, memory_owner, ns_owner.as_deref());
+
+    // K3 — `Advisory` logs the would-be outcome but does not block or
+    // queue a pending row. The capabilities surface continues to
+    // advertise `permissions.mode = "advisory"` so external integrators
+    // see the consistent posture.
+    if mode == PermissionsMode::Advisory {
+        match &decision {
+            GovernanceDecision::Allow => {}
+            GovernanceDecision::Deny(reason) => {
+                tracing::warn!(
+                    target: "ai_memory::governance",
+                    namespace = %namespace,
+                    agent_id = %agent_id,
+                    action = ?action,
+                    reason = %reason,
+                    "permissions.mode=advisory: would-deny suppressed (allowing)"
+                );
+            }
+            GovernanceDecision::Pending(_) => {
+                tracing::warn!(
+                    target: "ai_memory::governance",
+                    namespace = %namespace,
+                    agent_id = %agent_id,
+                    action = ?action,
+                    "permissions.mode=advisory: would-queue-approval suppressed (allowing)"
+                );
+            }
+        }
+        return Ok(GovernanceDecision::Allow);
+    }
+
+    // K3 — `Enforce`: the historical strict path. `Pending` queues a
+    // `pending_actions` row and returns the canonical id.
     if let GovernanceDecision::Pending(_) = decision {
         let pending_id =
             queue_pending_action(conn, action, namespace, memory_id, agent_id, payload)?;
