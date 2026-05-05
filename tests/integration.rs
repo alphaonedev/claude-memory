@@ -1783,7 +1783,13 @@ fn test_mcp_initialize() {
     let db_path = dir.join(format!("ai-memory-mcp-init-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1821,7 +1827,13 @@ fn test_mcp_tools_list() {
     let db_path = dir.join(format!("ai-memory-mcp-tools-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1888,7 +1900,7 @@ fn test_mcp_store_and_recall() {
 
     // Send store then recall in sequence
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1938,7 +1950,13 @@ fn test_mcp_invalid_jsonrpc_version() {
     let db_path = dir.join(format!("ai-memory-mcp-ver-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1976,7 +1994,7 @@ fn test_mcp_unknown_tool() {
     let db_path = dir.join(format!("ai-memory-mcp-unk-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -1998,9 +2016,17 @@ fn test_mcp_unknown_tool() {
     // found, not ok_response with isError.
     assert_eq!(resp["error"]["code"], -32601, "expected JSON-RPC -32601");
     let msg = resp["error"]["message"].as_str().unwrap_or("");
+    // v0.6.4-002 reworded the unknown-tool path to surface a more
+    // actionable diagnostic (names the family + suggests `--profile`
+    // and `memory_capabilities --include-schema` paths). Both
+    // historical ("unknown tool") and new ("not registered" / "not
+    // loaded under the active profile") wordings are valid markers
+    // for the same -32601 outcome.
     assert!(
-        msg.contains("unknown tool"),
-        "expected 'unknown tool' in error message, got {msg:?}"
+        msg.contains("unknown tool")
+            || msg.contains("not registered")
+            || msg.contains("not loaded under the active profile"),
+        "expected unknown/not-registered/not-loaded marker in error message, got {msg:?}"
     );
     assert!(resp["result"].is_null(), "result must be absent on error");
 
@@ -2014,7 +2040,7 @@ fn test_mcp_missing_tool_name() {
     let db_path = dir.join(format!("ai-memory-mcp-noname-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2048,7 +2074,7 @@ fn test_mcp_stats() {
     let db_path = dir.join(format!("ai-memory-mcp-stats-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2080,7 +2106,13 @@ fn test_mcp_prompts_list() {
     let db_path = dir.join(format!("ai-memory-mcp-prompts-{}.db", uuid::Uuid::new_v4()));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2122,7 +2154,7 @@ fn test_mcp_prompts_get_recall_first() {
     ));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2170,7 +2202,7 @@ fn test_mcp_recall_default_toon() {
     ));
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2545,7 +2577,13 @@ fn test_namespace_auto_detect_parent() {
     );
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2657,7 +2695,13 @@ fn test_mcp_namespace_standard_auto_prepend() {
     );
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2755,7 +2799,13 @@ fn test_namespace_standard_cascade_on_delete() {
     );
 
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args([
+            "--db",
+            db_path.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2800,7 +2850,7 @@ fn test_mcp_store_with_metadata() {
 
     // Store with metadata, then recall in JSON format to verify it persists
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2851,7 +2901,7 @@ fn test_mcp_update_metadata() {
 
     // Store with initial metadata
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2879,7 +2929,7 @@ fn test_mcp_update_metadata() {
 
     // Update metadata via a second MCP session, then get to verify
     let output2 = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -2931,7 +2981,7 @@ fn test_mcp_store_invalid_metadata_defaults_to_empty() {
     // Then store with metadata as null (invalid — should default to {})
     // Verify all three have empty metadata
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3013,7 +3063,7 @@ fn test_mcp_dedup_replaces_metadata() {
     // Store with metadata v1, then store same title+namespace with metadata v2
     // The MCP dedup path goes through db::update, not db::insert upsert
     let output = cmd(binary)
-        .args(["--db", db_path.to_str().unwrap(), "mcp"])
+        .args(["--db", db_path.to_str().unwrap(), "mcp", "--profile", "full"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -3559,6 +3609,8 @@ fn test_mcp_update_preserves_agent_id() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -3931,6 +3983,8 @@ fn test_agentid_visible_in_recall_response() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -4014,6 +4068,8 @@ fn test_agentid_visible_in_toon_and_json() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -4309,6 +4365,8 @@ fn test_mcp_agent_register_and_list() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -4421,6 +4479,8 @@ fn test_196_mcp_store_echoes_resolved_agent_id() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -4524,6 +4584,8 @@ fn test_197_mcp_list_rejects_invalid_agent_id_filter() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -4631,6 +4693,8 @@ fn test_199_toon_compact_surfaces_agent_id() {
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -5078,6 +5142,8 @@ fn seed_standard(
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -5123,6 +5189,8 @@ fn get_standard_inherit(
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -5277,7 +5345,15 @@ fn test_inherit_recall_auto_prepends_chain() {
     // Invoke recall via MCP and look for standards[]
     use std::io::Write;
     let mut child = cmd(bin)
-        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+            "--tier",
+            "keyword",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -5384,7 +5460,15 @@ fn test_inherit_default_omits_chain() {
     // get_standard with inherit=false (default) must return single-object shape
     use std::io::Write;
     let mut child = cmd(bin)
-        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+            "--tier",
+            "keyword",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -5696,6 +5780,8 @@ fn mcp_call(
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -5809,6 +5895,8 @@ fn mcp_call_raw(
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -6026,6 +6114,8 @@ fn set_governance(
             "--db",
             db_path.to_str().unwrap(),
             "mcp",
+            "--profile",
+            "full",
             "--tier",
             "keyword",
         ])
@@ -6582,7 +6672,15 @@ fn test_enforce_mcp_pending_tools() {
 
     use std::io::Write;
     let mut child = cmd(bin)
-        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+            "--tier",
+            "keyword",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -7402,7 +7500,15 @@ fn test_budget_mcp_tool_schema_and_response() {
     store_sized(bin, &db, "mcp-target", "mcp budget test content", 5);
 
     let mut child = cmd(bin)
-        .args(["--db", db.to_str().unwrap(), "mcp", "--tier", "keyword"])
+        .args([
+            "--db",
+            db.to_str().unwrap(),
+            "mcp",
+            "--profile",
+            "full",
+            "--tier",
+            "keyword",
+        ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
