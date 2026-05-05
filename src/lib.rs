@@ -25,6 +25,12 @@ pub mod embeddings;
 pub mod errors;
 pub mod federation;
 pub mod handlers;
+// v0.7 Track B — harness detection. B4 reads the MCP `clientInfo.name`
+// captured at the JSON-RPC `initialize` handshake and maps it to a
+// `Harness` enum so downstream paths (capabilities-v3, B1's
+// `memory_load_family`, B2's `memory_smart_load`) can shape responses
+// based on whether the harness supports deferred-tool registration.
+pub mod harness;
 pub mod hnsw;
 // v0.7 Track G — programmable lifecycle hook pipeline. G1 lands
 // the config schema + SIGHUP hot-reload plumbing; the executor
