@@ -201,7 +201,11 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       `default_timeout_seconds` + `expired_at` columns plus a
 //       composite (status, requested_at) index to bound the sweep
 //       cost.
-const CURRENT_SCHEMA_VERSION: i64 = 21;
+// v22 = v0.7.0 I1 (attested-cortex epic) `memory_transcripts` BLOB
+//       store with zstd-3 content blobs. Substrate for I2 (join
+//       table), I3 (archive→prune lifecycle), I4 (memory_replay),
+//       I5/R5 (pre_store extraction hook).
+const CURRENT_SCHEMA_VERSION: i64 = 22;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -276,6 +280,11 @@ const MIGRATION_V20_SQLITE: &str = include_str!("../migrations/sqlite/0014_v064_
 // EXISTS`; this file just holds the idempotent index batch.
 const MIGRATION_V21_SQLITE: &str =
     include_str!("../migrations/sqlite/0015_v07_pending_action_timeouts.sql");
+// v0.7.0 I1 — `memory_transcripts` table backing the attested-cortex
+// epic. CREATE TABLE IF NOT EXISTS + index — fully idempotent. Substrate
+// for I2 (join table), I3 (archive→prune lifecycle), I4 (memory_replay),
+// and I5/R5 (pre_store extraction hook).
+const MIGRATION_V22_SQLITE: &str = include_str!("../migrations/sqlite/0016_v07_transcripts.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -766,6 +775,14 @@ fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE pending_actions ADD COLUMN expired_at TEXT", [])?;
             }
             conn.execute_batch(MIGRATION_V21_SQLITE)?;
+        }
+        if version < 22 {
+            // v0.7.0 I1 — `memory_transcripts` substrate for the
+            // attested-cortex epic. CREATE TABLE IF NOT EXISTS + index
+            // — fully idempotent. Subsequent I-track tasks (I2 join
+            // table, I3 archive→prune, I4 memory_replay, I5/R5 pre_store
+            // hook) layer on top of this substrate.
+            conn.execute_batch(MIGRATION_V22_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;

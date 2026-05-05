@@ -46,6 +46,7 @@ pub mod sizes;
 pub mod subscriptions;
 pub mod tls;
 pub mod toon;
+pub mod transcripts;
 pub mod validate;
 
 #[cfg(feature = "sal")]
