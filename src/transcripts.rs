@@ -1050,6 +1050,7 @@ mod tests {
             TranscriptNamespaceConfig {
                 default_ttl_secs: Some(86_400),
                 archive_grace_secs: None,
+                auto_extract: None,
             },
         );
         let cfg = TranscriptsConfig {
@@ -1086,6 +1087,7 @@ mod tests {
             TranscriptNamespaceConfig {
                 default_ttl_secs: Some(60),
                 archive_grace_secs: Some(60),
+                auto_extract: None,
             },
         );
         let cfg = TranscriptsConfig {
