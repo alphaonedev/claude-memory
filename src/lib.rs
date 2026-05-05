@@ -42,6 +42,7 @@ pub mod models;
 pub mod profile;
 pub mod replication;
 pub mod reranker;
+pub mod signed_events;
 pub mod sizes;
 pub mod subscriptions;
 pub mod tls;

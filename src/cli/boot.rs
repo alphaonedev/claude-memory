@@ -54,16 +54,18 @@ use std::time::Instant;
 pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 
 /// Upper bound of the DB-schema range this binary supports. Mirrors
-/// `db::CURRENT_SCHEMA_VERSION` (24 in v0.7.0 — v21 from K2's
+/// `db::CURRENT_SCHEMA_VERSION` (25 in v0.7.0 — v21 from K2's
 /// `pending_actions` timeout-sweeper columns, v22 from I1's
 /// `memory_transcripts` BLOB store, v23 from H2's
-/// `memory_links.attest_level` column for outbound link signing, and
+/// `memory_links.attest_level` column for outbound link signing,
 /// v24 from I2's `memory_transcript_links` join table connecting
-/// memories to their transcript provenance — all part of the
-/// attested-cortex epic). When a DB's `schema_version` exceeds this,
-/// the binary is too old for a newer DB and we surface a warning.
-/// v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 24;
+/// memories to their transcript provenance, and v25 from H5's
+/// append-only `signed_events` audit table backing the immutable
+/// attestation chain — all part of the attested-cortex epic). When
+/// a DB's `schema_version` exceeds this, the binary is too old for
+/// a newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue
+/// #487 PR #497 req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 25;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the
