@@ -1892,10 +1892,7 @@ fn build_capabilities_overlay(
 pub fn build_capabilities_summary(profile: &crate::profile::Profile) -> String {
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let total: usize = Family::all()
-        .iter()
-        .map(|f| f.expected_tool_count())
-        .sum();
+    let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
 
     // Tools advertised in tools/list = sum of family counts the profile
     // includes, plus any always-on bootstrap tool whose owning family is

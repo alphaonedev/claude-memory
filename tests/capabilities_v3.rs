@@ -98,14 +98,9 @@ fn cap_v3_legacy_entry_point_refuses_v3() {
 fn cap_v3_response_carries_schema_version_and_summary() {
     let tier_config = semantic_tier();
     let conn = fresh_conn();
-    let val = handle_capabilities_with_conn_v3(
-        &tier_config,
-        None,
-        false,
-        Some(&conn),
-        &Profile::core(),
-    )
-    .expect("v3 capabilities serialize");
+    let val =
+        handle_capabilities_with_conn_v3(&tier_config, None, false, Some(&conn), &Profile::core())
+            .expect("v3 capabilities serialize");
 
     assert_eq!(
         val["schema_version"], "3",
