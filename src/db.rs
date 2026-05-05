@@ -220,7 +220,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       when memories are deleted or I3's archive->prune lifecycle
 //       removes transcripts. Substrate for I4 (memory_replay) and
 //       I5/R5 (pre_store extraction hook).
-const CURRENT_SCHEMA_VERSION: i64 = 24;
+// v25 = v0.7.0 I3 (attested-cortex epic) per-namespace transcript TTL
+//       with archive->prune lifecycle. Adds the `archived_at TEXT`
+//       column on `memory_transcripts` (NULL = live, RFC3339 = the
+//       moment the sweeper marked the row archived) plus a partial
+//       index on archived rows so the prune-phase scan is bounded.
+//       The lifecycle sweeper itself lives in `transcripts.rs` and
+//       runs on a 10-minute cadence from `daemon_runtime`. Per-
+//       namespace TTL overrides arrive via the `[transcripts]`
+//       config section (`config.rs`) and are resolved against the
+//       transcript's namespace at sweep time.
+const CURRENT_SCHEMA_VERSION: i64 = 25;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -313,6 +323,13 @@ const MIGRATION_V23_SQLITE: &str =
 // (pre_store extraction hook) writes to it.
 const MIGRATION_V24_SQLITE: &str =
     include_str!("../migrations/sqlite/0018_v07_transcript_links.sql");
+// v0.7.0 I3 — per-namespace transcript TTL with archive->prune
+// lifecycle. ALTER TABLE adding `memory_transcripts.archived_at` is
+// emitted from Rust (SQLite has no `ADD COLUMN IF NOT EXISTS`); the
+// SQL file holds the supporting partial index on archived rows so
+// the prune-phase scan stays O(archived) rather than O(total).
+const MIGRATION_V25_SQLITE: &str =
+    include_str!("../migrations/sqlite/0019_v07_transcript_lifecycle.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -837,6 +854,25 @@ fn migrate(conn: &Connection) -> Result<()> {
             // Substrate only; I4 layers `memory_replay` on top, I5/R5
             // wires the pre_store extraction hook that populates it.
             conn.execute_batch(MIGRATION_V24_SQLITE)?;
+        }
+        if version < 25 {
+            // v0.7.0 I3 — per-namespace transcript TTL with archive→
+            // prune lifecycle. Adds `memory_transcripts.archived_at`
+            // (NULL = live, RFC3339 = archived). The lifecycle
+            // sweeper in `transcripts.rs` consults this column; the
+            // partial index from the SQL file keeps the prune-phase
+            // scan bounded. Substrate for the 10-minute background
+            // task wired into `daemon_runtime::bootstrap_serve`.
+            let has_archived_at = conn
+                .prepare("SELECT archived_at FROM memory_transcripts LIMIT 0")
+                .is_ok();
+            if !has_archived_at {
+                conn.execute(
+                    "ALTER TABLE memory_transcripts ADD COLUMN archived_at TEXT",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V25_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
