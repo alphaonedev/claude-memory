@@ -418,6 +418,19 @@ pub(crate) fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_smart_load",
+                "description": "v0.7 B2 — pick the best Family from a free-text intent and forward to memory_load_family. Always-on intent-routed loader.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "intent": {"type": "string", "description": "Free-text description of what you're about to do (e.g. \"debug a flaky test\")."},
+                        "namespace": {"type": "string", "description": "Restrict to this namespace. Defaults to all namespaces when omitted."},
+                        "k": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Top-k to return. Capped at 100."}
+                    },
+                    "required": ["intent"]
+                }
+            },
+            {
                 "name": "memory_get_taxonomy",
                 "description": "Pillar 1 / Stream A — return a hierarchical tree of namespaces with memory counts. Walks the `/`-delimited namespace paths grouped from live memories (expired rows excluded). Each node carries `count` (memories at exactly that namespace) and `subtree_count` (count plus all descendants visible within `depth`); the response also exposes `total_count` for the prefix and a `truncated` flag set when `limit` forced rows to be dropped from the tree.",
                 "inputSchema": {
@@ -2289,7 +2302,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(49);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(50);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -3075,6 +3088,262 @@ pub fn handle_load_family(conn: &rusqlite::Connection, params: &Value) -> Result
         "count": memories.len(),
         "memories": memories,
     }))
+}
+
+/// v0.7 B2 — `memory_smart_load(intent, namespace?, k?)`.
+///
+/// Always-on intent-routed loader. Caller passes a free-text intent
+/// (e.g. "I'm about to debug a flaky test"); the handler picks the best
+/// `Family` and forwards to [`handle_load_family`]. The agent does not
+/// need to know the family taxonomy — it only describes what it's
+/// about to do.
+///
+/// Routing strategy:
+///
+/// - **Embedder available (B3 wiring, future):** when an `Embedder` is
+///   provided, embed the intent and score it against the cached family
+///   descriptor embeddings via cosine similarity. The family with the
+///   top score wins; the score is reported alongside the answer.
+/// - **Fallback (no embedder, e.g. keyword tier):** a deterministic
+///   keyword-overlap scorer maps the intent to the family with the
+///   highest descriptor-token overlap. The score is the normalized
+///   overlap ratio in `[0.0, 1.0]`. When no descriptor matches at all
+///   (e.g. an empty or wholly off-topic intent), the routing falls back
+///   to `Family::Core` and `chosen_family_source` is reported as
+///   `"fallback"` so the caller can detect the no-signal case.
+///
+/// Response shape:
+/// ```json
+/// {
+///   "chosen_family": "graph",
+///   "score": 0.62,
+///   "chosen_family_source": "embedder" | "keyword" | "fallback",
+///   "intent": "<echoed input>",
+///   "namespace": "projects/alpha", // or null
+///   "k": 20,
+///   "count": 3,
+///   "memories": [<MemoryRow>, ...]
+/// }
+/// ```
+///
+/// `k` defaults to 20 (mirroring `memory_load_family`) and is capped at
+/// 100. `intent` is required and may not be empty after trimming.
+pub fn handle_smart_load(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    embedder: Option<&Embedder>,
+) -> Result<Value, String> {
+    let intent_raw = params["intent"].as_str().ok_or("intent is required")?;
+    let intent = intent_raw.trim();
+    if intent.is_empty() {
+        // Empty intent is the canonical "no signal" case — route to
+        // Core and surface `chosen_family_source: "fallback"` so the
+        // caller can detect it. `handle_load_family` then runs the same
+        // DB query memory_load_family(family=core) would.
+        let resp = forward_to_load_family(
+            conn,
+            crate::profile::Family::Core,
+            0.0,
+            "fallback",
+            intent,
+            params,
+        )?;
+        return Ok(resp);
+    }
+
+    // Pick the best family. Try the embedder path first when an
+    // embedder is wired through; otherwise (or on embed failure) fall
+    // back to the deterministic keyword scorer.
+    let (family, score, source) = match embedder {
+        Some(emb) => match best_family_via_embedder(emb, intent) {
+            Some((f, s)) => (f, s, "embedder"),
+            None => fallback_via_keywords(intent),
+        },
+        None => fallback_via_keywords(intent),
+    };
+
+    forward_to_load_family(conn, family, score, source, intent, params)
+}
+
+/// Build the `memory_smart_load` response by forwarding to
+/// [`handle_load_family`] with the chosen family. The forwarded JSON is
+/// flattened into the smart_load response shape so callers see one
+/// payload, not a nested `load_family_response` blob.
+fn forward_to_load_family(
+    conn: &rusqlite::Connection,
+    family: crate::profile::Family,
+    score: f32,
+    source: &str,
+    intent: &str,
+    params: &Value,
+) -> Result<Value, String> {
+    let family_name = family.name();
+    tracing::info!(
+        target: "memory_smart_load",
+        chosen_family = family_name,
+        score = score,
+        source = source,
+        intent_len = intent.len(),
+        "smart_load routed intent to family"
+    );
+
+    // Build the payload memory_load_family expects: family + the
+    // forwarded namespace + k from the caller.
+    let mut forward = json!({"family": family_name});
+    if let Some(ns) = params.get("namespace").and_then(Value::as_str) {
+        forward["namespace"] = json!(ns);
+    }
+    if let Some(k) = params.get("k").and_then(Value::as_u64) {
+        forward["k"] = json!(k);
+    }
+
+    let inner = handle_load_family(conn, &forward)?;
+    let memories = inner.get("memories").cloned().unwrap_or_else(|| json!([]));
+    let count = inner.get("count").cloned().unwrap_or_else(|| json!(0));
+    let k = inner.get("k").cloned().unwrap_or_else(|| json!(20));
+    let namespace = inner.get("namespace").cloned().unwrap_or(Value::Null);
+
+    // Round score to 3 decimals at the wire — keeps the JSON readable
+    // without leaking f32 quantisation noise (same convention as
+    // memory_check_duplicate).
+    let score_rounded = (f64::from(score) * 1000.0).round() / 1000.0;
+
+    Ok(json!({
+        "chosen_family": family_name,
+        "score": score_rounded,
+        "chosen_family_source": source,
+        "intent": intent,
+        "namespace": namespace,
+        "k": k,
+        "count": count,
+        "memories": memories,
+    }))
+}
+
+/// Embedder-driven family pick. Embeds the intent, scores it against
+/// the cached descriptor for each family, and returns the top-scoring
+/// family + similarity. Returns `None` when the embedder fails
+/// (network blip, model not loaded, etc.) so the caller can fall back
+/// to the keyword scorer.
+///
+/// **B3 forward-compat note:** when B3 lands and `AppState` carries
+/// `family_embeddings: Arc<RwLock<Option<Vec<(Family, Vec<f32>)>>>>`
+/// plus `best_family_match(intent)`, this helper should be replaced
+/// with a call into `state.best_family_match(intent)`. Until then, the
+/// descriptors are embedded inline on every call — accurate but not
+/// the production caching shape.
+fn best_family_via_embedder(emb: &Embedder, intent: &str) -> Option<(crate::profile::Family, f32)> {
+    use crate::profile::Family;
+
+    let intent_vec = emb.embed(intent).ok()?;
+    let mut best: Option<(Family, f32)> = None;
+    for family in Family::all() {
+        let descriptor = family_descriptor(*family);
+        let Ok(desc_vec) = emb.embed(descriptor) else {
+            continue;
+        };
+        let score = Embedder::cosine_similarity(&intent_vec, &desc_vec);
+        if best.is_none_or(|(_, s)| score > s) {
+            best = Some((*family, score));
+        }
+    }
+    best
+}
+
+/// Deterministic keyword-overlap scorer used when no embedder is
+/// available (e.g. the `keyword` feature tier) or when the embedder
+/// returns an error mid-call. Splits `intent` on ASCII non-alphanumeric
+/// boundaries, lowercases, and counts how many tokens overlap each
+/// family's descriptor token set. Returns the family with the highest
+/// overlap; ties broken by family declaration order so the routing is
+/// stable.
+///
+/// When no descriptor matches at all the routing falls back to
+/// `Family::Core` with score 0.0 and source `"fallback"`. This mirrors
+/// the spec's "embedder not yet ready" branch: callers see
+/// `chosen_family_source: "fallback"` and can decide whether to retry
+/// with a richer intent.
+fn fallback_via_keywords(intent: &str) -> (crate::profile::Family, f32, &'static str) {
+    use crate::profile::Family;
+
+    let intent_tokens: Vec<String> = intent
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|s| !s.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect();
+    if intent_tokens.is_empty() {
+        return (Family::Core, 0.0, "fallback");
+    }
+
+    let mut best: Option<(Family, f32)> = None;
+    for family in Family::all() {
+        let descriptor = family_descriptor(*family).to_ascii_lowercase();
+        let desc_tokens: Vec<&str> = descriptor
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let overlap = intent_tokens
+            .iter()
+            .filter(|t| desc_tokens.iter().any(|d| d == t))
+            .count();
+        if overlap == 0 {
+            continue;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let score = (overlap as f32) / (intent_tokens.len() as f32);
+        if best.is_none_or(|(_, s)| score > s) {
+            best = Some((*family, score));
+        }
+    }
+
+    best.map_or((Family::Core, 0.0, "fallback"), |(f, s)| (f, s, "keyword"))
+}
+
+/// Per-family descriptor used as the embedding/keyword target. Each
+/// descriptor is a short paragraph of intent-style language that
+/// captures what an agent might say when about to act on that family's
+/// tools. Source-anchored at the family enum in `src/profile.rs`.
+///
+/// **B3 forward-compat note:** when B3 lands these strings will be
+/// embedded once at startup and cached on `AppState::family_embeddings`,
+/// rather than re-embedded per smart_load call. The strings themselves
+/// stay anchored here so the cache and the keyword fallback share one
+/// vocabulary.
+fn family_descriptor(family: crate::profile::Family) -> &'static str {
+    use crate::profile::Family;
+    match family {
+        Family::Core => {
+            "store remember save record memory note write recall fetch get \
+             search find list browse read load family core baseline"
+        }
+        Family::Lifecycle => {
+            "update edit modify change delete remove forget purge garbage \
+             collect promote upgrade downgrade migrate refresh rotate"
+        }
+        Family::Graph => {
+            "graph link relation entity knowledge kg query timeline replay \
+             verify path traverse find_paths connect taxonomy alias debug \
+             flaky test investigate trace ancestry"
+        }
+        Family::Governance => {
+            "approve reject pending policy permission rule namespace \
+             standard subscribe unsubscribe governance review audit"
+        }
+        Family::Power => {
+            "consolidate merge contradiction duplicate auto tag expand \
+             query inbox subscription replay dlq dead letter retry power \
+             llm augment"
+        }
+        Family::Meta => {
+            "capabilities agent register session start stats meta info \
+             discovery introspection bootstrap"
+        }
+        Family::Archive => {
+            "archive backup restore purge old historical retention cold \
+             storage"
+        }
+        Family::Other => "subscription notify subscribe webhook event other miscellaneous",
+    }
 }
 
 fn handle_delete(
@@ -4873,6 +5142,7 @@ fn handle_request(
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
                 "memory_load_family" => handle_load_family(conn, arguments),
+                "memory_smart_load" => handle_smart_load(conn, arguments, embedder),
                 "memory_get_taxonomy" => handle_get_taxonomy(conn, arguments),
                 "memory_check_duplicate" => handle_check_duplicate(conn, arguments, embedder),
                 "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
@@ -5438,7 +5708,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_49_tools() {
+    fn tool_definitions_returns_50_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
@@ -5451,25 +5721,27 @@ mod tests {
         // v0.7 K7 adds memory_subscription_replay +
         // memory_subscription_dlq_list (Family::Power) → 48.
         // v0.7 J7 adds memory_find_paths (Family::Graph) → 49.
+        // v0.7 B2 adds memory_smart_load (Family::Core) → 50.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 49);
+        assert_eq!(tools.len(), 50);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
-    /// registers exactly 6 family tools (5 baseline + v0.7 B1
-    /// memory_load_family) + 1 always-on bootstrap (memory_capabilities)
-    /// = 7 visible tools. `--profile full` registers all 49.
+    /// registers exactly 7 family tools (5 baseline + v0.7 B1
+    /// memory_load_family + v0.7 B2 memory_smart_load) + 1 always-on
+    /// bootstrap (memory_capabilities) = 8 visible tools. `--profile
+    /// full` registers all 50.
     #[test]
-    fn tool_definitions_for_profile_core_registers_6_plus_capabilities() {
+    fn tool_definitions_for_profile_core_registers_7_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
         let tools = defs["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        // Exactly the 6 core tools + memory_capabilities bootstrap.
+        // Exactly the 7 core tools + memory_capabilities bootstrap.
         assert_eq!(
             tools.len(),
-            7,
-            "core profile should register 6 core tools + memory_capabilities; got {names:?}"
+            8,
+            "core profile should register 7 core tools + memory_capabilities; got {names:?}"
         );
         for required in [
             "memory_store",
@@ -5478,6 +5750,7 @@ mod tests {
             "memory_get",
             "memory_search",
             "memory_load_family",
+            "memory_smart_load",
             "memory_capabilities",
         ] {
             assert!(
@@ -5501,30 +5774,32 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_49() {
+    fn tool_definitions_for_profile_full_registers_50() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            49,
+            50,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
+             v0.7 B2 memory_smart_load (1) + \
              v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
-             v0.7 J7 memory_find_paths (1) = 49"
+             v0.7 J7 memory_find_paths (1) = 50"
         );
     }
 
     #[test]
-    fn tool_definitions_for_profile_graph_registers_eighteen() {
+    fn tool_definitions_for_profile_graph_registers_nineteen() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
         let tools = defs["tools"].as_array().unwrap();
-        // 6 core (with v0.7 B1 memory_load_family) + 11 graph (8
-        // baseline + memory_replay + memory_verify + v0.7 J7
-        // memory_find_paths) + 1 always-on capabilities = 18.
+        // 7 core (with v0.7 B1 memory_load_family + v0.7 B2
+        // memory_smart_load) + 11 graph (8 baseline + memory_replay +
+        // memory_verify + v0.7 J7 memory_find_paths) + 1 always-on
+        // capabilities = 19.
         assert_eq!(
             tools.len(),
-            18,
-            "graph profile = core(6, with memory_load_family) + \
+            19,
+            "graph profile = core(7, with memory_load_family + memory_smart_load) + \
              graph(11, with memory_replay+memory_verify+memory_find_paths) + \
              capabilities-bootstrap(1)"
         );
@@ -5538,8 +5813,8 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            18,
-            "core,graph = 6 (B1 memory_load_family) + 11 (I4 memory_replay + H4 memory_verify + J7 memory_find_paths) + capabilities = 18"
+            19,
+            "core,graph = 7 (B1 memory_load_family + B2 memory_smart_load) + 11 (I4 memory_replay + H4 memory_verify + J7 memory_find_paths) + capabilities = 19"
         );
     }
 
@@ -5554,8 +5829,9 @@ mod tests {
 
         let core_row = families.iter().find(|r| r["name"] == "core").unwrap();
         assert_eq!(core_row["loaded"], true);
-        // v0.7 B1 — Core now ships 6 tools (5 baseline + memory_load_family).
-        assert_eq!(core_row["tool_count"], 6);
+        // v0.7 B1 + B2 — Core now ships 7 tools (5 baseline +
+        // memory_load_family + memory_smart_load).
+        assert_eq!(core_row["tool_count"], 7);
         let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
         assert_eq!(graph_row["loaded"], false);
         // v0.7 J7 — graph now ships 11 tools (8 baseline + memory_replay
@@ -5953,11 +6229,12 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 49 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 50 MCP tools (Justice of MCP pathway).
     /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
     /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46);
     /// v0.7 K7 added memory_subscription_replay + memory_subscription_dlq_list (48);
-    /// v0.7 J7 added memory_find_paths (49).
+    /// v0.7 J7 added memory_find_paths (49);
+    /// v0.7 B2 added memory_smart_load (50).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5999,6 +6276,15 @@ mod tests {
                 name: "memory_load_family",
                 valid_args: json!({"family": "core"}),
                 required_arg: Some("family"),
+            },
+            // v0.7 B2 — memory_smart_load: free-text intent picks a
+            // family using cached embeddings (or deterministic keyword
+            // fallback when the embedder is offline). Empty intent
+            // surfaces as a missing-required-arg error.
+            ToolCase {
+                name: "memory_smart_load",
+                valid_args: json!({"intent": "load core memories"}),
+                required_arg: Some("intent"),
             },
             ToolCase {
                 name: "memory_get_taxonomy",

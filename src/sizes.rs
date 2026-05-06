@@ -140,17 +140,17 @@ mod tests {
     /// `tool_definitions()` regressions that would silently hide other
     /// failures.
     #[test]
-    fn table_has_49_entries_matching_tool_definitions_count() {
+    fn table_has_50_entries_matching_tool_definitions_count() {
         let n = tool_sizes().len();
         assert_eq!(
-            n, 49,
-            "expected exactly 49 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, 50,
+            "expected exactly 50 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
-             `memory_load_family` + v0.7 K7 `memory_subscription_replay` \
-             + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`, \
-             source-anchored at src/mcp.rs::tool_definitions); got {n}. \
-             If the count changed, update the family map and this \
-             assertion together."
+             `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 \
+             `memory_subscription_replay` + `memory_subscription_dlq_list` \
+             + v0.7 J7 `memory_find_paths`, source-anchored at \
+             src/mcp.rs::tool_definitions); got {n}. If the count changed, \
+             update the family map and this assertion together."
         );
     }
 

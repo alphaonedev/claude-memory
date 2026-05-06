@@ -24,14 +24,15 @@
 //!
 //! ## Profile vocabulary
 //!
-//! - `core` — 6 tools, the new v0.6.4 default (v0.7 B1 added
-//!   `memory_load_family`). Always loaded.
-//! - `graph` — adds the 11 KG/entity/replay/verify/find_paths tools. ~17 tools.
-//! - `admin` — adds lifecycle (5) + governance (8). ~19 tools.
+//! - `core` — 7 tools, the new v0.6.4 default (v0.7 B1 added
+//!   `memory_load_family`; v0.7 B2 added `memory_smart_load`).
+//!   Always loaded.
+//! - `graph` — adds the 11 KG/entity/replay/verify/find_paths tools. ~18 tools.
+//! - `admin` — adds lifecycle (5) + governance (8). ~20 tools.
 //! - `power` — adds the 8 LLM-augmented + operator tools (consolidate,
 //!   auto_tag, …, plus the v0.7 K7 subscription-reliability pair).
-//!   ~14 tools.
-//! - `full` — every family. 49 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
+//!   ~15 tools.
+//! - `full` — every family. 50 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -57,18 +58,22 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-05. Counts must sum to 49 (the v0.6.3.1 baseline of 43 +
+/// 2026-05-05. Counts must sum to 50 (the v0.6.3.1 baseline of 43 +
 /// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` (both in
-/// `Family::Graph`) + v0.7 B1 `memory_load_family` in `Family::Core` +
+/// `Family::Graph`) + v0.7 B1 `memory_load_family` and v0.7 B2
+/// `memory_smart_load` in `Family::Core` +
 /// v0.7 K7 `memory_subscription_replay` and `memory_subscription_dlq_list`
 /// in `Family::Power` +
 /// v0.7 J7 `memory_find_paths` in `Family::Graph`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
-    /// store, recall, list, get, search, load_family — 6
+    /// store, recall, list, get, search, load_family, smart_load — 7
     /// (load_family added in v0.7 B1 — always-on family loader that
     /// returns the top-k recent + high-priority memories whose
-    /// `metadata.family` matches one of the eight enum names.)
+    /// `metadata.family` matches one of the eight enum names;
+    /// smart_load added in v0.7 B2 — intent-routed front door that
+    /// picks the best Family from a free-text intent and forwards to
+    /// `memory_load_family`.)
     Core,
     /// update, delete, forget, gc, promote — 5
     Lifecycle,
@@ -112,11 +117,13 @@ impl Family {
     #[must_use]
     pub fn for_tool(name: &str) -> Option<Self> {
         match name {
-            // core (6 — v0.7 B1 added memory_load_family as the always-on
+            // core (7 — v0.7 B1 added memory_load_family as the always-on
             // alternative to memory_recall when the agent already knows
-            // which family taxonomy it wants).
+            // which family taxonomy it wants; v0.7 B2 added
+            // memory_smart_load as the intent-routed front door that
+            // picks the best family for the caller).
             "memory_store" | "memory_recall" | "memory_list" | "memory_get" | "memory_search"
-            | "memory_load_family" => Some(Self::Core),
+            | "memory_load_family" | "memory_smart_load" => Some(Self::Core),
             // lifecycle (5)
             "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
             | "memory_promote" => Some(Self::Lifecycle),
@@ -206,8 +213,9 @@ impl Family {
     #[must_use]
     pub const fn expected_tool_count(self) -> usize {
         match self {
-            // Core: 5 baseline + memory_load_family (v0.7 B1) = 6.
-            Self::Core => 6,
+            // Core: 5 baseline + memory_load_family (v0.7 B1) +
+            // memory_smart_load (v0.7 B2) = 7.
+            Self::Core => 7,
             Self::Lifecycle | Self::Meta => 5,
             // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) +
             // memory_find_paths (v0.7 J7) = 11.
@@ -242,6 +250,11 @@ impl Family {
                 // v0.7 B1 — always-on alternative to memory_recall when
                 // the agent already knows the Family taxonomy it wants.
                 "memory_load_family",
+                // v0.7 B2 — intent-routed front door. Caller passes a
+                // free-text intent; the handler picks the best family
+                // from the cached descriptors and forwards to
+                // `memory_load_family`.
+                "memory_smart_load",
             ],
             Self::Lifecycle => &[
                 "memory_update",
@@ -340,9 +353,11 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// `core` — 6 tools (`store, recall, list, get, search, load_family`).
-    /// The new v0.6.4 default; v0.7 B1 added `memory_load_family` as the
-    /// always-on family loader. Registers exactly the `Core` family.
+    /// `core` — 7 tools (`store, recall, list, get, search,
+    /// load_family, smart_load`). The new v0.6.4 default; v0.7 B1
+    /// added `memory_load_family` as the always-on family loader and
+    /// v0.7 B2 added `memory_smart_load` as the intent-routed front
+    /// door. Registers exactly the `Core` family.
     ///
     /// **Design note (v0.6.4-002 hook):** `memory_capabilities` is
     /// **always-on** regardless of profile per RFC scenario S27. It is
@@ -358,9 +373,10 @@ impl Profile {
         }
     }
 
-    /// `graph` — core + graph. 17 tools (v0.7.0 I4 added `memory_replay`;
+    /// `graph` — core + graph. 18 tools (v0.7.0 I4 added `memory_replay`;
     /// v0.7 H4 added `memory_verify`; v0.7 B1 added `memory_load_family`
-    /// to core; v0.7 J7 added `memory_find_paths`).
+    /// to core; v0.7 B2 added `memory_smart_load` to core; v0.7 J7
+    /// added `memory_find_paths`).
     #[must_use]
     pub fn graph() -> Self {
         Self {
@@ -368,8 +384,9 @@ impl Profile {
         }
     }
 
-    /// `admin` — core + lifecycle + governance. 19 tools (v0.7 B1
-    /// added `memory_load_family` to core).
+    /// `admin` — core + lifecycle + governance. 20 tools (v0.7 B1
+    /// added `memory_load_family` to core; v0.7 B2 added
+    /// `memory_smart_load` to core).
     #[must_use]
     pub fn admin() -> Self {
         Self {
@@ -377,9 +394,10 @@ impl Profile {
         }
     }
 
-    /// `power` — core + power. 14 tools (v0.7 B1 added
-    /// `memory_load_family` to core; v0.7 K7 added the two
-    /// subscription-reliability tools to `Family::Power`).
+    /// `power` — core + power. 15 tools (v0.7 B1 added
+    /// `memory_load_family` to core; v0.7 B2 added `memory_smart_load`
+    /// to core; v0.7 K7 added the two subscription-reliability tools
+    /// to `Family::Power`).
     #[must_use]
     pub fn power() -> Self {
         Self {
@@ -387,10 +405,11 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 49 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `full` — every family. 50 tools (v0.6.3 baseline 43 + v0.7.0 I4
     /// `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1
-    /// `memory_load_family` + v0.7 K7 `memory_subscription_replay`
-    /// + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
+    /// `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7
+    /// `memory_subscription_replay` + `memory_subscription_dlq_list` +
+    /// v0.7 J7 `memory_find_paths`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -569,15 +588,15 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_49() {
+    fn family_expected_tool_counts_sum_to_50() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 49,
+            total, 50,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
-             `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 K7 \
-             `memory_subscription_replay` + `memory_subscription_dlq_list` \
-             + v0.7 J7 `memory_find_paths` \
-             = 49. If this drifts, update Family::expected_tool_count and \
+             `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
+             `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
+             + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` \
+             = 50. If this drifts, update Family::expected_tool_count and \
              the family map docs together."
         );
     }
@@ -613,10 +632,12 @@ mod tests {
     // ---------- Profile named ----------
 
     #[test]
-    fn profile_core_has_six_tools() {
+    fn profile_core_has_seven_tools() {
         let p = Profile::core();
-        // v0.7 B1 — Core now ships 6 tools (5 baseline + memory_load_family).
-        assert_eq!(p.expected_tool_count(), 6);
+        // v0.7 B1 — Core ships memory_load_family; v0.7 B2 — Core
+        // ships memory_smart_load. Total 7 (5 baseline + 2 always-on
+        // discovery tools).
+        assert_eq!(p.expected_tool_count(), 7);
         assert!(p.includes(Family::Core));
         // meta is NOT in core's family list — `memory_capabilities`
         // is bootstrapped separately as always-on per RFC S27. The
@@ -627,45 +648,48 @@ mod tests {
     }
 
     #[test]
-    fn profile_graph_has_seventeen_tools() {
+    fn profile_graph_has_eighteen_tools() {
         let p = Profile::graph();
         // v0.7 J7 — Graph now ships 11 tools (8 baseline + memory_replay
         // [I4] + memory_verify [H4] + memory_find_paths [J7]); v0.7 B1
-        // added memory_load_family to core (6 instead of 5).
-        assert_eq!(p.expected_tool_count(), 6 + 11);
+        // added memory_load_family to core; v0.7 B2 added
+        // memory_smart_load to core (7 instead of 5).
+        assert_eq!(p.expected_tool_count(), 7 + 11);
         assert!(p.includes(Family::Graph));
     }
 
     #[test]
-    fn profile_admin_has_nineteen_tools() {
+    fn profile_admin_has_twenty_tools() {
         let p = Profile::admin();
-        // admin = core (6, with v0.7 B1 memory_load_family) + lifecycle
-        // (5) + governance (8) = 19. Graph isn't in admin so the v0.7.0
-        // I4 memory_replay addition doesn't change this count.
-        assert_eq!(p.expected_tool_count(), 6 + 5 + 8);
+        // admin = core (7, with v0.7 B1 memory_load_family + v0.7 B2
+        // memory_smart_load) + lifecycle (5) + governance (8) = 20.
+        // Graph isn't in admin so the v0.7.0 I4 memory_replay addition
+        // doesn't change this count.
+        assert_eq!(p.expected_tool_count(), 7 + 5 + 8);
     }
 
     #[test]
-    fn profile_power_has_fourteen_tools() {
+    fn profile_power_has_fifteen_tools() {
         let p = Profile::power();
-        // v0.7 B1 — Core now ships 6 tools (was 5).
+        // v0.7 B1 + v0.7 B2 — Core now ships 7 tools (was 5).
         // v0.7 K7 — Power now ships 8 tools (was 6) after the
         // subscription-reliability pair landed.
-        assert_eq!(p.expected_tool_count(), 6 + 8);
+        assert_eq!(p.expected_tool_count(), 7 + 8);
     }
 
     #[test]
-    fn profile_full_has_forty_nine_tools() {
+    fn profile_full_has_fifty_tools() {
         let p = Profile::full();
-        // v0.7 J7 (post-K7) — full surface = 43 baseline + memory_replay (I4) +
-        // memory_verify (H4) + memory_load_family (B1) +
-        // memory_subscription_replay (K7) + memory_subscription_dlq_list (K7) +
-        // memory_find_paths (J7) = 49.
-        assert_eq!(p.expected_tool_count(), 49);
+        // v0.7 B2 (post-J7) — full surface = 43 baseline +
+        // memory_replay (I4) + memory_verify (H4) + memory_load_family
+        // (B1) + memory_smart_load (B2) + memory_subscription_replay
+        // (K7) + memory_subscription_dlq_list (K7) + memory_find_paths
+        // (J7) = 50.
+        assert_eq!(p.expected_tool_count(), 50);
 
         // The K7 additions live in Family::Power (operator/governance),
         // so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 6 + 8);
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 8);
     }
 
     // ---------- Profile::parse ----------
@@ -687,14 +711,15 @@ mod tests {
 
     #[test]
     fn parse_custom_comma_list_dedup() {
-        // `core,graph` → core (6, after v0.7 B1) + graph (11, after v0.7
-        // J7) = 17 tools. Meta is NOT included — `memory_capabilities`
-        // is always-on bootstrapped outside the family map (v0.6.4-002).
+        // `core,graph` → core (7, after v0.7 B1 + B2) + graph (11,
+        // after v0.7 J7) = 18 tools. Meta is NOT included —
+        // `memory_capabilities` is always-on bootstrapped outside the
+        // family map (v0.6.4-002).
         let p = Profile::parse("core,graph").unwrap();
         assert!(p.includes(Family::Core));
         assert!(!p.includes(Family::Meta));
         assert!(p.includes(Family::Graph));
-        assert_eq!(p.expected_tool_count(), 17);
+        assert_eq!(p.expected_tool_count(), 18);
     }
 
     #[test]
@@ -787,6 +812,8 @@ mod tests {
             "memory_search",
             // core (v0.7 B1 addition)
             "memory_load_family",
+            // core (v0.7 B2 addition)
+            "memory_smart_load",
             // lifecycle
             "memory_update",
             "memory_delete",
@@ -844,11 +871,12 @@ mod tests {
         ];
         assert_eq!(
             baseline.len(),
-            49,
+            50,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
+             1 (v0.7 B2 memory_smart_load) + \
              2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
-             1 (v0.7 J7 memory_find_paths) = 49"
+             1 (v0.7 J7 memory_find_paths) = 50"
         );
         for name in baseline {
             assert!(

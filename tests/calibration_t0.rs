@@ -60,7 +60,7 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    // 42 = 48 user-relevant tools − 6 core. (48 = 49 total tools − 1
+    // 42 = 49 user-relevant tools − 7 core. (49 = 50 total tools − 1
     // always-on bootstrap.) The bootstrap (`memory_capabilities`) is
     // excluded from BOTH the loaded and the unloaded count in
     // `to_describe_to_user` (it's plumbing, not a feature). Total
@@ -69,10 +69,11 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // `memory_verify`; to 46 in v0.7 B1 — Family::Core gained
     // `memory_load_family`; to 48 in v0.7 K7 — Family::Power gained
     // `memory_subscription_replay` + `memory_subscription_dlq_list`;
-    // to 49 in v0.7 J7 — Family::Graph gained `memory_find_paths`.
-    // Loaded under core bumped from 5 to 6 with B1, so the preview
-    // now overflows the 5-name cap (ends in ", ...").
-    let expected = "I can directly use 6 memory tools right now \
+    // to 49 in v0.7 J7 — Family::Graph gained `memory_find_paths`;
+    // to 50 in v0.7 B2 — Family::Core gained `memory_smart_load`.
+    // Loaded under core bumped from 5 to 6 with B1 then to 7 with B2,
+    // so the preview now overflows the 5-name cap (ends in ", ...").
+    let expected = "I can directly use 7 memory tools right now \
                     (store, recall, list, get, search, ...). 42 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
@@ -104,7 +105,7 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use all 48 memory tools right now \
+    let expected = "I can directly use all 49 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -118,12 +119,13 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 
 // ---------------------------------------------------------------------------
 // T0-A2-GRAPH — `to_describe_to_user` on `--profile graph` uses the
-// preview-with-ellipsis form (5 of 17 loaded shown + ", ..."). Loaded
+// preview-with-ellipsis form (5 of 18 loaded shown + ", ..."). Loaded
 // bumped from 13 to 14 in v0.7.0 I4 — Family::Graph gained
 // `memory_replay`; to 15 in v0.7 H4 — Family::Graph gained
 // `memory_verify`; to 16 in v0.7 B1 — Family::Core gained
 // `memory_load_family`; to 17 in v0.7 J7 — Family::Graph gained
-// `memory_find_paths`.
+// `memory_find_paths`; to 18 in v0.7 B2 — Family::Core gained
+// `memory_smart_load`.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -132,7 +134,7 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use 17 memory tools right now \
+    let expected = "I can directly use 18 memory tools right now \
                     (store, recall, list, get, search, ...). 31 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \

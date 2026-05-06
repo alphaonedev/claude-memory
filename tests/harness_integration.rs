@@ -136,7 +136,7 @@ fn round_trip(
 /// We re-pin it here so a regression in the harness path that
 /// accidentally swapped the profile or stripped the field would
 /// surface as a D4 failure too (defense in depth).
-const CORE_DESCRIBE_OPENING: &str = "I can directly use 6 memory tools right now (";
+const CORE_DESCRIBE_OPENING: &str = "I can directly use 7 memory tools right now (";
 
 // ---------------------------------------------------------------------------
 // D4 — five harness identity tests + one negative.
