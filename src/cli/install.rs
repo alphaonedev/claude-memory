@@ -327,7 +327,162 @@ pub fn run(args: &InstallArgs, out: &mut CliOutput<'_>) -> Result<()> {
     if let Some(b) = backup_path {
         writeln!(out.stdout, "ai-memory install: backup at {}", b.display())?;
     }
+
+    // v0.7-D3: emit the install-time system-prompt snippet alongside the
+    // managed-block write. Skip on uninstall — there is nothing to teach
+    // the agent once the server is gone. Failures here are surfaced as
+    // a stderr warning, not a hard error: the install itself succeeded
+    // and operators can re-derive the snippet from the docs.
+    if !t_args.uninstall {
+        match write_system_prompt_snippet(target) {
+            Ok(snippet_path) => {
+                writeln!(
+                    out.stderr,
+                    "ai-memory install: wrote system-prompt snippet to {}. \
+                     Paste into your {} system instructions.",
+                    snippet_path.display(),
+                    target.name(),
+                )?;
+            }
+            Err(e) => {
+                writeln!(
+                    out.stderr,
+                    "ai-memory install: warning — could not write system-prompt snippet: {e}"
+                )?;
+            }
+        }
+    }
+
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// v0.7-D3 — install-time system-prompt snippet
+// ---------------------------------------------------------------------------
+//
+// Each harness gets a small (≤200 tokens) Markdown snippet operators can
+// paste into the harness's system-prompt slot. Content teaches the agent
+// the four anchors the v0.7 surface needs: capability discovery
+// (`memory_capabilities`), pre-load (`memory_load_family`), R5 hook
+// auto-extraction, and signed-link `attest_level`.
+//
+// Snippet bodies are static — no templating beyond `<harness>` literal
+// substitution — so they are safe to embed verbatim in tests as anchor
+// strings. The snippet is keyed by `Target` so the wording can mention
+// harness-specific UX cues (e.g. claude-code's `ToolSearch`).
+//
+// The snippet path defaults to
+// `<config_dir>/ai-memory/system-prompt-<harness>.md` (Linux:
+// `~/.config/ai-memory/...`, macOS:
+// `~/Library/Application Support/ai-memory/...`). Tests override the base
+// directory via the `AI_MEMORY_SYSTEM_PROMPT_DIR` env var so they never
+// touch the operator's real config tree.
+
+/// Generate the system-prompt snippet body for `target`.
+///
+/// Bodies are crafted to stay ≤200 tokens (≈800 chars) while covering all
+/// four required anchors: `memory_capabilities`, `memory_load_family`,
+/// the R5 transcript hook, and `attest_level` on signed links.
+fn snippet_body(target: Target) -> String {
+    let harness = target.name();
+    // The narrow, harness-specific bullet sits at the top so the four
+    // shared anchors below are identical across variants. This keeps
+    // snippet maintenance to one place when the v0.7 surface evolves.
+    let harness_hint: &str = match target {
+        Target::ClaudeCode => {
+            "Claude Code supports deferred-tool registration via ToolSearch \
+             — new tools surface mid-session."
+        }
+        Target::Cursor => {
+            "Cursor eager-loads tools; call this in your first turn so its \
+             tools are visible."
+        }
+        Target::Cline | Target::Continue => {
+            "VS Code MCP clients eager-load tools; call this in your first turn."
+        }
+        Target::Codex => "Codex CLI eager-loads tools; call this in your first turn.",
+        Target::Windsurf | Target::GrokCli | Target::GeminiCli | Target::ClaudeDesktop => {
+            "This harness eager-loads tools; call this in your first turn."
+        }
+        Target::Openclaw => "OpenClaw eager-loads tools; call this in your first turn.",
+    };
+
+    format!(
+        "# ai-memory system prompt — {harness}\n\
+         \n\
+         You have persistent memory via the `ai-memory` MCP server.\n\
+         \n\
+         1. Call `memory_capabilities` first. It returns the live tool \
+         surface and a pre-computed `to_describe_to_user` summary. Trust \
+         it over any cached belief.\n\
+         2. Use `memory_load_family` to pre-load the context family you \
+         need (`core`, `recall`, `link`, `governance`). {harness_hint}\n\
+         3. Transcripts auto-extract via the R5 hook after each turn — \
+         do not call `memory_store` for chat history; extract only \
+         durable insights.\n\
+         4. Signed links carry `attest_level` \
+         (`unsigned`/`self_attested`/`peer_verified`). Treat anything \
+         below `peer_verified` as advisory.\n",
+    )
+}
+
+/// Resolve the snippet base directory. Tests override via
+/// `AI_MEMORY_SYSTEM_PROMPT_DIR`; production uses
+/// `dirs::config_dir().join("ai-memory")`. Under `cfg(test)` the default
+/// also routes to a per-process tempdir so unit tests calling `run()` in
+/// apply mode do not write to the operator's real config tree.
+fn snippet_base_dir() -> Result<PathBuf> {
+    if let Ok(v) = std::env::var("AI_MEMORY_SYSTEM_PROMPT_DIR")
+        && !v.is_empty()
+    {
+        return Ok(PathBuf::from(v));
+    }
+    #[cfg(test)]
+    {
+        return Ok(test_default_snippet_dir());
+    }
+    #[cfg(not(test))]
+    {
+        let base = dirs::config_dir().ok_or_else(|| {
+            anyhow!(
+                "OS did not advertise a config directory; \
+                 set AI_MEMORY_SYSTEM_PROMPT_DIR to choose where the snippet is written"
+            )
+        })?;
+        Ok(base.join("ai-memory"))
+    }
+}
+
+/// `cfg(test)`-only: per-process tempdir backing the default snippet
+/// path so tests never write into `~/.config/ai-memory/`.
+#[cfg(test)]
+fn test_default_snippet_dir() -> PathBuf {
+    use std::sync::OnceLock;
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        let tmp = tempfile::tempdir().expect("tempdir for snippet test default");
+        let p = tmp.path().to_path_buf();
+        // Leak the TempDir handle: we want this path to live for the
+        // entire test binary's lifetime, not be cleaned up between
+        // tests. The OS sweeps `/tmp` on reboot.
+        std::mem::forget(tmp);
+        p
+    })
+    .clone()
+}
+
+/// Write the system-prompt snippet for `target` to disk and return the
+/// path. Creates parent directories as needed; overwrites any existing
+/// file (snippet bodies are deterministic, so this is idempotent).
+fn write_system_prompt_snippet(target: Target) -> Result<PathBuf> {
+    let dir = snippet_base_dir()?;
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("creating snippet directory {}", dir.display()))?;
+    let path = dir.join(format!("system-prompt-{}.md", target.name()));
+    let body = snippet_body(target);
+    std::fs::write(&path, body)
+        .with_context(|| format!("writing snippet to {}", path.display()))?;
+    Ok(path)
 }
 
 // ---------------------------------------------------------------------------
@@ -1825,5 +1980,237 @@ mod tests {
         assert_eq!(parsed["unrelated"], 42);
         // ai-memory entry written.
         assert!(parsed["mcpServers"]["ai-memory"].is_object());
+    }
+
+    // --------------------------------------------------------------
+    // v0.7-D3 — install-time system-prompt snippet
+    //
+    // These tests serialize on a module-local Mutex so they can each
+    // point `AI_MEMORY_SYSTEM_PROMPT_DIR` at their own tempdir without
+    // racing other concurrent tests. Other apply-tests in this module
+    // rely on the `cfg(test)` default (a per-process tempdir) so they
+    // never touch the operator's real `~/.config/ai-memory/`.
+    // --------------------------------------------------------------
+
+    /// Serialise env-var mutation across snippet tests.
+    fn snippet_env_lock() -> &'static std::sync::Mutex<()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Run the snippet emit path for `target` against an isolated
+    /// tempdir and return `(snippet_path, snippet_body)`. The tempdir
+    /// is leaked so the snippet file remains on disk for the caller
+    /// to inspect after the helper returns; the OS sweeps `/tmp` on
+    /// reboot.
+    fn emit_snippet_isolated(target: Target) -> (PathBuf, String) {
+        let _g = snippet_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let tmp_path = tmp.path().to_path_buf();
+        // SAFETY: env-var mutation is serialised by `snippet_env_lock`
+        // for the duration of this helper.
+        unsafe {
+            std::env::set_var("AI_MEMORY_SYSTEM_PROMPT_DIR", &tmp_path);
+        }
+        let snippet_path = write_system_prompt_snippet(target).expect("snippet write");
+        let body = fs::read_to_string(&snippet_path).expect("read snippet");
+        // SAFETY: see above — still inside the lock guard's scope.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_SYSTEM_PROMPT_DIR");
+        }
+        // Leak the TempDir handle so the snippet file outlives this
+        // helper — callers may re-check `path.exists()`. OS sweeps
+        // `/tmp` on reboot.
+        std::mem::forget(tmp);
+        (snippet_path, body)
+    }
+
+    /// Every snippet must mention all four anchor strings the v0.7
+    /// surface depends on, plus the harness name verbatim.
+    fn assert_snippet_anchors(target: Target, body: &str) {
+        let harness = target.name();
+        assert!(
+            body.contains(harness),
+            "snippet for {harness} missing harness literal; body was:\n{body}",
+        );
+        for anchor in [
+            "memory_capabilities",
+            "memory_load_family",
+            "attest_level",
+            // R5 transcript hook — wording is "R5 hook" in the body.
+            "R5 hook",
+        ] {
+            assert!(
+                body.contains(anchor),
+                "snippet for {harness} missing anchor `{anchor}`; body was:\n{body}",
+            );
+        }
+    }
+
+    /// ≤200 token budget per spec. We use a coarse char-count proxy
+    /// (4 chars/token is the standard rule of thumb for English BPE),
+    /// so 200 tokens ≈ 800 chars. The actual cl100k-base count for
+    /// English prose with code-fence backticks runs ~10–15% lower than
+    /// chars/4, so a 800-char ceiling under-estimates the budget
+    /// conservatively.
+    fn assert_snippet_token_budget(body: &str) {
+        let approx_tokens = body.chars().count() / 4;
+        assert!(
+            approx_tokens <= 200,
+            "snippet exceeds 200-token budget (≈{approx_tokens} tokens, {} chars)",
+            body.chars().count(),
+        );
+    }
+
+    #[test]
+    fn snippet_claude_code_has_anchors_and_under_budget() {
+        let (path, body) = emit_snippet_isolated(Target::ClaudeCode);
+        assert!(path.ends_with("system-prompt-claude-code.md"));
+        assert_snippet_anchors(Target::ClaudeCode, &body);
+        assert_snippet_token_budget(&body);
+        // Claude Code's harness-specific bullet calls out ToolSearch.
+        assert!(
+            body.contains("ToolSearch"),
+            "claude-code snippet should mention ToolSearch (deferred-tool registration)",
+        );
+    }
+
+    #[test]
+    fn snippet_cursor_has_anchors_and_under_budget() {
+        let (path, body) = emit_snippet_isolated(Target::Cursor);
+        assert!(path.ends_with("system-prompt-cursor.md"));
+        assert_snippet_anchors(Target::Cursor, &body);
+        assert_snippet_token_budget(&body);
+    }
+
+    #[test]
+    fn snippet_codex_has_anchors_and_under_budget() {
+        let (path, body) = emit_snippet_isolated(Target::Codex);
+        assert!(path.ends_with("system-prompt-codex.md"));
+        assert_snippet_anchors(Target::Codex, &body);
+        assert_snippet_token_budget(&body);
+    }
+
+    #[test]
+    fn snippet_continue_has_anchors_and_under_budget() {
+        let (path, body) = emit_snippet_isolated(Target::Continue);
+        assert!(path.ends_with("system-prompt-continue.md"));
+        assert_snippet_anchors(Target::Continue, &body);
+        assert_snippet_token_budget(&body);
+    }
+
+    #[test]
+    fn snippet_every_target_emits_under_budget() {
+        // The full per-target sweep — every harness gets its own
+        // snippet file, each within budget and carrying every anchor.
+        for target in [
+            Target::ClaudeCode,
+            Target::Openclaw,
+            Target::Cursor,
+            Target::Cline,
+            Target::Continue,
+            Target::Windsurf,
+            Target::ClaudeDesktop,
+            Target::Codex,
+            Target::GrokCli,
+            Target::GeminiCli,
+        ] {
+            let (path, body) = emit_snippet_isolated(target);
+            assert!(
+                path.exists(),
+                "snippet file for {} not created",
+                target.name(),
+            );
+            assert_snippet_anchors(target, &body);
+            assert_snippet_token_budget(&body);
+        }
+    }
+
+    #[test]
+    fn snippet_emitted_during_install_apply_via_env_override() {
+        // End-to-end: invoking `run()` in apply mode for a target
+        // produces the snippet file at the env-overridden path and
+        // logs the "wrote system-prompt snippet" line to stderr.
+        let _g = snippet_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let snippet_dir = tempfile::tempdir().expect("snippet tempdir");
+        // SAFETY: mutation serialised by snippet_env_lock for this
+        // test's duration.
+        unsafe {
+            std::env::set_var("AI_MEMORY_SYSTEM_PROMPT_DIR", snippet_dir.path());
+        }
+
+        let mut env = TestEnv::fresh();
+        let cfg = config_path(&env, "settings.json");
+        seed(&cfg, "{}\n");
+        run(
+            &args_for_apply(Target::ClaudeCode, cfg.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+
+        let stderr = env.stderr_str();
+        assert!(
+            stderr.contains("system-prompt snippet"),
+            "stderr should announce snippet write; got:\n{stderr}",
+        );
+        assert!(
+            stderr.contains("claude-code"),
+            "stderr should mention the harness name; got:\n{stderr}",
+        );
+
+        let snippet = snippet_dir.path().join("system-prompt-claude-code.md");
+        assert!(
+            snippet.exists(),
+            "snippet should exist at {}",
+            snippet.display(),
+        );
+        let body = fs::read_to_string(&snippet).unwrap();
+        assert_snippet_anchors(Target::ClaudeCode, &body);
+
+        unsafe {
+            std::env::remove_var("AI_MEMORY_SYSTEM_PROMPT_DIR");
+        }
+        drop(snippet_dir);
+    }
+
+    #[test]
+    fn snippet_not_emitted_on_uninstall() {
+        // Uninstall path skips the snippet write — there's nothing
+        // to teach the agent once the server is gone.
+        let _g = snippet_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let snippet_dir = tempfile::tempdir().expect("snippet tempdir");
+        unsafe {
+            std::env::set_var("AI_MEMORY_SYSTEM_PROMPT_DIR", snippet_dir.path());
+        }
+
+        let mut env = TestEnv::fresh();
+        let cfg = config_path(&env, "settings.json");
+        // Seed an existing managed block so uninstall has work to do.
+        seed(&cfg, "{}\n");
+        run(
+            &args_for_apply(Target::ClaudeCode, cfg.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        // Reset stderr capture so we only see the uninstall-phase output.
+        env.stderr.clear();
+
+        // Now uninstall.
+        run(
+            &args_for_uninstall_apply(Target::ClaudeCode, cfg.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        let stderr = env.stderr_str();
+        assert!(
+            !stderr.contains("system-prompt snippet"),
+            "uninstall must not announce a snippet write; got:\n{stderr}",
+        );
+
+        unsafe {
+            std::env::remove_var("AI_MEMORY_SYSTEM_PROMPT_DIR");
+        }
+        drop(snippet_dir);
     }
 }
