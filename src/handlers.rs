@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::config::{ResolvedTtl, TierConfig};
@@ -83,14 +83,23 @@ pub struct AppState {
     /// carry the same signing identity.
     pub active_keypair: Arc<Option<crate::identity::keypair::AgentKeypair>>,
     /// v0.7.0 B3 — pre-computed embeddings for each [`Family`]
-    /// descriptor. Built once at boot from
+    /// descriptor. Filled asynchronously after boot from
     /// [`family_descriptors`] and reused by B2's
     /// `memory_smart_load(intent)` to do a fast cosine match between
-    /// an intent string and the eight family descriptors. When the
-    /// embedder is unavailable (e.g., `--profile core` keyword tier,
-    /// or no model loaded) this is `Arc::new(vec![])` and the smart
-    /// loader degrades to a non-embedding match path.
-    pub family_embeddings: Arc<Vec<(Family, Vec<f32>)>>,
+    /// an intent string and the eight family descriptors.
+    ///
+    /// **CI fix (v0.7 B3-fix)**: held behind `RwLock<Option<…>>` and
+    /// filled by a detached `tokio::spawn` task launched from
+    /// `bootstrap_serve` rather than synchronously on the serve
+    /// startup path. The original synchronous precompute would block
+    /// HTTP `/health` past the integration suite's 5 s
+    /// `wait_for_health` budget on CI runners without a pre-warmed
+    /// `hf-hub` model cache. `None` means "not yet populated"; an
+    /// empty inner `Vec` means "embedder unavailable, will never be
+    /// populated"; either case makes `best_family_match` return
+    /// `None` and B2's smart loader degrades to its non-embedding
+    /// match path.
+    pub family_embeddings: Arc<RwLock<Option<Vec<(Family, Vec<f32>)>>>>,
 }
 
 /// v0.7.0 B3 — canonical 1-2 sentence English descriptors for each
@@ -190,19 +199,28 @@ impl AppState {
 
     /// v0.7.0 B3 — embed `intent` and return the family-descriptor
     /// with the highest cosine similarity, paired with its score.
-    /// Returns `None` if the cache is empty (embedder unavailable at
-    /// boot) or if the embedder is unavailable now. This is the entry
-    /// point B2's `memory_smart_load(intent)` uses to pick which
-    /// family to load.
+    /// Returns `None` if the cache is not yet populated (the
+    /// asynchronous precompute task has not finished, or the
+    /// embedder is unavailable so the cache will never populate) or
+    /// if the embedder is unavailable now. This is the entry point
+    /// B2's `memory_smart_load(intent)` uses to pick which family to
+    /// load.
+    ///
+    /// Uses `try_read()` so a slow concurrent writer (the boot-time
+    /// precompute task still finalising its write) cannot block the
+    /// caller — on contention we degrade to `None` and the smart
+    /// loader's non-embedding fallback path takes over.
     #[must_use]
     pub fn best_family_match(&self, intent: &str) -> Option<(Family, f32)> {
-        if self.family_embeddings.is_empty() {
+        let guard = self.family_embeddings.try_read().ok()?;
+        let cache = guard.as_ref()?;
+        if cache.is_empty() {
             return None;
         }
         let embedder = self.embedder.as_ref().as_ref()?;
         let intent_vec = embedder.embed(intent).ok()?;
         let mut best: Option<(Family, f32)> = None;
-        for (family, descriptor_vec) in self.family_embeddings.iter() {
+        for (family, descriptor_vec) in cache.iter() {
             let score = Embedder::cosine_similarity(&intent_vec, descriptor_vec);
             match best {
                 Some((_, prev)) if prev >= score => {}
@@ -5470,7 +5488,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
-            family_embeddings: Arc::new(Vec::new()),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         }
     }
 
@@ -5968,7 +5986,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
-            family_embeddings: Arc::new(Vec::new()),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -13670,7 +13688,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
-            family_embeddings: Arc::new(Vec::new()),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         }
     }
 

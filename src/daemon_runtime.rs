@@ -1449,24 +1449,55 @@ pub async fn bootstrap_serve(
     // so a malformed keypair file doesn't take down the daemon.
     let active_keypair = load_active_keypair_for_serve();
 
-    // v0.7.0 B3 — pre-compute the family-descriptor embedding cache
-    // before moving the embedder into the AppState's Arc<Option<...>>.
-    // When the embedder is unavailable (keyword tier or model load
-    // failure), `precompute_family_embeddings` returns an empty Vec
-    // and boot continues; B2's `memory_smart_load` falls back to a
-    // non-embedding path in that case. See AppState::family_embeddings
-    // for the runtime contract.
-    let family_embeddings = AppState::precompute_family_embeddings(embedder.as_ref());
-    if !family_embeddings.is_empty() {
-        tracing::info!(
-            "B3: pre-computed {} family-descriptor embeddings",
-            family_embeddings.len(),
-        );
+    // v0.7.0 B3-fix — precompute the family-descriptor embedding
+    // cache OFF the serve startup path. The original implementation
+    // called `AppState::precompute_family_embeddings` synchronously
+    // here, but `Embedder::embed` blocks on a first-use `hf-hub`
+    // model download in CI environments without a pre-warmed cache,
+    // pushing HTTP `/health` past the integration suite's 5 s
+    // `wait_for_health` budget on Linux, macOS, and Windows runners.
+    //
+    // Fix: hand the cache cell to `AppState` already-allocated as
+    // `RwLock<None>`, then spawn a detached task (CPU-bound work
+    // routed through `spawn_blocking`) that fills it when the
+    // embedder returns. `best_family_match` returns `None` until the
+    // task completes, and B2's smart loader degrades to its
+    // non-embedding match path. The `JoinHandle` is parked on
+    // `task_handles` so daemon shutdown aborts the precompute if
+    // it's still in flight.
+    let family_embeddings: Arc<
+        tokio::sync::RwLock<Option<Vec<(crate::profile::Family, Vec<f32>)>>>,
+    > = Arc::new(tokio::sync::RwLock::new(None));
+    let embedder_arc = Arc::new(embedder);
+    {
+        let cache = family_embeddings.clone();
+        let embedder_for_task = embedder_arc.clone();
+        task_handles.push(tokio::spawn(async move {
+            let computed = tokio::task::spawn_blocking(move || {
+                AppState::precompute_family_embeddings(embedder_for_task.as_ref().as_ref())
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "B3: family-descriptor precompute task panicked; \
+                     family_embeddings will stay empty",
+                );
+                Vec::new()
+            });
+            if !computed.is_empty() {
+                tracing::info!(
+                    "B3: pre-computed {} family-descriptor embeddings (async)",
+                    computed.len(),
+                );
+            }
+            *cache.write().await = Some(computed);
+        }));
     }
 
     let app_state = AppState {
         db: db_state.clone(),
-        embedder: Arc::new(embedder),
+        embedder: embedder_arc,
         vector_index: Arc::new(Mutex::new(vector_index)),
         federation: Arc::new(federation),
         tier_config: Arc::new(tier_config),
@@ -1474,7 +1505,7 @@ pub async fn bootstrap_serve(
         profile: Arc::new(resolved_profile),
         mcp_config: Arc::new(mcp_config_for_http),
         active_keypair: Arc::new(active_keypair),
-        family_embeddings: Arc::new(family_embeddings),
+        family_embeddings,
     };
 
     // Automatic GC.
@@ -2179,7 +2210,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
-            family_embeddings: Arc::new(Vec::new()),
+            family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
         }
     }
 
@@ -2680,10 +2711,13 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Four task handles spawned (gc + wal_checkpoint + v0.7 K2
+        // Five task handles spawned (gc + wal_checkpoint + v0.7 K2
         // pending_actions timeout sweep + v0.7 I3 transcript
-        // archive→prune lifecycle sweep).
-        assert_eq!(bs.task_handles.len(), 4);
+        // archive→prune lifecycle sweep + v0.7 B3-fix family-
+        // descriptor embedding precompute that was moved off the
+        // serve startup path to fix the CI `wait_for_health`
+        // regression).
+        assert_eq!(bs.task_handles.len(), 5);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();
