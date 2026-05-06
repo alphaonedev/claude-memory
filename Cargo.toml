@@ -221,6 +221,19 @@ libc = "0.2"
 name = "recall"
 harness = false
 
+# v0.7.0 D1 — cross-harness latency benchmark. Spawns the MCP stdio
+# server with each of the four primary harnesses' clientInfo.name
+# strings (`claude-code`, `cursor`, `vscode-anthropic`, `unknown`),
+# measures `memory_capabilities` + `memory_recall` p50/p95/p99 per
+# harness, writes `target/bench/harness-cross.json` and prints a
+# markdown table. Fails on a 200ms p95 overshoot — loose budget; the
+# strict 50ms recall p95 stays in `recall.rs`. Not on the required-
+# checks list (per the D1 task spec); run manually before release with
+# `cargo bench --bench harness_bench`.
+[[bench]]
+name = "harness_bench"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
