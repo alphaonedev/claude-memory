@@ -150,7 +150,89 @@ fn audit_emit_for_mcp_dispatch(
 /// an existing tool's shape changes in a breaking way (renamed params,
 /// tightened schemas, removed options). Adding a new tool is additive
 /// and does NOT require a bump. Ultrareview #351.
-const TOOLS_VERSION: &str = "2026-04-26";
+///
+/// v0.7 C4 — bumped to `2026-05-06` because `tools/list` now ships
+/// the trimmed schema by default (optional params hidden unless the
+/// caller passes `verbose=true` to `memory_capabilities`). The wire
+/// shape of every existing tool's `inputSchema.properties` map is
+/// strictly a subset of the prior version, which is a breaking change
+/// for any client that was reading the long-tail optional params off
+/// `tools/list` directly. The full schema is still reachable via
+/// `memory_capabilities { family=<f>, include_schema=true, verbose=true }`.
+const TOOLS_VERSION: &str = "2026-05-06";
+
+/// v0.7 C4 — tools/list optional-param trim allow-list.
+///
+/// Optional properties (those NOT in `inputSchema.required`) are
+/// stripped from the default `tools/list` payload UNLESS their name
+/// appears here. This keeps the most-used knobs (`namespace`,
+/// `format`) visible by default — they're load-bearing for routing
+/// (namespace) and token-budget control (format=toon_compact) — while
+/// hiding the long tail (`confidence`, `priority`, `tier`, `metadata`,
+/// `agent_id`, `as_agent`, `since`/`until`, etc.).
+///
+/// Callers that need the full schema can pass `verbose=true` to
+/// `memory_capabilities` (see [`tool_definitions_for_profile`] +
+/// [`handle_capabilities_family`]).
+const C4_KEEP_OPTIONAL_PARAMS: &[&str] = &["namespace", "format"];
+
+/// v0.7 C4 — strip optional `inputSchema.properties` entries from a
+/// `tool_definitions()`-shaped value, keeping only required params and
+/// the [`C4_KEEP_OPTIONAL_PARAMS`] allow-list. Idempotent: re-running
+/// on an already-trimmed value is a no-op.
+///
+/// This is the load-bearing token-budget shrink for the default
+/// `tools/list` response. The full schema (every optional param,
+/// every default, every per-property description) is still available
+/// via `memory_capabilities { family=<f>, include_schema=true,
+/// verbose=true }` so power users / NHI agents that *do* want to set
+/// `confidence=0.7` or pin `tier="long"` can opt back in at runtime.
+///
+/// Returns the count of properties stripped across all tools, which
+/// is useful for telemetry / acceptance assertions in tests.
+pub(crate) fn trim_optional_params(defs: &mut Value) -> usize {
+    let Some(tools) = defs.get_mut("tools").and_then(Value::as_array_mut) else {
+        return 0;
+    };
+    let mut stripped = 0_usize;
+    for tool in tools.iter_mut() {
+        let Some(input_schema) = tool.get_mut("inputSchema") else {
+            continue;
+        };
+        // Snapshot the required list (clone the names) before we
+        // borrow `properties` mutably.
+        let required: Vec<String> = input_schema
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let Some(properties) = input_schema
+            .get_mut("properties")
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let drop_keys: Vec<String> = properties
+            .keys()
+            .filter(|k| {
+                !required.iter().any(|r| r == *k)
+                    && !C4_KEEP_OPTIONAL_PARAMS
+                        .iter()
+                        .any(|kept| *kept == k.as_str())
+            })
+            .cloned()
+            .collect();
+        for key in &drop_keys {
+            properties.remove(key);
+        }
+        stripped += drop_keys.len();
+    }
+    stripped
+}
 
 /// v0.6.4-006 — Build the `families` overview included in the v2
 /// `memory_capabilities` response. Each entry carries:
@@ -216,6 +298,15 @@ pub(crate) fn families_overview(profile: &crate::profile::Profile) -> Value {
 /// `verbose=true` without `include_schema=true` is a no-op (the
 /// name-list response carries no `docs`).
 ///
+/// v0.7 C4 — when `include_schema=true`, the returned tool schemas
+/// are now trimmed by default (optional params hidden) to match the
+/// `tools/list` shape. Pass `verbose=true` to opt into the full
+/// schema — every optional param, every default, every per-property
+/// description. The trim/keep allow-list lives in
+/// [`C4_KEEP_OPTIONAL_PARAMS`]. C2's `docs`-field strip and C4's
+/// `inputSchema.properties` trim are orthogonal and both governed by
+/// the same `verbose` flag.
+///
 /// Errors:
 /// - Unknown family → `Err` with diagnostic listing valid families.
 /// - Empty family name → `Err`.
@@ -280,7 +371,14 @@ pub fn handle_capabilities_family(
         crate::db::record_capability_expansion(conn, agent_id, family.name(), true, None);
     }
 
-    let defs = tool_definitions();
+    let mut defs = tool_definitions();
+    // v0.7 C4 — apply the optional-param trim BEFORE filtering by
+    // family when the caller did not opt into verbose. Trimming is a
+    // cheap pass over every tool's `inputSchema.properties` map, so
+    // running it pre-filter is fine and keeps the call site simple.
+    if !verbose {
+        trim_optional_params(&mut defs);
+    }
     let all_tools = defs
         .get("tools")
         .and_then(Value::as_array)
@@ -309,6 +407,7 @@ pub fn handle_capabilities_family(
             "schema_version": "v0.6.4-family-schemas-1",
             "family": family.name(),
             "loaded_under_active_profile": profile.includes(family),
+            "verbose": verbose,
             "tools": in_family,
         }))
     } else {
@@ -337,7 +436,36 @@ pub fn handle_capabilities_family(
 /// stays inside the C5 token budget. Callers that want the full docs
 /// invoke `memory_capabilities { family=<f>, verbose: true }`, which
 /// uses `tool_definitions()` directly without stripping.
+///
+/// v0.7 C4 — on top of the C2 docs strip, optional
+/// `inputSchema.properties` are also stripped from each tool by
+/// default (see [`trim_optional_params`]) so the `tools/list` payload
+/// fits the v0.7 token budget. Callers that need the full schema
+/// (every optional, every default) should call
+/// [`tool_definitions_for_profile_verbose`] or, on the wire, pass
+/// `verbose=true` to `memory_capabilities`. The C2 (description/docs)
+/// trim and the C4 (optional-params) trim are orthogonal — both run
+/// on the default path; both are skipped on the verbose path.
 pub fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
+    let mut defs = tool_definitions_for_profile_verbose(profile);
+    trim_optional_params(&mut defs);
+    defs
+}
+
+/// v0.7 C4 — full-schema (verbose) variant of
+/// [`tool_definitions_for_profile`]. Returns every optional param,
+/// every default, every per-property description. Used by the
+/// `memory_capabilities { verbose=true }` opt-in path so power users /
+/// NHI agents can still set the long-tail knobs (`confidence`,
+/// `priority`, `tier`, `metadata`, `agent_id`, …) without restarting
+/// the MCP server with a different profile.
+///
+/// v0.7 C2 — note that `docs` (long-form prose) is still stripped on
+/// the verbose path; the verbose flag controls whether
+/// `inputSchema.properties` is trimmed (C4), not the top-level `docs`
+/// field (C2). To recover the long-form docs, call
+/// [`tool_definitions`] directly.
+pub fn tool_definitions_for_profile_verbose(profile: &crate::profile::Profile) -> Value {
     let mut defs = tool_definitions();
     if let Some(arr) = defs.get_mut("tools").and_then(|t| t.as_array_mut()) {
         arr.retain(|tool| {
@@ -786,7 +914,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_capabilities",
                 "description": "Discover runtime capabilities; family=<name> drills in.",
-                "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget.",
+                "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget. v0.7 C4 — verbose=true also restores the FULL inputSchema (every optional param) instead of the trimmed default; the C2 docs strip and the C4 optional-params trim are both governed by the same `verbose` flag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -809,7 +937,7 @@ pub fn tool_definitions() -> Value {
                         "verbose": {
                             "type": "boolean",
                             "default": false,
-                            "description": "v0.7 C2 — when true (with family=<name>+include_schema=true), preserve the per-tool `docs` field (long-form description + examples) on each entry. When false (default), `docs` is stripped, matching the always-on `tools/list` shape."
+                            "description": "v0.7 C2/C4 — when true (with family=<name>+include_schema=true), preserve BOTH the per-tool `docs` field (long-form description + examples; C2) AND every optional `inputSchema` property (confidence, priority, tier, metadata, agent_id, …; C4). When false (default), `docs` is stripped and `inputSchema.properties` is trimmed to required + a small allow-list of high-traffic optionals (namespace, format), matching the always-on `tools/list` shape."
                         }
                     }
                 }
@@ -5671,10 +5799,12 @@ fn handle_request(
                             .get("include_schema")
                             .and_then(Value::as_bool)
                             .unwrap_or(false);
-                        // v0.7 C2 — opt into the long-form `docs`
-                        // field on each tool entry. Default false so
-                        // the family drilldown matches the
-                        // always-on `tools/list` shape.
+                        // v0.7 C2 + C4 — `verbose=true` opts the caller into
+                        // BOTH the long-form `docs` field on each tool entry
+                        // (C2) AND the full inputSchema with every optional
+                        // param (C4). Default is `false`, which strips `docs`
+                        // and trims optionals so the family drilldown matches
+                        // the shrunken `tools/list` shape.
                         let verbose = arguments
                             .get("verbose")
                             .and_then(Value::as_bool)
@@ -6366,8 +6496,14 @@ mod tests {
     #[test]
     fn handle_capabilities_family_include_schema_returns_full_definitions() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", true, false, &p, None, None, None).unwrap();
+        // v0.7 C2 + C4 — verbose=true preserves BOTH the long-form `docs`
+        // field (C2) AND every optional `inputSchema.properties` entry (C4).
+        // The legacy assertion (full definition shape present) still holds,
+        // and additionally `docs` is now expected on every tool that defines
+        // one.
+        let v = handle_capabilities_family("graph", true, true, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
+        assert_eq!(v["verbose"], true);
         let tools = v["tools"].as_array().unwrap();
         // v0.7 J7 — graph now ships 11 schemas (8 baseline + memory_replay
         // [I4] + memory_verify [H4] + memory_find_paths [J7]).
@@ -6377,11 +6513,6 @@ mod tests {
             assert!(tool.get("name").is_some(), "missing name");
             assert!(tool.get("description").is_some(), "missing description");
             assert!(tool.get("inputSchema").is_some(), "missing inputSchema");
-            // v0.7 C2 — `docs` stripped on the default (verbose=false) path.
-            assert!(
-                tool.get("docs").is_none(),
-                "docs must be omitted when verbose=false; got {tool}"
-            );
         }
     }
 
@@ -6419,6 +6550,170 @@ mod tests {
         let p = crate::profile::Profile::core();
         let err = handle_capabilities_family("", false, false, &p, None, None, None).unwrap_err();
         assert!(err.contains("must not be empty"));
+    }
+
+    // ---- v0.7 C4 — optional-param trim acceptance gates ----
+
+    /// `tools/list` payload (the default `tool_definitions_for_profile`
+    /// path) must hide every optional param except the C4 keep-list.
+    /// Concrete spot-check: `memory_store` keeps `title`, `content` (both
+    /// required) plus `namespace` (kept), and DROPS `confidence`,
+    /// `priority`, `tier`, `metadata`, `agent_id`, `source`, `scope`,
+    /// `tags`, `on_conflict`.
+    #[test]
+    fn tool_definitions_for_profile_strips_optional_params_by_default() {
+        let p = crate::profile::Profile::full();
+        let defs = tool_definitions_for_profile(&p);
+        let store = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "memory_store")
+            .expect("memory_store must be present in full profile");
+        let props = store["inputSchema"]["properties"].as_object().unwrap();
+        // Required + keep-list survives.
+        assert!(props.contains_key("title"), "title (required) dropped");
+        assert!(props.contains_key("content"), "content (required) dropped");
+        assert!(
+            props.contains_key("namespace"),
+            "namespace (C4 keep-list) dropped"
+        );
+        // Long-tail optionals must be gone.
+        for stripped in [
+            "confidence",
+            "priority",
+            "tier",
+            "metadata",
+            "agent_id",
+            "source",
+            "scope",
+            "tags",
+            "on_conflict",
+        ] {
+            assert!(
+                !props.contains_key(stripped),
+                "optional param `{stripped}` should have been stripped from default tools/list"
+            );
+        }
+    }
+
+    /// `tool_definitions_for_profile_verbose` keeps every optional —
+    /// this is the opt-in path callers reach via
+    /// `memory_capabilities { verbose=true, family=…, include_schema=true }`.
+    #[test]
+    fn tool_definitions_for_profile_verbose_keeps_every_optional() {
+        let p = crate::profile::Profile::full();
+        let defs = tool_definitions_for_profile_verbose(&p);
+        let store = defs["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "memory_store")
+            .expect("memory_store must be present");
+        let props = store["inputSchema"]["properties"].as_object().unwrap();
+        for kept in [
+            "title",
+            "content",
+            "namespace",
+            "confidence",
+            "priority",
+            "tier",
+            "metadata",
+            "agent_id",
+            "source",
+            "scope",
+            "tags",
+            "on_conflict",
+        ] {
+            assert!(
+                props.contains_key(kept),
+                "verbose path should preserve `{kept}`"
+            );
+        }
+    }
+
+    /// The `verbose=true` family path must round-trip every optional;
+    /// `verbose=false` (the default for `include_schema=true`) must
+    /// strip them. Anchors the wire-shape contract documented on
+    /// [`handle_capabilities_family`].
+    #[test]
+    fn handle_capabilities_family_verbose_toggles_optional_params() {
+        let p = crate::profile::Profile::full();
+        // verbose=false → trimmed schema for memory_store
+        let trimmed =
+            handle_capabilities_family("core", true, false, &p, None, None, None).unwrap();
+        assert_eq!(trimmed["verbose"], false);
+        let store_trimmed = trimmed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "memory_store")
+            .expect("memory_store in core family");
+        let props_trimmed = store_trimmed["inputSchema"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(!props_trimmed.contains_key("confidence"));
+        assert!(!props_trimmed.contains_key("priority"));
+        assert!(props_trimmed.contains_key("namespace"));
+        assert!(props_trimmed.contains_key("title"));
+
+        // verbose=true → full schema
+        let verbose = handle_capabilities_family("core", true, true, &p, None, None, None).unwrap();
+        assert_eq!(verbose["verbose"], true);
+        let store_verbose = verbose["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "memory_store")
+            .expect("memory_store in core family");
+        let props_verbose = store_verbose["inputSchema"]["properties"]
+            .as_object()
+            .unwrap();
+        assert!(props_verbose.contains_key("confidence"));
+        assert!(props_verbose.contains_key("priority"));
+        assert!(props_verbose.contains_key("metadata"));
+        assert!(props_verbose.contains_key("agent_id"));
+    }
+
+    /// `trim_optional_params` reports a positive count and is
+    /// idempotent — re-running on an already-trimmed value is a no-op.
+    #[test]
+    fn trim_optional_params_is_idempotent() {
+        let mut defs = tool_definitions();
+        let stripped_first = trim_optional_params(&mut defs);
+        assert!(
+            stripped_first > 0,
+            "first trim should strip a positive number of optionals"
+        );
+        let stripped_second = trim_optional_params(&mut defs);
+        assert_eq!(
+            stripped_second, 0,
+            "re-trim of an already-trimmed schema must be a no-op"
+        );
+    }
+
+    /// `tools/list` (full profile, trimmed) must be materially smaller
+    /// than the verbose payload. We assert >= 30% size reduction
+    /// because the long-tail optionals carry the bulk of the per-tool
+    /// description bytes (defaults, enums, prose). If this regresses,
+    /// the keep-list grew or the trimmer broke.
+    #[test]
+    fn c4_trim_shrinks_full_profile_payload_by_at_least_30_percent() {
+        let p = crate::profile::Profile::full();
+        let trimmed = tool_definitions_for_profile(&p);
+        let verbose = tool_definitions_for_profile_verbose(&p);
+        let trimmed_bytes = serde_json::to_string(&trimmed).unwrap().len();
+        let verbose_bytes = serde_json::to_string(&verbose).unwrap().len();
+        assert!(
+            trimmed_bytes < verbose_bytes,
+            "trimmed ({trimmed_bytes}B) must be smaller than verbose ({verbose_bytes}B)"
+        );
+        let saved_pct = (verbose_bytes - trimmed_bytes) as f64 / verbose_bytes as f64 * 100.0;
+        assert!(
+            saved_pct >= 30.0,
+            "C4 trim should save >=30% of full-profile bytes; got {saved_pct:.1}% \
+             (verbose={verbose_bytes}B, trimmed={trimmed_bytes}B)"
+        );
     }
 
     #[test]

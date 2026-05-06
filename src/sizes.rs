@@ -49,16 +49,39 @@ pub struct ToolSize {
     pub total_tokens: usize,
 }
 
-/// Runtime-computed table of every tool's tokenized schema cost.
+/// Runtime-computed table of every tool's tokenized schema cost
+/// **at the verbose ceiling** — every optional param, every default,
+/// every per-property description. This is the upper bound a host
+/// can ever pay (only reachable via
+/// `memory_capabilities { verbose=true, family=…, include_schema=true }`
+/// since v0.7 C4).
 ///
 /// Returns a static slice on every call after the first invocation
 /// (which performs the one-time BPE pass).
 pub fn tool_sizes() -> &'static [ToolSize] {
     static TABLE: OnceLock<Vec<ToolSize>> = OnceLock::new();
-    TABLE.get_or_init(compute_table).as_slice()
+    TABLE.get_or_init(|| compute_table(false)).as_slice()
 }
 
-/// Highest-cost tool in the table. Used by the CI gate.
+/// v0.7 C4 — runtime-computed table of every tool's tokenized schema
+/// cost **as actually shipped on `tools/list`**. Optional params are
+/// stripped (per [`crate::mcp::trim_optional_params`]); only required
+/// params + the C4 keep-list (`namespace`, `format`) remain. This is
+/// what an MCP host pays per request on the default code path.
+///
+/// v0.7 C2 rebase note (2026-05-06): the wire payload also strips the
+/// per-tool `docs` field (long-form prose) and per-property
+/// `description` strings via [`crate::mcp::strip_docs_from_tools`],
+/// so this table mirrors that double-strip. Keeping the model in
+/// lockstep with `tool_definitions_for_profile` is the only way the
+/// `trimmed_full_profile_total_tokens()` reading agrees with the C5
+/// budget gate (`tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`).
+pub fn trimmed_tool_sizes() -> &'static [ToolSize] {
+    static TABLE: OnceLock<Vec<ToolSize>> = OnceLock::new();
+    TABLE.get_or_init(|| compute_table(true)).as_slice()
+}
+
+/// Highest-cost tool in the verbose table. Used by the CI gate.
 pub fn tool_sizes_under_ci_gate() -> usize {
     tool_sizes()
         .iter()
@@ -67,25 +90,49 @@ pub fn tool_sizes_under_ci_gate() -> usize {
         .unwrap_or(0)
 }
 
-/// Sum of every tool's `total_tokens` — the worst-case prefix cost on
-/// an eager-loading harness with `--profile full`.
+/// Sum of every tool's `total_tokens` (verbose schema) — the
+/// worst-case prefix cost on a `verbose=true` opt-in harness with
+/// `--profile full`. The actually-paid cost on the default code path
+/// is reported by [`trimmed_full_profile_total_tokens`].
 pub fn full_profile_total_tokens() -> usize {
     tool_sizes().iter().map(|t| t.total_tokens).sum()
 }
 
-/// Lookup a single tool by name. `O(n)` but `n ≤ 50` (v0.7 K8).
+/// v0.7 C4 — sum of every tool's `total_tokens` after the C4 trim
+/// (optionals hidden). This is the bare `tools/list` payload cost
+/// under `--profile full`.
+pub fn trimmed_full_profile_total_tokens() -> usize {
+    trimmed_tool_sizes().iter().map(|t| t.total_tokens).sum()
+}
+
+/// Lookup a single tool by name in the verbose table. `O(n)` but
+/// `n ≤ 51` (v0.7 K8).
 pub fn tool_size(name: &str) -> Option<&'static ToolSize> {
     tool_sizes().iter().find(|t| t.name == name)
 }
 
-fn compute_table() -> Vec<ToolSize> {
+fn compute_table(trimmed: bool) -> Vec<ToolSize> {
     let bpe = bpe();
-    let defs = crate::mcp::tool_definitions();
-    let tools = defs
+    let mut defs = crate::mcp::tool_definitions();
+    if trimmed {
+        // v0.7 C4 — drop optional inputSchema properties (keep required +
+        // C4 allow-list).
+        crate::mcp::trim_optional_params(&mut defs);
+    }
+    let mut tools = defs
         .get("tools")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    if trimmed {
+        // v0.7 C2 rebase — also drop the per-tool `docs` field and the
+        // per-property `description` prose, matching the bare
+        // `tools/list` payload produced by
+        // `crate::mcp::tool_definitions_for_profile`. Without this the
+        // trimmed total double-counts the long-form prose that the wire
+        // never actually carries on the default path.
+        crate::mcp::strip_docs_from_tools(&mut tools);
+    }
 
     tools
         .into_iter()
@@ -211,5 +258,80 @@ mod tests {
     #[test]
     fn tool_size_returns_none_for_unknown() {
         assert!(tool_size("memory_does_not_exist_42").is_none());
+    }
+
+    /// v0.7 C4 acceptance gate: the trimmed `tools/list` payload (the
+    /// shape an MCP host actually receives by default) must be
+    /// materially smaller than the verbose ceiling AND must save at
+    /// least ~30% of the bytes the host used to pay. Original v0.7 C4
+    /// baseline (pre-C2): verbose ≈ 7416 tokens, trimmed ≈ 4545
+    /// tokens (~39% saved). After the v0.7 C2 rebase (2026-05-06)
+    /// added per-tool `docs` strings and the trim model in
+    /// `compute_table(true)` was extended to also call
+    /// `strip_docs_from_tools` — matching what
+    /// `tool_definitions_for_profile` ships on the wire — the verbose
+    /// ceiling rises (docs is now part of the source of truth) while
+    /// the trimmed figure shrinks (docs + per-property prose is
+    /// dropped on the wire). The pinned C5 budget gate
+    /// (`tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`)
+    /// keeps the wire payload itself ≤ 3500 cl100k tokens, so the
+    /// per-tool sum here lands well under the 5_000 soft ceiling.
+    ///
+    /// The bound is set at ≤ 5_000 so a few prose-heavy required-param
+    /// descriptions can grow before this trips, but tight enough that
+    /// doubling the keep-list lands red. The aspirational ~2500-token
+    /// target from the v0.7 C4 spec lives further down the C-track.
+    #[test]
+    fn trimmed_full_profile_total_under_c4_target() {
+        let trimmed = trimmed_full_profile_total_tokens();
+        let verbose = full_profile_total_tokens();
+        assert!(
+            trimmed < verbose,
+            "trimmed total ({trimmed}) must be strictly smaller than verbose ({verbose})"
+        );
+        let saved_pct = (verbose - trimmed) as f64 / verbose as f64 * 100.0;
+        assert!(
+            saved_pct >= 30.0,
+            "v0.7 C4 trim should save >=30% of full-profile tokens; got {saved_pct:.1}% \
+             (verbose={verbose}, trimmed={trimmed}). Audit C4_KEEP_OPTIONAL_PARAMS."
+        );
+        assert!(
+            trimmed <= 5_000,
+            "v0.7 C4 trimmed full-profile total {trimmed} > 5000-token soft ceiling. \
+             If a tool genuinely needs more required params, update the bound; \
+             if not, audit C4_KEEP_OPTIONAL_PARAMS for unintended growth."
+        );
+    }
+
+    /// Trim must shrink at least one optional from at least one tool;
+    /// otherwise the wiring is broken (e.g. `trim_optional_params` got
+    /// short-circuited or the keep-list went global).
+    #[test]
+    fn trimmed_table_strictly_smaller_per_tool_where_optionals_existed() {
+        let verbose: std::collections::HashMap<&str, usize> = tool_sizes()
+            .iter()
+            .map(|t| (t.name.as_str(), t.total_tokens))
+            .collect();
+        let mut at_least_one_smaller = false;
+        for trimmed_tool in trimmed_tool_sizes() {
+            let v = verbose
+                .get(trimmed_tool.name.as_str())
+                .copied()
+                .unwrap_or(0);
+            assert!(
+                trimmed_tool.total_tokens <= v,
+                "{} grew under trim ({} > {})",
+                trimmed_tool.name,
+                trimmed_tool.total_tokens,
+                v
+            );
+            if trimmed_tool.total_tokens < v {
+                at_least_one_smaller = true;
+            }
+        }
+        assert!(
+            at_least_one_smaller,
+            "trim should shrink at least one tool; none did — wiring is broken"
+        );
     }
 }

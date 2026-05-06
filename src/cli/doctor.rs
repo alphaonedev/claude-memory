@@ -178,8 +178,18 @@ pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
     };
 
     let table = sizes::tool_sizes();
+    let trimmed_table = sizes::trimmed_tool_sizes();
     let full_total: usize = table.iter().map(|t| t.total_tokens).sum();
     let active_total: usize = table
+        .iter()
+        .filter(|t| profile.loads(&t.name))
+        .map(|t| t.total_tokens)
+        .sum();
+    // v0.7 C4 — also report the trimmed (default `tools/list`) cost
+    // because that's what an MCP host actually pays per request unless
+    // it opts into `memory_capabilities { verbose=true }`.
+    let trimmed_full_total: usize = trimmed_table.iter().map(|t| t.total_tokens).sum();
+    let trimmed_active_total: usize = trimmed_table
         .iter()
         .filter(|t| profile.loads(&t.name))
         .map(|t| t.total_tokens)
@@ -220,6 +230,9 @@ pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
             "active_profile": profile.families().iter().map(|f| f.name()).collect::<Vec<_>>(),
             "active_total_tokens": active_total,
             "full_profile_total_tokens": full_total,
+            // v0.7 C4 — actually-paid cost on the default tools/list path.
+            "trimmed_active_total_tokens": trimmed_active_total,
+            "trimmed_full_profile_total_tokens": trimmed_full_total,
             "savings_tokens": savings,
             "savings_pct": format!("{pct:.1}"),
             "families": family_totals.iter().map(|(name, count, sum)| {
@@ -271,7 +284,7 @@ pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
             .join(",")
     )?;
     writeln!(out.stdout)?;
-    writeln!(out.stdout, "  Tool surface cost:")?;
+    writeln!(out.stdout, "  Tool surface cost (verbose schema, ceiling):")?;
     writeln!(
         out.stdout,
         "    Active ({:>2} tools loaded): {:>6} tokens",
@@ -288,6 +301,22 @@ pub fn run_tokens(args: TokensArgs, out: &mut CliOutput<'_>) -> Result<i32> {
         out.stdout,
         "    Savings vs full:           {:>6} tokens ({pct:.1}%)",
         savings
+    )?;
+    // v0.7 C4 — the bottom line an MCP host actually pays per request.
+    writeln!(out.stdout)?;
+    writeln!(
+        out.stdout,
+        "  Tools/list payload (v0.7 C4 trim, optionals hidden):"
+    )?;
+    writeln!(
+        out.stdout,
+        "    Active                     {:>6} tokens",
+        trimmed_active_total
+    )?;
+    writeln!(
+        out.stdout,
+        "    Full                       {:>6} tokens",
+        trimmed_full_total
     )?;
     writeln!(out.stdout)?;
     writeln!(out.stdout, "  Per-family breakdown (sorted by total cost):")?;
