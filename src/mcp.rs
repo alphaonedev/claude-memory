@@ -17,7 +17,7 @@ use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
 use crate::models::{CandidateCounts, GovernancePolicy, Memory, RecallMeta, RecallTelemetry, Tier};
-use crate::reranker::CrossEncoder;
+use crate::reranker::{BatchedReranker, CrossEncoder};
 use crate::validate;
 
 // --- JSON-RPC types ---
@@ -1700,7 +1700,7 @@ pub async fn handle_recall_with_pre_recall_hook(
     params: &Value,
     embedder: Option<&Embedder>,
     vector_index: Option<&VectorIndex>,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     archive_on_gc: bool,
     resolved_ttl: &crate::config::ResolvedTtl,
     resolved_scoring: &crate::config::ResolvedScoring,
@@ -1783,7 +1783,7 @@ pub fn handle_recall(
     params: &Value,
     embedder: Option<&Embedder>,
     vector_index: Option<&VectorIndex>,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     archive_on_gc: bool,
     resolved_ttl: &crate::config::ResolvedTtl,
     resolved_scoring: &crate::config::ResolvedScoring,
@@ -2080,7 +2080,7 @@ impl CapabilitiesAccept {
 /// legacy shape for backward compat (see [`Capabilities::to_v1`]).
 pub fn handle_capabilities_with_conn(
     tier_config: &TierConfig,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
     accept: CapabilitiesAccept,
@@ -2113,7 +2113,7 @@ pub fn handle_capabilities_with_conn(
 /// `AppState`); A1 lights up the MCP dispatch path only.
 pub fn handle_capabilities_with_conn_v3(
     tier_config: &TierConfig,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
     profile: &crate::profile::Profile,
@@ -2145,7 +2145,7 @@ pub fn handle_capabilities_with_conn_v3(
 /// logic stays single-sourced.
 fn build_capabilities_overlay(
     tier_config: &TierConfig,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     embedder_loaded: bool,
     conn: Option<&rusqlite::Connection>,
 ) -> crate::config::Capabilities {
@@ -5354,7 +5354,7 @@ fn handle_request(
     req: &RpcRequest,
     embedder: Option<&Embedder>,
     llm: Option<&OllamaClient>,
-    reranker: Option<&CrossEncoder>,
+    reranker: Option<&BatchedReranker>,
     tier_config: &TierConfig,
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,
@@ -5937,15 +5937,20 @@ pub fn run_mcp_server(
     };
 
     // --- Initialize cross-encoder reranker (autonomous tier) ---
+    //
+    // v0.7 G9 — wrap the encoder in a `BatchedReranker` so concurrent
+    // recall requests coalesce into a single tokenize+forward pass on
+    // the BERT model, instead of serializing through the per-candidate
+    // `Arc<Mutex<BertModel>>`.
     let reranker = if tier_config.cross_encoder {
         eprintln!("ai-memory: loading neural cross-encoder (ms-marco-MiniLM-L-6-v2)...");
         let ce = CrossEncoder::new_neural();
         if ce.is_neural() {
-            eprintln!("ai-memory: neural cross-encoder ready");
+            eprintln!("ai-memory: neural cross-encoder ready (batched)");
         } else {
             eprintln!("ai-memory: using lexical cross-encoder fallback");
         }
-        Some(ce)
+        Some(BatchedReranker::new(ce))
     } else {
         None
     };
