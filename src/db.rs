@@ -938,7 +938,7 @@ fn migrate(conn: &Connection) -> Result<()> {
     }
 }
 
-fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
+pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
     let tags_json: String = row.get("tags")?;
     let tags: Vec<String> = serde_json::from_str(&tags_json).unwrap_or_default();
     let tier_str: String = row.get("tier")?;

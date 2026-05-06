@@ -60,15 +60,18 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    // 39 = 44 user-relevant tools − 5 core. (44 = 45 total tools − 1
+    // 39 = 45 user-relevant tools − 6 core. (45 = 46 total tools − 1
     // always-on bootstrap.) The bootstrap (`memory_capabilities`) is
     // excluded from BOTH the loaded and the unloaded count in
     // `to_describe_to_user` (it's plumbing, not a feature). Total
     // bumped from 43 to 44 in v0.7.0 I4 — Family::Graph gained
-    // `memory_replay`; then to 45 in v0.7 H4 — Family::Graph gained
-    // `memory_verify`.
-    let expected = "I can directly use 5 memory tools right now \
-                    (store, recall, list, get, search). 39 more \
+    // `memory_replay`; to 45 in v0.7 H4 — Family::Graph gained
+    // `memory_verify`; to 46 in v0.7 B1 — Family::Core gained
+    // `memory_load_family`. Loaded under core bumped from 5 to 6 with
+    // B1, so the preview now overflows the 5-name cap (ends in
+    // ", ...").
+    let expected = "I can directly use 6 memory tools right now \
+                    (store, recall, list, get, search, ...). 39 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -84,9 +87,10 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // ---------------------------------------------------------------------------
 // T0-A2-FULL — `to_describe_to_user` on `--profile full` uses the
 // "nothing more to load" closing form (excludes the always-on bootstrap
-// from the user-facing 44 count). Bumped from 42 to 43 in v0.7.0 I4 —
-// Family::Graph gained `memory_replay`; then to 44 in v0.7 H4 —
-// Family::Graph gained `memory_verify`.
+// from the user-facing 45 count). Bumped from 42 to 43 in v0.7.0 I4 —
+// Family::Graph gained `memory_replay`; to 44 in v0.7 H4 —
+// Family::Graph gained `memory_verify`; to 45 in v0.7 B1 —
+// Family::Core gained `memory_load_family`.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_full_profile_canonical_phrasing() {
@@ -95,7 +99,7 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use all 44 memory tools right now \
+    let expected = "I can directly use all 45 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -109,10 +113,11 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 
 // ---------------------------------------------------------------------------
 // T0-A2-GRAPH — `to_describe_to_user` on `--profile graph` uses the
-// preview-with-ellipsis form (5 of 15 loaded shown + ", ..."). Loaded
+// preview-with-ellipsis form (5 of 16 loaded shown + ", ..."). Loaded
 // bumped from 13 to 14 in v0.7.0 I4 — Family::Graph gained
-// `memory_replay`; then to 15 in v0.7 H4 — Family::Graph gained
-// `memory_verify`.
+// `memory_replay`; to 15 in v0.7 H4 — Family::Graph gained
+// `memory_verify`; to 16 in v0.7 B1 — Family::Core gained
+// `memory_load_family`.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -121,7 +126,7 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use 15 memory tools right now \
+    let expected = "I can directly use 16 memory tools right now \
                     (store, recall, list, get, search, ...). 29 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \

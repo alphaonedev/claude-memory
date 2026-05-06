@@ -24,12 +24,13 @@
 //!
 //! ## Profile vocabulary
 //!
-//! - `core` — 5 tools, the new v0.6.4 default. Always loaded.
-//! - `graph` — adds the 10 KG/entity/replay/verify tools. ~15 tools.
-//! - `admin` — adds lifecycle (5) + governance (8). ~18 tools.
+//! - `core` — 6 tools, the new v0.6.4 default (v0.7 B1 added
+//!   `memory_load_family`). Always loaded.
+//! - `graph` — adds the 10 KG/entity/replay/verify tools. ~16 tools.
+//! - `admin` — adds lifecycle (5) + governance (8). ~19 tools.
 //! - `power` — adds the 6 LLM-augmented tools (consolidate, auto_tag, …).
-//!   ~11 tools.
-//! - `full` — every family. 45 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify`).
+//!   ~12 tools.
+//! - `full` — every family. 46 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -55,12 +56,15 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-05. Counts must sum to 45 (the v0.6.3.1 baseline of 43 +
-/// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify`, both in
-/// `Family::Graph`).
+/// 2026-05-05. Counts must sum to 46 (the v0.6.3.1 baseline of 43 +
+/// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` (both in
+/// `Family::Graph`) + v0.7 B1 `memory_load_family` in `Family::Core`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
-    /// store, recall, list, get, search — 5
+    /// store, recall, list, get, search, load_family — 6
+    /// (load_family added in v0.7 B1 — always-on family loader that
+    /// returns the top-k recent + high-priority memories whose
+    /// `metadata.family` matches one of the eight enum names.)
     Core,
     /// update, delete, forget, gc, promote — 5
     Lifecycle,
@@ -102,10 +106,11 @@ impl Family {
     #[must_use]
     pub fn for_tool(name: &str) -> Option<Self> {
         match name {
-            // core (5)
-            "memory_store" | "memory_recall" | "memory_list" | "memory_get" | "memory_search" => {
-                Some(Self::Core)
-            }
+            // core (6 — v0.7 B1 added memory_load_family as the always-on
+            // alternative to memory_recall when the agent already knows
+            // which family taxonomy it wants).
+            "memory_store" | "memory_recall" | "memory_list" | "memory_get" | "memory_search"
+            | "memory_load_family" => Some(Self::Core),
             // lifecycle (5)
             "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
             | "memory_promote" => Some(Self::Lifecycle),
@@ -189,7 +194,9 @@ impl Family {
     #[must_use]
     pub const fn expected_tool_count(self) -> usize {
         match self {
-            Self::Core | Self::Lifecycle | Self::Meta => 5,
+            // Core: 5 baseline + memory_load_family (v0.7 B1) = 6.
+            Self::Core => 6,
+            Self::Lifecycle | Self::Meta => 5,
             // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) = 10.
             Self::Graph => 10,
             Self::Governance => 8,
@@ -220,6 +227,9 @@ impl Family {
                 "memory_list",
                 "memory_get",
                 "memory_search",
+                // v0.7 B1 — always-on alternative to memory_recall when
+                // the agent already knows the Family taxonomy it wants.
+                "memory_load_family",
             ],
             Self::Lifecycle => &[
                 "memory_update",
@@ -309,8 +319,9 @@ pub struct Profile {
 }
 
 impl Profile {
-    /// `core` — 5 tools (`store, recall, list, get, search`). The new
-    /// v0.6.4 default. Registers exactly the `Core` family.
+    /// `core` — 6 tools (`store, recall, list, get, search, load_family`).
+    /// The new v0.6.4 default; v0.7 B1 added `memory_load_family` as the
+    /// always-on family loader. Registers exactly the `Core` family.
     ///
     /// **Design note (v0.6.4-002 hook):** `memory_capabilities` is
     /// **always-on** regardless of profile per RFC scenario S27. It is
@@ -326,8 +337,9 @@ impl Profile {
         }
     }
 
-    /// `graph` — core + graph. 15 tools (v0.7.0 I4 added `memory_replay`;
-    /// v0.7 H4 added `memory_verify`).
+    /// `graph` — core + graph. 16 tools (v0.7.0 I4 added `memory_replay`;
+    /// v0.7 H4 added `memory_verify`; v0.7 B1 added `memory_load_family`
+    /// to core).
     #[must_use]
     pub fn graph() -> Self {
         Self {
@@ -335,7 +347,8 @@ impl Profile {
         }
     }
 
-    /// `admin` — core + lifecycle + governance. 18 tools.
+    /// `admin` — core + lifecycle + governance. 19 tools (v0.7 B1
+    /// added `memory_load_family` to core).
     #[must_use]
     pub fn admin() -> Self {
         Self {
@@ -343,7 +356,8 @@ impl Profile {
         }
     }
 
-    /// `power` — core + power. 11 tools.
+    /// `power` — core + power. 12 tools (v0.7 B1 added
+    /// `memory_load_family` to core).
     #[must_use]
     pub fn power() -> Self {
         Self {
@@ -351,8 +365,9 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 45 tools (v0.6.3 baseline 43 + v0.7.0 I4
-    /// `memory_replay` + v0.7 H4 `memory_verify`).
+    /// `full` — every family. 46 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1
+    /// `memory_load_family`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -531,13 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_45() {
+    fn family_expected_tool_counts_sum_to_46() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 45,
+            total, 46,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
-             `memory_verify` = 45. If this drifts, update \
-             Family::expected_tool_count and the family map docs together."
+             `memory_verify` + v0.7 B1 `memory_load_family` = 46. If this \
+             drifts, update Family::expected_tool_count and the family \
+             map docs together."
         );
     }
 
@@ -572,9 +588,10 @@ mod tests {
     // ---------- Profile named ----------
 
     #[test]
-    fn profile_core_has_five_tools() {
+    fn profile_core_has_six_tools() {
         let p = Profile::core();
-        assert_eq!(p.expected_tool_count(), 5);
+        // v0.7 B1 — Core now ships 6 tools (5 baseline + memory_load_family).
+        assert_eq!(p.expected_tool_count(), 6);
         assert!(p.includes(Family::Core));
         // meta is NOT in core's family list — `memory_capabilities`
         // is bootstrapped separately as always-on per RFC S27. The
@@ -585,35 +602,37 @@ mod tests {
     }
 
     #[test]
-    fn profile_graph_has_fifteen_tools() {
+    fn profile_graph_has_sixteen_tools() {
         let p = Profile::graph();
         // v0.7 H4 — Graph now ships 10 tools (8 baseline + memory_replay
-        // [I4] + memory_verify [H4]).
-        assert_eq!(p.expected_tool_count(), 5 + 10);
+        // [I4] + memory_verify [H4]); v0.7 B1 added memory_load_family
+        // to core (6 instead of 5).
+        assert_eq!(p.expected_tool_count(), 6 + 10);
         assert!(p.includes(Family::Graph));
     }
 
     #[test]
-    fn profile_admin_has_eighteen_tools() {
+    fn profile_admin_has_nineteen_tools() {
         let p = Profile::admin();
-        // admin = core (5) + lifecycle (5) + governance (8). Graph isn't
-        // in admin so the v0.7.0 I4 memory_replay addition doesn't change
-        // this count.
-        assert_eq!(p.expected_tool_count(), 5 + 5 + 8);
+        // admin = core (6, with v0.7 B1 memory_load_family) + lifecycle
+        // (5) + governance (8) = 19. Graph isn't in admin so the v0.7.0
+        // I4 memory_replay addition doesn't change this count.
+        assert_eq!(p.expected_tool_count(), 6 + 5 + 8);
     }
 
     #[test]
-    fn profile_power_has_eleven_tools() {
+    fn profile_power_has_twelve_tools() {
         let p = Profile::power();
-        assert_eq!(p.expected_tool_count(), 5 + 6);
+        // v0.7 B1 — Core now ships 6 tools (was 5).
+        assert_eq!(p.expected_tool_count(), 6 + 6);
     }
 
     #[test]
-    fn profile_full_has_forty_five_tools() {
+    fn profile_full_has_forty_six_tools() {
         let p = Profile::full();
-        // v0.7 H4 — full surface = 43 baseline + memory_replay (I4) +
-        // memory_verify (H4) = 45.
-        assert_eq!(p.expected_tool_count(), 45);
+        // v0.7 B1 — full surface = 43 baseline + memory_replay (I4) +
+        // memory_verify (H4) + memory_load_family (B1) = 46.
+        assert_eq!(p.expected_tool_count(), 46);
     }
 
     // ---------- Profile::parse ----------
@@ -635,14 +654,14 @@ mod tests {
 
     #[test]
     fn parse_custom_comma_list_dedup() {
-        // `core,graph` → core (5) + graph (10, after v0.7 H4) = 15 tools.
-        // Meta is NOT included — `memory_capabilities` is always-on
-        // bootstrapped outside the family map (v0.6.4-002).
+        // `core,graph` → core (6, after v0.7 B1) + graph (10, after v0.7
+        // H4) = 16 tools. Meta is NOT included — `memory_capabilities`
+        // is always-on bootstrapped outside the family map (v0.6.4-002).
         let p = Profile::parse("core,graph").unwrap();
         assert!(p.includes(Family::Core));
         assert!(!p.includes(Family::Meta));
         assert!(p.includes(Family::Graph));
-        assert_eq!(p.expected_tool_count(), 15);
+        assert_eq!(p.expected_tool_count(), 16);
     }
 
     #[test]
@@ -733,6 +752,8 @@ mod tests {
             "memory_list",
             "memory_get",
             "memory_search",
+            // core (v0.7 B1 addition)
+            "memory_load_family",
             // lifecycle
             "memory_update",
             "memory_delete",
@@ -785,8 +806,9 @@ mod tests {
         ];
         assert_eq!(
             baseline.len(),
-            45,
-            "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + 1 (v0.7 H4 memory_verify) = 45"
+            46,
+            "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
+             1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) = 46"
         );
         for name in baseline {
             assert!(

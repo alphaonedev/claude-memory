@@ -405,6 +405,19 @@ pub(crate) fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_load_family",
+                "description": "v0.7 B1 — load top-k recent + high-priority memories tagged with metadata.family=<family>. Always-on alternative to memory_recall when the family is known.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "family": {"type": "string", "enum": ["core", "lifecycle", "graph", "governance", "power", "meta", "archive", "other"], "description": "Family taxonomy enum (one of the eight)."},
+                        "namespace": {"type": "string", "description": "Restrict to this namespace. Defaults to all namespaces when omitted."},
+                        "k": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Top-k to return. Capped at 100."}
+                    },
+                    "required": ["family"]
+                }
+            },
+            {
                 "name": "memory_get_taxonomy",
                 "description": "Pillar 1 / Stream A — return a hierarchical tree of namespaces with memory counts. Walks the `/`-delimited namespace paths grouped from live memories (expired rows excluded). Each node carries `count` (memories at exactly that namespace) and `subtree_count` (count plus all descendants visible within `depth`); the response also exposes `total_count` for the prefix and a `truncated` flag set when `limit` forced rows to be dropped from the tree.",
                 "inputSchema": {
@@ -2141,7 +2154,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(45);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(46);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -2789,6 +2802,102 @@ fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, Str
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"memories": results, "count": results.len()}))
+}
+
+/// v0.7 B1 — `memory_load_family(family, namespace?, k?)`.
+///
+/// Always-on alternative to `memory_recall` for the case where the agent
+/// already knows which `Family` taxonomy bucket it wants. Returns the
+/// top-k recent + high-priority memories whose `metadata.family` matches
+/// the requested enum, ordered by `priority DESC, updated_at DESC`,
+/// optionally restricted to a single namespace.
+///
+/// Conventions:
+///
+/// - `family` is required. Validated against the eight-family enum
+///   (core/lifecycle/graph/governance/power/meta/archive/other) — anything
+///   else returns the same `ProfileParseError::UnknownFamily` diagnostic
+///   the rest of the codebase uses, so the error message lists the valid
+///   options.
+/// - `namespace` is optional. When omitted the query spans every
+///   namespace; this matches `memory_list`'s "no namespace = all"
+///   convention.
+/// - `k` defaults to 20 (mirroring `memory_list`'s default `limit`) and
+///   is capped at 100 to bound the response payload. Values outside
+///   `[1, 100]` are clamped silently rather than rejected — the cap is
+///   for response budget, not for correctness.
+///
+/// Filter shape: `json_extract(memories.metadata, '$.family') = ?` —
+/// no schema change is needed because v0.7 B1 stores the family tag in
+/// the existing free-form `metadata` JSON column. Memories that don't
+/// carry a `metadata.family` are invisible to this tool by design (the
+/// caller would use `memory_list` or `memory_recall` for the unfiltered
+/// case).
+///
+/// Response shape:
+/// ```json
+/// {
+///   "family": "core",
+///   "namespace": "projects/alpha",   // or null when omitted
+///   "k": 20,
+///   "count": 3,
+///   "memories": [<MemoryRow>, ...]
+/// }
+/// ```
+pub fn handle_load_family(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    use crate::profile::Family;
+    use std::str::FromStr;
+
+    let family_raw = params["family"].as_str().ok_or("family is required")?;
+    // Reuse the canonical enum parser so the diagnostic on a bad
+    // `family` value lists the valid options verbatim. Lowercase only,
+    // matching the rest of the family vocabulary.
+    let family = Family::from_str(family_raw).map_err(|e| e.to_string())?;
+    let family_name = family.name();
+
+    let namespace = params.get("namespace").and_then(Value::as_str);
+    if let Some(ns) = namespace {
+        validate::validate_namespace(ns).map_err(|e| e.to_string())?;
+    }
+
+    // Default 20, cap at 100 (per spec). Anything below 1 collapses to 1
+    // — calling `memory_load_family(k=0)` is almost always a bug, and
+    // the always-return-at-least-one shape lines up with R1's recall
+    // budget guarantee.
+    let k_raw = params.get("k").and_then(Value::as_u64).unwrap_or(20);
+    let k = usize::try_from(k_raw).unwrap_or(usize::MAX).clamp(1, 100);
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, tier, namespace, title, content, tags, priority, confidence, source, \
+                    access_count, created_at, updated_at, last_accessed_at, expires_at, metadata \
+             FROM memories \
+             WHERE (?1 IS NULL OR namespace = ?1) \
+               AND json_extract(metadata, '$.family') = ?2 \
+               AND (expires_at IS NULL OR expires_at > ?3) \
+             ORDER BY priority DESC, updated_at DESC \
+             LIMIT ?4",
+        )
+        .map_err(|e| format!("prepare memory_load_family failed: {e}"))?;
+
+    let rows = stmt
+        .query_map(
+            rusqlite::params![namespace, family_name, now, k],
+            db::row_to_memory,
+        )
+        .map_err(|e| format!("query memory_load_family failed: {e}"))?;
+    let memories: Vec<Memory> = rows
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| format!("collect memory_load_family rows failed: {e}"))?;
+
+    Ok(json!({
+        "family": family_name,
+        "namespace": namespace,
+        "k": k,
+        "count": memories.len(),
+        "memories": memories,
+    }))
 }
 
 fn handle_delete(
@@ -4543,6 +4652,7 @@ fn handle_request(
                 ),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
+                "memory_load_family" => handle_load_family(conn, arguments),
                 "memory_get_taxonomy" => handle_get_taxonomy(conn, arguments),
                 "memory_check_duplicate" => handle_check_duplicate(conn, arguments, embedder),
                 "memory_entity_register" => handle_entity_register(conn, arguments, mcp_client),
@@ -5105,7 +5215,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_45_tools() {
+    fn tool_definitions_returns_46_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
@@ -5114,25 +5224,26 @@ mod tests {
         // on top of the 36-tool v0.6.0.0 surface = 43.
         // v0.7.0 I4 adds memory_replay (Family::Graph) → 44.
         // v0.7 H4 adds memory_verify (Family::Graph) → 45.
+        // v0.7 B1 adds memory_load_family (Family::Core) → 46.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 45);
+        assert_eq!(tools.len(), 46);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
-    /// registers exactly 5 family tools + 1 always-on bootstrap
-    /// (memory_capabilities) = 6 visible tools. `--profile full`
-    /// registers all 45 (43 v0.6.3 + memory_replay + memory_verify).
+    /// registers exactly 6 family tools (5 baseline + v0.7 B1
+    /// memory_load_family) + 1 always-on bootstrap (memory_capabilities)
+    /// = 7 visible tools. `--profile full` registers all 46.
     #[test]
-    fn tool_definitions_for_profile_core_registers_5_plus_capabilities() {
+    fn tool_definitions_for_profile_core_registers_6_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
         let tools = defs["tools"].as_array().unwrap();
         let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
-        // Exactly the 5 core tools + memory_capabilities bootstrap.
+        // Exactly the 6 core tools + memory_capabilities bootstrap.
         assert_eq!(
             tools.len(),
-            6,
-            "core profile should register 5 core tools + memory_capabilities; got {names:?}"
+            7,
+            "core profile should register 6 core tools + memory_capabilities; got {names:?}"
         );
         for required in [
             "memory_store",
@@ -5140,6 +5251,7 @@ mod tests {
             "memory_list",
             "memory_get",
             "memory_search",
+            "memory_load_family",
             "memory_capabilities",
         ] {
             assert!(
@@ -5163,27 +5275,30 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_45() {
+    fn tool_definitions_for_profile_full_registers_46() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            45,
-            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + v0.7 H4 memory_verify (1) = 45"
+            46,
+            "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
+             v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) = 46"
         );
     }
 
     #[test]
-    fn tool_definitions_for_profile_graph_registers_sixteen() {
+    fn tool_definitions_for_profile_graph_registers_seventeen() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
         let tools = defs["tools"].as_array().unwrap();
-        // 5 core + 10 graph (8 baseline + memory_replay + memory_verify)
-        // + 1 always-on capabilities = 16 (capabilities is in meta but
-        // loaded as bootstrap; without it we'd have 15).
+        // 6 core (with v0.7 B1 memory_load_family) + 10 graph (8
+        // baseline + memory_replay + memory_verify) + 1 always-on
+        // capabilities = 17 (capabilities is in meta but loaded as
+        // bootstrap; without it we'd have 16).
         assert_eq!(
             tools.len(),
-            16,
-            "graph profile = core(5) + graph(10, with memory_replay+memory_verify) + capabilities-bootstrap(1)"
+            17,
+            "graph profile = core(6, with memory_load_family) + \
+             graph(10, with memory_replay+memory_verify) + capabilities-bootstrap(1)"
         );
     }
 
@@ -5195,8 +5310,8 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            16,
-            "core,graph = 5 + 10 (I4 memory_replay + H4 memory_verify) + capabilities = 16"
+            17,
+            "core,graph = 6 (B1 memory_load_family) + 10 (I4 memory_replay + H4 memory_verify) + capabilities = 17"
         );
     }
 
@@ -5211,7 +5326,8 @@ mod tests {
 
         let core_row = families.iter().find(|r| r["name"] == "core").unwrap();
         assert_eq!(core_row["loaded"], true);
-        assert_eq!(core_row["tool_count"], 5);
+        // v0.7 B1 — Core now ships 6 tools (5 baseline + memory_load_family).
+        assert_eq!(core_row["tool_count"], 6);
         let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
         assert_eq!(graph_row["loaded"], false);
         // v0.7 H4 — graph now ships 10 tools (8 baseline + memory_replay
@@ -5608,9 +5724,9 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 45 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 46 MCP tools (Justice of MCP pathway).
     /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
-    /// v0.7 H4 added memory_verify (45).
+    /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5647,6 +5763,11 @@ mod tests {
                 name: "memory_list",
                 valid_args: json!({}),
                 required_arg: None,
+            },
+            ToolCase {
+                name: "memory_load_family",
+                valid_args: json!({"family": "core"}),
+                required_arg: Some("family"),
             },
             ToolCase {
                 name: "memory_get_taxonomy",
