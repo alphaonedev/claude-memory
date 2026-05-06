@@ -27,6 +27,7 @@ pub mod doctor;
 pub mod forget;
 pub mod gc;
 pub mod governance;
+pub mod governance_migrate;
 pub mod helpers;
 pub mod identity;
 pub mod install;
