@@ -54,6 +54,11 @@ pub mod models;
 // which source produced the outcome.
 pub mod permissions;
 pub mod profile;
+// v0.7 Track K, Task K8 — per-agent rate limits + storage caps.
+// `agent_quotas` table backs three counters (memories/day, storage
+// bytes, links/day) consulted by the store_memory + memory_link write
+// paths; daily counters reset at UTC midnight via a sweep loop.
+pub mod quotas;
 pub mod replication;
 pub mod reranker;
 pub mod signed_events;

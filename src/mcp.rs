@@ -993,6 +993,16 @@ pub(crate) fn tool_definitions() -> Value {
                         "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
                     }
                 }
+            },
+            {
+                "name": "memory_quota_status",
+                "description": "v0.7 K8 — report per-agent quota usage (memories/day, storage bytes, links/day). Omit agent_id to list all agents. Operator-facing.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {"type": "string", "description": "Optional — restrict to one agent. When omitted, returns every quota row."}
+                    }
+                }
             }
         ]
     })
@@ -1393,7 +1403,43 @@ fn handle_store(
         }));
     }
 
+    // v0.7 K8 — per-agent quota gate. Pre-write check; on exceeded
+    // limit returns a `QUOTA_EXCEEDED` diagnostic naming the limit
+    // hit. Bytes counted = (title + content + serialized metadata)
+    // to match the post-write `record_op` accounting below.
+    let payload_bytes = i64::try_from(
+        mem.title.len()
+            + mem.content.len()
+            + serde_json::to_string(&mem.metadata)
+                .map(|s| s.len())
+                .unwrap_or(0),
+    )
+    .unwrap_or(i64::MAX);
+    if let Err(e) = crate::quotas::check_quota(
+        conn,
+        &agent_id,
+        crate::quotas::QuotaOp::Memory {
+            bytes: payload_bytes,
+        },
+    ) {
+        return Err(e.to_string());
+    }
+
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
+
+    // v0.7 K8 — record the successful write against the agent's
+    // counters. Best-effort: a counter update failure is logged but
+    // does not roll back the insert (the inline-roll branch in
+    // check_quota would re-derive any missed delta on the next call).
+    if let Err(e) = crate::quotas::record_op(
+        conn,
+        &agent_id,
+        crate::quotas::QuotaOp::Memory {
+            bytes: payload_bytes,
+        },
+    ) {
+        tracing::warn!("quota record_op failed for agent {}: {}", &agent_id, e);
+    }
 
     // PR-5 (issue #487): security audit trail. No-op when disabled.
     crate::audit::emit(crate::audit::EventBuilder::new(
@@ -3882,12 +3928,39 @@ fn handle_link(
         }
     }
 
+    // v0.7 K8 — per-agent quota gate. The link is charged against the
+    // SOURCE memory's owner so a single agent fanning out links from
+    // their own memories pays for them. If we can't resolve the owner
+    // (source memory not found) the quota check is skipped:
+    // db::create_link_signed will surface its own FK error in that
+    // case, which is the more actionable failure.
+    let link_agent_id = db::get(conn, source_id).ok().flatten().and_then(|mem| {
+        mem.metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    });
+    if let Some(ref aid) = link_agent_id {
+        if let Err(e) = crate::quotas::check_quota(conn, aid, crate::quotas::QuotaOp::Link) {
+            return Err(e.to_string());
+        }
+    }
+
     // v0.7 H2 — sign with active keypair when present; falls through
     // to attest_level="unsigned" otherwise. The chosen attest_level is
     // surfaced in the wire response so callers can tell signed vs
     // unsigned without re-querying.
     let attest_level = db::create_link_signed(conn, source_id, target_id, relation, active_keypair)
         .map_err(|e| e.to_string())?;
+
+    // v0.7 K8 — record the successful link against the agent's
+    // counters (best-effort; does not roll back the link insert on
+    // counter-update failure).
+    if let Some(ref aid) = link_agent_id {
+        if let Err(e) = crate::quotas::record_op(conn, aid, crate::quotas::QuotaOp::Link) {
+            tracing::warn!("quota record_op failed for agent {}: {}", aid, e);
+        }
+    }
 
     // P5 (G9): fire `memory_link_created` webhook AFTER the link is
     // persisted. Resolve the source memory to populate `namespace` /
@@ -4942,6 +5015,28 @@ pub(crate) fn handle_subscription_replay(
         .map_err(|e| e.to_string())
 }
 
+/// v0.7 K8 — MCP handler for `memory_quota_status`. Reports per-agent
+/// quota usage (memories/day, storage bytes, links/day) for the
+/// operator-facing surface. When `agent_id` is provided, returns a
+/// single row (auto-inserting a default row if the agent has none).
+/// When omitted, returns every quota row in the substrate, sorted by
+/// agent_id ASC. Family: `Power` (operator-scoped, not data-plane).
+pub fn handle_quota_status(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    if let Some(agent_id) = params.get("agent_id").and_then(Value::as_str) {
+        let row = crate::quotas::get_status(conn, agent_id).map_err(|e| e.to_string())?;
+        Ok(json!({
+            "agent_id": agent_id,
+            "quota": row,
+        }))
+    } else {
+        let rows = crate::quotas::list_status(conn).map_err(|e| e.to_string())?;
+        Ok(json!({
+            "count": rows.len(),
+            "quotas": rows,
+        }))
+    }
+}
+
 /// v0.7 K7 — MCP handler for `memory_subscription_dlq_list`. Wraps
 /// [`crate::subscriptions::list_dlq`] and applies the optional
 /// `limit` cap (default 100, max 1000) so an operator inspecting a
@@ -5536,6 +5631,7 @@ fn handle_request(
                 "memory_list_subscriptions" => handle_list_subscriptions(conn),
                 "memory_subscription_replay" => handle_subscription_replay(conn, arguments),
                 "memory_subscription_dlq_list" => handle_subscription_dlq_list(conn, arguments),
+                "memory_quota_status" => handle_quota_status(conn, arguments),
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
@@ -5980,16 +6076,17 @@ mod tests {
         // memory_subscription_dlq_list (Family::Power) → 48.
         // v0.7 J7 adds memory_find_paths (Family::Graph) → 49.
         // v0.7 B2 adds memory_smart_load (Family::Core) → 50.
+        // v0.7 K8 adds memory_quota_status (Family::Power) → 51.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 50);
+        assert_eq!(tools.len(), 51);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
     /// registers exactly 7 family tools (5 baseline + v0.7 B1
     /// memory_load_family + v0.7 B2 memory_smart_load) + 1 always-on
     /// bootstrap (memory_capabilities) = 8 visible tools. `--profile
-    /// full` registers all 50.
+    /// full` registers all 51.
     #[test]
     fn tool_definitions_for_profile_core_registers_7_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
@@ -6032,17 +6129,17 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_50() {
+    fn tool_definitions_for_profile_full_registers_51() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            50,
+            51,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
              v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
-             v0.7 J7 memory_find_paths (1) = 50"
+             v0.7 J7 memory_find_paths (1) + v0.7 K8 memory_quota_status (1) = 51"
         );
     }
 
@@ -6487,12 +6584,13 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 50 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 51 MCP tools (Justice of MCP pathway).
     /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
     /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46);
     /// v0.7 K7 added memory_subscription_replay + memory_subscription_dlq_list (48);
     /// v0.7 J7 added memory_find_paths (49);
-    /// v0.7 B2 added memory_smart_load (50).
+    /// v0.7 B2 added memory_smart_load (50);
+    /// v0.7 K8 added memory_quota_status (51).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -6787,6 +6885,13 @@ mod tests {
             },
             ToolCase {
                 name: "memory_subscription_dlq_list",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            // v0.7 K8 — per-agent quota status. Optional agent_id; on
+            // omission returns every quota row.
+            ToolCase {
+                name: "memory_quota_status",
                 valid_args: json!({}),
                 required_arg: None,
             },
