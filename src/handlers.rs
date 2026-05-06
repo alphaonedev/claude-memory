@@ -12,7 +12,7 @@ use chrono::{Duration, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::config::{ResolvedTtl, TierConfig};
@@ -23,6 +23,7 @@ use crate::models::{
     CreateMemory, ForgetQuery, LinkBody, ListQuery, Memory, MemoryLink, RecallBody, RecallQuery,
     RegisterAgentBody, SearchQuery, Tier, UpdateMemory,
 };
+use crate::profile::Family;
 use crate::validate;
 
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;
@@ -81,6 +82,153 @@ pub struct AppState {
     /// H3 will reuse this handle for outbound writes that need to
     /// carry the same signing identity.
     pub active_keypair: Arc<Option<crate::identity::keypair::AgentKeypair>>,
+    /// v0.7.0 B3 — pre-computed embeddings for each [`Family`]
+    /// descriptor. Filled asynchronously after boot from
+    /// [`family_descriptors`] and reused by B2's
+    /// `memory_smart_load(intent)` to do a fast cosine match between
+    /// an intent string and the eight family descriptors.
+    ///
+    /// **CI fix (v0.7 B3-fix)**: held behind `RwLock<Option<…>>` and
+    /// filled by a detached `tokio::spawn` task launched from
+    /// `bootstrap_serve` rather than synchronously on the serve
+    /// startup path. The original synchronous precompute would block
+    /// HTTP `/health` past the integration suite's 5 s
+    /// `wait_for_health` budget on CI runners without a pre-warmed
+    /// `hf-hub` model cache. `None` means "not yet populated"; an
+    /// empty inner `Vec` means "embedder unavailable, will never be
+    /// populated"; either case makes `best_family_match` return
+    /// `None` and B2's smart loader degrades to its non-embedding
+    /// match path.
+    pub family_embeddings: Arc<RwLock<Option<Vec<(Family, Vec<f32>)>>>>,
+}
+
+/// v0.7.0 B3 — canonical 1-2 sentence English descriptors for each
+/// [`Family`]. Used at boot to pre-compute embeddings that B2's
+/// `memory_smart_load(intent)` cosine-matches against an intent
+/// string. Order tracks [`Family::all()`] (declaration order) so the
+/// returned slice is stable across releases. Wording is chosen to
+/// reflect the *user-facing* purpose of each family, not its tool
+/// names — the embedder needs natural-language signal, not enum
+/// labels, for the cosine match to be meaningful.
+#[must_use]
+pub fn family_descriptors() -> &'static [(Family, &'static str)] {
+    &[
+        (
+            Family::Core,
+            "Store, recall, list, get, and search memories. The basic \
+             read and write operations for saving facts and looking \
+             them up later.",
+        ),
+        (
+            Family::Lifecycle,
+            "Update, delete, forget, garbage-collect, and promote \
+             memories. Operations that change a memory's state, tier, \
+             or visibility over time.",
+        ),
+        (
+            Family::Graph,
+            "Knowledge-graph queries, timelines, links between \
+             memories, entity registration, taxonomy lookup, and \
+             replay or verification of stored relationships.",
+        ),
+        (
+            Family::Governance,
+            "Approval workflows, namespace standards, and \
+             subscriptions. Operations that gate or shape what other \
+             agents are allowed to write or see.",
+        ),
+        (
+            Family::Power,
+            "Advanced reasoning helpers: consolidate duplicates, \
+             detect contradictions, check for duplicates, auto-tag, \
+             expand a query, and inspect the inbox.",
+        ),
+        (
+            Family::Meta,
+            "Server capabilities, agent registration and listing, \
+             session bootstrap, and aggregate stats. Operations that \
+             describe the memory system itself rather than its \
+             contents.",
+        ),
+        (
+            Family::Archive,
+            "List, restore, purge, and report stats on archived \
+             memories. The cold-storage tier where forgotten or aged-out \
+             memories live until they are pruned.",
+        ),
+        (
+            Family::Other,
+            "Subscription listing and out-of-band notifications. \
+             Auxiliary operations that don't fit the other families.",
+        ),
+    ]
+}
+
+impl AppState {
+    /// v0.7.0 B3 — pre-compute the family-descriptor embedding cache.
+    /// Iterates the eight descriptors from [`family_descriptors`] and
+    /// runs each through the embedder once. Returns an empty vector
+    /// when the embedder is `None` (keyword-only deployments) or when
+    /// any single descriptor fails to embed — the latter is logged at
+    /// `warn` and the cache is still returned empty so boot stays
+    /// fault-tolerant. The returned vector is intended to be wrapped
+    /// in `Arc::new(...)` and stored in [`AppState::family_embeddings`].
+    #[must_use]
+    pub fn precompute_family_embeddings(embedder: Option<&Embedder>) -> Vec<(Family, Vec<f32>)> {
+        let Some(embedder) = embedder else {
+            return Vec::new();
+        };
+        let descriptors = family_descriptors();
+        let mut out: Vec<(Family, Vec<f32>)> = Vec::with_capacity(descriptors.len());
+        for (family, descriptor) in descriptors {
+            match embedder.embed(descriptor) {
+                Ok(v) => out.push((*family, v)),
+                Err(e) => {
+                    tracing::warn!(
+                        family = family.name(),
+                        error = %e,
+                        "B3: failed to embed family descriptor; \
+                         family_embeddings will be empty",
+                    );
+                    return Vec::new();
+                }
+            }
+        }
+        out
+    }
+
+    /// v0.7.0 B3 — embed `intent` and return the family-descriptor
+    /// with the highest cosine similarity, paired with its score.
+    /// Returns `None` if the cache is not yet populated (the
+    /// asynchronous precompute task has not finished, or the
+    /// embedder is unavailable so the cache will never populate) or
+    /// if the embedder is unavailable now. This is the entry point
+    /// B2's `memory_smart_load(intent)` uses to pick which family to
+    /// load.
+    ///
+    /// Uses `try_read()` so a slow concurrent writer (the boot-time
+    /// precompute task still finalising its write) cannot block the
+    /// caller — on contention we degrade to `None` and the smart
+    /// loader's non-embedding fallback path takes over.
+    #[must_use]
+    pub fn best_family_match(&self, intent: &str) -> Option<(Family, f32)> {
+        let guard = self.family_embeddings.try_read().ok()?;
+        let cache = guard.as_ref()?;
+        if cache.is_empty() {
+            return None;
+        }
+        let embedder = self.embedder.as_ref().as_ref()?;
+        let intent_vec = embedder.embed(intent).ok()?;
+        let mut best: Option<(Family, f32)> = None;
+        for (family, descriptor_vec) in cache.iter() {
+            let score = Embedder::cosine_similarity(&intent_vec, descriptor_vec);
+            match best {
+                Some((_, prev)) if prev >= score => {}
+                _ => best = Some((*family, score)),
+            }
+        }
+        best
+    }
 }
 
 impl FromRef<AppState> for Db {
@@ -5340,6 +5488,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         }
     }
 
@@ -5837,6 +5986,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -13538,6 +13688,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
+            family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
         }
     }
 
@@ -17150,5 +17301,74 @@ mod tests {
             "got {}",
             resp.status()
         );
+    }
+
+    // --- v0.7.0 B3: family-descriptor embeddings ------------------------
+
+    #[test]
+    fn b3_family_descriptors_cover_all_eight_families_in_order() {
+        // Source-anchored to Family::all() so a future re-ordering or
+        // family addition trips this test before it ships a stale
+        // descriptor list.
+        let descriptors = family_descriptors();
+        assert_eq!(
+            descriptors.len(),
+            Family::all().len(),
+            "family_descriptors must cover every Family variant"
+        );
+        for (i, family) in Family::all().iter().enumerate() {
+            assert_eq!(
+                descriptors[i].0, *family,
+                "family_descriptors[{i}] should be {family:?} to match Family::all()"
+            );
+            assert!(
+                !descriptors[i].1.trim().is_empty(),
+                "descriptor for {family:?} must be non-empty",
+            );
+        }
+    }
+
+    #[test]
+    fn b3_precompute_with_no_embedder_returns_empty() {
+        let cache = AppState::precompute_family_embeddings(None);
+        assert!(
+            cache.is_empty(),
+            "no-embedder boot must produce an empty cache",
+        );
+    }
+
+    #[test]
+    fn b3_precompute_with_local_embedder_populates_eight_descriptors() {
+        // Boot with a real local embedder when the model is downloadable
+        // in this environment; otherwise skip — keeps CI green on
+        // sandboxed runners that block hf-hub.
+        let Ok(embedder) = Embedder::new_local() else {
+            eprintln!(
+                "b3_precompute_with_local_embedder_populates_eight_descriptors: \
+                 Embedder::new_local() failed (likely sandboxed network); skipping",
+            );
+            return;
+        };
+        let cache = AppState::precompute_family_embeddings(Some(&embedder));
+        assert_eq!(
+            cache.len(),
+            8,
+            "embedder-available boot must produce 8 family-descriptor embeddings",
+        );
+        let dim = embedder.dim();
+        for (family, vec) in &cache {
+            assert_eq!(
+                vec.len(),
+                dim,
+                "descriptor vector for {family:?} must match embedder dim",
+            );
+        }
+    }
+
+    #[test]
+    fn b3_best_family_match_returns_none_when_cache_empty() {
+        let state = test_state();
+        let app = test_app_state(state); // family_embeddings is empty here
+        assert!(app.best_family_match("store a memory").is_none());
     }
 }

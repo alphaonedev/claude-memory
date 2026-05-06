@@ -92,6 +92,7 @@ impl HttpHarness {
             profile: Arc::new(ai_memory::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
+            family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
         };
         let api_key_state = ApiKeyState { key: None };
         let router = ai_memory::build_router(api_key_state, app_state);
