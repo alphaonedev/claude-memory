@@ -128,7 +128,9 @@ fn read_attest_level(conn: &rusqlite::Connection, src: &str, dst: &str) -> Optio
 fn unsigned_link_reports_unsigned_and_not_verified() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     // Insert an unsigned link via the H2 helper with `keypair=None` —
@@ -164,7 +166,9 @@ fn unsigned_link_reports_unsigned_and_not_verified() {
 fn self_signed_link_verifies_and_reports_self_signed() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     // Generate alice's keypair under the per-test key dir so the
@@ -206,7 +210,9 @@ fn self_signed_link_verifies_and_reports_self_signed() {
 fn tampered_signature_byte_does_not_verify() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     let alice = kp_mod::generate("alice").unwrap();
@@ -274,7 +280,9 @@ fn tampered_signature_byte_does_not_verify() {
 fn peer_attested_link_verifies_and_reports_peer_attested() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     // Peer "bob" exists on a different host. We import only bob's
@@ -343,7 +351,9 @@ fn peer_attested_link_verifies_and_reports_peer_attested() {
 fn link_id_composite_form_resolves_same_link() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     db::create_link_signed(&f.conn, &f.src_id, &f.dst_id, "related_to", None)
@@ -364,7 +374,9 @@ fn link_id_composite_form_resolves_same_link() {
 fn missing_link_returns_err() {
     // PoisonError-tolerant lock: a panic in a sibling test would
     // otherwise cascade-fail every other test in the file.
-    let _g = ENV_GUARD.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _g = ENV_GUARD
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let f = setup();
 
     // Look up a relation we never inserted on this fixture.
