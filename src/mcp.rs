@@ -931,6 +931,29 @@ pub(crate) fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {}
                 }
+            },
+            {
+                "name": "memory_subscription_replay",
+                "description": "v0.7 K7 — replay subscription_events for one subscription since an RFC3339 timestamp. Returns ordered audit envelope (delivered_at asc). Operator/governance tool.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subscription_id": {"type": "string", "description": "Subscription id from memory_subscribe."},
+                        "since": {"type": "string", "description": "RFC3339 lower bound on delivered_at (inclusive)."}
+                    },
+                    "required": ["subscription_id", "since"]
+                }
+            },
+            {
+                "name": "memory_subscription_dlq_list",
+                "description": "v0.7 K7 — list subscription_dlq rows (deliveries that exhausted the retry ladder). Filter by subscription_id; cap with limit. Operator/governance inspector.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "subscription_id": {"type": "string", "description": "Optional — restrict to one subscription."},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 100}
+                    }
+                }
             }
         ]
     })
@@ -2154,7 +2177,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(46);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(48);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -4334,6 +4357,49 @@ pub(crate) fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<V
     Ok(json!({"count": subs.len(), "subscriptions": subs}))
 }
 
+/// v0.7 K7 — MCP handler for `memory_subscription_replay`. Thin
+/// wrapper around [`crate::subscriptions::memory_subscription_replay`]
+/// that exposes the operator/governance reliability tool over the
+/// MCP wire. Family: `Power` (operator-scoped, not data-plane).
+pub(crate) fn handle_subscription_replay(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let subscription_id = params["subscription_id"]
+        .as_str()
+        .ok_or("subscription_id is required")?;
+    let since = params["since"]
+        .as_str()
+        .ok_or("since is required (RFC3339)")?;
+    crate::subscriptions::memory_subscription_replay(conn, subscription_id, since)
+        .map_err(|e| e.to_string())
+}
+
+/// v0.7 K7 — MCP handler for `memory_subscription_dlq_list`. Wraps
+/// [`crate::subscriptions::list_dlq`] and applies the optional
+/// `limit` cap (default 100, max 1000) so an operator inspecting a
+/// runaway DLQ can't blow the response size budget. Family: `Power`.
+pub(crate) fn handle_subscription_dlq_list(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
+    let subscription_id = params["subscription_id"].as_str();
+    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
+        .unwrap_or(100)
+        .clamp(1, 1000);
+    let mut rows =
+        crate::subscriptions::list_dlq(conn, subscription_id).map_err(|e| e.to_string())?;
+    if rows.len() > limit {
+        rows.truncate(limit);
+    }
+    Ok(json!({
+        "count": rows.len(),
+        "subscription_id": subscription_id,
+        "limit": limit,
+        "entries": rows,
+    }))
+}
+
 fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let status = params["status"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
@@ -4790,6 +4856,8 @@ fn handle_request(
                 "memory_subscribe" => handle_subscribe(conn, arguments, mcp_client),
                 "memory_unsubscribe" => handle_unsubscribe(conn, arguments),
                 "memory_list_subscriptions" => handle_list_subscriptions(conn),
+                "memory_subscription_replay" => handle_subscription_replay(conn, arguments),
+                "memory_subscription_dlq_list" => handle_subscription_dlq_list(conn, arguments),
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
@@ -5215,7 +5283,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_46_tools() {
+    fn tool_definitions_returns_48_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
@@ -5225,15 +5293,17 @@ mod tests {
         // v0.7.0 I4 adds memory_replay (Family::Graph) → 44.
         // v0.7 H4 adds memory_verify (Family::Graph) → 45.
         // v0.7 B1 adds memory_load_family (Family::Core) → 46.
+        // v0.7 K7 adds memory_subscription_replay +
+        // memory_subscription_dlq_list (Family::Power) → 48.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 46);
+        assert_eq!(tools.len(), 48);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
     /// registers exactly 6 family tools (5 baseline + v0.7 B1
     /// memory_load_family) + 1 always-on bootstrap (memory_capabilities)
-    /// = 7 visible tools. `--profile full` registers all 46.
+    /// = 7 visible tools. `--profile full` registers all 48.
     #[test]
     fn tool_definitions_for_profile_core_registers_6_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
@@ -5275,14 +5345,15 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_46() {
+    fn tool_definitions_for_profile_full_registers_48() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            46,
+            48,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
-             v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) = 46"
+             v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
+             v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) = 48"
         );
     }
 
@@ -5724,9 +5795,10 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 46 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 48 MCP tools (Justice of MCP pathway).
     /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
-    /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46).
+    /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46);
+    /// v0.7 K7 added memory_subscription_replay + memory_subscription_dlq_list (48).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5987,6 +6059,20 @@ mod tests {
             },
             ToolCase {
                 name: "memory_list_subscriptions",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            // v0.7 K7 — subscription reliability inspection tools.
+            ToolCase {
+                name: "memory_subscription_replay",
+                valid_args: json!({
+                    "subscription_id": "smoke-id",
+                    "since": "1970-01-01T00:00:00Z"
+                }),
+                required_arg: Some("subscription_id"),
+            },
+            ToolCase {
+                name: "memory_subscription_dlq_list",
                 valid_args: json!({}),
                 required_arg: None,
             },

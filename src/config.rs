@@ -1504,6 +1504,95 @@ pub struct AppConfig {
     /// Unset → compiled defaults apply globally
     /// ([`DEFAULT_TRANSCRIPT_TTL_SECS`] / [`DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS`]).
     pub transcripts: Option<TranscriptsConfig>,
+    /// v0.7.0 K7 — `[hooks]` block. Currently carries the
+    /// `[hooks.subscription] hmac_secret` server-wide override that
+    /// signs every outgoing webhook payload regardless of whether the
+    /// individual subscription supplied a per-subscription secret.
+    /// When unset, only per-subscription secrets are used (legacy
+    /// pre-K7 behaviour).
+    pub hooks: Option<HooksConfig>,
+}
+
+// ---------------------------------------------------------------------------
+// Hooks / subscription HMAC (K7)
+// ---------------------------------------------------------------------------
+
+/// `[hooks]` config block. v0.7.0 K7 — operator-facing knobs for the
+/// outgoing-webhook surface.
+///
+/// Wire format:
+/// ```toml
+/// [hooks.subscription]
+/// hmac_secret = "<plaintext-secret>"
+/// ```
+///
+/// When `hmac_secret` is set, EVERY outbound webhook payload is signed
+/// with `HMAC-SHA256(hmac_secret, "<timestamp>.<body>")` and the hex
+/// digest is sent as the `X-AI-Memory-Signature: sha256=<hex>` header.
+/// The override applies even to subscriptions that did not register a
+/// per-subscription secret. When both are set, the per-subscription
+/// secret wins (subscription-scoped trust beats server-scoped trust).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksConfig {
+    /// `[hooks.subscription]` sub-block. Optional — when omitted, no
+    /// server-wide HMAC override applies.
+    pub subscription: Option<HooksSubscriptionConfig>,
+}
+
+/// `[hooks.subscription]` sub-block. K7 ships one knob today
+/// (`hmac_secret`); future K-track work may add per-event opt-out
+/// filters or alternate signing algorithms.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HooksSubscriptionConfig {
+    /// Server-wide HMAC secret. Plaintext on disk — operators are
+    /// expected to chmod 600 the config file (same posture as the
+    /// existing `api_key` field).
+    pub hmac_secret: Option<String>,
+}
+
+impl AppConfig {
+    /// v0.7.0 K7 — resolved server-wide webhook HMAC secret. `None`
+    /// means no server-wide override (per-subscription secrets still
+    /// apply via the legacy code path).
+    #[must_use]
+    pub fn effective_hooks_hmac_secret(&self) -> Option<String> {
+        self.hooks
+            .as_ref()
+            .and_then(|h| h.subscription.as_ref())
+            .and_then(|s| s.hmac_secret.clone())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process-wide handle for the K7 server-wide HMAC override.
+// Mirrors the `ACTIVE_PERMISSIONS_MODE` pattern: set once at boot,
+// read by `subscriptions::dispatch_event_with_details` without an
+// API churn through every callsite. Stored behind a `RwLock<Option<…>>`
+// so the K7 integration tests can flip the value mid-process without
+// the `OnceLock`'s set-once contract getting in the way.
+// ---------------------------------------------------------------------------
+
+use std::sync::RwLock;
+
+static ACTIVE_HOOKS_HMAC_SECRET: RwLock<Option<String>> = RwLock::new(None);
+
+/// v0.7.0 K7 — set the process-wide webhook HMAC override. Called from
+/// `main`/daemon bootstrap with the value from
+/// `[hooks.subscription] hmac_secret`. Last writer wins — this is
+/// production-safe because boot only invokes it once; tests use the
+/// same setter to flip mid-process.
+pub fn set_active_hooks_hmac_secret(secret: Option<String>) {
+    if let Ok(mut w) = ACTIVE_HOOKS_HMAC_SECRET.write() {
+        *w = secret;
+    }
+}
+
+/// v0.7.0 K7 — read the process-wide webhook HMAC override. Returns
+/// `None` when unset (the K6-and-earlier behaviour: only
+/// per-subscription secrets sign outgoing payloads).
+#[must_use]
+pub fn active_hooks_hmac_secret() -> Option<String> {
+    ACTIVE_HOOKS_HMAC_SECRET.read().ok().and_then(|g| g.clone())
 }
 
 // ---------------------------------------------------------------------------

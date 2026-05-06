@@ -586,10 +586,24 @@ pub fn dispatch_event_with_details(
             // the DB-stored secret hash. Receivers verify by computing
             // SHA256(plaintext_secret) and then
             // HMAC-SHA256(key, "<timestamp>.<body>").
+            //
+            // v0.7.0 K7 — when no per-subscription secret is set, fall
+            // back to the process-wide `[hooks.subscription] hmac_secret`
+            // override so operators can sign EVERY outgoing payload
+            // without round-tripping each receiver through `memory_subscribe`.
+            // The plaintext server-wide secret is itself SHA-256-hashed
+            // first so the keying material on the wire matches the
+            // per-subscription path (receivers compute the same
+            // `SHA256(plaintext_secret)` regardless of which path
+            // configured it).
             let canonical = format!("{ts}.{body}");
-            let signature = secret_hash
-                .as_deref()
-                .map(|h| hmac_sha256_hex(h, &canonical));
+            let signature = match secret_hash.as_deref() {
+                Some(h) => Some(hmac_sha256_hex(h, &canonical)),
+                None => crate::config::active_hooks_hmac_secret().map(|plain| {
+                    let key_hash = sha256_hex(&plain);
+                    hmac_sha256_hex(&key_hash, &canonical)
+                }),
+            };
             let outcome =
                 deliver_with_retry(&url, &body, &ts, signature.as_deref(), &correlation_id);
             let ok = outcome.success;

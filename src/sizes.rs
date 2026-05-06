@@ -73,7 +73,7 @@ pub fn full_profile_total_tokens() -> usize {
     tool_sizes().iter().map(|t| t.total_tokens).sum()
 }
 
-/// Lookup a single tool by name. `O(n)` but `n ≤ 43`.
+/// Lookup a single tool by name. `O(n)` but `n ≤ 48` (v0.7 K7).
 pub fn tool_size(name: &str) -> Option<&'static ToolSize> {
     tool_sizes().iter().find(|t| t.name == name)
 }
@@ -140,13 +140,14 @@ mod tests {
     /// `tool_definitions()` regressions that would silently hide other
     /// failures.
     #[test]
-    fn table_has_46_entries_matching_tool_definitions_count() {
+    fn table_has_48_entries_matching_tool_definitions_count() {
         let n = tool_sizes().len();
         assert_eq!(
-            n, 46,
-            "expected exactly 46 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, 48,
+            "expected exactly 48 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
-             `memory_load_family`, source-anchored at \
+             `memory_load_family` + v0.7 K7 `memory_subscription_replay` \
+             + `memory_subscription_dlq_list`, source-anchored at \
              src/mcp.rs::tool_definitions); got {n}. If the count changed, \
              update the family map and this assertion together."
         );
