@@ -30,6 +30,13 @@ async fn main() -> Result<()> {
     // Idempotent (`OnceLock::set`); first writer wins.
     config::set_active_permissions_mode(app_config.effective_permissions_mode());
 
+    // v0.7.0 K7 — pin the process-wide webhook HMAC override (if any)
+    // before the daemon spawns any subscription-dispatch worker thread.
+    // Idempotent; the dispatcher reads via
+    // `crate::config::active_hooks_hmac_secret` and falls back to the
+    // per-subscription secret when unset.
+    config::set_active_hooks_hmac_secret(app_config.effective_hooks_hmac_secret());
+
     // PR-5 (issue #487): bootstrap operational logging + security
     // audit trail. Both are default-OFF; init returns silently when
     // disabled. The `_log_guard` MUST stay in scope for the lifetime
