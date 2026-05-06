@@ -177,17 +177,25 @@ mod tests {
     /// but the public claims need a 4× downward correction (tracked in
     /// v0.6.4-014 + v0.6.4-015 docs work).
     ///
-    /// This test pins the new honest range. The savings *percentage*
-    /// from `core` (~700 tokens) is unchanged at ~88%; the savings
-    /// *absolute* is ~5,300 tokens per request, not ~22,000.
+    /// **v0.7 C2 update (2026-05-06):** the canonical
+    /// `tool_definitions()` now carries an additional per-tool `docs`
+    /// field (long-form description + examples) that the bare
+    /// `tools/list` payload strips before transmission. The numbers
+    /// in this table reflect the **source of truth** (verbose +
+    /// short), not the wire payload. The bare-wire C5 budget is
+    /// pinned separately at ≤ 3500 tokens by
+    /// `tests/c2_tool_docs_field.rs::c2_tools_list_token_budget_is_under_3500`.
+    /// The savings *percentage* from `core` is unchanged; the
+    /// always-on payload is now ~85% smaller than the source.
     #[test]
     fn full_profile_total_in_honest_measured_range() {
         let total = full_profile_total_tokens();
         assert!(
-            (5_000..=8_000).contains(&total),
+            (5_000..=10_000).contains(&total),
             "full-profile total {total} tokens is outside the measured \
-             cl100k_base range (5K–8K). If the schema grew, update the \
-             public claim in RFC/README/roadmap and adjust this bound."
+             cl100k_base range (5K–10K, source-of-truth incl. v0.7 C2 \
+             `docs` fields). If the schema grew, update the public \
+             claim in RFC/README/roadmap and adjust this bound."
         );
     }
 
