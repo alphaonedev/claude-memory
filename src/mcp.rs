@@ -1222,6 +1222,38 @@ fn handle_store(
         metadata,
     };
 
+    // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
+    // composes declarative `[permissions.rules]` matchers + the K3
+    // `[permissions].mode` knob + (when wired) hook decisions into
+    // a single `Decision`. Deny-first: if a rule denies, we
+    // short-circuit before the K3 governance gate ever resolves a
+    // policy. Allow falls through to the existing K3 / governance
+    // gate so legacy `[governance]` policies continue to work.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let payload = serde_json::to_value(&mem).unwrap_or_default();
+        let ctx = PermissionContext {
+            op: Op::MemoryStore,
+            namespace: mem.namespace.clone(),
+            agent_id: agent_id.clone(),
+            payload,
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("store denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "store",
+                    "namespace": mem.namespace,
+                }));
+            }
+        }
+    }
+
     // Task 1.9: governance enforcement (store-side).
     {
         use crate::models::{GovernanceDecision, GovernedAction};
@@ -3053,6 +3085,34 @@ fn handle_delete(
         .and_then(|v| v.as_str())
         .map(str::to_string);
 
+    // v0.7.0 K9 — unified permission pipeline (delete-side).
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+            .map_err(|e| e.to_string())?;
+        let payload = json!({"id": target.id, "title": target.title});
+        let ctx = PermissionContext {
+            op: Op::MemoryDelete,
+            namespace: target.namespace.clone(),
+            agent_id,
+            payload,
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("delete denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "delete",
+                    "memory_id": target.id,
+                }));
+            }
+        }
+    }
+
     // Task 1.9: governance enforcement (delete-side).
     {
         use crate::models::{GovernanceDecision, GovernedAction};
@@ -3445,6 +3505,46 @@ fn handle_link(
     let relation = params["relation"].as_str().unwrap_or("related_to");
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
+
+    // v0.7.0 K9 — unified permission pipeline (link-side).
+    // Link evaluation uses the *source* memory's namespace (the
+    // originating end of the relation) so policies can scope by
+    // who is allowed to outbound-link from a given namespace.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let link_ns = match db::get(conn, source_id) {
+            Ok(Some(m)) => m.namespace,
+            _ => "global".to_string(),
+        };
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryLink,
+            namespace: link_ns,
+            agent_id,
+            payload: json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("link denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "link",
+                    "source_id": source_id,
+                    "target_id": target_id,
+                }));
+            }
+        }
+    }
+
     // v0.7 H2 — sign with active keypair when present; falls through
     // to attest_level="unsigned" otherwise. The chosen attest_level is
     // surfaced in the wire response so callers can tell signed vs
@@ -3873,6 +3973,38 @@ fn handle_consolidate(
     };
 
     validate::validate_consolidate(&ids, title, &summary, namespace).map_err(|e| e.to_string())?;
+
+    // v0.7.0 K9 — unified permission pipeline (consolidate-side).
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryConsolidate,
+            namespace: namespace.to_string(),
+            agent_id,
+            payload: json!({
+                "title": title,
+                "summary_chars": summary.len(),
+                "source_ids": ids,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("consolidate denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "consolidate",
+                    "namespace": namespace,
+                    "source_count": ids.len(),
+                }));
+            }
+        }
+    }
 
     let auto_generated = params["summary"].as_str().is_none();
 
@@ -4579,6 +4711,36 @@ fn handle_archive_restore(conn: &rusqlite::Connection, params: &Value) -> Result
 
 fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let older_than_days = params["older_than_days"].as_i64();
+
+    // v0.7.0 K9 — unified permission pipeline (archive-side).
+    // Archive purge is a destructive across-namespace operation; we
+    // evaluate against the global namespace + caller's agent_id.
+    // Operators can still scope rules via `namespace_pattern = "**"`.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryArchive,
+            namespace: "global".to_string(),
+            agent_id,
+            payload: json!({"older_than_days": older_than_days}),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("archive denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "archive",
+                }));
+            }
+        }
+    }
+
     let purged = db::purge_archive(conn, older_than_days).map_err(|e| e.to_string())?;
     Ok(json!({"purged": purged}))
 }

@@ -1647,13 +1647,41 @@ impl PermissionsMode {
 }
 
 /// `[permissions]` block in `config.toml`. Carries the gate's
-/// enforcement posture.
+/// enforcement posture and (v0.7.0 K9) the declarative rule list
+/// the unified [`crate::permissions::Permissions::evaluate`]
+/// pipeline consults before mode + hook fall-through.
+///
+/// Wire format (rules — K9):
+///
+/// ```toml
+/// [permissions]
+/// mode = "enforce"
+///
+/// [[permissions.rules]]
+/// namespace_pattern = "secrets/*"
+/// op               = "memory_store"
+/// agent_pattern    = "ai:*"
+/// decision         = "deny"
+/// reason           = "ai agents may not write to secrets"
+/// ```
+///
+/// Rules are deny-first and longest-pattern-wins; see
+/// [`crate::permissions`] module docs for the full combination
+/// rule.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionsConfig {
     /// Enforcement mode. Defaults to [`PermissionsMode::Advisory`] when
     /// omitted from the config file.
     #[serde(default)]
     pub mode: PermissionsMode,
+    /// v0.7.0 K9 — declarative permission rules. Each entry is a
+    /// `(namespace_pattern, op, agent_pattern, decision)` tuple
+    /// consulted by [`crate::permissions::Permissions::evaluate`]
+    /// before the mode default falls through. Defaults to empty
+    /// (no declarative rules — pre-K9 behaviour: mode + hooks +
+    /// existing governance gate decide everything).
+    #[serde(default)]
+    pub rules: Vec<crate::permissions::PermissionRule>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2205,6 +2233,20 @@ impl AppConfig {
         self.permissions
             .as_ref()
             .map_or_else(PermissionsMode::default, |p| p.mode)
+    }
+
+    /// v0.7.0 K9 — resolve the effective declarative rule set
+    /// consulted by [`crate::permissions::Permissions::evaluate`].
+    ///
+    /// Returns the rules from `[permissions]` when configured;
+    /// otherwise an empty vec (no declarative rules — mode + hooks
+    /// resolve every decision).
+    #[must_use]
+    pub fn effective_permission_rules(&self) -> Vec<crate::permissions::PermissionRule> {
+        self.permissions
+            .as_ref()
+            .map(|p| p.rules.clone())
+            .unwrap_or_default()
     }
 
     /// Resolve the effective feature tier from config (CLI flag overrides).

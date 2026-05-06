@@ -45,6 +45,13 @@ pub mod mcp;
 pub mod metrics;
 pub mod mine;
 pub mod models;
+// v0.7.0 K9 — unified permission system. Composes declarative
+// `[permissions.rules]` matchers, the K3 `[permissions].mode`
+// knob, and G1-G11 hook decisions into a single `Decision`.
+// Wired into the five op paths (store, link, delete, archive,
+// consolidate) so callers consult one evaluator regardless of
+// which source produced the outcome.
+pub mod permissions;
 pub mod profile;
 pub mod replication;
 pub mod reranker;
