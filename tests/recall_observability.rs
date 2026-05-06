@@ -23,7 +23,7 @@ use ai_memory::config::{ResolvedScoring, ResolvedTtl};
 use ai_memory::db;
 use ai_memory::hnsw::VectorIndex;
 use ai_memory::models::{Memory, Tier};
-use ai_memory::reranker::CrossEncoder;
+use ai_memory::reranker::{BatchedReranker, CrossEncoder};
 use serde_json::json;
 
 /// Build a fresh on-disk `SQLite` DB with the canonical schema applied.
@@ -162,12 +162,16 @@ fn recall_response_meta_reports_lexical_when_neural_unavailable() {
         !lexical.is_neural(),
         "test precondition: CrossEncoder::new() must be Lexical"
     );
+    // v0.7 G9 — `handle_recall` now takes a `&BatchedReranker`, which
+    // exposes the same `is_neural()` capability surface and routes
+    // concurrent calls through a coalescing worker.
+    let lexical_batched = BatchedReranker::new(lexical);
     let resp = ai_memory::mcp::handle_recall(
         &conn,
         &json!({"context": "rust runtime", "namespace": "test"}),
         None,
         None,
-        Some(&lexical),
+        Some(&lexical_batched),
         false,
         &ttl,
         &scoring,

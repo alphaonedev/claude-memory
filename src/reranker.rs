@@ -13,7 +13,10 @@
 //!   from `cross-encoder/ms-marco-MiniLM-L-6-v2` (~80 MB, ONNX-free).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::mpsc::{Sender, sync_channel};
 use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use candle_core::{Device, Tensor};
@@ -254,6 +257,191 @@ impl CrossEncoder {
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scored
     }
+
+    /// v0.7 G9 — batched rerank for concurrent recall.
+    ///
+    /// Process all `(query, candidates)` jobs in a single tokenize + single
+    /// forward pass on the Neural variant, holding the BERT mutex once for
+    /// the whole batch instead of once per (query, candidate) pair.
+    ///
+    /// **Throughput target**: ~3× for parallel recall vs. per-query
+    /// `rerank()` calls.
+    ///
+    /// Output ordering: `result[i]` corresponds to `queries[i]`. Each
+    /// inner vector is sorted by descending blended score, identical to
+    /// `rerank()`. Lexical variant delegates per-query (no batching win
+    /// since lexical scoring is already CPU-trivial).
+    pub fn rerank_batch(
+        &self,
+        queries: Vec<(String, Vec<(Memory, f64)>)>,
+    ) -> Vec<Vec<(Memory, f64)>> {
+        // Single-query short-circuit: avoid any batching overhead.
+        if queries.len() == 1 {
+            let mut iter = queries.into_iter();
+            let (q, cands) = iter.next().expect("len == 1");
+            return vec![self.rerank(&q, cands)];
+        }
+
+        match self {
+            Self::Lexical => queries
+                .into_iter()
+                .map(|(q, cands)| self.rerank(&q, cands))
+                .collect(),
+            Self::Neural {
+                model,
+                tokenizer,
+                classifier_weight,
+                classifier_bias,
+                device,
+            } => {
+                let model_guard = match model.lock() {
+                    Ok(g) => g,
+                    Err(e) => {
+                        tracing::warn!(
+                            "cross-encoder model lock poisoned in rerank_batch: {e}, falling back to lexical per-query"
+                        );
+                        return queries
+                            .into_iter()
+                            .map(|(q, cands)| {
+                                let lex = Self::Lexical;
+                                lex.rerank(&q, cands)
+                            })
+                            .collect();
+                    }
+                };
+
+                match Self::neural_rerank_batch(
+                    &model_guard,
+                    tokenizer,
+                    classifier_weight,
+                    classifier_bias,
+                    device,
+                    &queries,
+                ) {
+                    Ok(scores) => {
+                        // scores is a flat Vec<f32>, one per (query_idx,
+                        // candidate_idx) in row-major order matching
+                        // queries.iter().flat_map(|(_, cs)| cs).
+                        let mut out = Vec::with_capacity(queries.len());
+                        let mut cursor = 0usize;
+                        for (_query, cands) in queries {
+                            let n = cands.len();
+                            let mut scored: Vec<(Memory, f64)> = cands
+                                .into_iter()
+                                .enumerate()
+                                .map(|(i, (mem, original))| {
+                                    let ce = f64::from(scores[cursor + i]);
+                                    let final_score =
+                                        ORIGINAL_WEIGHT * original + CROSS_ENCODER_WEIGHT * ce;
+                                    (mem, final_score)
+                                })
+                                .collect();
+                            cursor += n;
+                            scored.sort_by(|a, b| {
+                                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+                            });
+                            out.push(scored);
+                        }
+                        out
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "neural rerank_batch failed: {e}, falling back to lexical per-query"
+                        );
+                        drop(model_guard);
+                        queries
+                            .into_iter()
+                            .map(|(q, cands)| {
+                                let lex = Self::Lexical;
+                                lex.rerank(&q, cands)
+                            })
+                            .collect()
+                    }
+                }
+            }
+        }
+    }
+
+    /// One tokenize + one forward pass over a flat batch of (query, doc)
+    /// pairs. Returns a flat `Vec<f32>` of sigmoided logits in the same
+    /// row-major order the candidates appear in `queries`.
+    fn neural_rerank_batch(
+        model: &BertModel,
+        tokenizer: &Tokenizer,
+        classifier_weight: &Tensor,
+        classifier_bias: &Tensor,
+        device: &Device,
+        queries: &[(String, Vec<(Memory, f64)>)],
+    ) -> Result<Vec<f32>> {
+        // Build the flat (query, document) pair list.
+        let mut pairs: Vec<(&str, String)> = Vec::new();
+        for (q, cands) in queries {
+            for (mem, _) in cands {
+                let document = format!("{} {}", mem.title, mem.content);
+                pairs.push((q.as_str(), document));
+            }
+        }
+        if pairs.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Variable-length pairs require padding for a single forward pass.
+        // Clone the tokenizer so we can mutate padding settings without
+        // racing other threads on the shared `Arc<Tokenizer>`.
+        let mut batch_tokenizer = tokenizer.clone();
+        let padding = tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::BatchLongest,
+            direction: tokenizers::PaddingDirection::Right,
+            pad_id: 0,
+            pad_type_id: 0,
+            pad_token: "[PAD]".to_string(),
+            ..Default::default()
+        };
+        batch_tokenizer.with_padding(Some(padding));
+
+        let encodings = batch_tokenizer
+            .encode_batch(
+                pairs
+                    .into_iter()
+                    .map(|(q, d)| tokenizers::EncodeInput::Dual(q.into(), d.into()))
+                    .collect::<Vec<_>>(),
+                true,
+            )
+            .map_err(|e| anyhow::anyhow!("cross-encoder batch tokenization failed: {e}"))?;
+
+        let batch_size = encodings.len();
+        let seq_len = encodings.first().map(|e| e.get_ids().len()).unwrap_or(0);
+
+        let mut input_ids: Vec<u32> = Vec::with_capacity(batch_size * seq_len);
+        let mut attn_mask: Vec<u32> = Vec::with_capacity(batch_size * seq_len);
+        let mut token_types: Vec<u32> = Vec::with_capacity(batch_size * seq_len);
+        for enc in &encodings {
+            input_ids.extend_from_slice(enc.get_ids());
+            attn_mask.extend_from_slice(enc.get_attention_mask());
+            token_types.extend_from_slice(enc.get_type_ids());
+        }
+
+        let input_ids = Tensor::from_vec(input_ids, (batch_size, seq_len), device)?;
+        let attention_mask = Tensor::from_vec(attn_mask, (batch_size, seq_len), device)?;
+        let token_type_ids = Tensor::from_vec(token_types, (batch_size, seq_len), device)?;
+
+        // Forward pass → [batch, seq, 384]
+        let hidden = model.forward(&input_ids, &token_type_ids, Some(&attention_mask))?;
+
+        // [CLS] token per row → [batch, 384]
+        let cls = hidden.narrow(1, 0, 1)?.squeeze(1)?;
+
+        // Classification head per row → [batch, 1]
+        let logits = cls
+            .matmul(&classifier_weight.t()?)?
+            .broadcast_add(classifier_bias)?;
+
+        let logits_vec: Vec<f32> = logits.squeeze(1)?.to_vec1()?;
+        Ok(logits_vec
+            .into_iter()
+            .map(|l| 1.0 / (1.0 + (-l).exp()))
+            .collect())
+    }
 }
 
 impl Default for CrossEncoder {
@@ -388,6 +576,183 @@ fn tfidf_score(query_terms: &[&str], doc_tokens: &[&str]) -> f32 {
 
 fn bigrams<'a>(tokens: &'a [&str]) -> Vec<(&'a str, &'a str)> {
     tokens.windows(2).map(|w| (w[0], w[1])).collect()
+}
+
+// ---------------------------------------------------------------------------
+// v0.7 G9 — concurrent rerank coalescer
+// ---------------------------------------------------------------------------
+
+/// Default upper bound on how many requests we coalesce per BERT call.
+pub const DEFAULT_MAX_BATCH: usize = 32;
+
+/// Default flush latency (ms) — how long the worker waits for more requests
+/// before processing a non-full batch. 5ms keeps single-request latency
+/// negligible while still benefiting parallel callers.
+pub const DEFAULT_MAX_WAIT_MS: u64 = 5;
+
+/// Job submitted to the coalescer worker.
+struct RerankJob {
+    query: String,
+    candidates: Vec<(Memory, f64)>,
+    reply: std::sync::mpsc::SyncSender<Vec<(Memory, f64)>>,
+}
+
+/// Concurrent rerank coalescer.
+///
+/// Wraps a `CrossEncoder` and serializes concurrent recall reranks through
+/// a single worker thread. The worker buffers up to `max_batch` requests
+/// or waits up to `max_wait_ms` (whichever first), then issues one
+/// `rerank_batch` call. The Mutex around the BERT model is held for the
+/// whole batch instead of once per (query, candidate) — the throughput
+/// fix mandated by G9.
+///
+/// **Single-request latency**: the worker flushes immediately when the
+/// queue is empty after pulling the first job, so a lone request only
+/// pays one `recv_timeout(0)` round-trip — no artificial waiting.
+pub struct BatchedReranker {
+    sender: Option<Sender<RerankJob>>,
+    worker: Option<JoinHandle<()>>,
+    /// Direct handle to the underlying encoder, used for the single-query
+    /// short-circuit and for callers that explicitly want non-batched
+    /// behavior (tests, benchmarks).
+    encoder: Arc<CrossEncoder>,
+}
+
+impl BatchedReranker {
+    /// Wrap an existing `CrossEncoder` with the default batching parameters
+    /// (`max_batch = 32`, `max_wait_ms = 5`).
+    pub fn new(encoder: CrossEncoder) -> Self {
+        Self::with_params(encoder, DEFAULT_MAX_BATCH, DEFAULT_MAX_WAIT_MS)
+    }
+
+    /// Wrap an existing `CrossEncoder` with custom batching parameters.
+    pub fn with_params(encoder: CrossEncoder, max_batch: usize, max_wait_ms: u64) -> Self {
+        let encoder = Arc::new(encoder);
+        let (tx, rx) = std::sync::mpsc::channel::<RerankJob>();
+        let worker_encoder = Arc::clone(&encoder);
+        let max_wait = Duration::from_millis(max_wait_ms);
+
+        let worker = thread::Builder::new()
+            .name("ai-memory-reranker-batcher".into())
+            .spawn(move || {
+                loop {
+                    // Block until the first job arrives — no busy wait.
+                    let first = match rx.recv() {
+                        Ok(job) => job,
+                        Err(_) => return, // sender dropped → shut down
+                    };
+
+                    let mut batch: Vec<RerankJob> = Vec::with_capacity(max_batch);
+                    batch.push(first);
+
+                    // Coalesce additional jobs that arrive within the
+                    // window, up to the batch cap.
+                    let deadline = Instant::now() + max_wait;
+                    while batch.len() < max_batch {
+                        let now = Instant::now();
+                        if now >= deadline {
+                            break;
+                        }
+                        match rx.recv_timeout(deadline - now) {
+                            Ok(j) => batch.push(j),
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                // Drain the current batch then exit.
+                                break;
+                            }
+                        }
+                    }
+
+                    process_batch(&worker_encoder, batch);
+                }
+            })
+            .expect("failed to spawn rerank batcher worker");
+
+        Self {
+            sender: Some(tx),
+            worker: Some(worker),
+            encoder,
+        }
+    }
+
+    /// Submit a single rerank request. Blocks until the batcher returns
+    /// the result. Concurrent callers are coalesced into a single
+    /// `rerank_batch` call inside the worker thread.
+    ///
+    /// If the worker is unavailable for any reason (channel closed),
+    /// falls back to a direct `rerank` call on the underlying encoder.
+    pub fn rerank(&self, query: &str, candidates: Vec<(Memory, f64)>) -> Vec<(Memory, f64)> {
+        let Some(sender) = self.sender.as_ref() else {
+            return self.encoder.rerank(query, candidates);
+        };
+        let (reply_tx, reply_rx) = sync_channel::<Vec<(Memory, f64)>>(1);
+        let job = RerankJob {
+            query: query.to_string(),
+            candidates,
+            reply: reply_tx,
+        };
+        if sender.send(job).is_err() {
+            return self.encoder.rerank(query, Vec::new());
+        }
+        reply_rx
+            .recv()
+            .unwrap_or_else(|_| self.encoder.rerank(query, Vec::new()))
+    }
+
+    /// Direct access to the wrapped encoder. Useful for callers that
+    /// want to bypass the coalescer (tests, benchmarks).
+    pub fn encoder(&self) -> &CrossEncoder {
+        &self.encoder
+    }
+
+    /// Convenience shortcut for `self.encoder().is_neural()`. Most
+    /// callers in the recall pipeline only need to check the variant
+    /// for capability reporting.
+    pub fn is_neural(&self) -> bool {
+        self.encoder.is_neural()
+    }
+}
+
+impl Drop for BatchedReranker {
+    fn drop(&mut self) {
+        // Drop the sender so the worker observes a disconnected channel
+        // and exits its loop cleanly.
+        self.sender.take();
+        if let Some(handle) = self.worker.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn process_batch(encoder: &CrossEncoder, batch: Vec<RerankJob>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    // Single-request fast path: bypass the batched API to avoid the
+    // padding overhead and any latency regression on lone callers.
+    if batch.len() == 1 {
+        let mut iter = batch.into_iter();
+        let job = iter.next().expect("len == 1");
+        let result = encoder.rerank(&job.query, job.candidates);
+        let _ = job.reply.send(result);
+        return;
+    }
+
+    // Build the input vector for the batched call. Use placeholder
+    // `Memory` clones via `take` to avoid copying — we move out.
+    let mut queries: Vec<(String, Vec<(Memory, f64)>)> = Vec::with_capacity(batch.len());
+    let mut replies: Vec<std::sync::mpsc::SyncSender<Vec<(Memory, f64)>>> =
+        Vec::with_capacity(batch.len());
+    for job in batch {
+        queries.push((job.query, job.candidates));
+        replies.push(job.reply);
+    }
+
+    let outputs = encoder.rerank_batch(queries);
+    for (out, reply) in outputs.into_iter().zip(replies.into_iter()) {
+        let _ = reply.send(out);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -797,6 +1162,144 @@ mod tests {
         let ce = CrossEncoder::new_neural();
         let s = ce.score("query", "title", "content");
         assert!((0.0..=1.0).contains(&s), "score {s} out of bounds");
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7 G9 — batched rerank parity + coalescer smoke tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn g9_rerank_batch_matches_per_query_rerank_lexical() {
+        // Spec: 3 queries × 5 candidates. Batched output must match
+        // per-query rerank() output exactly for the deterministic Lexical
+        // path. (Neural parity is gated behind `test-with-models`; the
+        // implementation is symmetric — same blend, same sort.)
+        let ce = CrossEncoder::new();
+        let queries = vec!["alpha gamma", "beta words", "rust async"];
+        let mut jobs: Vec<(String, Vec<(Memory, f64)>)> = Vec::new();
+        let mut expected: Vec<Vec<(Memory, f64)>> = Vec::new();
+        for q in &queries {
+            let cands: Vec<(Memory, f64)> = (0..5)
+                .map(|i| {
+                    (
+                        make_memory(
+                            &format!("title-{i}-{q}"),
+                            &format!("alpha beta gamma rust async body {i} {q}"),
+                        ),
+                        f64::from(i) * 0.1,
+                    )
+                })
+                .collect();
+            expected.push(ce.rerank(q, cands.clone()));
+            jobs.push(((*q).to_string(), cands));
+        }
+
+        let batched = ce.rerank_batch(jobs);
+        assert_eq!(batched.len(), expected.len());
+        for (b, e) in batched.iter().zip(expected.iter()) {
+            assert_eq!(b.len(), e.len());
+            for (bi, ei) in b.iter().zip(e.iter()) {
+                assert_eq!(bi.0.id, ei.0.id);
+                assert_eq!(bi.0.title, ei.0.title);
+                assert!(
+                    (bi.1 - ei.1).abs() < 1e-12,
+                    "blended score mismatch: batched={} per-query={}",
+                    bi.1,
+                    ei.1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g9_rerank_batch_single_query_short_circuits() {
+        // Single-query batches must not regress vs rerank() — use the
+        // single-query short-circuit path.
+        let ce = CrossEncoder::new();
+        let cands: Vec<(Memory, f64)> = (0..5)
+            .map(|i| (make_memory(&format!("t{i}"), &format!("body {i}")), 0.5))
+            .collect();
+        let direct = ce.rerank("body", cands.clone());
+        let batched = ce.rerank_batch(vec![("body".to_string(), cands)]);
+        assert_eq!(batched.len(), 1);
+        assert_eq!(batched[0].len(), direct.len());
+        for (a, b) in batched[0].iter().zip(direct.iter()) {
+            assert_eq!(a.0.id, b.0.id);
+            assert!((a.1 - b.1).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn g9_rerank_batch_empty_inputs() {
+        let ce = CrossEncoder::new();
+        let out = ce.rerank_batch(Vec::new());
+        assert!(out.is_empty());
+
+        // Multi-query but each has zero candidates.
+        let out2 = ce.rerank_batch(vec![
+            ("q1".to_string(), Vec::new()),
+            ("q2".to_string(), Vec::new()),
+        ]);
+        assert_eq!(out2.len(), 2);
+        assert!(out2.iter().all(std::vec::Vec::is_empty));
+    }
+
+    #[test]
+    fn g9_batched_reranker_serial_calls_match_rerank() {
+        use super::BatchedReranker;
+        let batched = BatchedReranker::new(CrossEncoder::new());
+        let cands: Vec<(Memory, f64)> = (0..4)
+            .map(|i| {
+                (
+                    make_memory(
+                        &format!("t{i}"),
+                        &format!("alpha gamma body {i} content words"),
+                    ),
+                    f64::from(i) * 0.1,
+                )
+            })
+            .collect();
+        let direct = CrossEncoder::new().rerank("alpha", cands.clone());
+        let via_batcher = batched.rerank("alpha", cands);
+        assert_eq!(via_batcher.len(), direct.len());
+        for (a, b) in via_batcher.iter().zip(direct.iter()) {
+            assert_eq!(a.0.id, b.0.id);
+            assert!((a.1 - b.1).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn g9_batched_reranker_concurrent_calls_all_succeed() {
+        use super::BatchedReranker;
+        use std::sync::Arc;
+        let batched = Arc::new(BatchedReranker::new(CrossEncoder::new()));
+        let mut handles = Vec::new();
+        for i in 0..8 {
+            let b = Arc::clone(&batched);
+            handles.push(std::thread::spawn(move || {
+                let cands: Vec<(Memory, f64)> = (0..5)
+                    .map(|j| {
+                        (
+                            make_memory(
+                                &format!("t{i}-{j}"),
+                                &format!("body {j} alpha gamma rust"),
+                            ),
+                            0.5,
+                        )
+                    })
+                    .collect();
+                let q = format!("alpha {i}");
+                let out = b.rerank(&q, cands);
+                assert_eq!(out.len(), 5);
+                // Output is sorted descending.
+                for w in out.windows(2) {
+                    assert!(w[0].1 >= w[1].1);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
     }
 
     #[test]

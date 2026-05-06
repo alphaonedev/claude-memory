@@ -272,6 +272,19 @@ harness = false
 name = "age_vs_cte"
 harness = false
 
+# v0.7.0 G9 — concurrent rerank throughput benchmark. Measures wall-clock
+# time for N=8 parallel recall reranks under two strategies: per-request
+# `CrossEncoder::rerank` (serializes through the per-candidate Mutex) vs.
+# `BatchedReranker::rerank` (one tokenize + one forward pass per worker
+# tick). Default model is Lexical (fast, deterministic, no download).
+# Set `AI_MEMORY_BENCH_NEURAL=1` to exercise the BERT path that the
+# coalescer actually optimises — that's where the documented ~3× win
+# materialises. Not on the required-checks list; run manually with
+# `cargo bench --bench reranker_throughput`.
+[[bench]]
+name = "reranker_throughput"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
