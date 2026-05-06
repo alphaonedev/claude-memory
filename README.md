@@ -23,7 +23,22 @@
 
 **ai-memory is a persistent memory system for AI assistants.** It works with **any AI that supports MCP** -- Claude, ChatGPT, Grok, Llama, and more. It stores what your AI learns in a local SQLite database, ranks memories by relevance when recalling, and auto-promotes important knowledge to permanent storage. Install it once, and every AI assistant you use remembers your architecture, your preferences, your corrections -- forever.
 
-**v0.6.4 (`quiet-tools`)** — the MCP server now ships with a **5-tool default surface** (`memory_store`, `memory_recall`, `memory_list`, `memory_get`, `memory_search`) plus the always-on `memory_capabilities` bootstrap. The other 38 tools remain reachable via `--profile graph|admin|power|full` or runtime expansion through `memory_capabilities --include-schema family=<name>`. Eager-loading harnesses (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI) drop ~4,700 input tokens of tool schemas per request — a **76.4% reduction** measured against `cl100k_base` BPE. To preserve v0.6.3 behavior 1:1, run `ai-memory mcp --profile full`. See `docs/MIGRATION_v0.6.4.md`.
+**v0.7.0 (`attested-cortex`)** rolls together the cortex-fluent legibility work with the full v0.7 trust + A2A scope from ROADMAP2 §7.3. The substrate becomes both **more articulate** (capabilities v3, named loader tools, compacted schemas) and **cryptographically trustworthy** (Ed25519 attestation, sidechain transcripts, programmable hook pipeline, enforced namespace inheritance). The v0.6.4 5-tool default surface and 43-tool runtime ceiling are unchanged; everything new is additive and (for the trust surfaces) opt-in. **Upgrading from v0.6.x?** Read [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md) first — most v0.6.4 callers see no behavior change, but pre-v0.6.3.1 v0.6.x users hit the G1 namespace-inheritance fix.
+
+**v0.6.4 (`quiet-tools`)** — the MCP server ships with a **5-tool default surface** (`memory_store`, `memory_recall`, `memory_list`, `memory_get`, `memory_search`) plus the always-on `memory_capabilities` bootstrap. The other 38 tools remain reachable via `--profile graph|admin|power|full` or runtime expansion through `memory_capabilities --include-schema family=<name>`. Eager-loading harnesses (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI) drop ~4,700 input tokens of tool schemas per request — a **76.4% reduction** measured against `cl100k_base` BPE. To preserve v0.6.3 behavior 1:1, run `ai-memory mcp --profile full`. See `docs/MIGRATION_v0.6.4.md`.
+
+## What's new in v0.7
+
+v0.7.0 ships **five interlocking substrates** under one release banner. Every surface stays default-off or default-equivalent for v0.6.4 callers — see the [v0.7 compatibility matrix](docs/v0.7/compatibility-matrix.html) for the breakdown.
+
+- **Attested links (Ed25519).** The dead `signature` column shipped in v0.6.3 is now filled with real per-agent Ed25519 attestation, and `memory_verify(link_id)` returns `{signature_verified, attest_level, signed_by, signed_at}` on demand. Generate a keypair with `ai-memory identity generate`; opt-in via `attest_level = "self_signed"`. See the [`attested-cortex` RFC](docs/v0.7/rfc-attested-cortex.md#decision-1--why-ed25519-over-x25519--chacha20).
+- **Hook pipeline (20 lifecycle events).** A programmable extension surface fires on `pre_/post_store|recall|search|delete|promote|link|consolidate|governance_decision|archive|transcript_store` plus `on_index_eviction`; hooks return `Allow` / `Modify` / `Deny` / `AskUser`. Default off; opt in via `~/.config/ai-memory/hooks.toml`. See [MIGRATION § Hook pipeline](docs/MIGRATION_v0.7.md#hook-pipeline-opt-in).
+- **Transcripts + replay.** zstd-3 BLOB sidechain stores raw conversation/reasoning trails; `memory_replay(memory_id)` walks `memory_transcript_links` to reconstruct the chain. Opt-in per namespace via `[transcripts."team/*"]`. See [MIGRATION § Sidechain transcripts](docs/MIGRATION_v0.7.md#sidechain-transcripts-opt-in-per-namespace).
+- **Apache AGE backend.** When AGE is installed in the Postgres SAL backend, KG ops route through Cypher; the recursive-CTE path stays as fallback. Bench-gated — AGE p95 must beat CTE p95 by ≥30% at depth=5. See [MIGRATION § Apache AGE acceleration](docs/MIGRATION_v0.7.md#apache-age-acceleration-opt-in).
+- **Capabilities v3 + smart loaders.** `memory_capabilities` v3 adds `summary`, `to_describe_to_user`, per-tool `callable_now`, and `agent_permitted_families`; the new always-on `memory_load_family(family)` and `memory_smart_load(intent)` tools replace the `memory_capabilities --include-schema` ergonomics. The pinned phrasings live in [`docs/v0.7/canonical-phrasings.md`](docs/v0.7/canonical-phrasings.md).
+- **Permissions + A2A approvals.** The v0.6.x governance subsystem is refactored into rules + modes + hooks → a single `Decision`, with namespace inheritance (G1) actually enforced. `memory_approval_pending` / `memory_approval_decide(remember=forever)` enable progressive trust; HMAC signing on the approval API is mandatory. Migrate with `ai-memory governance migrate-to-permissions --apply`. See [`What's new in v0.7`](docs/whats-new-v07.html) for the full walk-through.
+
+> **Where to start:** [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md) (upgrade procedure), [`docs/whats-new-v07.html`](docs/whats-new-v07.html) (visual summary), [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md) (design rationale), [`docs/ADMIN_GUIDE.md`](docs/ADMIN_GUIDE.md) (operator playbook).
 
 **One binary, four operational modes** (v0.6.4). The `ai-memory` Rust binary (tokio + axum) can run any of these in isolation or simultaneously, sharing a single SQLite database:
 
@@ -57,7 +72,7 @@ a1b2|Project DB is PostgreSQL 16|long|infra|8|0.91|database,postgres|ai:claude-c
 c3d4|API rate limit is 100 rps|long|infra|7|0.87|api,limits|ai:claude-desktop@laptop:pid-5219
 ```
 
-**Today** `agent_id` is *claimed*, not *attested* — don't make security decisions on it without pairing with agent registration. **v0.7** wires cryptographic attestation into the schema-reserved `memory_links.signature` field. See the [agent identity page](https://alphaonedev.github.io/ai-memory-mcp/agent-identity.html) for the full provenance contract.
+**Today** `agent_id` is *claimed*, not *attested* — don't make security decisions on it without pairing with agent registration. **v0.7 (`attested-cortex`)** wires cryptographic Ed25519 attestation into the previously-reserved `memory_links.signature` field, with `memory_verify(link_id)` for inbound verification and an append-only `signed_events` audit chain. See the [agent identity page](https://alphaonedev.github.io/ai-memory-mcp/agent-identity.html) and the [`attested-cortex` RFC](docs/v0.7/rfc-attested-cortex.md) for the full provenance contract.
 
 ## Retroactive conversation import — `ai-memory mine`
 
@@ -1008,6 +1023,10 @@ ai-memory includes hardening across all input paths:
 
 | Guide | Audience |
 |-------|----------|
+| [Migration Guide v0.7](docs/MIGRATION_v0.7.md) | **Upgrading from v0.6.x — read this first** (covers attested-cortex, hooks, transcripts, AGE, permissions, G1 inheritance fix) |
+| [What's new in v0.7](docs/whats-new-v07.html) | Visual walk-through of the `attested-cortex` substrates |
+| [`attested-cortex` RFC](docs/v0.7/rfc-attested-cortex.md) | Design rationale for the four v0.7 architectural decisions |
+| [v0.7 compatibility matrix](docs/v0.7/compatibility-matrix.html) | Per-feature default-vs-opt-in matrix |
 | [Installation Guide](docs/INSTALL.md) | Getting it running (includes MCP setup for multiple AI platforms) |
 | [User Guide](docs/USER_GUIDE.md) | AI assistant users who want persistent memory |
 | [Developer Guide](docs/DEVELOPER_GUIDE.md) | Building on or contributing to ai-memory |

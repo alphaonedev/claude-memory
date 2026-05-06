@@ -1,10 +1,12 @@
 # Admin Guide
 
+> **Upgrading to v0.7?** Read [`MIGRATION_v0.7.md`](MIGRATION_v0.7.md) **before** you upgrade. v0.7.0 (`attested-cortex`) adds Ed25519 link attestation, a 20-event hook pipeline, sidechain transcripts + `memory_replay`, optional Apache AGE acceleration, capabilities v3 (with the new `memory_load_family` / `memory_smart_load` loaders), and a refactored permissions + A2A approval system. Most v0.6.4 callers see **no behavior change** — but pre-v0.6.3.1 v0.6.x users hit the G1 namespace-inheritance fix. Companion docs: [What's new in v0.7](whats-new-v07.html), [`attested-cortex` RFC](v0.7/rfc-attested-cortex.md), [v0.7 compatibility matrix](v0.7/compatibility-matrix.html), and [canonical phrasings](v0.7/canonical-phrasings.md) for the agent-facing strings.
+
 `ai-memory` is an AI-agnostic memory management system. It works with **any MCP-compatible AI client** -- including Claude AI, OpenAI ChatGPT, xAI Grok, META Llama, and others. The HTTP API and CLI are completely platform-independent.
 
-**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), 1,886 lib tests + 49+ integration tests at 93.84% line coverage (v0.6.3.1). v0.6.3 baseline numbers (1,600 lib / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 deltas are documented in `CHANGELOG.md` and the v0.6.3.1 release notes.
+**Key features for admins:** Zero token cost until recall (replaces built-in auto-memory), TOON compact default response format (79% smaller than JSON), MCP prompts for proactive AI behavior (`recall-first`, `memory-workflow`), 4 feature tiers (keyword → autonomous with local LLMs via Ollama), and the v0.7.0 `attested-cortex` substrates (Ed25519 link attestation, hook pipeline, sidechain transcripts, optional AGE acceleration, capabilities v3, permissions + A2A approvals). 1,886 lib tests + 49+ integration tests at 93.84% line coverage (v0.6.3.1). v0.6.3 baseline numbers (1,600 lib / 93.08%) are frozen on the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html); v0.6.3.1 and v0.7.0 deltas are documented in `CHANGELOG.md` and the per-release notes.
 
-> **Maturity framing (v0.6.3).** The single-machine primitive (T1/T2 in the [architectures matrix](https://alphaonedev.github.io/ai-memory-mcp/architectures.html)) is **production-ready**. Federation (T3 multi-node quorum cluster) is **beta** — the code is shipped and tested but not recommended for unattended production fleets. The Postgres+pgvector backend is **experimental** under the `sal-postgres` Cargo feature, GA target v0.7. Multi-region distributed consensus (T5 "global hive") is **vision** at v1.0+. ai-memory is a single-machine primitive that ships beta-quality federation primitives for opt-in multi-node clusters; it is not a distributed database. See the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html) for the canonical maturity labels — use those labels in all customer-facing materials.
+> **Maturity framing (v0.7).** The single-machine primitive (T1/T2 in the [architectures matrix](https://alphaonedev.github.io/ai-memory-mcp/architectures.html)) is **production-ready**. Federation (T3 multi-node quorum cluster) is **beta** — the code is shipped and tested but not recommended for unattended production fleets. The Postgres+pgvector backend reaches **GA in v0.7** (with optional **Apache AGE acceleration** for KG ops behind a bench gate). Ed25519 attestation, the hook pipeline, sidechain transcripts, and the permissions/A2A surfaces are all **opt-in** — a v0.7.0 install with no `hooks.toml`, no keypair, and no `[transcripts]` config behaves identically to v0.6.4 at the lifecycle layer. Multi-region distributed consensus (T5 "global hive") is **vision** at v1.0+. See the [evidence page](https://alphaonedev.github.io/ai-memory-mcp/evidence.html) for the canonical maturity labels — use those labels in all customer-facing materials.
 
 ## Deployment Options
 
@@ -359,6 +361,168 @@ These are set in the source code and require recompilation to change:
 | `PROMOTION_THRESHOLD` | 5 accesses | `models.rs` |
 | `SHORT_TTL_EXTEND_SECS` | 3600 (1 hour) | `models.rs` |
 | `MID_TTL_EXTEND_SECS` | 86400 (1 day) | `models.rs` |
+
+## Profiles (v0.6.4+)
+
+The MCP server's tool surface is selected by `--profile`. Profiles compose tool **families** — `core`, `graph`, `admin`, `power`, `full` — and the always-on bootstrap (`memory_capabilities`) is unioned in regardless of which profile is active.
+
+| Profile | Advertised tools | Use when |
+|---|---|---|
+| `core` (default) | 5 + bootstrap | Eager-loading harnesses where every kilobyte of `tools/list` schema costs input tokens (Claude Desktop / Codex CLI / Grok CLI / Gemini CLI). |
+| `graph` | core + KG family | Agents that walk `memory_link` / `memory_get_links` / `memory_kg_query` / `memory_find_paths`. |
+| `admin` | core + governance + audit | Operator sessions doing `memory_governance_*`, `memory_audit_*`, archive purges. |
+| `power` | core + smart-tier LLM tools | Smart/autonomous tier deployments that want `memory_expand_query`, `memory_auto_tag`, `memory_detect_contradiction` always available. |
+| `full` | every family — 43 tools | Pre-v0.6.4 behavior 1:1, plus v0.7 additions. |
+
+**v0.7 always-on additions:** `memory_load_family(family)` and `memory_smart_load(intent)` are advertised under every profile. They register additional families at runtime without restarting the MCP server — preferred over re-launching with a wider `--profile` for short-lived expansions. The pinned phrasings the agent sees for these recovery paths live in [`v0.7/canonical-phrasings.md`](v0.7/canonical-phrasings.md).
+
+```bash
+ai-memory mcp                       # --profile core (default)
+ai-memory mcp --profile graph       # core + KG family
+ai-memory mcp --profile full        # every tool advertised eagerly
+```
+
+The `--profile` flag **must** be passed in the MCP args — `config.toml` has no equivalent key by design (the profile is a per-launch ergonomic choice, not durable configuration).
+
+## Hooks (v0.7+)
+
+The hook pipeline (Track G of `attested-cortex`) adds **20 lifecycle events** at every memory operation point, turning the substrate into a programmable extension surface. Hooks are **default off** — a v0.7 install with no `~/.config/ai-memory/hooks.toml` behaves identically to v0.6.4.
+
+```toml
+# ~/.config/ai-memory/hooks.toml
+[[hook]]
+event = "post_store"
+command = "/usr/local/bin/auto-link-detector"
+priority = 100
+timeout_ms = 5000
+mode = "daemon"
+enabled = true
+namespace = "team/*"
+```
+
+**Event matrix:** `pre_store`, `post_store`, `pre_recall`, `post_recall`, `pre_search`, `post_search`, `pre_delete`, `post_delete`, `pre_promote`, `post_promote`, `pre_link`, `post_link`, `pre_consolidate`, `post_consolidate`, `pre_governance_decision`, `post_governance_decision`, `on_index_eviction`, `pre_archive`, `pre_transcript_store`, `post_transcript_store`. Hooks return `Allow`, `Modify(delta)` (pre- events only), `Deny{reason, code}`, or `AskUser{prompt, options, default}`. Chain order is priority-desc; the first `Deny` short-circuits the chain.
+
+**Performance contract:** `post_recall` and `post_search` default to `mode = "daemon"` (long-running IPC client) so they do not blow the v0.6.3 50ms recall p95 budget. `mode = "exec"` (subprocess-per-call) is permitted but requires explicit override and budget recalibration. Audit every hook for time and resource cost before promoting it past staging — a 200ms `post_recall` exec hook silently degrades every recall on the box.
+
+For the full schema (`hooks.toml` keys, decision shape, IPC framing) and for the pre-shipped sample hooks, see the relevant [V0.7-EPIC tracks G1–G11](v0.7/V0.7-EPIC.md) and the per-task documentation under `docs/hooks/` once those tracks merge.
+
+## Identity & Attestation (v0.7+)
+
+Per-agent Ed25519 keypairs sign every outbound `memory_links` write. Inbound writes are verified against the cached public key for the claimed `observed_by` agent. The previously-reserved `memory_links.signature` column is now actually populated; the append-only `signed_events` audit table (schema v21) records every signed write with no UPDATE / DELETE through the application layer.
+
+```bash
+ai-memory identity generate --agent-id "ai:claude-code@host:pid-12345"
+ai-memory identity list
+ai-memory identity export-pub --agent-id "ai:claude-code@host:pid-12345"
+ai-memory identity suggest-id                # prints a sensible default for $HOSTNAME / current process
+```
+
+Keys live at `~/.config/ai-memory/keys/<agent_id>.{pub,priv}` with mode `0644` / `0600`. The private key never leaves the host; only the `.pub` is exchanged with peers (via `identity export-pub`, by hand or out-of-band).
+
+**`attest_level` enum** stamped on every link:
+- `unsigned` — no keypair present for the writer; preserves v0.6.4 backward compat
+- `self_signed` — active agent has a keypair; outbound writes are signed
+- `peer_attested` — federated link verified against the peer's pinned public key
+
+The `memory_verify(link_id)` MCP tool returns `{signature_verified, attest_level, signed_by, signed_at}` for any link on demand. Use it as a verification gate in any decision path that previously trusted `metadata.agent_id` alone.
+
+**Hardware-backed key storage** (TPM / HSM / Secure Enclave) is **out of OSS scope** per ROADMAP2 — available only in the AgenticMem commercial layer. Software-only Ed25519 with file-mode 0600 is the OSS contract. See [MIGRATION § Ed25519 attestation](MIGRATION_v0.7.md#ed25519-attestation-opt-in) and the [`attested-cortex` RFC § Decision 1](v0.7/rfc-attested-cortex.md#decision-1--why-ed25519-over-x25519--chacha20) for the threat model and the X25519 / ChaCha20 deferral rationale.
+
+## Transcripts & Replay (v0.7+)
+
+The transcript sidechain (Track I) stores raw conversation/reasoning trails in zstd-3-compressed BLOBs, linked to derived memories via `memory_transcript_links`. This is the substrate for R5 auto-extraction (post-v0.7 roadmap) — and the operator-facing payoff today is faithful **replay** of how a memory was learned.
+
+Transcripts are **default off**. Opt in per namespace in `config.toml`:
+
+```toml
+[transcripts."team/*"]
+enabled = true
+ttl_days = 30
+archive_after_days = 7
+```
+
+Schema migration v21 → v22 adds `memory_transcripts` and `memory_transcript_links`. A background sweeper archives transcripts whose linked memories are all expired, then prunes after the grace period — keep `archive_after_days` ≤ `ttl_days` or you'll grow the BLOB store unboundedly.
+
+The `memory_replay(memory_id)` tool walks `memory_transcript_links` and returns the decompressed text plus per-span metadata. Useful when you need to audit how an agent arrived at a stored claim, or when a contradiction surfaces and you want to inspect the originating turn. See [MIGRATION § Sidechain transcripts](MIGRATION_v0.7.md#sidechain-transcripts-opt-in-per-namespace).
+
+## Postgres + AGE (v0.7+)
+
+The Postgres backend (`sal-postgres` Cargo feature) reaches **GA in v0.7**. With **Apache AGE** also installed in the same Postgres instance, KG operations (`memory_kg_query`, `memory_kg_timeline`, `memory_find_paths`) route through Cypher; without it, the recursive-CTE path used since v0.6.x stays in place.
+
+```sql
+-- Confirm the AGE extension is available in your Postgres
+SELECT * FROM pg_extension WHERE extname = 'age';
+CREATE EXTENSION IF NOT EXISTS age;
+```
+
+```bash
+ai-memory doctor --kg-backend
+# kg_backend = "age"   ← AGE detected, Cypher path active
+# kg_backend = "cte"   ← AGE not detected, recursive-CTE fallback
+```
+
+**Acceptance gate:** AGE p95 must beat CTE p95 by ≥30% at depth=5 to ship in a given build — the bench gate (`feat/v0.7-j-8-age-bench-gate`) enforces it. If AGE isn't faster on your Postgres + hardware combination, stay on the CTE path; the substrate is happy with either. See [MIGRATION § Apache AGE acceleration](MIGRATION_v0.7.md#apache-age-acceleration-opt-in) and the [`attested-cortex` RFC § Decision 3](v0.7/rfc-attested-cortex.md#decision-3--why-age-behind-a-feature-flag-vs-hard-dependency) for why AGE ships behind a feature flag instead of as a hard dependency.
+
+## Permissions & Approvals (A2A) (v0.7+)
+
+The v0.6.x `governance` subsystem is refactored into three composable inputs that resolve to a single `Decision`:
+
+- **Rules** — declarative policies (the existing governance shape, with `inherit: bool` defaulting to `true` for honest namespace inheritance)
+- **Modes** — `enforce` / `advisory` / `off`
+- **Hooks** — programmable from Track G; see [Hooks (v0.7+)](#hooks-v07) above
+
+Decisions are **deny-first**; ambiguous cases go to `AskUser` rather than silently approving.
+
+**Migration tool** (idempotent, dry-run by default):
+
+```bash
+ai-memory governance migrate-to-permissions               # dry-run — prints proposed permissions rows
+ai-memory governance migrate-to-permissions --apply       # commit
+```
+
+Re-running is safe — already-migrated rows are skipped. The dry-run output is the authoritative diff to review before `--apply`.
+
+**A2A approval API** (Track K10) — three surfaces, all HMAC-signed (mandatory, non-optional per ROADMAP2 §7.3):
+
+| Surface | Endpoint / tool |
+|---|---|
+| HTTP | `GET /api/v1/approvals/pending`, `POST /api/v1/approvals/:id/decide` |
+| SSE | `GET /api/v1/approvals/stream` (live updates for human-in-the-loop UIs) |
+| MCP | `memory_approval_pending`, `memory_approval_decide(id, decision, remember=forever?)` |
+
+Set `remember=forever` on a `decide` call to enable **progressive trust** — subsequent identical requests auto-approve. Use sparingly; an over-eager `remember=forever` on a sensitive rule effectively turns enforcement off for that request shape.
+
+**G1 inheritance fix (behavior change for pre-v0.6.3.1 v0.6.x users):** `resolve_governance_policy(namespace)` now walks the full namespace chain and honors the first non-null policy encountered, instead of stopping at the leaf. A parent `Approve` policy now blocks child writes that previously slipped through. To preserve pre-v0.6.3.1 behavior on a specific child, set `inherit = false` on its policy. See [MIGRATION § G1 inheritance fix](MIGRATION_v0.7.md#g1-inheritance-fix-behavior-change) for the worked example.
+
+## Subscriptions & Webhooks
+
+The HTTP daemon exposes **HMAC-signed webhook subscriptions** that turn the memory store into a message bus. Subscribers register a URL + filter (namespace, agent_id, event type), the daemon POSTs JSON payloads on matching events, and every payload carries an `X-Memory-Signature` header (HMAC-SHA256 over the body using the shared secret).
+
+```bash
+# Register a subscription
+curl -X POST http://127.0.0.1:9077/api/v1/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "url": "https://my-app.local/webhook",
+    "secret": "shared-hmac-secret",
+    "events": ["memory_stored", "approval_requested"],
+    "namespace": "team/*"
+  }'
+```
+
+**SSRF hardening:** the subscription dispatcher refuses URLs resolving to private/loopback ranges (RFC1918, link-local, loopback) unless explicitly allowlisted at daemon startup. Webhook URLs that fail the resolution check at registration time are rejected with `400 Bad Request`.
+
+**v0.7 event additions:** `transcript_stored`, `transcript_archived`, `signed_event_appended`, `permission_decision`, `approval_requested`, `approval_decided` join the v0.6.x event set. Subscribe to `approval_requested` to feed the human-in-the-loop UI; subscribe to `signed_event_appended` to feed an external audit pipeline.
+
+For the full event catalog, payload shapes, and the retry / backoff contract, see [DEVELOPER_GUIDE.md](DEVELOPER_GUIDE.md) and the relevant [V0.7-EPIC](v0.7/V0.7-EPIC.md) tracks once they merge.
+
+## Backup + Restore
+
+See [Database Management → Backup](#backup) and [Database Management → Restore](#restore) below for the canonical procedures (live `sqlite3 .backup`, JSON export, file copy with WAL checkpoint). v0.7-specific notes:
+
+- The `signed_events` table (schema v21) is **append-only through the application layer** but is a regular SQLite table at the storage layer — `.backup` and `VACUUM` work normally. Do not `DELETE` from it manually unless you're rebuilding the audit chain from a known-good source.
+- The `memory_transcripts` and `memory_transcript_links` tables (schema v22) carry the zstd-3 BLOBs. They can be large — size the backup destination accordingly. To exclude transcripts from a JSON export, pass `--exclude transcripts` to `ai-memory export`.
+- Ed25519 private keys at `~/.config/ai-memory/keys/*.priv` are **NOT** part of the database backup. Back them up separately, with the same care you'd give an SSH private key — losing them means losing the ability to sign as that agent. Public keys (`.pub`) are recoverable from peers via `identity export-pub`.
 
 ## Graceful Shutdown
 
