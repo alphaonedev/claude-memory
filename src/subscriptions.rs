@@ -2534,15 +2534,26 @@ mod tests {
 
         // Sanity: the dispatch_count was bumped on the subscription
         // row (proves we went through record_dispatch on success).
+        // Poll up to 2s — dispatch_count is written back AFTER the HTTP
+        // POST is acked, so seeing the wiremock request above does not
+        // imply the row update has landed yet (race observed on Linux
+        // and Windows runners under load).
         let conn = Connection::open(&db_path).unwrap();
-        let dc: i64 = conn
-            .query_row(
-                "SELECT dispatch_count FROM subscriptions WHERE id = ?1",
-                params![sub_id],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(dc, 1);
+        let mut dc: i64 = 0;
+        for _ in 0..40 {
+            dc = conn
+                .query_row(
+                    "SELECT dispatch_count FROM subscriptions WHERE id = ?1",
+                    params![sub_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            if dc == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(dc, 1, "dispatch_count must be 1 after successful dispatch");
     }
 
     #[test]
