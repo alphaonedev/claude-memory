@@ -1,0 +1,50 @@
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# v0.7.0 — Track G, task G11 (R3).
+#
+# Reference implementation of a `post_store` hook that proposes
+# `auto-related` links between the just-stored memory and recent
+# neighbours in the same namespace. Standalone Rust crate — kept
+# out of the published `ai-memory` crate via the parent
+# `Cargo.toml`'s `include = [...]` allowlist (the same allowlist
+# that excludes `tools/` from the crates.io upload).
+#
+# This crate is *not* part of the workspace on purpose: G3-G11
+# own the in-tree hook pipeline and any change to the production
+# code base. The detector is a reference subprocess that reads
+# the same JSON envelope the production executor writes
+# (`{"event":"post_store","payload":{...}}`) and replies with a
+# `HookDecision` line — fully decoupled from the daemon, exactly
+# like its sibling `tools/transcript-extractor/` (I5).
+
+[package]
+name = "ai-memory-auto-link-detector"
+version = "0.1.0"
+edition = "2024"
+authors = ["AlphaOne LLC"]
+description = "v0.7 R3 reference post_store hook: heuristic auto-related link proposals"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[[bin]]
+name = "auto-link-detector"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# `must_use_candidate` and `missing_errors_doc` fire on every
+# small helper in this single-binary crate; suppressed locally to
+# keep the reference impl readable. Production hook code in the
+# main crate keeps the strict pedantic profile.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
