@@ -1561,6 +1561,104 @@ fn inject_namespace_standard(
     }
 }
 
+/// G10 — recall hot-path wrapper that fires the
+/// [`crate::hooks::HookEvent::PreRecallExpand`] chain before
+/// delegating to [`handle_recall`].
+///
+/// The wrapper is the canonical fire site for `pre_recall_expand`:
+/// the chain runs inside the v0.6.3 50ms recall budget (G6's
+/// `EventClass::HotPath` deadline) and may rewrite the query /
+/// namespace / k or short-circuit the recall via `Deny`. On `Deny`
+/// the wrapper returns an empty `memories` array with a
+/// `meta.diagnostic.pre_recall_denied` block so callers can see
+/// *why* the recall was suppressed without parsing logs.
+///
+/// `handle_recall` itself stays sync; this wrapper is async only
+/// because it awaits the daemon-mode chain `fire`. Existing
+/// callers that don't have a hooks runtime can keep calling
+/// `handle_recall` directly — this wrapper is opt-in.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_recall_with_pre_recall_hook(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    embedder: Option<&Embedder>,
+    vector_index: Option<&VectorIndex>,
+    reranker: Option<&CrossEncoder>,
+    archive_on_gc: bool,
+    resolved_ttl: &crate::config::ResolvedTtl,
+    resolved_scoring: &crate::config::ResolvedScoring,
+    chain: &crate::hooks::HookChain,
+    registry: &mut crate::hooks::ExecutorRegistry,
+) -> Result<Value, String> {
+    // Resolve the (query, namespace, k) triple once so the hook
+    // sees exactly what the recall would see.
+    let context = params["context"].as_str().ok_or("context is required")?;
+    let namespace = params["namespace"].as_str().unwrap_or("");
+    let k = u32::try_from(params["limit"].as_u64().unwrap_or(10)).unwrap_or(u32::MAX);
+
+    // Fire the hot-path chain. The chain runner enforces the 50ms
+    // class deadline (G6); a hook that exceeds it converts to
+    // fail-open Allow per the configured `FailMode`.
+    let outcome =
+        crate::hooks::apply_pre_recall_expand(context, namespace, k, chain, registry).await;
+
+    if let crate::hooks::PreRecallOutcome::Denied { reason, code } = &outcome {
+        // The recall is suppressed. Return the same envelope shape
+        // a normal empty recall would produce, decorated with a
+        // `meta.diagnostic.pre_recall_denied` block so the caller
+        // can distinguish "no matches" from "blocked by hook".
+        let mut resp = json!({
+            "memories": [],
+            "count": 0,
+            "mode": "denied_by_hook",
+        });
+        let meta = resp
+            .as_object_mut()
+            .expect("recall response is always a JSON object")
+            .entry("meta".to_string())
+            .or_insert_with(|| json!({}));
+        meta["diagnostic"] = json!({
+            "pre_recall_denied": {
+                "reason": reason,
+                "code": code,
+            }
+        });
+        return Ok(resp);
+    }
+
+    // Apply any Modify-side rewrites onto the params bag before
+    // calling the sync recall path. We clone the input so the
+    // caller's Value is left untouched.
+    let mut effective = params.clone();
+    if let crate::hooks::PreRecallOutcome::Modified {
+        query: q,
+        namespace: ns,
+        k: nk,
+    } = outcome
+    {
+        if let Some(obj) = effective.as_object_mut() {
+            obj.insert("context".to_string(), json!(q));
+            // Only inject `namespace` if the hook actually rewrote
+            // it (vs leaving the original empty-string default).
+            if !ns.is_empty() {
+                obj.insert("namespace".to_string(), json!(ns));
+            }
+            obj.insert("limit".to_string(), json!(u64::from(nk)));
+        }
+    }
+
+    handle_recall(
+        conn,
+        &effective,
+        embedder,
+        vector_index,
+        reranker,
+        archive_on_gc,
+        resolved_ttl,
+        resolved_scoring,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)]
 pub fn handle_recall(

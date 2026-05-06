@@ -379,6 +379,9 @@ pub fn is_pre_event(event: HookEvent) -> bool {
             | HookEvent::PreGovernanceDecision
             | HookEvent::PreArchive
             | HookEvent::PreTranscriptStore
+            // G10: hot-path query expansion fires before the recall
+            // call — Modify decisions rewrite the in-flight query.
+            | HookEvent::PreRecallExpand
     )
 }
 
@@ -652,7 +655,7 @@ mod tests {
 
     #[test]
     fn is_pre_event_classifies_all_variants() {
-        // Pre- variants
+        // Pre- variants (G10 added PreRecallExpand)
         for ev in [
             HookEvent::PreStore,
             HookEvent::PreRecall,
@@ -664,6 +667,7 @@ mod tests {
             HookEvent::PreGovernanceDecision,
             HookEvent::PreArchive,
             HookEvent::PreTranscriptStore,
+            HookEvent::PreRecallExpand,
         ] {
             assert!(is_pre_event(ev), "expected {ev:?} to be a pre- event");
         }
