@@ -289,6 +289,29 @@ pub enum Command {
     /// trail (`verify`, `tail`, `path`). Default-OFF — emits nothing
     /// useful unless `[audit] enabled = true` is set in `config.toml`.
     Audit(AuditArgs),
+    /// v0.7.0 K11 — translate legacy `[governance]` policies in
+    /// `config.toml` into the v0.7 `[[permissions.rules]]` (K9) format.
+    /// Default mode is dry-run: prints to stdout. Pass `--config-out
+    /// PATH` to write the rendered block to a file (or merge in-place
+    /// when `PATH` matches the loaded config).
+    Governance(GovernanceCliArgs),
+}
+
+/// `ai-memory governance` parent argument struct.
+#[derive(Args)]
+pub struct GovernanceCliArgs {
+    #[command(subcommand)]
+    pub action: GovernanceAction,
+}
+
+/// `ai-memory governance` sub-subcommands. Today only the K11 migrator
+/// lives here; future K-track work may add more verbs (`lint`,
+/// `explain`, …) so the surface is shaped as an enum from day one.
+#[derive(clap::Subcommand)]
+pub enum GovernanceAction {
+    /// Translate legacy [governance] policies to v0.7
+    /// [[permissions.rules]] (K9 format).
+    MigrateToPermissions(crate::cli::governance_migrate::MigrateToPermissionsArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -923,6 +946,18 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             match cli::audit::run(a, app_config, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
+            }
+        }
+        Command::Governance(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match a.action {
+                GovernanceAction::MigrateToPermissions(args) => {
+                    cli::governance_migrate::run(args, &mut out)
+                }
             }
         }
     };
