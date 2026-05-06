@@ -1449,9 +1449,82 @@ pub async fn bootstrap_serve(
     // so a malformed keypair file doesn't take down the daemon.
     let active_keypair = load_active_keypair_for_serve();
 
+    // v0.7.0 B3-fix2 — gate the family-descriptor embedding precompute
+    // behind `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1`, default OFF.
+    //
+    // ## Why default-OFF
+    //
+    // The B3 precompute is forward-infrastructure for B2's
+    // `memory_smart_load(intent)`, which is not yet wired into any HTTP
+    // or MCP handler — `best_family_match` is dead code in production
+    // today (only one unit test calls it). Running 8 detached embeds at
+    // boot therefore buys nothing for current callers but does compete
+    // for the embedder's `std::sync::Mutex<BertModel>` against every
+    // request that needs to embed (notify content, sync_push row
+    // refresh, recall query, single-row create_memory).
+    //
+    // Under heavy parallel `cargo test` load (every integration test
+    // spawns its own `ai-memory serve` subprocess, saturating CPU),
+    // that contention pushes federation-quorum windows over the 5 s
+    // ack budget — observed locally as `http_notify_fans_out_…` 503s
+    // and `test_serve_mtls_…` POST timeouts that did not occur on
+    // `origin/main` and disappear when the precompute is gated off.
+    // Even the prior B3-fix's "detached spawn_blocking" form does not
+    // help: the contention is on the embedder mutex inside `embed()`,
+    // not on the tokio scheduler.
+    //
+    // ## Cell semantics preserved
+    //
+    // `AppState::family_embeddings` stays `Arc<RwLock<Option<…>>>` so
+    // B2 can flip the env var on (or remove the gate entirely) the
+    // day the smart loader actually consumes the cache, without an
+    // `AppState` field-shape change. `None` continues to mean "not
+    // yet populated" and `best_family_match` already short-circuits
+    // to its non-embedding fallback in that state.
+    let family_embeddings: Arc<
+        tokio::sync::RwLock<Option<Vec<(crate::profile::Family, Vec<f32>)>>>,
+    > = Arc::new(tokio::sync::RwLock::new(None));
+    let embedder_arc = Arc::new(embedder);
+    if std::env::var("AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS")
+        .ok()
+        .as_deref()
+        == Some("1")
+    {
+        let cache = family_embeddings.clone();
+        let embedder_for_task = embedder_arc.clone();
+        task_handles.push(tokio::spawn(async move {
+            let computed = tokio::task::spawn_blocking(move || {
+                AppState::precompute_family_embeddings(embedder_for_task.as_ref().as_ref())
+            })
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    error = %e,
+                    "B3: family-descriptor precompute task panicked; \
+                     family_embeddings will stay empty",
+                );
+                Vec::new()
+            });
+            if !computed.is_empty() {
+                tracing::info!(
+                    "B3: pre-computed {} family-descriptor embeddings (async)",
+                    computed.len(),
+                );
+            }
+            *cache.write().await = Some(computed);
+        }));
+    } else {
+        tracing::debug!(
+            "B3: family-descriptor precompute disabled \
+             (AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS != 1); \
+             best_family_match will return None until B2 wires \
+             the smart loader and the gate is flipped on"
+        );
+    }
+
     let app_state = AppState {
         db: db_state.clone(),
-        embedder: Arc::new(embedder),
+        embedder: embedder_arc,
         vector_index: Arc::new(Mutex::new(vector_index)),
         federation: Arc::new(federation),
         tier_config: Arc::new(tier_config),
@@ -1459,6 +1532,7 @@ pub async fn bootstrap_serve(
         profile: Arc::new(resolved_profile),
         mcp_config: Arc::new(mcp_config_for_http),
         active_keypair: Arc::new(active_keypair),
+        family_embeddings,
     };
 
     // Automatic GC.
@@ -2163,6 +2237,7 @@ mod tests {
             profile: Arc::new(crate::profile::Profile::core()),
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
+            family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
         }
     }
 
@@ -2665,7 +2740,13 @@ mod tests {
         assert!(vi.is_none());
         // Four task handles spawned (gc + wal_checkpoint + v0.7 K2
         // pending_actions timeout sweep + v0.7 I3 transcript
-        // archive→prune lifecycle sweep).
+        // archive→prune lifecycle sweep). v0.7 B3-fix2 gates the
+        // family-descriptor embedding precompute behind
+        // `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1` (default OFF) so
+        // it does not contend with HTTP request-path embeds under
+        // parallel CI load — see the gate site in `bootstrap_serve`
+        // for the rationale. The task count reverts to four when the
+        // env var is unset.
         assert_eq!(bs.task_handles.len(), 4);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {

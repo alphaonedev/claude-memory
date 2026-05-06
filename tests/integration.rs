@@ -8762,6 +8762,7 @@ impl OneshotDaemon {
             profile: std::sync::Arc::new(ai_memory::profile::Profile::core()),
             mcp_config: std::sync::Arc::new(None),
             active_keypair: std::sync::Arc::new(None),
+            family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
         };
         let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
         let router = ai_memory::build_router(api_key_state, app_state);
@@ -12402,6 +12403,7 @@ fn build_serve_state(
         profile: std::sync::Arc::new(ai_memory::profile::Profile::core()),
         mcp_config: std::sync::Arc::new(None),
         active_keypair: std::sync::Arc::new(None),
+        family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
     };
     let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
     (api_key_state, app_state)
