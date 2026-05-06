@@ -1233,6 +1233,225 @@ impl PostgresStore {
         })
     }
 
+    /// v0.7 J7 — enumerate up to N paths between two memories.
+    ///
+    /// Routes on the [`KgBackend`] resolved at [`Self::connect`] time
+    /// (J1 substrate). When AGE is installed the enumeration runs as a
+    /// Cypher `MATCH p = (s)-[*..N]-(t) RETURN p LIMIT M` query through
+    /// the `memory_graph` projection; otherwise we fall back to a
+    /// recursive CTE over the `memory_links` table that mirrors the
+    /// SQLite shape in `db::find_paths`.
+    ///
+    /// Both branches return rows in the same `Vec<Vec<String>>` shape
+    /// so the upper-layer `memory_find_paths` handler stays
+    /// backend-blind.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::InvalidInput` for `max_depth == 0` or above
+    /// the supported ceiling, and `StoreError::BackendUnavailable` for
+    /// any underlying SQL or Cypher error.
+    pub async fn find_paths(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        max_depth: Option<usize>,
+        max_results: Option<usize>,
+    ) -> StoreResult<Vec<Vec<String>>> {
+        match self.kg_backend {
+            KgBackend::Age => {
+                self.find_paths_cypher(source_id, target_id, max_depth, max_results)
+                    .await
+            }
+            KgBackend::Cte => {
+                self.find_paths_cte(source_id, target_id, max_depth, max_results)
+                    .await
+            }
+        }
+    }
+
+    /// Recursive-CTE fallback for `find_paths` on Postgres.
+    ///
+    /// Mirrors the SQLite recursive-CTE in `db::find_paths` so vanilla
+    /// Postgres deployments (no AGE extension) get the same enumeration
+    /// semantics. The walk is undirected: edges are unioned with their
+    /// reverse so paths can traverse `memory_links` against the
+    /// declared direction. Cycle prevention uses a TEXT-array prefix
+    /// of visited ids.
+    ///
+    /// # Errors
+    ///
+    /// `StoreError::InvalidInput` for an out-of-range `max_depth`;
+    /// `StoreError::BackendUnavailable` for any sqlx error.
+    pub async fn find_paths_cte(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        max_depth: Option<usize>,
+        max_results: Option<usize>,
+    ) -> StoreResult<Vec<Vec<String>>> {
+        let depth = max_depth.unwrap_or(FIND_PATHS_DEFAULT_DEPTH_SAL);
+        validate_find_paths_depth(depth)?;
+        let cap = max_results
+            .unwrap_or(FIND_PATHS_DEFAULT_LIMIT_SAL)
+            .clamp(1, FIND_PATHS_MAX_LIMIT_SAL);
+
+        if source_id == target_id {
+            return Ok(vec![vec![source_id.to_string()]]);
+        }
+
+        let depth_i32 = i32::try_from(depth).unwrap_or(i32::MAX);
+        let cap_i64 = i64::try_from(cap).unwrap_or(i64::MAX);
+
+        // The CTE walks symmetric edges via a UNION over the original
+        // and reverse direction. The visited-id prefix is carried as
+        // TEXT[] so we can both check membership (= ANY) and append
+        // (array_append). Rows whose `current_id` matches the target
+        // and whose depth is at least 1 are reported as completed
+        // paths; ordering by depth then path keeps the shortest paths
+        // first so the LIMIT cap drops the longest tail.
+        let sql = "WITH RECURSIVE traversal(current_id, depth, path) AS (
+                SELECT $1::TEXT, 0, ARRAY[$1::TEXT]
+                UNION ALL
+                SELECT edges.next_id, t.depth + 1, t.path || edges.next_id
+                FROM traversal t
+                JOIN (
+                    SELECT source_id AS from_id, target_id AS next_id FROM memory_links
+                    UNION
+                    SELECT target_id AS from_id, source_id AS next_id FROM memory_links
+                ) edges ON edges.from_id = t.current_id
+                WHERE t.depth < $3
+                  AND NOT (edges.next_id = ANY(t.path))
+            )
+            SELECT path
+            FROM traversal
+            WHERE current_id = $2 AND depth >= 1
+            ORDER BY depth ASC, path ASC
+            LIMIT $4";
+
+        let rows = sqlx::query(sql)
+            .bind(source_id)
+            .bind(target_id)
+            .bind(depth_i32)
+            .bind(cap_i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("cte find_paths", e))?;
+
+        rows.iter()
+            .map(|r| {
+                let path: Vec<String> = r
+                    .try_get::<Vec<String>, _>("path")
+                    .map_err(|e| to_store_err("read path", e))?;
+                Ok(path)
+            })
+            .collect()
+    }
+
+    /// Cypher (Apache AGE) implementation of `find_paths`.
+    ///
+    /// Wraps a `MATCH p = (s)-[*..N]-(t) RETURN [n IN nodes(p) | n.id]`
+    /// traversal in the `cypher('memory_graph', ...)` set-returning
+    /// function, ordered by `length(p)` so shorter paths land first.
+    /// Source / target ids are bound through AGE's `$vars` JSON so
+    /// user input is never interpolated into the Cypher body. The
+    /// variable-length pattern's upper bound IS interpolated — Cypher
+    /// does not accept a parameter there — but `validate_find_paths_depth`
+    /// already clamps it to a small bounded integer with no injection
+    /// surface.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoreError::InvalidInput` for an out-of-range
+    /// `max_depth`; `StoreError::BackendUnavailable` for any sqlx or
+    /// AGE error.
+    pub async fn find_paths_cypher(
+        &self,
+        source_id: &str,
+        target_id: &str,
+        max_depth: Option<usize>,
+        max_results: Option<usize>,
+    ) -> StoreResult<Vec<Vec<String>>> {
+        let depth = max_depth.unwrap_or(FIND_PATHS_DEFAULT_DEPTH_SAL);
+        validate_find_paths_depth(depth)?;
+        let cap = max_results
+            .unwrap_or(FIND_PATHS_DEFAULT_LIMIT_SAL)
+            .clamp(1, FIND_PATHS_MAX_LIMIT_SAL);
+
+        if source_id == target_id {
+            return Ok(vec![vec![source_id.to_string()]]);
+        }
+
+        // AGE requires `ag_catalog` on the search path and the extension
+        // loaded into the session. Same shape as `kg_query_cypher`.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin AGE tx", e))?;
+
+        sqlx::query("LOAD 'age'")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("LOAD age", e))?;
+        sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("set search_path", e))?;
+
+        // `[*..N]` (no leading hop count) reads as "1..N" in Cypher,
+        // matching the directed-or-reverse spec. The pattern is
+        // un-arrowed (`-[r]-`), giving the symmetric closure for free
+        // — the AGE projection stores edges in declared direction but
+        // the path query treats them as undirected, the same contract
+        // as the CTE branch.
+        let cypher = format!(
+            "MATCH p = (a)-[*..{depth}]-(b) \
+             WHERE a.id = $start_id AND b.id = $target_id \
+             RETURN [n IN nodes(p) | n.id] AS path \
+             ORDER BY length(p) ASC \
+             LIMIT {cap}"
+        );
+
+        let sql = format!(
+            "SELECT path FROM cypher('memory_graph', $$ {cypher} $$, $1::agtype) AS \
+             (path agtype)"
+        );
+
+        let params = serde_json::json!({
+            "start_id": source_id,
+            "target_id": target_id,
+        })
+        .to_string();
+
+        let rows = sqlx::query(&sql)
+            .bind(params)
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("cypher find_paths", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit AGE tx", e))?;
+
+        // AGE returns each `path` cell as agtype text shaped like
+        // `["id1","id2",...]`. We parse it as JSON since AGE arrays of
+        // strings are JSON-compatible — the same trick the rest of
+        // this module uses for scalars.
+        rows.iter()
+            .map(|r| {
+                let raw: String = r
+                    .try_get::<String, _>("path")
+                    .map_err(|e| to_store_err("read path", e))?;
+                let parsed: Vec<String> =
+                    serde_json::from_str(&raw).map_err(|e| StoreError::IntegrityFailed {
+                        detail: format!("non-JSON AGE path: {raw}: {e}"),
+                    })?;
+                Ok(parsed)
+            })
+            .collect()
+    }
+
     fn row_to_memory(row: &sqlx::postgres::PgRow) -> StoreResult<Memory> {
         let created_at: DateTime<Utc> = row
             .try_get("created_at")
@@ -1328,6 +1547,44 @@ fn validate_depth(max_depth: usize) -> StoreResult<()> {
         return Err(StoreError::InvalidInput {
             detail: format!(
                 "max_depth={max_depth} exceeds supported depth={KG_QUERY_MAX_SUPPORTED_DEPTH}"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// Default depth used by [`PostgresStore::find_paths`] when the caller
+/// omits `max_depth`. Mirrors `crate::db::FIND_PATHS_DEFAULT_DEPTH`.
+const FIND_PATHS_DEFAULT_DEPTH_SAL: usize = 4;
+
+/// Hard ceiling on traversal depth supported by
+/// [`PostgresStore::find_paths`]. Mirrors
+/// `crate::db::FIND_PATHS_MAX_DEPTH`.
+const FIND_PATHS_MAX_DEPTH_SAL: usize = 7;
+
+/// Default cap on paths returned by [`PostgresStore::find_paths`] when
+/// the caller omits `max_results`. Mirrors
+/// `crate::db::FIND_PATHS_DEFAULT_LIMIT`.
+const FIND_PATHS_DEFAULT_LIMIT_SAL: usize = 10;
+
+/// Hard ceiling on paths returned by [`PostgresStore::find_paths`].
+/// Mirrors `crate::db::FIND_PATHS_MAX_LIMIT`.
+const FIND_PATHS_MAX_LIMIT_SAL: usize = 50;
+
+/// Common pre-flight check shared by both `find_paths` branches. Pulled
+/// out so the dispatcher's contract — "0 and >FIND_PATHS_MAX_DEPTH_SAL
+/// always error before we touch the wire" — survives a future refactor
+/// that splits the branches into separate modules.
+fn validate_find_paths_depth(max_depth: usize) -> StoreResult<()> {
+    if max_depth == 0 {
+        return Err(StoreError::InvalidInput {
+            detail: "max_depth must be >= 1".to_string(),
+        });
+    }
+    if max_depth > FIND_PATHS_MAX_DEPTH_SAL {
+        return Err(StoreError::InvalidInput {
+            detail: format!(
+                "max_depth={max_depth} exceeds supported depth={FIND_PATHS_MAX_DEPTH_SAL}"
             ),
         });
     }

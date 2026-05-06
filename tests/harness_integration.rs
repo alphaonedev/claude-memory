@@ -36,7 +36,7 @@
 //! silently breaks (e.g. a typo in `Harness::detect`'s match arms, a
 //! removed variant, or a bypass of the harness threading in the
 //! capabilities builder). Pure test additions — no schema changes, no
-//! tool count changes; the surface stays at 45 tools.
+//! tool count changes; the surface stays at 46 tools.
 
 use ai_memory::config::{FeatureTier, McpConfig, TierConfig};
 use ai_memory::harness::Harness;

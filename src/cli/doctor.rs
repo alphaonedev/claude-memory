@@ -2069,8 +2069,8 @@ mod tests {
             "default profile should be core; got: {stdout}"
         );
         assert!(
-            stdout.contains("Full   (48 tools loaded)"),
-            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list)"
+            stdout.contains("Full   (49 tools loaded)"),
+            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths)"
         );
         assert!(
             stdout.contains("Tokenizer: cl100k_base"),
@@ -2126,8 +2126,8 @@ mod tests {
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            48,
-            "raw_table must include all 48 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list)"
+            49,
+            "raw_table must include all 49 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths)"
         );
         // memory_store is in core and must be loaded under the default
         // (core) profile.
