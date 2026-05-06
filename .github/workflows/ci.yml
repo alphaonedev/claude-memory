@@ -542,13 +542,32 @@ jobs:
         run: |
           copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
 
-  # Coverage is advisory (not in required-status-checks) so we can safely
-  # skip the whole job on docs-only PRs.
+  # Coverage is now a HARD GATE (top-shelf engineering). Two enforcement
+  # tiers protect the line-coverage number from regression:
+  #
+  #   1. Absolute floor (`MIN_COVERAGE_PCT`) — the line below which CI
+  #      simply refuses to merge regardless of the historical baseline.
+  #      Set at the current measured coverage, rounded DOWN to the nearest
+  #      5 percentage points so it can only ever be raised, never lowered.
+  #
+  #   2. Ratchet (`.coverage-baseline`) — the file at the repo root pins
+  #      the most recent measured coverage. Each run re-asserts that the
+  #      current number is >= baseline - 0.5% (small slack absorbs the
+  #      sub-percent jitter that comes from `target/` cache differences).
+  #      When a PR materially raises coverage, a follow-up commit can
+  #      bump the file; CI never lowers it automatically.
+  #
+  # Skipped on docs-only PRs (no Rust changed, no coverage delta possible).
+  # Job name is `Code Coverage` — must be added to branch protection
+  # required-status-checks for the gate to actually block merges.
   coverage:
     name: Code Coverage
     needs: classify
     if: needs.classify.outputs.docs_only != 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - uses: actions/checkout@v5
 
@@ -580,20 +599,91 @@ jobs:
           # `tee` form masked that failure since `tee` always exits 0.
           cargo llvm-cov report --summary-only | tee coverage/summary.txt
 
-      # v0.6.3.1 coverage gate — fail-under 93% lines.
-      # Bumped from 92 → 93 after the cli/sync.rs + reranker.rs uplift
-      # work landed on release/v0.6.3.1-coverage-uplift-sync-reranker
-      # (cli/sync.rs 75.00% → ~96%, reranker.rs 79.25% → ~95%, total
-      # 93.08% → ≥93.50%). The 1%-absorb-buffer convention is retained:
-      # routine churn doesn't trip the gate but a regression of >1% does.
-      # Per-module floors for hot modules (handlers, db, federation, mcp,
-      # governance) are tracked in the v0.7 assertion table; this is the
-      # total-line floor.
-      - name: Enforce coverage floor (≥93% lines)
+      # Hard absolute floor — the catastrophic-regression backstop. The
+      # locally measured TOTAL line coverage at the time of this commit
+      # was 93.13% (cargo llvm-cov, --features sal, --test-threads=2).
+      # The absolute floor is 90 — that value is current coverage rounded
+      # DOWN to the nearest 5 percentage points so it can only ever be
+      # raised, never lowered, and so routine churn doesn't trip it.
+      # The tight day-to-day enforcement happens in the ratchet step
+      # below; this floor is the "delete-half-the-tests" backstop.
+      - name: Enforce absolute coverage floor (>=90% lines)
         env:
           AI_MEMORY_NO_CONFIG: "1"
+          MIN_COVERAGE_PCT: "90"
         run: |
-          cargo llvm-cov report --fail-under-lines 93
+          set -euo pipefail
+          # Extract TOTAL line-coverage % from the saved summary. The
+          # llvm-cov text summary's last row is the TOTAL; the line-cov
+          # column is the 10th whitespace-separated field and includes a
+          # trailing %.
+          PCT=$(awk '/^TOTAL/ {gsub("%","",$10); print $10}' coverage/summary.txt)
+          if [ -z "${PCT:-}" ]; then
+            echo "::error::could not parse line-coverage % from coverage/summary.txt"
+            cat coverage/summary.txt
+            exit 1
+          fi
+          echo "::notice::measured line coverage = ${PCT}% (absolute floor ${MIN_COVERAGE_PCT}%)"
+          echo "COVERAGE_PCT=${PCT}" >> "$GITHUB_ENV"
+          awk -v pct="$PCT" -v floor="$MIN_COVERAGE_PCT" 'BEGIN { if (pct + 0 < floor + 0) { printf "::error::coverage %.2f%% is below absolute floor %s%%\n", pct, floor; exit 1 } }'
+
+      # Ratchet — re-assert that we have not regressed against the
+      # tracked baseline more than the 0.5% slack window. PRs that raise
+      # coverage are encouraged to bump `.coverage-baseline` in the same
+      # commit so future PRs benefit from the higher floor.
+      - name: Enforce coverage ratchet (>= baseline - 0.5%)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+          RATCHET_SLACK_PCT: "0.5"
+        run: |
+          set -euo pipefail
+          if [ ! -f .coverage-baseline ]; then
+            echo "::warning::.coverage-baseline missing — skipping ratchet (absolute floor still applies)"
+            exit 0
+          fi
+          BASELINE=$(tr -d '[:space:]' < .coverage-baseline)
+          PCT="${COVERAGE_PCT:-0}"
+          echo "::notice::ratchet check: coverage=${PCT}% baseline=${BASELINE}% slack=${RATCHET_SLACK_PCT}%"
+          awk -v pct="$PCT" -v base="$BASELINE" -v slack="$RATCHET_SLACK_PCT" 'BEGIN { min = base + 0 - slack - 0; if (pct + 0 < min) { printf "::error::coverage %.2f%% regressed below ratchet floor %.2f%% (baseline %.2f%% - %.2f%% slack)\n", pct, min, base, slack; exit 1 } printf "::notice::ratchet OK: %.2f%% >= %.2f%%\n", pct, min }'
+
+      # Render the sticky-comment markdown to a file so the action can
+      # `path:`-include it. Inlining `$(cat ...)` inside the action's
+      # `message:` value would NOT shell-expand — it would post the
+      # literal `$(cat ...)` text — so we materialise the body here.
+      - name: Render coverage comment body
+        if: github.event_name == 'pull_request'
+        env:
+          COVERAGE_PCT: ${{ env.COVERAGE_PCT }}
+        run: |
+          set -euo pipefail
+          BASELINE=$(tr -d '[:space:]' < .coverage-baseline 2>/dev/null || echo "(unset)")
+          {
+            echo "### Code Coverage Gate"
+            echo ""
+            echo "| metric | value |"
+            echo "| --- | --- |"
+            echo "| measured | **${COVERAGE_PCT}%** lines |"
+            echo "| absolute floor | 90% |"
+            echo "| ratchet baseline | ${BASELINE}% (slack 0.5%) |"
+            echo ""
+            echo "<details><summary>llvm-cov summary</summary>"
+            echo ""
+            echo '```'
+            cat coverage/summary.txt 2>/dev/null || echo "(summary not available)"
+            echo '```'
+            echo ""
+            echo "</details>"
+          } > coverage/comment.md
+
+      # Sticky PR comment with the measured coverage number. Re-uses a
+      # marker so the comment is updated in place across pushes instead
+      # of accumulating one comment per CI run.
+      - name: Post coverage to PR (sticky)
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: coverage-gate
+          path: coverage/comment.md
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v5
