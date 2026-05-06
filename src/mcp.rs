@@ -857,22 +857,34 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_approve",
-                "description": "Approve a pending action by id (Task 1.9). Caller identity is stamped as decided_by.",
+                "description": "Approve a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic permission rule so the same context auto-decides next time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Pending action id"}
+                        "id": {"type": "string", "description": "Pending action id"},
+                        "remember": {
+                            "type": "string",
+                            "enum": ["once", "session", "forever"],
+                            "default": "once",
+                            "description": "v0.7 K10 — persistence horizon for the decision"
+                        }
                     },
                     "required": ["id"]
                 }
             },
             {
                 "name": "memory_pending_reject",
-                "description": "Reject a pending action by id (Task 1.9). Caller identity is stamped as decided_by.",
+                "description": "Reject a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic deny rule so the same context auto-rejects next time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "id": {"type": "string", "description": "Pending action id"}
+                        "id": {"type": "string", "description": "Pending action id"},
+                        "remember": {
+                            "type": "string",
+                            "enum": ["once", "session", "forever"],
+                            "default": "once",
+                            "description": "v0.7 K10 — persistence horizon for the decision"
+                        }
                     },
                     "required": ["id"]
                 }
@@ -4964,7 +4976,68 @@ fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Va
     Ok(json!({"count": items.len(), "pending": items}))
 }
 
-fn handle_pending_approve(
+/// v0.7 K10 — parse the optional `remember` MCP param.
+///
+/// Defaults to `Once` when absent or invalid (the K10 contract is
+/// best-effort: a typoed `remember` value MUST NOT block the underlying
+/// approve/reject path). Validation drift is logged at WARN so
+/// operators can see the regression without it surfacing as a
+/// caller-facing error.
+fn parse_remember_param(params: &Value) -> crate::approvals::Remember {
+    match params["remember"].as_str() {
+        Some("session") => crate::approvals::Remember::Session,
+        Some("forever") => crate::approvals::Remember::Forever,
+        Some("once") | None => crate::approvals::Remember::Once,
+        Some(other) => {
+            tracing::warn!(
+                "memory_pending_*: unknown remember value {other:?}, defaulting to once"
+            );
+            crate::approvals::Remember::Once
+        }
+    }
+}
+
+/// v0.7 K10 — record a synthetic rule + publish on the approval bus
+/// for an MCP-side approve/reject. Mirrors the HTTP-side hook in
+/// `handlers::approval_decide` so the three transports stay
+/// behaviourally identical.
+fn record_mcp_decision(
+    conn: &rusqlite::Connection,
+    pending_id: &str,
+    decided_by: &str,
+    decision_label: &str,
+    remember: crate::approvals::Remember,
+) {
+    let pa = crate::db::get_pending_action(conn, pending_id)
+        .ok()
+        .flatten();
+    let remember_label = match remember {
+        crate::approvals::Remember::Once => "once",
+        crate::approvals::Remember::Session => "session",
+        crate::approvals::Remember::Forever => "forever",
+    };
+    crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalDecided {
+        pending_id: pending_id.to_string(),
+        decision: decision_label.to_string(),
+        decided_by: decided_by.to_string(),
+        remember: remember_label.to_string(),
+    });
+    if matches!(
+        remember,
+        crate::approvals::Remember::Forever | crate::approvals::Remember::Session
+    ) && let Some(snap) = pa
+    {
+        crate::approvals::record_synthetic_rule(crate::approvals::SyntheticPermissionRule {
+            action_type: snap.action_type,
+            namespace: snap.namespace,
+            agent_id: Some(snap.requested_by),
+            decision: decision_label.to_string(),
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        });
+    }
+}
+
+pub fn handle_pending_approve(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,
@@ -4974,16 +5047,23 @@ fn handle_pending_approve(
     validate::validate_id(id).map_err(|e| e.to_string())?;
     let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
         .map_err(|e| e.to_string())?;
+    let remember = parse_remember_param(params);
     match db::approve_with_approver_type(conn, id, &agent_id).map_err(|e| e.to_string())? {
         ApproveOutcome::Approved => {
             // Task 1.10: auto-execute the queued action on final approval.
             let executed = db::execute_pending_action(conn, id).map_err(|e| e.to_string())?;
+            record_mcp_decision(conn, id, &agent_id, "approve", remember);
             Ok(json!({
                 "approved": true,
                 "id": id,
                 "decided_by": agent_id,
                 "executed": true,
                 "memory_id": executed,
+                "remember": match remember {
+                    crate::approvals::Remember::Once => "once",
+                    crate::approvals::Remember::Session => "session",
+                    crate::approvals::Remember::Forever => "forever",
+                },
             }))
         }
         ApproveOutcome::Pending { votes, quorum } => Ok(json!({
@@ -4998,7 +5078,7 @@ fn handle_pending_approve(
     }
 }
 
-fn handle_pending_reject(
+pub fn handle_pending_reject(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,
@@ -5007,12 +5087,23 @@ fn handle_pending_reject(
     validate::validate_id(id).map_err(|e| e.to_string())?;
     let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
         .map_err(|e| e.to_string())?;
+    let remember = parse_remember_param(params);
     let transitioned =
         db::decide_pending_action(conn, id, false, &agent_id).map_err(|e| e.to_string())?;
     if !transitioned {
         return Err(format!("pending action not found or already decided: {id}"));
     }
-    Ok(json!({"rejected": true, "id": id, "decided_by": agent_id}))
+    record_mcp_decision(conn, id, &agent_id, "deny", remember);
+    Ok(json!({
+        "rejected": true,
+        "id": id,
+        "decided_by": agent_id,
+        "remember": match remember {
+            crate::approvals::Remember::Once => "once",
+            crate::approvals::Remember::Session => "session",
+            crate::approvals::Remember::Forever => "forever",
+        },
+    }))
 }
 
 fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {

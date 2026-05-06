@@ -53,8 +53,10 @@ dependencies = [
  "criterion",
  "dirs",
  "ed25519-dalek",
+ "futures-core",
  "gethostname",
  "hf-hub",
+ "http-body-util",
  "instant-distance",
  "libc",
  "pgvector",
@@ -75,6 +77,7 @@ dependencies = [
  "tiktoken-rs",
  "tokenizers",
  "tokio",
+ "tokio-stream",
  "toml",
  "tower",
  "tower-http",
@@ -4317,6 +4320,7 @@ dependencies = [
  "futures-core",
  "pin-project-lite",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]

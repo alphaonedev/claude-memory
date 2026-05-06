@@ -5296,6 +5296,312 @@ pub async fn session_start(
     }
 }
 
+// ---------------------------------------------------------------------------
+// v0.7.0 K10 — Approval API (HTTP + SSE)
+// ---------------------------------------------------------------------------
+//
+// `POST /api/v1/approvals/{pending_id}` — approve / deny a pending row.
+// Body: `{"decision":"approve|deny","remember":"once|session|forever"}`.
+// Gated behind the K7 server-wide HMAC: caller MUST present
+// `X-AI-Memory-Signature: sha256=<hex>` keyed on
+// `SHA256([hooks.subscription].hmac_secret)` over the canonical
+// `<timestamp>.<body>` string. Missing or invalid signature → 401.
+//
+// `GET /api/v1/approvals/stream` — long-lived SSE stream that fans out
+// every `approval_requested` and `approval_decided` event from the
+// process-wide [`crate::approvals`] broadcast bus to every attached
+// subscriber.
+//
+// The SSE endpoint is intentionally unauthenticated beyond the
+// existing `api_key_auth` middleware: SSE re-key handshakes are clunky
+// and the K7 HMAC is a *write*-side gate. Read-side gating piggybacks
+// on the api-key middleware that wraps every other route.
+
+/// Body of `POST /api/v1/approvals/{pending_id}`.
+#[derive(Debug, Deserialize)]
+pub struct ApprovalRequestBody {
+    /// `"approve"` or `"deny"`.
+    pub decision: crate::approvals::Decision,
+    /// `"once"` (default), `"session"`, or `"forever"`.
+    #[serde(default = "default_remember")]
+    pub remember: crate::approvals::Remember,
+}
+
+fn default_remember() -> crate::approvals::Remember {
+    crate::approvals::Remember::Once
+}
+
+/// HMAC-verify an inbound approval request.
+///
+/// Mirrors the K7 outbound construction: signature value is
+/// `sha256=<hex>` where `<hex>` = `HMAC-SHA256(SHA256(secret),
+/// "<timestamp>.<body>")`. Returns `Ok(())` on a valid signature;
+/// `Err(StatusCode)` (always 401) on any failure mode (missing
+/// header, missing timestamp, bad encoding, mismatch).
+///
+/// The caller MUST send the body verbatim — even a single
+/// reformatted byte invalidates the signature, which is the whole
+/// point of HMAC. We compare in constant time via `constant_time_eq`
+/// to avoid timing oracles on the hex digest.
+fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
+    let secret = match crate::config::active_hooks_hmac_secret() {
+        Some(s) => s,
+        None => {
+            // No server-wide HMAC configured → the K10 contract is
+            // strict by default: reject every inbound approval. This
+            // is the safe posture (better to refuse a write than to
+            // accept an unauthenticated one) and matches the spec
+            // header "HMAC signing per K7's pattern".
+            tracing::warn!("K10 approval rejected: no [hooks.subscription].hmac_secret configured");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    };
+    let sig_header = headers
+        .get("x-ai-memory-signature")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let sig_hex = sig_header
+        .strip_prefix("sha256=")
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let timestamp = headers
+        .get("x-ai-memory-timestamp")
+        .and_then(|v| v.to_str().ok())
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let body_str = std::str::from_utf8(body).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let canonical = format!("{timestamp}.{body_str}");
+    let key_hash = crate::subscriptions::sha256_hex(&secret);
+    let expected = crate::subscriptions::hmac_sha256_hex(&key_hash, &canonical);
+    if constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
+        Ok(())
+    } else {
+        Err(StatusCode::UNAUTHORIZED)
+    }
+}
+
+/// `POST /api/v1/approvals/{pending_id}` — K10's HMAC-gated approval
+/// endpoint. See module-level comment above for the full contract.
+#[allow(clippy::too_many_lines)]
+pub async fn approval_decide(
+    State(app): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    body_bytes: axum::body::Bytes,
+) -> impl IntoResponse {
+    if let Err(status) = verify_approval_hmac(&headers, &body_bytes) {
+        return (
+            status,
+            Json(json!({"error": "invalid or missing X-AI-Memory-Signature"})),
+        )
+            .into_response();
+    }
+    let body: ApprovalRequestBody = match serde_json::from_slice(&body_bytes) {
+        Ok(b) => b,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid body: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    if let Err(e) = validate::validate_id(&id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response();
+    }
+    let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+    let agent_id = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+        Ok(a) => a,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": format!("invalid agent_id: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let lock = app.db.lock().await;
+    // Snapshot the pending row before deciding so we can synthesise a
+    // permission rule even after the row transitions.
+    let pending_snapshot = db::get_pending_action(&lock.0, &id).ok().flatten();
+    let outcome = match body.decision {
+        crate::approvals::Decision::Approve => {
+            match db::approve_with_approver_type(&lock.0, &id, &agent_id) {
+                Ok(crate::db::ApproveOutcome::Approved) => {
+                    let executed = db::execute_pending_action(&lock.0, &id);
+                    match executed {
+                        Ok(memory_id) => json!({
+                            "approved": true,
+                            "id": id,
+                            "decided_by": agent_id,
+                            "executed": true,
+                            "memory_id": memory_id,
+                            "remember": format!("{:?}", body.remember).to_lowercase(),
+                        }),
+                        Err(e) => {
+                            tracing::error!("execute pending error: {e}");
+                            return (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"error": "approved but execution failed"})),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
+                Ok(crate::db::ApproveOutcome::Pending { votes, quorum }) => json!({
+                    "approved": false,
+                    "status": "pending",
+                    "id": id,
+                    "votes": votes,
+                    "quorum": quorum,
+                    "remember": format!("{:?}", body.remember).to_lowercase(),
+                }),
+                Ok(crate::db::ApproveOutcome::Rejected(reason)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": format!("approve rejected: {reason}")})),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    tracing::error!("handler error: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal server error"})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        crate::approvals::Decision::Deny => {
+            match db::decide_pending_action(&lock.0, &id, false, &agent_id) {
+                Ok(true) => json!({
+                    "rejected": true,
+                    "id": id,
+                    "decided_by": agent_id,
+                    "remember": format!("{:?}", body.remember).to_lowercase(),
+                }),
+                Ok(false) => {
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(json!({"error": "pending action not found or already decided"})),
+                    )
+                        .into_response();
+                }
+                Err(e) => {
+                    tracing::error!("handler error: {e}");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({"error": "internal server error"})),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
+    drop(lock);
+
+    // Fan out the decision on the broadcast bus and (for forever)
+    // record the synthetic rule.
+    let decision_label = match body.decision {
+        crate::approvals::Decision::Approve => "approve",
+        crate::approvals::Decision::Deny => "deny",
+    };
+    let remember_label = match body.remember {
+        crate::approvals::Remember::Once => "once",
+        crate::approvals::Remember::Session => "session",
+        crate::approvals::Remember::Forever => "forever",
+    };
+    crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalDecided {
+        pending_id: id.clone(),
+        decision: decision_label.to_string(),
+        decided_by: agent_id.clone(),
+        remember: remember_label.to_string(),
+    });
+    if matches!(
+        body.remember,
+        crate::approvals::Remember::Forever | crate::approvals::Remember::Session
+    ) && let Some(snap) = pending_snapshot
+    {
+        crate::approvals::record_synthetic_rule(crate::approvals::SyntheticPermissionRule {
+            action_type: snap.action_type,
+            namespace: snap.namespace,
+            agent_id: Some(snap.requested_by),
+            decision: decision_label.to_string(),
+            recorded_at: Utc::now().to_rfc3339(),
+        });
+    }
+    Json(outcome).into_response()
+}
+
+/// `GET /api/v1/approvals/stream` — SSE endpoint streaming
+/// `approval_requested` and `approval_decided` events from the
+/// process-wide broadcast bus.
+///
+/// Returns the axum SSE response. Each event is a JSON-encoded
+/// [`crate::approvals::ApprovalEvent`] payload tagged with `event:
+/// approval_requested` (or `_decided`) per the SSE spec. A keepalive
+/// comment line fires every 15 s to prevent intermediary timeouts.
+pub async fn approvals_sse(
+    State(_app): State<AppState>,
+) -> axum::response::Sse<
+    impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
+> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use std::time::Duration as StdDuration;
+    use tokio_stream::wrappers::BroadcastStream;
+    use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+
+    /// Bridges a `BroadcastStream<ApprovalEvent>` into the
+    /// `Stream<Item = Result<Event, Infallible>>` axum's `Sse` requires.
+    /// We swallow `Lagged` by emitting a synthetic `lagged` SSE event
+    /// so subscribers can re-sync via `GET /api/v1/pending` instead of
+    /// silently missing frames; channel `Closed` ends the stream.
+    struct ApprovalSseStream {
+        inner: BroadcastStream<crate::approvals::ApprovalEvent>,
+    }
+
+    impl Stream for ApprovalSseStream {
+        type Item = Result<Event, std::convert::Infallible>;
+
+        fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            match Pin::new(&mut self.inner).poll_next(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(Ok(evt))) => {
+                    let (event_name, json_value) = match &evt {
+                        crate::approvals::ApprovalEvent::ApprovalRequested { .. } => (
+                            "approval_requested",
+                            serde_json::to_value(&evt).unwrap_or_default(),
+                        ),
+                        crate::approvals::ApprovalEvent::ApprovalDecided { .. } => (
+                            "approval_decided",
+                            serde_json::to_value(&evt).unwrap_or_default(),
+                        ),
+                    };
+                    let data = serde_json::to_string(&json_value).unwrap_or_else(|_| "{}".into());
+                    Poll::Ready(Some(Ok(Event::default().event(event_name).data(data))))
+                }
+                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
+                    let body = serde_json::json!({"lagged": n}).to_string();
+                    Poll::Ready(Some(Ok(Event::default().event("lagged").data(body))))
+                }
+            }
+        }
+    }
+
+    let rx = crate::approvals::subscribe();
+    let stream = ApprovalSseStream {
+        inner: BroadcastStream::new(rx),
+    };
+    Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
