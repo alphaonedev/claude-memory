@@ -12,20 +12,20 @@
 //! payload shape the production handlers use, and assert the right
 //! events land at the right URLs.
 //!
-//! The handler-internal call sites (handle_promote / handle_delete /
-//! handle_link / handle_consolidate) are private so we exercise the
+//! The handler-internal call sites (`handle_promote` / `handle_delete` /
+//! `handle_link` / `handle_consolidate`) are private so we exercise the
 //! `subscriptions::dispatch_event_with_details` entry point directly
-//! with the *exact* event-name + namespace + agent_id shape each
+//! with the *exact* event-name + namespace + `agent_id` shape each
 //! handler now uses (see src/mcp.rs in the corresponding handler).
 //! That keeps the test tightly scoped to the coverage gap G9 closes
 //! without re-spinning the full MCP stdio harness.
 //!
-//! Acceptance (per REMEDIATIONv0631 §P5):
-//!   - webhook_fires_on_promote
-//!   - webhook_fires_on_delete
-//!   - webhook_fires_on_link_created
-//!   - webhook_fires_on_consolidate
-//!   - subscriber_filtered_to_store_does_not_get_delete
+//! Acceptance (per `REMEDIATIONv0631` §P5):
+//!   - `webhook_fires_on_promote`
+//!   - `webhook_fires_on_delete`
+//!   - `webhook_fires_on_link_created`
+//!   - `webhook_fires_on_consolidate`
+//!   - `subscriber_filtered_to_store_does_not_get_delete`
 
 use ai_memory::subscriptions::{
     self, ConsolidatedEventDetails, DeleteEventDetails, LinkCreatedEventDetails, NewSubscription,
@@ -38,7 +38,7 @@ use tempfile::NamedTempFile;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
-/// Stand up a fresh on-disk SQLite at a tempfile path with the
+/// Stand up a fresh on-disk `SQLite` at a tempfile path with the
 /// production schema applied (incl. P5 migration v17).
 fn fresh_db() -> (NamedTempFile, PathBuf) {
     let f = NamedTempFile::new().expect("tempfile");

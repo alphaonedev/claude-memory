@@ -46,7 +46,9 @@ fn ranked(items: &[(&str, &str)]) -> Vec<(Memory, f64)> {
         .iter()
         .enumerate()
         .map(|(i, (id, content))| {
-            let score = 1.0 - (i as f64) * 0.01;
+            // `i` is bounded by the small caller-provided slice length, so
+            // u32 → f64 is exact here (mantissa 52 bits >> u32 max).
+            let score = 1.0 - f64::from(u32::try_from(i).expect("rank fits in u32")) * 0.01;
             (mem_with_content(id, content), score)
         })
         .collect()
@@ -222,7 +224,7 @@ fn budget_outcome_round_trips_meta_fields() {
     ]);
     let (out, outcome): (Vec<_>, BudgetOutcome) = apply_token_budget(scored.clone(), Some(5));
 
-    assert!(out.len() >= 1);
+    assert!(!out.is_empty());
     assert!(outcome.tokens_used > 0);
     assert!(outcome.tokens_remaining.is_some());
     assert!(outcome.memories_dropped <= scored.len());

@@ -34,6 +34,8 @@ fn out_dir() -> PathBuf {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fmt::Write as _;
+
     let dir = out_dir();
     fs::create_dir_all(&dir)?;
 
@@ -56,8 +58,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // SHA-256 of the leaf cert DER — what the mTLS allowlist would pin.
     let der_hash = Sha256::digest(leaf_cert.der());
     let mut hex = String::with_capacity(64);
-    use std::fmt::Write as _;
-    for b in der_hash.iter() {
+    for b in &der_hash {
         let _ = write!(hex, "{b:02x}");
     }
     fs::write(dir.join("valid_cert_sha256.txt"), format!("{hex}\n"))?;

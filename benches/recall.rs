@@ -18,17 +18,16 @@ fn binary_path() -> String {
         .expect("failed to get cargo metadata");
     let meta: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let target_dir = meta["target_directory"].as_str().unwrap().to_string();
-    format!("{}/release/ai-memory", target_dir)
+    format!("{target_dir}/release/ai-memory")
 }
 
 fn seed_memories(binary: &str, db_path: &str, count: usize) {
     for i in 0..count {
-        let title = format!("bench-memory-{}", i);
+        let title = format!("bench-memory-{i}");
+        let topic = i % 50;
+        let category = i % 10;
         let content = format!(
-            "This is benchmark memory number {} with some searchable content about topic-{} and category-{}",
-            i,
-            i % 50,
-            i % 10
+            "This is benchmark memory number {i} with some searchable content about topic-{topic} and category-{category}"
         );
         let priority = ((i % 10) + 1).to_string();
         let output = Command::new(binary)
@@ -49,7 +48,7 @@ fn seed_memories(binary: &str, db_path: &str, count: usize) {
             ])
             .output()
             .expect("failed to store memory");
-        assert!(output.status.success(), "store failed for memory {}", i);
+        assert!(output.status.success(), "store failed for memory {i}");
     }
 }
 
@@ -194,7 +193,7 @@ fn bench_insert(c: &mut Criterion) {
     group.bench_function("store_memory", |b| {
         b.iter(|| {
             counter += 1;
-            let title = format!("insert-bench-{}", counter);
+            let title = format!("insert-bench-{counter}");
             let output = Command::new(&binary)
                 .args([
                     "--db",

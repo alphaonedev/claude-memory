@@ -42,7 +42,7 @@
 //! This file uses `harness = false` and an ad-hoc main rather than
 //! Criterion because we need (a) per-harness tagged percentiles in a
 //! single artifact, and (b) the regression-gate behaviour at process
-//! exit. Criterion's bench_function only emits per-bench reports, not
+//! exit. Criterion's `bench_function` only emits per-bench reports, not
 //! a single cross-cutting JSON document.
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -225,6 +225,14 @@ fn initialize(stdin: &mut ChildStdin, rx: &mpsc::Receiver<String>, client_name: 
 /// site guarantees at least N samples by construction.
 fn percentile(sorted: &[u128], pct: f64) -> u128 {
     assert!(!sorted.is_empty(), "percentile of empty sample set");
+    // Bench-internal helper: sample sets are bounded by the
+    // benchmark `iters` argument (≤ a few thousand), well within
+    // f64 mantissa precision and never negative or fractional.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     let rank = ((pct / 100.0) * sorted.len() as f64).ceil() as usize;
     let idx = rank.saturating_sub(1).min(sorted.len() - 1);
     sorted[idx]
@@ -232,7 +240,7 @@ fn percentile(sorted: &[u128], pct: f64) -> u128 {
 
 /// Time `iters` iterations of `op` and return all observed latencies in
 /// microseconds. A `WARMUP` burst runs first and is discarded so the
-/// first-call JIT-y costs (page-cache miss on the SQLite file, BPE
+/// first-call JIT-y costs (page-cache miss on the `SQLite` file, BPE
 /// table init, etc.) don't skew the percentiles.
 fn measure<F>(iters: usize, mut op: F) -> Vec<u128>
 where
@@ -264,6 +272,7 @@ struct Row {
     max_us: u128,
 }
 
+#[allow(clippy::too_many_lines)] // bench driver; sequential JSON-emit pipeline
 fn main() {
     let binary = binary_path();
     eprintln!("[harness_bench] binary = {}", binary.display());
@@ -382,6 +391,9 @@ fn main() {
         "| harness | clientInfo.name | tool | iters | p50 (ms) | p95 (ms) | p99 (ms) | min (ms) | max (ms) |"
     );
     println!("|---|---|---|---:|---:|---:|---:|---:|---:|");
+    // Display-only conversion: latencies are bench durations measured in
+    // microseconds (typically <10s, well within f64 mantissa precision).
+    #[allow(clippy::cast_precision_loss)]
     for r in &rows {
         println!(
             "| {} | {} | {} | {} | {:.3} | {:.3} | {:.3} | {:.3} | {:.3} |",

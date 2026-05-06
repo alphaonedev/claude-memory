@@ -33,7 +33,7 @@ use ai_memory::models::{
 };
 use rusqlite::Connection;
 
-fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, owner_agent_id: &str) {
+fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy, owner_agent_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let mut metadata = default_metadata();
     if let Some(obj) = metadata.as_object_mut() {
@@ -43,7 +43,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, own
         );
         obj.insert(
             "governance".to_string(),
-            serde_json::to_value(&policy).unwrap(),
+            serde_json::to_value(policy).unwrap(),
         );
     }
     let standard = Memory {
@@ -87,7 +87,7 @@ fn k3_enforce_mode_blocks_with_pending() {
     reset_permissions_decision_counts_for_test();
 
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
 
     let leaf = "alphaone/secure/team-a";
     let payload = serde_json::json!({"title": "k3-enforce"});
@@ -136,7 +136,7 @@ fn k3_advisory_mode_logs_and_allows_no_pending_row() {
     reset_permissions_decision_counts_for_test();
 
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
 
     let leaf = "alphaone/secure/team-a";
     let payload = serde_json::json!({"title": "k3-advisory"});
@@ -190,7 +190,7 @@ fn k3_off_mode_skips_gate_entirely() {
     reset_permissions_decision_counts_for_test();
 
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
 
     let leaf = "alphaone/secure/team-a";
     let payload = serde_json::json!({"title": "k3-off"});
@@ -234,8 +234,8 @@ fn k3_off_mode_skips_gate_entirely() {
 /// Capabilities surface — the active mode + decision counts must be
 /// observable through the canonical capabilities response so doctor
 /// + remote operators can verify the gate posture. With the mode
-/// pinned to `enforce` and one decision recorded, the shape is:
-/// `{ mode: "enforce", decision_counts: { enforce: 1, ... } }`.
+///   pinned to `enforce` and one decision recorded, the shape is:
+///   `{ mode: "enforce", decision_counts: { enforce: 1, ... } }`.
 #[test]
 fn k3_capabilities_reports_active_mode_and_decision_counts() {
     let _guard = lock_permissions_mode_for_test();
@@ -243,7 +243,7 @@ fn k3_capabilities_reports_active_mode_and_decision_counts() {
     reset_permissions_decision_counts_for_test();
 
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
     let _ = db::enforce_governance(
         &conn,
         GovernedAction::Store,

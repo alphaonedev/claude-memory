@@ -57,8 +57,8 @@ proptest! {
     ) {
         if a.len() == b.len() {
             let similarity = Embedder::cosine_similarity(&a, &b);
-            assert!(similarity >= -1.0 && similarity <= 1.0,
-                   "cosine similarity {} out of bounds [-1, 1]", similarity);
+            assert!((-1.0..=1.0).contains(&similarity),
+                   "cosine similarity {similarity} out of bounds [-1, 1]");
         }
     }
 }
@@ -71,8 +71,12 @@ proptest! {
     ) {
         let zero: Vec<f32> = vec![0.0; a.len()];
         let similarity = Embedder::cosine_similarity(&a, &zero);
-        // Either both are zero (ill-defined, return 0.0) or similarity is 0
-        assert_eq!(similarity, 0.0);
+        // The API contract returns the literal `0.0` for the
+        // ill-defined-with-zero-vector case (denom < 1e-12 branch).
+        // Bit-equality is the precise check; clippy::float_cmp is
+        // a false positive here because the value is a literal, not
+        // the result of an arithmetic computation.
+        assert_eq!(similarity.to_bits(), 0.0_f32.to_bits());
     }
 }
 
@@ -85,7 +89,8 @@ proptest! {
     ) {
         if a.len() != b.len() && !a.is_empty() && !b.is_empty() {
             let similarity = Embedder::cosine_similarity(&a, &b);
-            assert_eq!(similarity, 0.0);
+            // Mismatched-dim path returns the literal `0.0` (bit-exact).
+            assert_eq!(similarity.to_bits(), 0.0_f32.to_bits());
         }
     }
 }
@@ -143,9 +148,9 @@ proptest! {
             let sim_ac = Embedder::cosine_similarity(&a, &c);
 
             // All similarities should be bounded
-            assert!(sim_ab >= -1.0 && sim_ab <= 1.0);
-            assert!(sim_bc >= -1.0 && sim_bc <= 1.0);
-            assert!(sim_ac >= -1.0 && sim_ac <= 1.0);
+            assert!((-1.0..=1.0).contains(&sim_ab));
+            assert!((-1.0..=1.0).contains(&sim_bc));
+            assert!((-1.0..=1.0).contains(&sim_ac));
         }
     }
 }

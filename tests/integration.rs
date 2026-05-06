@@ -315,13 +315,7 @@ fn test_import_export_roundtrip() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&export_output.stdout)
-        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), &export_output.stdout).unwrap();
     let result = child.wait_with_output().unwrap();
     assert!(
         result.status.success(),
@@ -1484,13 +1478,7 @@ fn test_import_roundtrip_count_match() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .unwrap();
-    use std::io::Write;
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(&export_output.stdout)
-        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), &export_output.stdout).unwrap();
     let result = child.wait_with_output().unwrap();
     assert!(result.status.success());
 
@@ -2521,6 +2509,7 @@ fn test_version_flag_matches_cargo_pkg_version() {
 // --- Patch 4: auto-detect parent by prefix ---
 
 #[test]
+#[allow(clippy::too_many_lines)] // sequential CLI scenario, splitting hurts readability
 fn test_namespace_auto_detect_parent() {
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!(
@@ -5122,6 +5111,8 @@ fn seed_standard(
     title: &str,
     content: &str,
 ) -> String {
+    use std::io::Write;
+
     let out = cmd(binary)
         .args([
             "--db",
@@ -5148,7 +5139,6 @@ fn seed_standard(
     let id = v["id"].as_str().unwrap().to_string();
 
     // Set via MCP (CLI doesn't expose set_namespace_standard)
-    use std::io::Write;
     let mut child = cmd(binary)
         .args([
             "--db",
@@ -5328,6 +5318,8 @@ fn test_inherit_preserves_3_level_flat_behavior() {
 
 #[test]
 fn test_inherit_recall_auto_prepends_chain() {
+    use std::io::Write;
+
     // session_start / recall should already inject the chain when namespace is set.
     let db = fresh_inherit_db();
     let bin = env!("CARGO_BIN_EXE_ai-memory");
@@ -5355,7 +5347,6 @@ fn test_inherit_recall_auto_prepends_chain() {
         .unwrap();
 
     // Invoke recall via MCP and look for standards[]
-    use std::io::Write;
     let mut child = cmd(bin)
         .args([
             "--db",
@@ -5463,6 +5454,8 @@ fn test_inherit_deep_namespace_8_levels() {
 
 #[test]
 fn test_inherit_default_omits_chain() {
+    use std::io::Write;
+
     // Without inherit=true, the old single-namespace response shape is used.
     let db = fresh_inherit_db();
     let bin = env!("CARGO_BIN_EXE_ai-memory");
@@ -5470,7 +5463,6 @@ fn test_inherit_default_omits_chain() {
     seed_standard(bin, &db, "alphaone", "org-only", "org");
 
     // get_standard with inherit=false (default) must return single-object shape
-    use std::io::Write;
     let mut child = cmd(bin)
         .args([
             "--db",
@@ -5784,7 +5776,7 @@ fn mcp_call(
     binary: &str,
     db_path: &std::path::Path,
     name: &str,
-    args: serde_json::Value,
+    args: &serde_json::Value,
 ) -> serde_json::Value {
     use std::io::Write;
     let mut child = cmd(binary)
@@ -5844,7 +5836,7 @@ fn test_governance_set_and_get_roundtrip() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({
+        &serde_json::json!({
             "namespace": "alphaone/eng",
             "id": sid,
             "governance": gov.clone(),
@@ -5857,7 +5849,7 @@ fn test_governance_set_and_get_roundtrip() {
         bin,
         &db,
         "memory_namespace_get_standard",
-        serde_json::json!({"namespace": "alphaone/eng"}),
+        &serde_json::json!({"namespace": "alphaone/eng"}),
     );
     assert_eq!(get_resp["governance"]["write"], "registered");
     assert_eq!(get_resp["governance"]["promote"], "approve");
@@ -5876,13 +5868,13 @@ fn test_governance_default_returned_when_unset() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({"namespace": "plain", "id": sid}),
+        &serde_json::json!({"namespace": "plain", "id": sid}),
     );
     let get_resp = mcp_call(
         bin,
         &db,
         "memory_namespace_get_standard",
-        serde_json::json!({"namespace": "plain"}),
+        &serde_json::json!({"namespace": "plain"}),
     );
     let gov = &get_resp["governance"];
     assert_eq!(gov["write"], "any");
@@ -5899,7 +5891,7 @@ fn mcp_call_raw(
     binary: &str,
     db_path: &std::path::Path,
     name: &str,
-    args: serde_json::Value,
+    args: &serde_json::Value,
 ) -> serde_json::Value {
     use std::io::Write;
     let mut child = cmd(binary)
@@ -5951,7 +5943,7 @@ fn test_governance_invalid_rejected() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({
+        &serde_json::json!({
             "namespace": "alphaone/eng",
             "id": sid,
             "governance": {
@@ -5979,7 +5971,7 @@ fn test_governance_consensus_quorum_rejected() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({
+        &serde_json::json!({
             "namespace": "alphaone",
             "id": sid,
             "governance": {
@@ -6009,7 +6001,7 @@ fn test_governance_inherit_path_surfaces_per_level() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({
+        &serde_json::json!({
             "namespace": "alphaone",
             "id": org_id,
             "governance": {
@@ -6022,7 +6014,7 @@ fn test_governance_inherit_path_surfaces_per_level() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({
+        &serde_json::json!({
             "namespace": "alphaone/eng",
             "id": team_id,
             "governance": {
@@ -6036,7 +6028,7 @@ fn test_governance_inherit_path_surfaces_per_level() {
         bin,
         &db,
         "memory_namespace_get_standard",
-        serde_json::json!({"namespace": "alphaone/eng", "inherit": true}),
+        &serde_json::json!({"namespace": "alphaone/eng", "inherit": true}),
     );
     let standards = resp["standards"].as_array().unwrap();
     assert!(standards.len() >= 2);
@@ -6064,7 +6056,7 @@ fn test_governance_legacy_memory_defaults_not_mutated() {
         bin,
         &db,
         "memory_namespace_set_standard",
-        serde_json::json!({"namespace": "legacy", "id": sid}),
+        &serde_json::json!({"namespace": "legacy", "id": sid}),
     );
     let out = cmd(bin)
         .args(["--db", db.to_str().unwrap(), "--json", "get", &sid])
@@ -6093,9 +6085,11 @@ fn set_governance(
     binary: &str,
     db_path: &std::path::Path,
     namespace: &str,
-    governance: serde_json::Value,
+    governance: &serde_json::Value,
     owner_agent_id: &str,
 ) {
+    use std::io::Write;
+
     let out = cmd(binary)
         .env_remove("AI_MEMORY_AGENT_ID")
         .args([
@@ -6120,7 +6114,6 @@ fn set_governance(
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     let sid = v["id"].as_str().unwrap().to_string();
 
-    use std::io::Write;
     let mut child = cmd(binary)
         .args([
             "--db",
@@ -6169,7 +6162,7 @@ fn test_enforce_any_allows_store() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"any","promote":"any","delete":"any","approver":"human"}),
+        &serde_json::json!({"write":"any","promote":"any","delete":"any","approver":"human"}),
         "owner",
     );
     let out = cmd(bin)
@@ -6207,7 +6200,7 @@ fn test_enforce_registered_blocks_unregistered() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"registered","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"registered","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let out = cmd(bin)
@@ -6255,7 +6248,7 @@ fn test_enforce_registered_allows_registered() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"registered","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"registered","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let out = cmd(bin)
@@ -6288,7 +6281,7 @@ fn test_enforce_owner_blocks_non_owner_delete() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"any","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"any","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let store = cmd(bin)
@@ -6339,7 +6332,7 @@ fn test_enforce_owner_allows_self_delete() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"any","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"any","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let store = cmd(bin)
@@ -6388,7 +6381,7 @@ fn test_enforce_approve_queues_pending() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let out = cmd(bin)
@@ -6425,7 +6418,7 @@ fn test_enforce_pending_list_and_approve() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let queued = cmd(bin)
@@ -6503,7 +6496,7 @@ fn test_enforce_pending_reject_status() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let queued = cmd(bin)
@@ -6601,7 +6594,7 @@ fn test_enforce_promote_with_approve_policy() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"any","promote":"approve","delete":"any","approver":"human"}),
+        &serde_json::json!({"write":"any","promote":"approve","delete":"any","approver":"human"}),
         "owner",
     );
     let store = cmd(bin)
@@ -6648,13 +6641,15 @@ fn test_enforce_promote_with_approve_policy() {
 
 #[test]
 fn test_enforce_mcp_pending_tools() {
+    use std::io::Write;
+
     let db = fresh_enforce_db();
     let bin = env!("CARGO_BIN_EXE_ai-memory");
     set_governance(
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let queued = cmd(bin)
@@ -6682,7 +6677,6 @@ fn test_enforce_mcp_pending_tools() {
             .unwrap()
             .to_string();
 
-    use std::io::Write;
     let mut child = cmd(bin)
         .args([
             "--db",
@@ -6832,7 +6826,7 @@ fn test_approver_human_any_approver_accepted() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
+        &serde_json::json!({"write":"approve","promote":"any","delete":"owner","approver":"human"}),
         "owner",
     );
     let pid = queue_store(bin, &db, "alphaone", "human-target", "alice");
@@ -6853,7 +6847,7 @@ fn test_approver_agent_rejects_wrong_caller() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"agent":"maintainer"}
         }),
@@ -6878,7 +6872,7 @@ fn test_approver_agent_accepts_matching_caller() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"agent":"maintainer"}
         }),
@@ -6901,7 +6895,7 @@ fn test_approver_consensus_below_threshold_pending() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":3}
         }),
@@ -6943,7 +6937,7 @@ fn test_approver_consensus_threshold_auto_executes() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":2}
         }),
@@ -7002,7 +6996,7 @@ fn test_approver_consensus_same_agent_does_not_double_count() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":2}
         }),
@@ -7034,7 +7028,7 @@ fn test_approver_agent_rejected_not_counted_for_consensus() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"agent":"only-me"}
         }),
@@ -7062,7 +7056,7 @@ fn test_approver_delete_consensus_executes_delete() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"any","promote":"any","delete":"approve",
             "approver":{"consensus":2}
         }),
@@ -7143,7 +7137,7 @@ fn test_consensus_unregistered_voter_rejected() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":2}
         }),
@@ -7187,7 +7181,7 @@ fn test_consensus_case_variant_rejected_if_only_lowercase_registered() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":2}
         }),
@@ -7225,7 +7219,7 @@ fn test_consensus_case_insensitive_dedup_when_variants_registered() {
         bin,
         &db,
         "alphaone",
-        serde_json::json!({
+        &serde_json::json!({
             "write":"approve","promote":"any","delete":"owner",
             "approver":{"consensus":2}
         }),
@@ -7381,7 +7375,7 @@ fn test_budget_truncates_to_fit() {
     }
 
     let v = recall_with_budget(bin, &db, "alpha", Some(25));
-    let count = v["count"].as_u64().unwrap() as usize;
+    let count = usize::try_from(v["count"].as_u64().unwrap()).expect("count fits in usize");
     assert!(
         (1..5).contains(&count),
         "budget must truncate; got count={count}"
@@ -8331,6 +8325,7 @@ fn cert_sha256_fingerprint(cert_path: &std::path::Path) -> Option<String> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // end-to-end mTLS scenario; splitting hurts readability
 fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
     // Layer 2 — mTLS with SHA-256 fingerprint allowlist.
     // Peer B runs serve with an allowlist containing peer-A's cert
@@ -8352,7 +8347,7 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
         eprintln!("skipping: openssl not available on PATH");
         return;
     };
-    let Some((peer_c_cert, peer_c_key)) = gen_self_signed_cert(&dir) else {
+    let Some((outsider_cert, outsider_key)) = gen_self_signed_cert(&dir) else {
         eprintln!("skipping: openssl not available on PATH");
         return;
     };
@@ -8396,8 +8391,8 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
         server_key.clone(),
         peer_a_cert.clone(),
         peer_a_key.clone(),
-        peer_c_cert.clone(),
-        peer_c_key.clone(),
+        outsider_cert.clone(),
+        outsider_key.clone(),
         allowlist_path.clone(),
     ]);
 
@@ -8511,8 +8506,8 @@ fn test_serve_mtls_fingerprint_allowlist_accepts_only_known_peer() {
     // Negative case: reqwest with peer-C's cert must be rejected at
     // handshake. The `send()` call returns an error (not an HTTP code)
     // because the TLS layer fails before any HTTP exchange.
-    let client_c = build_mtls_probe_client(&peer_c_cert, &peer_c_key);
-    let neg = client_c.get(&health_url).send();
+    let outsider_client = build_mtls_probe_client(&outsider_cert, &outsider_key);
+    let neg = outsider_client.get(&health_url).send();
     assert!(
         neg.is_err(),
         "unauthorised cert must be rejected at TLS handshake; got {neg:?}"
@@ -8801,7 +8796,7 @@ impl OneshotDaemon {
     }
 }
 
-/// Tuple-style helper mirroring `curl_get`: returns (status_code_str, body_json).
+/// Tuple-style helper mirroring `curl_get`: returns (`status_code_str`, `body_json`).
 #[allow(dead_code)]
 async fn route_get(d: &OneshotDaemon, path: &str) -> (String, serde_json::Value) {
     let (status, body) = d.request("GET", path, None, None).await;
@@ -10411,7 +10406,7 @@ fn test_curator_autonomy_end_to_end_cycle() {
 /// Modeled after `src/federation.rs::tests::spawn_mock_peer`. Used only
 /// by the in-process federation integration tests (where the leader is
 /// an `OneshotDaemon` and the peers are these stubs); production code
-/// paths in `federation.rs` (broadcast_store_quorum, fanout_or_503, the
+/// paths in `federation.rs` (`broadcast_store_quorum`, `fanout_or_503`, the
 /// reqwest fan-out, deadline plumbing, ack tracking) all run inside the
 /// test process and are attributed to coverage.
 #[allow(dead_code)]
@@ -10525,6 +10520,8 @@ fn federation_cfg_for_test(
 /// sync mesh) correctly stay in their subprocess form below.
 #[tokio::test]
 async fn test_quorum_partial_failure_with_timeout() {
+    use std::sync::atomic::Ordering;
+
     // 3 healthy peers; W=2 means 1 local + 1 peer ack is enough to
     // satisfy quorum. The remaining peer(s) still receive the post-
     // quorum detached fanout.
@@ -10572,7 +10569,6 @@ async fn test_quorum_partial_failure_with_timeout() {
     // Detached post-quorum fanout reaches every peer eventually. We
     // expect ≥2 calls per peer (1 from register_agent, 1 from the store
     // above). Wait for all three peers to record at least 2 calls.
-    use std::sync::atomic::Ordering;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     while std::time::Instant::now() < deadline {
         if count1.load(Ordering::Relaxed) >= 2
@@ -10642,13 +10638,13 @@ async fn test_quorum_partial_failure_with_timeout() {
     );
 }
 
-/// Justice of Federation Tier 1: subscription webhook with namespace_filter.
+/// Justice of Federation Tier 1: subscription webhook with `namespace_filter`.
 ///
 /// Register a webhook subscription with a namespace filter, store memories
 /// in matching + non-matching namespaces, and verify the subscription
 /// survives the writes. Refactored from `DaemonGuard::spawn() + curl_*()`
 /// to `OneshotDaemon` since this test exercises only the subscription
-/// HTTP API + create_memory write path — no real-socket behavior needed.
+/// HTTP API + `create_memory` write path — no real-socket behavior needed.
 #[tokio::test]
 async fn test_subscription_webhook_namespace_filter() {
     let d = OneshotDaemon::new();
@@ -10729,14 +10725,14 @@ async fn test_subscription_webhook_namespace_filter() {
         "metadata": {"test": "non-matching"}
     });
 
-    let (code_nm, _resp_nm) = route_post(
+    let (code_other_ns, _resp_other_ns) = route_post(
         &d,
         "/api/v1/memories",
         &non_matching_body,
         Some("ai:webhook-test"),
     )
     .await;
-    assert_eq!(code_nm, "201", "store non-matching memory");
+    assert_eq!(code_other_ns, "201", "store non-matching memory");
 
     // Verify the subscription is still active after storing memories.
     let (code_subs_final, body_subs_final) =
@@ -10848,6 +10844,7 @@ fn curl_put(
 /// Phase 3 (6 governance/webhook): `approve_pending`, `reject_pending`, `register_agent`,
 /// notify, subscribe, unsubscribe.
 #[tokio::test]
+#[allow(clippy::too_many_lines)] // smoke matrix: 30+ HTTP scenarios driven by one runtime
 async fn http_smoke_matrix_phases_1_3() {
     let d = OneshotDaemon::new();
 
@@ -11665,8 +11662,6 @@ async fn http_phase4_sync_since() {
 }
 
 /// CLI smoke test matrix (Tier 1+2): all 32 subcommands
-
-/// CLI smoke test matrix (Tier 1+2): all 32 subcommands
 ///
 /// Tier 1: --help exit 0 + non-empty stdout (arg validation coverage)
 /// Tier 2: canonical happy-path invocation against temp DB (main dispatch + JSON output)
@@ -11740,6 +11735,7 @@ fn test_cli_smoke_subcommand_help() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // CLI smoke matrix exercises 30+ subcommands sequentially
 fn test_cli_smoke_canonical_paths() {
     let dir = std::env::temp_dir();
     let db_path = dir.join(format!("ai-memory-cli-smoke-{}.db", uuid::Uuid::new_v4()));
@@ -11844,7 +11840,7 @@ fn test_cli_smoke_canonical_paths() {
     assert!(gc_output.status.success(), "gc failed");
 
     // 12. link: link two memories
-    let store2_output = cmd_output_or_panic(
+    let second_store = cmd_output_or_panic(
         binary,
         &[
             "--db",
@@ -11857,7 +11853,7 @@ fn test_cli_smoke_canonical_paths() {
             "Another test",
         ],
     );
-    let stored2: serde_json::Value = serde_json::from_slice(&store2_output.stdout).unwrap();
+    let stored2: serde_json::Value = serde_json::from_slice(&second_store.stdout).unwrap();
     let test_id_2 = stored2["id"].as_str().unwrap();
 
     let link_output = cmd_output_or_panic(
@@ -12347,7 +12343,7 @@ fn test_cli_failure_matrix() {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            let combined = format!("{}\n{}", stderr, stdout).to_lowercase();
+            let combined = format!("{stderr}\n{stdout}").to_lowercase();
 
             // Check if the expected error message appears (case-insensitive)
             if !combined.contains(&case.expected_stderr_contains.to_lowercase()) {

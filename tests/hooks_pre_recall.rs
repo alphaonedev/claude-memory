@@ -228,7 +228,6 @@ async fn drive_with_mock(
         .await
         .expect("mock fire");
     let outcome = match fire {
-        HookDecision::Allow => PreRecallOutcome::Allow,
         HookDecision::Modify(mp) => {
             let new_query = mp.delta.content.unwrap_or_else(|| query.to_string());
             let new_namespace = mp.delta.namespace.unwrap_or_else(|| namespace.to_string());
@@ -243,7 +242,7 @@ async fn drive_with_mock(
             }
         }
         HookDecision::Deny { reason, code } => PreRecallOutcome::Denied { reason, code },
-        HookDecision::AskUser { .. } => PreRecallOutcome::Allow,
+        HookDecision::Allow | HookDecision::AskUser { .. } => PreRecallOutcome::Allow,
     };
     (outcome, mock, payload)
 }

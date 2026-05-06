@@ -11,12 +11,12 @@
 //! `handle_capabilities`.
 //!
 //! Run with:
-//!     AI_MEMORY_NO_CONFIG=1 cargo test --test recall_observability
+//!     `AI_MEMORY_NO_CONFIG=1` cargo test --test `recall_observability`
 //!
 //! The tests run end-to-end through the public `mcp::handle_recall`
 //! handler so the wire shape (the JSON `meta` block) is asserted exactly
 //! as a remote MCP client would see it. No fixtures are imported from
-//! the daemon — each test seeds an in-memory SQLite DB with the minimal
+//! the daemon — each test seeds an in-memory `SQLite` DB with the minimal
 //! row set it needs.
 
 use ai_memory::config::{ResolvedScoring, ResolvedTtl};
@@ -26,7 +26,7 @@ use ai_memory::models::{Memory, Tier};
 use ai_memory::reranker::CrossEncoder;
 use serde_json::json;
 
-/// Build a fresh on-disk SQLite DB with the canonical schema applied.
+/// Build a fresh on-disk `SQLite` DB with the canonical schema applied.
 /// Returns `(connection, temp-path)`. The path is held by the caller so
 /// the file outlives the connection.
 fn fresh_db() -> (rusqlite::Connection, std::path::PathBuf) {
@@ -195,6 +195,13 @@ fn recall_response_meta_reports_lexical_when_neural_unavailable() {
 
 #[test]
 fn hnsw_eviction_increments_counter() {
+    // The MAX_ENTRIES cap is 100_000 — building the index at the cap and
+    // inserting one more row trips the eviction path. We seed the build
+    // call with `MAX_ENTRIES` synthetic vectors (2-d, L2-normalized to
+    // satisfy the cosine-distance contract) so the `insert` exceeds the
+    // cap by exactly one and we can assert the counter delta precisely.
+    const MAX_ENTRIES: usize = 100_000;
+
     // Reset the process-local counter so concurrent tests don't bleed.
     ai_memory::hnsw::reset_eviction_counters_for_test();
     assert_eq!(
@@ -207,12 +214,6 @@ fn hnsw_eviction_increments_counter() {
         "test precondition: no recent evictions after reset"
     );
 
-    // The MAX_ENTRIES cap is 100_000 — building the index at the cap and
-    // inserting one more row trips the eviction path. We seed the build
-    // call with `MAX_ENTRIES` synthetic vectors (2-d, L2-normalized to
-    // satisfy the cosine-distance contract) so the `insert` exceeds the
-    // cap by exactly one and we can assert the counter delta precisely.
-    const MAX_ENTRIES: usize = 100_000;
     let entries: Vec<(String, Vec<f32>)> = (0..MAX_ENTRIES)
         .map(|i| {
             // 2-d L2-normalized vector with a small per-i variation so

@@ -11,14 +11,14 @@
 //! - `doctor_warns_on_dim_violations` — when the post-P2 `embedding_dim`
 //!   column is present and a row's dim disagrees with its namespace's
 //!   modal dim, the doctor reports CRITICAL on the Storage section. (We
-//!   simulate the post-P2 schema by hand-editing the SQLite file; the
+//!   simulate the post-P2 schema by hand-editing the `SQLite` file; the
 //!   real P2 migration lands separately.)
 //! - `doctor_critical_on_pending_actions_older_than_24h` — synthesizing
 //!   a `pending_actions` row with `requested_at` 25h in the past pushes
 //!   Governance into CRITICAL and the process exits 2.
 //! - `doctor_remote_queries_capabilities_endpoint` — `--remote <url>`
 //!   pulls the Capabilities JSON from a live `serve` daemon and renders
-//!   the recall_mode / reranker_active fields.
+//!   the `recall_mode` / `reranker_active` fields.
 //!
 //! All tests set `AI_MEMORY_NO_CONFIG=1` per the standard CLI test
 //! convention.
@@ -304,5 +304,6 @@ fn spawn_serve(db: &Path) -> ServeChild {
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
+    let _ = child.wait();
     panic!("serve daemon did not become ready within {SPAWN_TIMEOUT:?}");
 }

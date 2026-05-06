@@ -19,7 +19,7 @@
 //! `build_router` + `Router::oneshot` harness so the assertion runs
 //! against the real handler code, not a mocked dispatch.
 //!
-//! ## Why on-disk SQLite (not `:memory:`)
+//! ## Why on-disk `SQLite` (not `:memory:`)
 //!
 //! `dispatch_event_with_details` spawns a worker thread for each
 //! subscriber that re-opens the database at the recorded `db_path` so
@@ -29,7 +29,7 @@
 //! spawned thread would be unable to find any subscriptions and the
 //! tests would silently pass without exercising the HTTP path. We use
 //! a `NamedTempFile` so the spawned dispatch thread shares the same
-//! WAL-mode SQLite file the foreground request used.
+//! WAL-mode `SQLite` file the foreground request used.
 //!
 //! ## Why a tiny `tokio::time::sleep`
 //!

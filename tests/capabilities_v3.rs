@@ -763,7 +763,7 @@ fn cap_v3_b4_claude_code_harness_advertises_deferred_true() {
     .expect("v3 capabilities serialize");
     assert_eq!(
         val.get("your_harness_supports_deferred_registration")
-            .and_then(|v| v.as_bool()),
+            .and_then(serde_json::Value::as_bool),
         Some(true),
         "Claude Code → field must be present and true; got: {val}"
     );
@@ -793,7 +793,7 @@ fn cap_v3_b4_codex_harness_advertises_deferred_false() {
     .expect("v3 capabilities serialize");
     assert_eq!(
         val.get("your_harness_supports_deferred_registration")
-            .and_then(|v| v.as_bool()),
+            .and_then(serde_json::Value::as_bool),
         Some(false),
         "Codex → field must be present and false; got: {val}"
     );
@@ -852,7 +852,7 @@ fn cap_v3_b4_generic_harness_defaults_deferred_false() {
     .expect("v3 capabilities serialize");
     assert_eq!(
         val.get("your_harness_supports_deferred_registration")
-            .and_then(|v| v.as_bool()),
+            .and_then(serde_json::Value::as_bool),
         Some(false),
         "unknown harness → field must be present and false (conservative default); got: {val}"
     );

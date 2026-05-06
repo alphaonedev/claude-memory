@@ -15,7 +15,7 @@ proptest! {
             let result = validate_title(title);
             if result.is_ok() {
                 // The result should be deterministic
-                assert_eq!(validate_title(title).is_ok(), true);
+                assert!(validate_title(title).is_ok());
             }
         }
     }
@@ -71,7 +71,7 @@ proptest! {
     fn prop_namespace_space_rejected(
         base in r"[a-z0-9_-]{1,50}"
     ) {
-        let ns = format!("{} test", base);
+        let ns = format!("{base} test");
         assert!(validate_namespace(&ns).is_err());
     }
 }
@@ -100,7 +100,7 @@ proptest! {
 proptest! {
     #[test]
     fn prop_scope_valid_set(choice in 0usize..5) {
-        let scopes = vec!["private", "team", "unit", "org", "collective"];
+        let scopes = ["private", "team", "unit", "org", "collective"];
         let scope = scopes[choice % scopes.len()];
         assert!(validate_scope(scope).is_ok());
     }
@@ -112,7 +112,7 @@ proptest! {
     fn prop_scope_invalid_rejected(
         s in r"[a-z_]{1,50}"
     ) {
-        if !vec!["private", "team", "unit", "org", "collective"].contains(&s.as_str()) {
+        if !["private", "team", "unit", "org", "collective"].contains(&s.as_str()) {
             assert!(validate_scope(&s).is_err());
         }
     }
@@ -155,7 +155,7 @@ proptest! {
         month in 1u32..=12u32,
         day in 1u32..=28u32,
     ) {
-        let ts = format!("{:04}-{:02}-{:02}T12:00:00Z", year, month, day);
+        let ts = format!("{year:04}-{month:02}-{day:02}T12:00:00Z");
         // All of these should be valid RFC3339
         let result = validate_expires_at(Some(&ts));
         // Past dates might fail (if today > this date), but format should be valid
@@ -170,7 +170,7 @@ proptest! {
 proptest! {
     #[test]
     fn prop_ttl_positive_only(
-        secs in 1i64..=31536000i64  // 1 sec to 1 year
+        secs in 1i64..=31_536_000i64  // 1 sec to 1 year
     ) {
         assert!(validate_ttl_secs(Some(secs)).is_ok());
     }

@@ -17,6 +17,7 @@
 //! 1. `docs/v0.7/canonical-phrasings.md` (the human-readable spec)
 //! 2. `src/mcp.rs::build_capabilities_{summary,describe_to_user}`
 //!    (the substrate)
+//!
 //! …and re-run this test. Drift between the spec and the substrate is
 //! exactly what this file is designed to surface.
 

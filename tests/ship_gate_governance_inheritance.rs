@@ -44,7 +44,7 @@ fn pin_enforce_mode() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, owner_agent_id: &str) {
+fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy, owner_agent_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let mut metadata = default_metadata();
     if let Some(obj) = metadata.as_object_mut() {
@@ -54,7 +54,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, own
         );
         obj.insert(
             "governance".to_string(),
-            serde_json::to_value(&policy).unwrap(),
+            serde_json::to_value(policy).unwrap(),
         );
     }
     let standard = Memory {
@@ -107,7 +107,7 @@ fn any_policy_no_inherit() -> GovernancePolicy {
 fn shipgate_inherit_default_governance_chain_5_deep_requires_approval_at_leaf() {
     let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone", &approve_write_policy(), "alice");
 
     let leaf = "alphaone/secure/team-a/svc/agent-1";
     let payload = serde_json::json!({"title": "leak-test", "tier": "long"});
@@ -143,11 +143,11 @@ fn shipgate_inherit_default_governance_chain_5_deep_requires_approval_at_leaf() 
 fn shipgate_inherit_false_at_child_blocks_parent_policy() {
     let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
     seed_policy(
         &conn,
         "alphaone/secure/team-a",
-        any_policy_no_inherit(),
+        &any_policy_no_inherit(),
         "alice",
     );
 
@@ -174,11 +174,11 @@ fn shipgate_inherit_false_at_child_blocks_parent_policy() {
 fn shipgate_most_specific_policy_wins_when_both_set() {
     let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
     seed_policy(
         &conn,
         "alphaone/secure/team-a",
-        GovernancePolicy::default(), // write=Any, inherit=true
+        &GovernancePolicy::default(), // write=Any, inherit=true
         "alice",
     );
 
@@ -206,7 +206,7 @@ fn shipgate_most_specific_policy_wins_when_both_set() {
 fn shipgate_child_with_no_policy_inherits_parent_policy() {
     let _gate = pin_enforce_mode();
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
     // NB: alphaone/secure/team-a has no standard.
 
     let payload = serde_json::json!({"title": "leak-attempt"});
@@ -241,7 +241,7 @@ fn shipgate_audit_no_silent_bypass_in_v063_compatibility_path() {
     // Approve-write policy; the unprivileged subtree must NOT be able
     // to bypass it just by writing under a child namespace that
     // wasn't explicitly governed.
-    seed_policy(&conn, "alphaone/secure", approve_write_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_write_policy(), "alice");
 
     for child in [
         "alphaone/secure/team-a",

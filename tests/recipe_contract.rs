@@ -265,8 +265,7 @@ fn binary_on_path(name: &str) -> bool {
     Command::new(probe)
         .arg(name)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Run a python3 syntax check on `src`. Returns Ok if `compile()` succeeds.

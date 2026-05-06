@@ -1132,15 +1132,6 @@ mod wiremock_tests {
             .await;
     }
 
-    /// Build a real OllamaClient pointed at the supplied mock server.
-    /// Runs the blocking constructor on the spawn_blocking pool so it
-    /// doesn't deadlock the test's tokio runtime.
-    async fn build_client(uri: String, model: &'static str) -> OllamaClient {
-        tokio::task::spawn_blocking(move || OllamaClient::new_with_url(&uri, model).unwrap())
-            .await
-            .unwrap()
-    }
-
     // ---------------- is_available ----------------
 
     #[tokio::test(flavor = "multi_thread")]

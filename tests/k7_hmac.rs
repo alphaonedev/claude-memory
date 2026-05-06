@@ -66,6 +66,11 @@ impl wiremock::Respond for AckEcho {
 
 #[test]
 fn k7_hooks_subscription_config_round_trips_through_serde() {
+    #[derive(serde::Deserialize)]
+    struct Wrapper {
+        hooks: HooksConfig,
+    }
+
     // Operator-visible TOML deserializes cleanly into the K7
     // `HooksConfig` shape. Asserting this here pins the wire format
     // operators are expected to put in `~/.config/ai-memory/config.toml`.
@@ -73,10 +78,6 @@ fn k7_hooks_subscription_config_round_trips_through_serde() {
 [hooks.subscription]
 hmac_secret = "fleet-wide-secret"
 "#;
-    #[derive(serde::Deserialize)]
-    struct Wrapper {
-        hooks: HooksConfig,
-    }
     let cfg: Wrapper = toml::from_str(toml_src).expect("parse [hooks.subscription]");
     let secret = cfg
         .hooks
@@ -98,7 +99,7 @@ hmac_secret = "fleet-wide-secret"
 fn k7_active_hmac_secret_setter_and_getter_round_trip() {
     let _guard = K7_HMAC_GLOBAL_LOCK
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     set_active_hooks_hmac_secret(Some("k7-test-secret".into()));
     assert_eq!(
         active_hooks_hmac_secret().as_deref(),
@@ -124,7 +125,7 @@ fn k7_active_hmac_secret_setter_and_getter_round_trip() {
 async fn k7_hmac_signature_header_present_when_global_secret_configured() {
     let _guard = K7_HMAC_GLOBAL_LOCK
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // ----------------------------------------------------------------
     // Setup: stand up a wiremock POST listener with the K6 ACK
     // responder. Register a subscription pointing at it WITHOUT a
@@ -233,7 +234,7 @@ async fn k7_hmac_signature_header_present_when_global_secret_configured() {
 async fn k7_hmac_unset_means_unsigned_payload_when_no_per_sub_secret() {
     let _guard = K7_HMAC_GLOBAL_LOCK
         .lock()
-        .unwrap_or_else(|p| p.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Sanity counter-test: when neither the per-subscription secret
     // nor the K7 global override is set, the payload is unsigned
     // (preserves pre-K7 behaviour).
@@ -303,6 +304,10 @@ async fn poll_for_first_request(server: &MockServer) -> Request {
 /// `hmac_sha256_hex` with itself.
 fn expected_k7_signature(plaintext_secret: &str, canonical: &str) -> String {
     use sha2::{Digest, Sha256};
+
+    // Step 2: RFC 2104 HMAC-SHA256 block size.
+    const BLOCK: usize = 64;
+
     // Step 1: SHA-256 the plaintext secret to produce the keying
     // material the K7 dispatcher passes into the HMAC keyed-hash
     // construction. The dispatcher then hex-decodes that string back
@@ -314,8 +319,6 @@ fn expected_k7_signature(plaintext_secret: &str, canonical: &str) -> String {
     };
     let key_bytes = hex_decode(&key_hex);
 
-    // Step 2: RFC 2104 HMAC-SHA256.
-    const BLOCK: usize = 64;
     let mut key = if key_bytes.len() > BLOCK {
         let mut h = Sha256::new();
         h.update(&key_bytes);

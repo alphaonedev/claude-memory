@@ -31,7 +31,7 @@ fn ai_memory(db: &std::path::Path) -> Command {
 }
 
 /// Build a `std::process::Command` for the binary so callers can pipe
-/// to/from stdin / stdout (assert_cmd::Command doesn't surface those).
+/// to/from stdin / stdout (`assert_cmd::Command` doesn't surface those).
 fn ai_memory_std(db: &std::path::Path) -> StdCommand {
     let mut cmd = StdCommand::new(env!("CARGO_BIN_EXE_ai-memory"));
     cmd.env("AI_MEMORY_NO_CONFIG", "1")
@@ -190,7 +190,7 @@ fn store_then_list() {
         .clone();
     // The list output has shape {"count": N, "memories": [...]}
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    let count = v["memories"].as_array().map(Vec::len).unwrap_or(0);
+    let count = v["memories"].as_array().map_or(0, Vec::len);
     assert!(count >= 3, "expected >=3 memories, got {count}");
 }
 
@@ -326,7 +326,7 @@ fn export_import_roundtrip() {
         .stdout
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&list_out).unwrap();
-    let count = v["memories"].as_array().map(Vec::len).unwrap_or(0);
+    let count = v["memories"].as_array().map_or(0, Vec::len);
     assert_eq!(count, 5, "expected 5 imported, got {count}");
 }
 
@@ -426,7 +426,7 @@ fn forget_by_namespace() {
         .stdout
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&list_out).unwrap();
-    let count = v["memories"].as_array().map(Vec::len).unwrap_or(99);
+    let count = v["memories"].as_array().map_or(99, Vec::len);
     assert_eq!(count, 0, "expected 0 after forget, got {count}: {v:?}");
 }
 

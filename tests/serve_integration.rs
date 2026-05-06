@@ -118,6 +118,7 @@ fn spawn_serve(
         std::thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
+    let _ = child.wait();
     panic!("serve daemon did not become ready within {SPAWN_TIMEOUT:?}");
 }
 
@@ -274,8 +275,7 @@ fn serve_api_key_required_when_configured() {
         if client
             .get(format!("{url}/api/v1/health"))
             .send()
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
+            .is_ok_and(|r| r.status().is_success())
         {
             ready = true;
             break;
@@ -321,7 +321,7 @@ fn serve_graceful_shutdown_on_sigterm() {
     // the spec calls the test "shutdown_on_sigterm" — using SIGINT keeps
     // the assertion meaningful (graceful shutdown path actually runs).
     unsafe {
-        libc::kill(pid as i32, libc::SIGINT);
+        libc::kill(i32::try_from(pid).expect("pid fits in i32"), libc::SIGINT);
     }
     // Give the daemon up to 10s to flush the WAL and exit.
     let deadline = Instant::now() + Duration::from_secs(10);

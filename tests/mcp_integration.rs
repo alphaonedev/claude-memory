@@ -4,7 +4,7 @@
 //! Wave 7 / I7 — MCP stdio handshake regression guards.
 //!
 //! These tests spawn `ai-memory mcp --tier keyword` (the cheapest tier
-//! that doesn't try to load MiniLM / nomic-embed) as a child process,
+//! that doesn't try to load `MiniLM` / nomic-embed) as a child process,
 //! write JSON-RPC requests to its stdin, and assert the responses on
 //! stdout. They guard the binary's stdio framing — newline-delimited
 //! JSON-RPC 2.0 — which the in-process unit tests in `mcp.rs` can't

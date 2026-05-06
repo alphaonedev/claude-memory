@@ -22,7 +22,7 @@ use rusqlite::Connection;
 /// Seed `namespace` with the supplied policy. Mirrors the helper in
 /// `cli::governance::tests` but stays self-contained so the
 /// integration-test crate has no dependency on private cli helpers.
-fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, owner_agent_id: &str) {
+fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy, owner_agent_id: &str) {
     let now = chrono::Utc::now().to_rfc3339();
     let mut metadata = default_metadata();
     if let Some(obj) = metadata.as_object_mut() {
@@ -32,7 +32,7 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: GovernancePolicy, own
         );
         obj.insert(
             "governance".to_string(),
-            serde_json::to_value(&policy).unwrap(),
+            serde_json::to_value(policy).unwrap(),
         );
     }
     let standard = Memory {
@@ -80,7 +80,7 @@ fn any_policy() -> GovernancePolicy {
 #[test]
 fn inherit_default_governance_chain_5_deep_requires_approval_at_leaf() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone", approve_policy(), "alice");
+    seed_policy(&conn, "alphaone", &approve_policy(), "alice");
 
     // Five-deep leaf with no intermediate policies.
     let leaf = "alphaone/secure/team-a/svc/agent-1";
@@ -98,11 +98,11 @@ fn inherit_default_governance_chain_5_deep_requires_approval_at_leaf() {
 #[test]
 fn inherit_false_at_child_blocks_parent_policy() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_policy(), "alice");
 
     let mut child = any_policy();
     child.inherit = false;
-    seed_policy(&conn, "alphaone/secure/team-a", child, "alice");
+    seed_policy(&conn, "alphaone/secure/team-a", &child, "alice");
 
     let resolved = db::resolve_governance_policy(&conn, "alphaone/secure/team-a")
         .expect("child has its own policy, must be returned");
@@ -120,8 +120,8 @@ fn inherit_false_at_child_blocks_parent_policy() {
 #[test]
 fn most_specific_policy_wins_when_both_set() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_policy(), "alice");
-    seed_policy(&conn, "alphaone/secure/team-a", any_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure/team-a", &any_policy(), "alice");
 
     let resolved = db::resolve_governance_policy(&conn, "alphaone/secure/team-a")
         .expect("child has its own policy");
@@ -137,7 +137,7 @@ fn most_specific_policy_wins_when_both_set() {
 #[test]
 fn child_with_no_policy_inherits_parent_policy() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone/secure", approve_policy(), "alice");
+    seed_policy(&conn, "alphaone/secure", &approve_policy(), "alice");
     // NB: NO policy on "alphaone/secure/team-a".
     let resolved = db::resolve_governance_policy(&conn, "alphaone/secure/team-a")
         .expect("parent policy must inherit");
@@ -156,7 +156,7 @@ fn child_with_no_policy_inherits_parent_policy() {
 fn audit_no_silent_bypass_in_v063_compatibility_path() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
     // Policy exists somewhere, but in an unrelated subtree.
-    seed_policy(&conn, "betatwo/secure", approve_policy(), "alice");
+    seed_policy(&conn, "betatwo/secure", &approve_policy(), "alice");
 
     // alphaone/* has no policy in any ancestor.
     let resolved = db::resolve_governance_policy(&conn, "alphaone/secure/team-a");
@@ -167,12 +167,12 @@ fn audit_no_silent_bypass_in_v063_compatibility_path() {
 }
 
 /// Cycle-safety: the explicit-parent walker is bounded by
-/// MAX_EXPLICIT_DEPTH=8. A self-referencing or cyclic
-/// namespace_meta entry must not panic or loop forever.
+/// `MAX_EXPLICIT_DEPTH=8`. A self-referencing or cyclic
+/// `namespace_meta` entry must not panic or loop forever.
 #[test]
 fn resolver_is_cycle_safe() {
     let conn = db::open(std::path::Path::new(":memory:")).unwrap();
-    seed_policy(&conn, "alphaone", approve_policy(), "alice");
+    seed_policy(&conn, "alphaone", &approve_policy(), "alice");
     // No cycle here, but exercise a deep chain that forces the
     // explicit-parent fallback to no-op (no namespace_meta cycle).
     let leaf = "alphaone/a/b/c/d/e/f/g";

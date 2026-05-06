@@ -61,7 +61,7 @@ fn semantic_tier() -> TierConfig {
     FeatureTier::Semantic.config()
 }
 
-/// Build a minimal `[mcp.allowlist]` table for the agent_permitted_families
+/// Build a minimal `[mcp.allowlist]` table for the `agent_permitted_families`
 /// assertions. Mirrors `allowlist()` in `tests/capabilities_v3.rs`.
 fn allowlist(rows: &[(&str, &[&str])]) -> McpConfig {
     let mut map = HashMap::new();

@@ -12,7 +12,7 @@
 //!    the full profile (and is reachable for `--profile power`).
 //! 2. The handler exposed at `crate::subscriptions::memory_subscription_replay`
 //!    returns a stable, ordered envelope when fed a synthetic event
-//!    series (delivered_at ascending, plus a `count` field equal to
+//!    series (`delivered_at` ascending, plus a `count` field equal to
 //!    `events.len()`).
 //!
 //! The test deliberately avoids spinning the full MCP stdio harness —
@@ -25,9 +25,9 @@ use ai_memory::subscriptions::{self, NewSubscription};
 use rusqlite::Connection;
 use tempfile::NamedTempFile;
 
-/// Stand up a fresh on-disk SQLite at a tempfile path with the
-/// production schema applied (incl. K6 subscription_dlq /
-/// subscription_events migrations).
+/// Stand up a fresh on-disk `SQLite` at a tempfile path with the
+/// production schema applied (incl. K6 `subscription_dlq` /
+/// `subscription_events` migrations).
 fn fresh_db() -> (NamedTempFile, std::path::PathBuf) {
     let f = NamedTempFile::new().expect("tempfile");
     let p = f.path().to_path_buf();

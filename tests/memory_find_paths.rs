@@ -6,7 +6,7 @@
 //! J7 ships a new MCP tool `memory_find_paths(source_id, target_id,
 //! max_depth?, max_results?)` that returns up to N paths through the
 //! KG between two memories using BFS with cycle detection. The
-//! implementation dispatches on the resolved `KgBackend`: SQLite uses
+//! implementation dispatches on the resolved `KgBackend`: `SQLite` uses
 //! a recursive CTE through `db::find_paths`; Postgres deployments
 //! either fall back to the same recursive-CTE shape via
 //! `PostgresStore::find_paths_cte` or use Cypher
