@@ -230,7 +230,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       namespace TTL overrides arrive via the `[transcripts]`
 //       config section (`config.rs`) and are resolved against the
 //       transcript's namespace at sweep time.
-const CURRENT_SCHEMA_VERSION: i64 = 27;
+const CURRENT_SCHEMA_VERSION: i64 = 28;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -347,6 +347,13 @@ const MIGRATION_V26_SQLITE: &str = include_str!("../migrations/sqlite/0020_v07_s
 // idempotent CREATE TABLE / CREATE INDEX statements.
 const MIGRATION_V27_SQLITE: &str =
     include_str!("../migrations/sqlite/0021_v07_a2a_correlation.sql");
+// v0.7.0 K8 — per-agent quotas (memories/day, storage bytes, links/day).
+// CREATE TABLE IF NOT EXISTS + index — fully idempotent. Daily counters
+// reset at UTC midnight via the K8 sweep loop wired into
+// `daemon_runtime::bootstrap_serve`. The store_memory + memory_link
+// write paths consult the row before committing; on exceeded limit the
+// call returns a `QUOTA_EXCEEDED` diagnostic naming the limit hit.
+const MIGRATION_V28_SQLITE: &str = include_str!("../migrations/sqlite/0022_v07_agent_quotas.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -916,6 +923,13 @@ fn migrate(conn: &Connection) -> Result<()> {
                     [],
                 )?;
             }
+        }
+        if version < 28 {
+            // v0.7.0 K8 — per-agent quotas (memories/day, storage
+            // bytes, links/day). CREATE TABLE IF NOT EXISTS + index —
+            // fully idempotent; see MIGRATION_V28_SQLITE for the
+            // substrate documentation.
+            conn.execute_batch(MIGRATION_V28_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;

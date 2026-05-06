@@ -103,6 +103,13 @@ const PENDING_TIMEOUT_DEFAULT_SECS: i64 = 86_400;
 /// tick, and slow enough that the scan never dominates a busy
 /// daemon's wall-clock.
 const TRANSCRIPT_LIFECYCLE_SWEEP_INTERVAL_SECS: u64 = 600;
+/// v0.7.0 K8 — agent-quota daily-counter reset cadence. The sweep
+/// zeroes `current_memories_today` + `current_links_today` for every
+/// row whose `day_started_at` predates the current UTC date. 60-second
+/// cadence matches the K2 pending-actions sweeper — a single SQL
+/// UPDATE that touches at most one row per registered agent per
+/// midnight crossing.
+const AGENT_QUOTA_RESET_INTERVAL_SECS: u64 = 60;
 
 // ---------------------------------------------------------------------------
 // Clap-derived CLI surface
@@ -1348,6 +1355,41 @@ pub fn spawn_transcript_lifecycle_sweep_loop(
     })
 }
 
+/// v0.7.0 K8 — spawn the periodic agent-quota daily-counter reset
+/// sweeper.
+///
+/// Sleeps `interval`, then calls [`crate::quotas::reset_daily`] against
+/// the daemon's shared connection. The SQL statement zeros
+/// `current_memories_today` + `current_links_today` for every row
+/// whose `day_started_at` is not the current UTC date — touched rows
+/// equal "agents that crossed midnight since the last sweep tick"
+/// which is at most one row per registered agent per 24h.
+///
+/// The returned [`JoinHandle`] is owned by the caller; `serve()`
+/// aborts it on shutdown — same lifecycle as
+/// [`spawn_pending_timeout_sweep_loop`].
+#[must_use]
+pub fn spawn_agent_quota_reset_loop(state: Db, interval: Duration) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(interval).await;
+            let reset_count = {
+                let lock = state.lock().await;
+                match crate::quotas::reset_daily(&lock.0) {
+                    Ok(n) => n,
+                    Err(e) => {
+                        tracing::warn!("agent_quotas daily reset failed: {e}");
+                        continue;
+                    }
+                }
+            };
+            if reset_count > 0 {
+                tracing::info!("agent_quotas daily reset: {reset_count} row(s) zeroed");
+            }
+        }
+    })
+}
+
 /// Spawn the periodic WAL checkpoint loop. First checkpoint runs
 /// `interval / 2` after start (staggered from the GC loop to avoid
 /// lock-contention bursts on cold start), then on a fixed cadence.
@@ -1615,6 +1657,18 @@ pub async fn bootstrap_serve(
         db_state.clone(),
         app_config.effective_transcripts(),
         Duration::from_secs(TRANSCRIPT_LIFECYCLE_SWEEP_INTERVAL_SECS),
+    ));
+
+    // v0.7.0 K8: agent-quota daily-counter reset sweeper. Resets
+    // `current_memories_today` + `current_links_today` for every row
+    // whose `day_started_at` predates the current UTC date. 60-second
+    // cadence — same shape as the K2 pending sweeper above. The
+    // inline-roll branch in `crate::quotas::check_quota` /
+    // `crate::quotas::record_op` is the per-write fallback so the
+    // substrate stays honest even if this sweep is delayed.
+    task_handles.push(spawn_agent_quota_reset_loop(
+        db_state.clone(),
+        Duration::from_secs(AGENT_QUOTA_RESET_INTERVAL_SECS),
     ));
 
     let api_key_state = ApiKeyState {
@@ -2773,16 +2827,17 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Four task handles spawned (gc + wal_checkpoint + v0.7 K2
+        // Five task handles spawned (gc + wal_checkpoint + v0.7 K2
         // pending_actions timeout sweep + v0.7 I3 transcript
-        // archive→prune lifecycle sweep). v0.7 B3-fix2 gates the
+        // archive→prune lifecycle sweep + v0.7 K8 agent_quotas
+        // daily-counter reset sweep). v0.7 B3-fix2 gates the
         // family-descriptor embedding precompute behind
         // `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1` (default OFF) so
         // it does not contend with HTTP request-path embeds under
         // parallel CI load — see the gate site in `bootstrap_serve`
-        // for the rationale. The task count reverts to four when the
+        // for the rationale. The task count reverts to five when the
         // env var is unset.
-        assert_eq!(bs.task_handles.len(), 4);
+        assert_eq!(bs.task_handles.len(), 5);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();

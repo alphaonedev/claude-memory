@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::bool_assert_comparison, clippy::useless_vec)]
+
 use ai_memory::validate::*;
 use proptest::prelude::*;
 use serde_json::json;

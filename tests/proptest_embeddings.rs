@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::manual_range_contains)]
+
 use ai_memory::embeddings::Embedder;
 use proptest::prelude::*;
 

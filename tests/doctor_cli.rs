@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::zombie_processes)]
+
 //! Phase P7 / R7 — `ai-memory doctor` CLI integration tests.
 //!
 //! These tests spawn the real `ai-memory` binary (via `assert_cmd`) and
