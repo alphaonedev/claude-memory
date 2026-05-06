@@ -1,5 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
+
+#![allow(clippy::comparison_to_empty, clippy::len_zero)]
+
 //
 // Phase P6 (R1) — `budget_tokens` recall acceptance tests.
 //
