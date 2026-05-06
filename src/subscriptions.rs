@@ -272,6 +272,15 @@ fn matches_filters(
 }
 
 /// Payload fired to subscribers. Stable JSON shape.
+///
+/// v0.7.0 K6 — every dispatched payload now carries a deterministic
+/// `correlation_id` (UUIDv7 — time-ordered, unique). Receivers ACK
+/// with `{"status":"ack","correlation_id":"..."}`; the dispatcher
+/// retries on no-ACK or non-2xx with the [200ms, 1s, 5s] exponential
+/// backoff ladder and lands the row in `subscription_dlq` after three
+/// failed attempts. The id is generated once per (subscription,
+/// event) pair and persisted into `subscription_events` BEFORE the
+/// network send so replay-from-cursor (K7) sees a stable record.
 #[derive(Serialize)]
 struct DispatchPayload<'a> {
     event: &'a str,
@@ -279,12 +288,66 @@ struct DispatchPayload<'a> {
     namespace: &'a str,
     agent_id: Option<&'a str>,
     delivered_at: String,
+    /// v0.7.0 K6 — UUIDv7 correlation id. Stable across retries.
+    correlation_id: &'a str,
     /// P5 (G9): event-specific extra fields. Flattened so the wire shape
     /// stays a flat object — older subscribers that ignore unknown keys
     /// keep working. Each new event type uses one of the
     /// `*EventDetails` structs below.
     #[serde(flatten, skip_serializing_if = "Option::is_none")]
     details: Option<serde_json::Value>,
+}
+
+/// v0.7.0 K6 — exponential-backoff retry ladder for failed webhook
+/// deliveries. The dispatcher attempts the initial POST, then up to
+/// three retries spaced [200ms, 1s, 5s] apart. After the final retry
+/// fails the row lands in `subscription_dlq` for K7's inspector tool
+/// to surface. Exposed as a constant so tests can reason about the
+/// total wall-clock budget (≈ 6.2s + per-attempt timeout).
+pub const RETRY_BACKOFFS: &[std::time::Duration] = &[
+    std::time::Duration::from_millis(200),
+    std::time::Duration::from_secs(1),
+    std::time::Duration::from_secs(5),
+];
+
+/// v0.7.0 K6 — per-attempt ACK timeout. Receivers MUST return a JSON
+/// body of the form `{"status":"ack","correlation_id":"..."}` within
+/// this window for the delivery to count as successful. A non-2xx
+/// response, a timeout, or an ACK whose `correlation_id` doesn't
+/// match the dispatched id all count as failure and trigger the next
+/// retry. Exposed so the integration tests can pin the wall-clock
+/// expectations.
+pub const ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// One row of the `subscription_events` per-delivery audit log. K6
+/// writes one row before each network send; K7's
+/// `memory_subscription_replay` tool reads the rows back ordered by
+/// `delivered_at` for replay-from-cursor support.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionEvent {
+    pub id: i64,
+    pub subscription_id: String,
+    pub correlation_id: String,
+    pub event_type: String,
+    pub payload: String,
+    pub delivered_at: String,
+    pub delivery_status: String,
+}
+
+/// One row of the `subscription_dlq` table. Created when a delivery
+/// exhausts the [200ms, 1s, 5s] retry ladder. K7's inspector tool
+/// surfaces these rows; K6 only ships the writer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DlqEntry {
+    pub id: i64,
+    pub subscription_id: String,
+    pub correlation_id: String,
+    pub event_type: String,
+    pub payload: String,
+    pub retry_count: i64,
+    pub last_error: String,
+    pub first_failed_at: String,
+    pub last_failed_at: String,
 }
 
 // ---------------------------------------------------------------------
@@ -469,33 +532,49 @@ pub fn dispatch_event_with_details(
     if matching.is_empty() {
         return;
     }
-    let payload = DispatchPayload {
-        event,
-        memory_id,
-        namespace,
-        agent_id,
-        delivered_at: chrono::Utc::now().to_rfc3339(),
-        details,
-    };
-    let body = match serde_json::to_string(&payload) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::warn!("dispatch payload serialize failed: {e}");
-            return;
-        }
-    };
     // Timestamp is part of the canonical string the signature is
     // computed over. Receivers SHOULD reject requests whose timestamp
     // differs from their clock by more than 5 minutes (replay window).
     // (#301 item 1 — prior implementation had no replay protection.)
     let timestamp = chrono::Utc::now().timestamp().to_string();
     for sub in matching {
+        // v0.7.0 K6 — UUIDv7 correlation id is generated per
+        // (subscription, event) pair so receivers can correlate ACKs
+        // back to the dispatched payload across the retry ladder.
+        // Generated here (not inside the worker thread) so the
+        // ordering invariant — correlation_ids monotonic in
+        // dispatch-loop order — holds even when worker threads race.
+        let correlation_id = uuid::Uuid::now_v7().to_string();
+        let payload = DispatchPayload {
+            event,
+            memory_id,
+            namespace,
+            agent_id,
+            delivered_at: chrono::Utc::now().to_rfc3339(),
+            correlation_id: &correlation_id,
+            details: details.clone(),
+        };
+        let body = match serde_json::to_string(&payload) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("dispatch payload serialize failed: {e}");
+                continue;
+            }
+        };
         let url = sub.url.clone();
         let sub_id = sub.id.clone();
-        let body = body.clone();
+        let event_owned = event.to_string();
         let ts = timestamp.clone();
         let db_path = db_path.to_path_buf();
         std::thread::spawn(move || {
+            // Persist the per-delivery audit row BEFORE the network
+            // send so replay-from-cursor (K7) sees a stable record
+            // even if the dispatcher process crashes mid-retry.
+            if let Err(e) =
+                record_subscription_event(&db_path, &sub_id, &correlation_id, &event_owned, &body)
+            {
+                tracing::warn!("subscription event audit write failed: {e}");
+            }
             let secret_hash = match load_secret_hash(&db_path, &sub_id) {
                 Ok(s) => s,
                 Err(e) => {
@@ -511,8 +590,26 @@ pub fn dispatch_event_with_details(
             let signature = secret_hash
                 .as_deref()
                 .map(|h| hmac_sha256_hex(h, &canonical));
-            let ok = send(&url, &body, &ts, signature.as_deref());
+            let outcome =
+                deliver_with_retry(&url, &body, &ts, signature.as_deref(), &correlation_id);
+            let ok = outcome.success;
             record_dispatch(&db_path, &sub_id, ok);
+            update_event_status(&db_path, &correlation_id, ok);
+            if !ok {
+                if let Err(e) = record_dlq(
+                    &db_path,
+                    &sub_id,
+                    &correlation_id,
+                    &event_owned,
+                    &body,
+                    outcome.attempts,
+                    &outcome.last_error,
+                    &outcome.first_failed_at,
+                    &outcome.last_failed_at,
+                ) {
+                    tracing::warn!("subscription DLQ write failed: {e}");
+                }
+            }
         });
     }
 }
@@ -579,12 +676,93 @@ pub fn dispatch_approval_requested(conn: &Connection, pending_id: &str, db_path:
     );
 }
 
+/// v0.7.0 K6 — outcome of a single attempt or full retry ladder.
+///
+/// `success` is true once the receiver has returned 2xx AND a JSON
+/// body of the form `{"status":"ack","correlation_id":"<id>"}` whose
+/// id matches the one we dispatched. `attempts` is the number of
+/// network requests issued (1..=4 — initial + 3 retries). `last_error`
+/// is the short error string from the last failed attempt (empty on
+/// success). The `first_failed_at` / `last_failed_at` pair brackets
+/// the retry window for DLQ analytics.
+struct DeliveryOutcome {
+    success: bool,
+    attempts: i64,
+    last_error: String,
+    first_failed_at: String,
+    last_failed_at: String,
+}
+
+/// v0.7.0 K6 — dispatcher driver. Issues the initial POST plus up to
+/// three retries spaced [200ms, 1s, 5s] apart. Each attempt validates
+/// the receiver's ACK body — a 2xx response with no ACK or a
+/// mismatched correlation_id counts as failure and triggers the next
+/// retry. Returns the cumulative [`DeliveryOutcome`].
+fn deliver_with_retry(
+    url: &str,
+    body: &str,
+    timestamp: &str,
+    signature: Option<&str>,
+    correlation_id: &str,
+) -> DeliveryOutcome {
+    let mut attempts: i64 = 0;
+    let mut first_failed_at = String::new();
+    let mut last_failed_at = String::new();
+    let mut last_error = String::new();
+    // Total attempts = 1 (initial) + RETRY_BACKOFFS.len() (retries).
+    for attempt_idx in 0..=RETRY_BACKOFFS.len() {
+        if attempt_idx > 0 {
+            std::thread::sleep(RETRY_BACKOFFS[attempt_idx - 1]);
+        }
+        attempts += 1;
+        match send(url, body, timestamp, signature, correlation_id) {
+            Ok(()) => {
+                return DeliveryOutcome {
+                    success: true,
+                    attempts,
+                    last_error: String::new(),
+                    first_failed_at,
+                    last_failed_at,
+                };
+            }
+            Err(e) => {
+                let now = chrono::Utc::now().to_rfc3339();
+                if first_failed_at.is_empty() {
+                    first_failed_at = now.clone();
+                }
+                last_failed_at = now;
+                last_error = e;
+            }
+        }
+    }
+    DeliveryOutcome {
+        success: false,
+        attempts,
+        last_error,
+        first_failed_at,
+        last_failed_at,
+    }
+}
+
 /// Perform one HTTP POST with SSRF-hardened URL check + signature
-/// + timestamp headers. Returns true on any 2xx response.
-fn send(url: &str, body: &str, timestamp: &str, signature: Option<&str>) -> bool {
+/// + timestamp headers.
+///
+/// v0.7.0 K6 — return Ok(()) only when the receiver returns 2xx AND
+/// a JSON ACK body (`{"status":"ack","correlation_id":"..."}`) whose
+/// `correlation_id` matches the dispatched id within
+/// [`ACK_TIMEOUT`]. Anything else (network error, non-2xx, ACK
+/// timeout, mismatched correlation id) returns Err with a short
+/// reason string the retry driver records.
+fn send(
+    url: &str,
+    body: &str,
+    timestamp: &str,
+    signature: Option<&str>,
+    correlation_id: &str,
+) -> Result<(), String> {
     if let Err(e) = validate_url(url) {
         tracing::warn!("SSRF guard rejected webhook URL {url}: {e}");
-        return false;
+        return Err(format!("ssrf-rejected: {e}"));
     }
     // DNS-resolution guard (#301 item 2). We rely on reqwest to
     // perform the connect, but pre-check by resolving the host here
@@ -593,33 +771,61 @@ fn send(url: &str, body: &str, timestamp: &str, signature: Option<&str>) -> bool
     // domains that resolve to internal IPs.
     if let Err(e) = validate_url_dns(url) {
         tracing::warn!("DNS SSRF guard rejected webhook URL {url}: {e}");
-        return false;
+        return Err(format!("dns-ssrf-rejected: {e}"));
     }
     let client = match reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(ACK_TIMEOUT)
         .build()
     {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("webhook client build failed: {e}");
-            return false;
+            return Err(format!("client-build: {e}"));
         }
     };
     let mut req = client
         .post(url)
         .header("content-type", "application/json")
         .header("user-agent", "ai-memory/0.6.0.0")
-        .header("x-ai-memory-timestamp", timestamp);
+        .header("x-ai-memory-timestamp", timestamp)
+        .header("x-ai-memory-correlation-id", correlation_id);
     if let Some(sig) = signature {
         req = req.header("x-ai-memory-signature", format!("sha256={sig}"));
     }
-    match req.body(body.to_string()).send() {
-        Ok(resp) => resp.status().is_success(),
+    let resp = match req.body(body.to_string()).send() {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!("webhook POST to {url} failed: {e}");
-            false
+            return Err(format!("network: {e}"));
         }
+    };
+    if !resp.status().is_success() {
+        let status = resp.status().as_u16();
+        return Err(format!("http-{status}"));
     }
+    // K6 ACK contract: receivers MUST return
+    // {"status":"ack","correlation_id":"..."}. A 2xx with a missing /
+    // mismatched body is treated as failure so retries kick in.
+    let ack_body = match resp.text() {
+        Ok(s) => s,
+        Err(e) => return Err(format!("ack-read: {e}")),
+    };
+    let ack: serde_json::Value = match serde_json::from_str(&ack_body) {
+        Ok(v) => v,
+        Err(e) => return Err(format!("ack-decode: {e}")),
+    };
+    let status_field = ack.get("status").and_then(|v| v.as_str()).unwrap_or("");
+    if status_field != "ack" {
+        return Err(format!("ack-status: {status_field}"));
+    }
+    let ack_corr = ack
+        .get("correlation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if ack_corr != correlation_id {
+        return Err(format!("ack-corr-mismatch: {ack_corr}"));
+    }
+    Ok(())
 }
 
 /// Hash a plaintext secret (SHA-256 hex).
@@ -826,6 +1032,180 @@ fn load_secret_hash(db_path: &std::path::Path, sub_id: &str) -> Result<Option<St
         )
         .context("load_secret_hash query")?;
     Ok(row)
+}
+
+/// v0.7.0 K6 — append a `subscription_events` audit row for one
+/// outgoing delivery. Called from the dispatch worker BEFORE the
+/// network send so replay-from-cursor (K7) sees a stable record even
+/// if the dispatcher process crashes mid-retry. The row is created
+/// with `delivery_status = 'pending'`; [`update_event_status`]
+/// transitions it to `'ack'` / `'failed'` once the retry ladder
+/// settles.
+pub fn record_subscription_event(
+    db_path: &std::path::Path,
+    sub_id: &str,
+    correlation_id: &str,
+    event_type: &str,
+    payload: &str,
+) -> Result<()> {
+    let conn = Connection::open(db_path).context("subscription_events open")?;
+    let now = chrono::Utc::now().to_rfc3339();
+    conn.execute(
+        "INSERT INTO subscription_events \
+         (subscription_id, correlation_id, event_type, payload, delivered_at, delivery_status) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 'pending')",
+        params![sub_id, correlation_id, event_type, payload, now],
+    )
+    .context("subscription_events insert")?;
+    Ok(())
+}
+
+/// v0.7.0 K6 — transition the audit row's `delivery_status` after the
+/// retry ladder settles. Best-effort: a failure here is logged and
+/// otherwise ignored so the dispatcher loop never blocks on the
+/// audit table.
+fn update_event_status(db_path: &std::path::Path, correlation_id: &str, ok: bool) {
+    let Ok(conn) = Connection::open(db_path) else {
+        return;
+    };
+    let status = if ok { "ack" } else { "failed" };
+    let _ = conn.execute(
+        "UPDATE subscription_events SET delivery_status = ?1 WHERE correlation_id = ?2",
+        params![status, correlation_id],
+    );
+}
+
+/// v0.7.0 K6 — append a `subscription_dlq` row for a delivery that
+/// exhausted the [200ms, 1s, 5s] retry ladder. K7's inspector tool
+/// surfaces these rows to operators; K6 only ships the writer.
+#[allow(clippy::too_many_arguments)]
+pub fn record_dlq(
+    db_path: &std::path::Path,
+    sub_id: &str,
+    correlation_id: &str,
+    event_type: &str,
+    payload: &str,
+    retry_count: i64,
+    last_error: &str,
+    first_failed_at: &str,
+    last_failed_at: &str,
+) -> Result<()> {
+    let conn = Connection::open(db_path).context("subscription_dlq open")?;
+    conn.execute(
+        "INSERT INTO subscription_dlq \
+         (subscription_id, correlation_id, event_type, payload, retry_count, last_error, first_failed_at, last_failed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            sub_id,
+            correlation_id,
+            event_type,
+            payload,
+            retry_count,
+            last_error,
+            first_failed_at,
+            last_failed_at,
+        ],
+    )
+    .context("subscription_dlq insert")?;
+    Ok(())
+}
+
+/// v0.7.0 K6 — list `subscription_dlq` rows. Used by the K7
+/// inspector tool (not registered in MCP yet) and by the K6
+/// integration test suite.
+pub fn list_dlq(conn: &Connection, subscription_id: Option<&str>) -> Result<Vec<DlqEntry>> {
+    let mut out = Vec::new();
+    if let Some(sub_id) = subscription_id {
+        let mut stmt = conn.prepare(
+            "SELECT id, subscription_id, correlation_id, event_type, payload, retry_count, last_error, first_failed_at, last_failed_at \
+             FROM subscription_dlq WHERE subscription_id = ?1 ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map(params![sub_id], dlq_row_to_entry)?;
+        for r in rows {
+            out.push(r?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, subscription_id, correlation_id, event_type, payload, retry_count, last_error, first_failed_at, last_failed_at \
+             FROM subscription_dlq ORDER BY id ASC",
+        )?;
+        let rows = stmt.query_map([], dlq_row_to_entry)?;
+        for r in rows {
+            out.push(r?);
+        }
+    }
+    Ok(out)
+}
+
+fn dlq_row_to_entry(row: &rusqlite::Row) -> rusqlite::Result<DlqEntry> {
+    Ok(DlqEntry {
+        id: row.get(0)?,
+        subscription_id: row.get(1)?,
+        correlation_id: row.get(2)?,
+        event_type: row.get(3)?,
+        payload: row.get(4)?,
+        retry_count: row.get(5)?,
+        last_error: row.get(6)?,
+        first_failed_at: row.get(7)?,
+        last_failed_at: row.get(8)?,
+    })
+}
+
+/// v0.7.0 K6 — replay subscription events for a single subscription
+/// since `since_rfc3339`. Returns the audit rows ordered by
+/// `delivered_at` ascending (so cursor-by-time scans are stable).
+///
+/// **MCP gating:** the companion `memory_subscription_replay` MCP
+/// tool is **not** registered in the dispatch table yet — that wiring
+/// lives in K7 (subscription reliability) so we don't bump the v0.7
+/// tool count cascade while Track B1 is in flight. The handler
+/// surface is exposed here so K7's MCP wiring is a one-line patch.
+pub fn replay_subscription_events(
+    conn: &Connection,
+    subscription_id: &str,
+    since_rfc3339: &str,
+) -> Result<Vec<SubscriptionEvent>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, subscription_id, correlation_id, event_type, payload, delivered_at, delivery_status \
+         FROM subscription_events \
+         WHERE subscription_id = ?1 AND delivered_at >= ?2 \
+         ORDER BY delivered_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![subscription_id, since_rfc3339], |row| {
+        Ok(SubscriptionEvent {
+            id: row.get(0)?,
+            subscription_id: row.get(1)?,
+            correlation_id: row.get(2)?,
+            event_type: row.get(3)?,
+            payload: row.get(4)?,
+            delivered_at: row.get(5)?,
+            delivery_status: row.get(6)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.context("subscription_events row decode")?);
+    }
+    Ok(out)
+}
+
+/// v0.7.0 K6 — handler for `memory_subscription_replay`. Registered in
+/// K7 (subscription reliability) — DO NOT add to the MCP dispatch
+/// table during K6 because the v0.7 tool count cascade collides with
+/// Track B1 in flight. K7 will wire this into `mcp::dispatch_tool`
+/// behind the existing `memory_subscription_*` family.
+pub fn memory_subscription_replay(
+    conn: &Connection,
+    subscription_id: &str,
+    since_rfc3339: &str,
+) -> Result<serde_json::Value> {
+    let events = replay_subscription_events(conn, subscription_id, since_rfc3339)?;
+    Ok(serde_json::json!({
+        "subscription_id": subscription_id,
+        "since": since_rfc3339,
+        "count": events.len(),
+        "events": events,
+    }))
 }
 
 fn record_dispatch(db_path: &std::path::Path, sub_id: &str, ok: bool) {
@@ -1193,6 +1573,28 @@ mod tests {
         // Apply schema via the production opener so migrations run.
         let _ = crate::db::open(&p).expect("db::open");
         (f, p)
+    }
+
+    /// v0.7.0 K6 test helper — wiremock responder that builds a 2xx
+    /// JSON ACK body whose `correlation_id` field echoes the
+    /// dispatched id from the `x-ai-memory-correlation-id` request
+    /// header. Lets the legacy dispatch tests (which previously only
+    /// asserted "2xx → success") satisfy K6's strict ACK contract
+    /// without coupling each test to the exact UUID value.
+    struct AckEcho;
+    impl wiremock::Respond for AckEcho {
+        fn respond(&self, request: &wiremock::Request) -> wiremock::ResponseTemplate {
+            let corr = request
+                .headers
+                .get("x-ai-memory-correlation-id")
+                .map(|v| v.to_str().unwrap_or("").to_string())
+                .unwrap_or_default();
+            let body = serde_json::json!({
+                "status": "ack",
+                "correlation_id": corr,
+            });
+            wiremock::ResponseTemplate::new(200).set_body_json(body)
+        }
     }
 
     // ---------------- insert / delete / list ----------------
@@ -1667,21 +2069,31 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn send_returns_true_on_2xx() {
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
         let server = MockServer::start().await;
+        // K6: receivers MUST return a JSON ack body — the AckEcho
+        // helper echoes the request's correlation_id header so the
+        // ack-correlation-id check in `send` passes.
         Mock::given(method("POST"))
             .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(AckEcho)
             .expect(1)
             .mount(&server)
             .await;
         let url = format!("{}/hook", server.uri());
-        let ok = tokio::task::spawn_blocking(move || {
-            send(&url, "{\"event\":\"x\"}", "1700000000", Some("deadbeef"))
+        let corr = uuid::Uuid::now_v7().to_string();
+        let res = tokio::task::spawn_blocking(move || {
+            send(
+                &url,
+                "{\"event\":\"x\"}",
+                "1700000000",
+                Some("deadbeef"),
+                &corr,
+            )
         })
         .await
         .unwrap();
-        assert!(ok, "2xx must return true");
+        assert!(res.is_ok(), "2xx + matching ack must succeed: {res:?}");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1695,12 +2107,13 @@ mod tests {
             .mount(&server)
             .await;
         let url = format!("{}/hook", server.uri());
-        let ok = tokio::task::spawn_blocking(move || {
-            send(&url, "{\"event\":\"x\"}", "1700000000", None)
+        let corr = uuid::Uuid::now_v7().to_string();
+        let res = tokio::task::spawn_blocking(move || {
+            send(&url, "{\"event\":\"x\"}", "1700000000", None, &corr)
         })
         .await
         .unwrap();
-        assert!(!ok, "5xx must return false (no retry inside send)");
+        assert!(res.is_err(), "5xx must return Err (no retry inside send)");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1714,54 +2127,63 @@ mod tests {
             .mount(&server)
             .await;
         let url = format!("{}/hook", server.uri());
-        let ok = tokio::task::spawn_blocking(move || send(&url, "{}", "1700000000", None))
+        let corr = uuid::Uuid::now_v7().to_string();
+        let res = tokio::task::spawn_blocking(move || send(&url, "{}", "1700000000", None, &corr))
             .await
             .unwrap();
-        assert!(!ok, "4xx must return false");
+        assert!(res.is_err(), "4xx must return Err");
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn send_signature_header_set_when_provided() {
         use wiremock::matchers::{header, header_exists, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
         let server = MockServer::start().await;
         // Assert the `x-ai-memory-signature` header is `sha256=<sig>`
-        // and the timestamp header is set.
+        // and the timestamp + correlation-id headers are set.
         Mock::given(method("POST"))
             .and(path("/hook"))
             .and(header("x-ai-memory-signature", "sha256=abc123"))
             .and(header_exists("x-ai-memory-timestamp"))
+            .and(header_exists("x-ai-memory-correlation-id"))
             .and(header("content-type", "application/json"))
-            .respond_with(ResponseTemplate::new(204))
+            .respond_with(AckEcho)
             .expect(1)
             .mount(&server)
             .await;
         let url = format!("{}/hook", server.uri());
-        let ok =
-            tokio::task::spawn_blocking(move || send(&url, "{}", "1700000000", Some("abc123")))
-                .await
-                .unwrap();
-        assert!(ok, "2xx with matched signature header must succeed");
+        let corr = uuid::Uuid::now_v7().to_string();
+        let res = tokio::task::spawn_blocking(move || {
+            send(&url, "{}", "1700000000", Some("abc123"), &corr)
+        })
+        .await
+        .unwrap();
+        assert!(
+            res.is_ok(),
+            "2xx with matched signature header + ack must succeed: {res:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn send_no_signature_header_when_secret_absent() {
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        use wiremock::{Mock, MockServer, Request};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(202))
+            .respond_with(AckEcho)
             .mount(&server)
             .await;
         let url = format!("{}/hook", server.uri());
-        let ok = tokio::task::spawn_blocking({
+        let corr = uuid::Uuid::now_v7().to_string();
+        let res = tokio::task::spawn_blocking({
             let url = url.clone();
-            move || send(&url, "{}", "1700000000", None)
+            let corr = corr.clone();
+            move || send(&url, "{}", "1700000000", None, &corr)
         })
         .await
         .unwrap();
-        assert!(ok);
+        assert!(res.is_ok(), "ack-echo must succeed: {res:?}");
         // Inspect the captured request to confirm no signature header.
         let received: Vec<Request> = server.received_requests().await.unwrap_or_default();
         assert_eq!(received.len(), 1);
@@ -1781,16 +2203,25 @@ mod tests {
     fn send_rejects_ssrf_url_without_network() {
         // `send` is the public dispatch path. A private-network URL must
         // be rejected by the `validate_url` guard before any HTTP attempt.
-        // We don't need a server — the guard fails fast and returns false.
-        let ok = send("https://10.0.0.1/hook", "{}", "1700000000", None);
-        assert!(!ok, "send must reject SSRF URL via validate_url guard");
+        // We don't need a server — the guard fails fast and returns Err.
+        let res = send(
+            "https://10.0.0.1/hook",
+            "{}",
+            "1700000000",
+            None,
+            "some-corr",
+        );
+        assert!(
+            res.is_err(),
+            "send must reject SSRF URL via validate_url guard"
+        );
     }
 
     #[test]
     fn send_rejects_invalid_scheme_without_network() {
-        // ftp:// is rejected by validate_url; send returns false.
-        let ok = send("ftp://example.com/hook", "{}", "1700000000", None);
-        assert!(!ok, "send must reject non-http(s) URL");
+        // ftp:// is rejected by validate_url; send returns Err.
+        let res = send("ftp://example.com/hook", "{}", "1700000000", None, "x");
+        assert!(res.is_err(), "send must reject non-http(s) URL");
     }
 
     // ---------------- end-to-end dispatch_event with HTTP mock ----------------
@@ -1798,11 +2229,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_event_e2e_increments_dispatch_count_on_2xx() {
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(AckEcho)
             .mount(&server)
             .await;
 
@@ -1893,10 +2324,13 @@ mod tests {
             dispatch_event(&conn, "memory_store", "m2", "ns", None, &db_path);
         }
 
+        // K6 retry ladder (200ms + 1s + 5s) means a final-failure
+        // counter bump can take ≈ 6.5s of wall-clock + per-attempt
+        // overhead. Poll for up to 12s to cover the worst case.
         let path_for_poll = db_path.clone();
         let id_for_poll = id.clone();
         let (dc, fc) = tokio::task::spawn_blocking(move || {
-            for _ in 0..50 {
+            for _ in 0..120 {
                 let conn = Connection::open(&path_for_poll).unwrap();
                 let row: (i64, i64) = conn
                     .query_row(
@@ -1921,13 +2355,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn dispatch_event_e2e_signature_present_when_secret_set() {
         use wiremock::matchers::{header_exists, method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
             .and(header_exists("x-ai-memory-signature"))
             .and(header_exists("x-ai-memory-timestamp"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(AckEcho)
             .expect(1)
             .mount(&server)
             .await;
@@ -2005,11 +2439,11 @@ mod tests {
         // db layer; call the dispatch helper; assert the wiremock
         // saw the POST and the body shape carries the K4 details.
         use wiremock::matchers::{method, path};
-        use wiremock::{Mock, MockServer, ResponseTemplate};
+        use wiremock::{Mock, MockServer};
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/hook"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(AckEcho)
             .mount(&server)
             .await;
 
@@ -2189,6 +2623,225 @@ mod tests {
             .unwrap();
         assert_eq!(dc, 0, "missing pending row must not dispatch");
         assert_eq!(fc, 0);
+    }
+
+    // ----------------------------------------------------------------
+    // v0.7.0 K6 — A2A correlation IDs + ACK / retry / DLQ tests.
+    //
+    // Pinned behaviours:
+    //   1. correlation_id is a UUIDv7 string and lands in
+    //      `subscription_events.correlation_id`
+    //   2. successful delivery transitions the audit row to 'ack' and
+    //      the dispatched body's `correlation_id` field matches
+    //   3. a 500-only mock exhausts the [200ms, 1s, 5s] retry ladder
+    //      and the row lands in `subscription_dlq`
+    //   4. `replay_subscription_events` returns audit rows ordered by
+    //      delivered_at since a cursor timestamp
+    // ----------------------------------------------------------------
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn k6_dispatch_persists_uuidv7_correlation_id() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(AckEcho)
+            .mount(&server)
+            .await;
+
+        let (_keep, db_path) = fresh_db();
+        let url = format!("{}/hook", server.uri());
+        let sub_id = {
+            let conn = Connection::open(&db_path).unwrap();
+            insert(
+                &conn,
+                &NewSubscription {
+                    url: &url,
+                    events: "*",
+                    secret: None,
+                    namespace_filter: None,
+                    agent_filter: None,
+                    created_by: None,
+                    event_types: None,
+                },
+            )
+            .unwrap()
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            dispatch_event(&conn, "memory_store", "k6-mem", "k6-ns", None, &db_path);
+        }
+
+        // Poll until the subscription_events row is acked.
+        let path_for_poll = db_path.clone();
+        let sub_for_poll = sub_id.clone();
+        let row = tokio::task::spawn_blocking(move || {
+            for _ in 0..50 {
+                let conn = Connection::open(&path_for_poll).unwrap();
+                let r: Option<(String, String, String)> = conn
+                    .query_row(
+                        "SELECT correlation_id, payload, delivery_status \
+                         FROM subscription_events WHERE subscription_id = ?1",
+                        params![sub_for_poll],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .ok();
+                if let Some(r) = r
+                    && r.2 == "ack"
+                {
+                    return Some(r);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            None
+        })
+        .await
+        .unwrap();
+        let (corr, body, status) = row.expect("audit row must reach ack status");
+        assert_eq!(status, "ack");
+        // UUIDv7 — parses + version 7.
+        let parsed = uuid::Uuid::parse_str(&corr).expect("UUIDv7 string");
+        assert_eq!(parsed.get_version_num(), 7, "correlation_id must be UUIDv7");
+        // The dispatched body carries the same correlation_id.
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            json["correlation_id"].as_str(),
+            Some(corr.as_str()),
+            "payload correlation_id must match audit row"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn k6_500_after_retries_lands_in_dlq() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        // Mock returns 500 for every attempt — exhausts the retry
+        // ladder and forces the DLQ branch.
+        Mock::given(method("POST"))
+            .and(path("/hook"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let (_keep, db_path) = fresh_db();
+        let url = format!("{}/hook", server.uri());
+        let sub_id = {
+            let conn = Connection::open(&db_path).unwrap();
+            insert(
+                &conn,
+                &NewSubscription {
+                    url: &url,
+                    events: "*",
+                    secret: None,
+                    namespace_filter: None,
+                    agent_filter: None,
+                    created_by: None,
+                    event_types: None,
+                },
+            )
+            .unwrap()
+        };
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            dispatch_event(&conn, "memory_store", "k6-fail", "k6-ns", None, &db_path);
+        }
+
+        // Backoff ladder is 200ms + 1s + 5s ≈ 6.2s of sleeps + per-
+        // attempt network time. Poll for up to 12s for the DLQ row.
+        let path_for_poll = db_path.clone();
+        let sub_for_poll = sub_id.clone();
+        let dlq_row = tokio::task::spawn_blocking(move || {
+            for _ in 0..120 {
+                let conn = Connection::open(&path_for_poll).unwrap();
+                let entries = list_dlq(&conn, Some(&sub_for_poll)).unwrap();
+                if !entries.is_empty() {
+                    return Some(entries);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            None
+        })
+        .await
+        .unwrap()
+        .expect("DLQ row must appear after retry ladder exhaustion");
+
+        assert_eq!(dlq_row.len(), 1, "exactly one DLQ row per failed delivery");
+        let row = &dlq_row[0];
+        assert_eq!(row.subscription_id, sub_id);
+        assert_eq!(row.event_type, "memory_store");
+        assert_eq!(
+            row.retry_count,
+            (RETRY_BACKOFFS.len() as i64) + 1,
+            "retry_count = initial attempt + RETRY_BACKOFFS.len() retries"
+        );
+        assert!(
+            row.last_error.starts_with("http-5"),
+            "last_error must record the 5xx status: {}",
+            row.last_error
+        );
+        assert!(!row.first_failed_at.is_empty());
+        assert!(!row.last_failed_at.is_empty());
+        // Audit row should be marked failed.
+        let conn = Connection::open(&db_path).unwrap();
+        let status: String = conn
+            .query_row(
+                "SELECT delivery_status FROM subscription_events WHERE correlation_id = ?1",
+                params![row.correlation_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn k6_replay_subscription_events_returns_rows_since_cursor() {
+        // Insert two audit rows by hand (faster than driving two full
+        // dispatches) and assert the cursor filter returns only the
+        // newer one.
+        let (_keep, db_path) = fresh_db();
+        let url = "https://example.com/hook";
+        let sub_id = {
+            let conn = Connection::open(&db_path).unwrap();
+            insert(
+                &conn,
+                &NewSubscription {
+                    url,
+                    events: "*",
+                    secret: None,
+                    namespace_filter: None,
+                    agent_filter: None,
+                    created_by: None,
+                    event_types: None,
+                },
+            )
+            .unwrap()
+        };
+        // Two correlation ids with explicit delivered_at cursors.
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO subscription_events \
+             (subscription_id, correlation_id, event_type, payload, delivered_at, delivery_status) \
+             VALUES (?1, ?2, 'memory_store', '{}', '2026-01-01T00:00:00Z', 'ack')",
+            params![sub_id, "c-old"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO subscription_events \
+             (subscription_id, correlation_id, event_type, payload, delivered_at, delivery_status) \
+             VALUES (?1, ?2, 'memory_store', '{}', '2026-05-05T00:00:00Z', 'ack')",
+            params![sub_id, "c-new"],
+        )
+        .unwrap();
+        let after = replay_subscription_events(&conn, &sub_id, "2026-03-01T00:00:00Z")
+            .expect("replay query");
+        assert_eq!(after.len(), 1, "cursor must filter to the newer row");
+        assert_eq!(after[0].correlation_id, "c-new");
+        // The MCP-shaped wrapper.
+        let envelope = memory_subscription_replay(&conn, &sub_id, "2026-03-01T00:00:00Z").unwrap();
+        assert_eq!(envelope["count"], 1);
+        assert_eq!(envelope["events"][0]["correlation_id"], "c-new");
     }
 }
 

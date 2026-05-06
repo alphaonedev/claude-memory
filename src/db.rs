@@ -230,7 +230,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       namespace TTL overrides arrive via the `[transcripts]`
 //       config section (`config.rs`) and are resolved against the
 //       transcript's namespace at sweep time.
-const CURRENT_SCHEMA_VERSION: i64 = 25;
+const CURRENT_SCHEMA_VERSION: i64 = 27;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -330,6 +330,23 @@ const MIGRATION_V24_SQLITE: &str =
 // the prune-phase scan stays O(archived) rather than O(total).
 const MIGRATION_V25_SQLITE: &str =
     include_str!("../migrations/sqlite/0019_v07_transcript_lifecycle.sql");
+// v0.7.0 H5 — append-only `signed_events` audit table backing the
+// immutable attestation chain. CREATE TABLE IF NOT EXISTS + indexes —
+// fully idempotent. The H5 substrate; H6 read-side tooling layers on
+// top.
+const MIGRATION_V26_SQLITE: &str = include_str!("../migrations/sqlite/0020_v07_signed_events.sql");
+// v0.7.0 K6 — A2A correlation IDs + ACK / retry / DLQ for the
+// subscription dispatch path. Adds `subscription_events.correlation_id`
+// (UUIDv7 string) for replay-from-cursor lookups, the
+// `subscription_events` audit table itself (created here because no
+// prior K-track migration introduced it), and the `subscription_dlq`
+// table holding deliveries that exhausted the three-attempt retry
+// ladder. The ALTER TABLE on a pre-existing `subscription_events`
+// row (deployments that hand-rolled it) is emitted from Rust because
+// SQLite has no `ADD COLUMN IF NOT EXISTS`; the SQL file holds the
+// idempotent CREATE TABLE / CREATE INDEX statements.
+const MIGRATION_V27_SQLITE: &str =
+    include_str!("../migrations/sqlite/0021_v07_a2a_correlation.sql");
 
 #[allow(clippy::too_many_lines)]
 fn migrate(conn: &Connection) -> Result<()> {
@@ -873,6 +890,32 @@ fn migrate(conn: &Connection) -> Result<()> {
                 )?;
             }
             conn.execute_batch(MIGRATION_V25_SQLITE)?;
+        }
+        if version < 26 {
+            // v0.7.0 H5 — append-only `signed_events` audit table.
+            // CREATE TABLE IF NOT EXISTS + indexes — fully idempotent;
+            // see MIGRATION_V26_SQLITE for the substrate documentation.
+            conn.execute_batch(MIGRATION_V26_SQLITE)?;
+        }
+        if version < 27 {
+            // v0.7.0 K6 — A2A correlation IDs + DLQ. Brings up the
+            // `subscription_events` audit table (if not already
+            // present) and the `subscription_dlq` table. If a prior
+            // operator hand-rolled `subscription_events`, the
+            // CREATE TABLE IF NOT EXISTS is a no-op but they may be
+            // missing the new `correlation_id` column — we ALTER it
+            // in here from Rust because SQLite has no `ADD COLUMN IF
+            // NOT EXISTS`.
+            conn.execute_batch(MIGRATION_V27_SQLITE)?;
+            let has_correlation = conn
+                .prepare("SELECT correlation_id FROM subscription_events LIMIT 0")
+                .is_ok();
+            if !has_correlation {
+                conn.execute(
+                    "ALTER TABLE subscription_events ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''",
+                    [],
+                )?;
+            }
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
