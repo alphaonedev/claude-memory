@@ -607,6 +607,13 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (50 endpoints on port 90
 ### Coverage Floor (hard CI gate)
 The `Code Coverage` job is a **required status check**. CI re-asserts two invariants on every PR: an **absolute floor of >= 90% lines** (catastrophic-regression backstop, set at the current measurement rounded down to the nearest 5%), and a **ratchet against the value pinned in [`.coverage-baseline`](.coverage-baseline)** with a 0.5% slack window (the day-to-day enforcement). PRs that raise coverage should bump the baseline file in the same commit so future PRs benefit from the new floor; PRs that regress more than 0.5% are blocked from merging. Current measurement: **93.13%** lines.
 
+### Token-Budget Gate (hard CI gate, v0.7 C5)
+The `token-budget` workflow is a **required status check**. It enforces three cl100k_base-measured invariants on every PR:
+
+- **Per-tool ceiling of 1500 tokens** -- no single MCP tool's serialized schema (name + description + inputSchema) may exceed 1500 cl100k_base tokens.
+- **Full-profile honest range (5K-8K)** -- the v0.6.4 backstop, kept in place to detect pathological shrinkage (accidentally dropping tools).
+- **Full-profile <= 3500 hard ceiling (new in v0.7 C5)** -- the `tools/list` payload under `--profile full` may not exceed 3500 cl100k_base tokens. C2 (split docs field), C3 (collapse repeated schema boilerplate), and C4 (hide rarely-used optional params) drove the surface from ~7.4K to ~3.49K tokens; this gate locks in the win and forces future PRs that grow the surface to claw back budget elsewhere. Inspect `ai-memory doctor --tokens --raw-table` to see per-tool costs. See [`.github/workflows/token-budget.yml`](.github/workflows/token-budget.yml) and [`docs/v0.7/schema-compaction-audit.md`](docs/v0.7/schema-compaction-audit.md).
+
 ### ML and LLM Dependencies (semantic tier+)
 - **candle-core, candle-nn, candle-transformers** -- Hugging Face Candle ML framework for native Rust inference
 - **hf-hub** -- download models from Hugging Face Hub
