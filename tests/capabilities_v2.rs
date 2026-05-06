@@ -27,7 +27,7 @@ use ai_memory::config::{
     TierConfig,
 };
 use ai_memory::mcp::{CapabilitiesAccept, handle_capabilities_with_conn};
-use ai_memory::reranker::CrossEncoder;
+use ai_memory::reranker::{BatchedReranker, CrossEncoder};
 use serde_json::Value;
 
 /// Build a fresh in-memory `rusqlite::Connection` so each test gets a
@@ -104,6 +104,9 @@ fn cap_v2_reports_reranker_off_when_disabled_at_startup() {
 fn cap_v2_reports_reranker_lexical_fallback_when_neural_init_failed() {
     let tier_config = FeatureTier::Autonomous.config();
     let lexical = CrossEncoder::new(); // Lexical variant — same as a failed neural load
+    // v0.7 G9 — capabilities API takes &BatchedReranker now; the wrapper
+    // forwards `is_neural()` so the lexical-fallback signal is identical.
+    let lexical = BatchedReranker::new(lexical);
     let conn = fresh_conn();
     let val = handle_capabilities_with_conn(
         &tier_config,
