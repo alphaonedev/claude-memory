@@ -44,7 +44,12 @@ fn pin_enforce_mode() -> std::sync::MutexGuard<'static, ()> {
     guard
 }
 
-fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy, owner_agent_id: &str) {
+fn seed_policy(
+    conn: &Connection,
+    namespace: &str,
+    policy: &GovernancePolicy,
+    owner_agent_id: &str,
+) {
     let now = chrono::Utc::now().to_rfc3339();
     let mut metadata = default_metadata();
     if let Some(obj) = metadata.as_object_mut() {
