@@ -53,10 +53,10 @@ use serde_json::Value;
 use crate::models::{Memory, MemoryLink, Tier};
 
 // ---------------------------------------------------------------------------
-// HookEvent — the 20 lifecycle event tags
+// HookEvent — the 21 lifecycle event tags
 // ---------------------------------------------------------------------------
 
-/// The 20 lifecycle events the hook pipeline supports.
+/// The 21 lifecycle events the hook pipeline supports.
 ///
 /// `HookEvent` is the *tag* an operator names in `hooks.toml`
 /// (`event = "post_store"`) and the discriminator the executor
@@ -151,6 +151,16 @@ pub enum HookEvent {
     ///
     /// TODO(G3-G11): wire here at `src/transcripts.rs:72` (post-INSERT in `pub fn store`).
     PostTranscriptStore,
+    /// G10: fires *synchronously* on the recall hot path before the
+    /// embedder / DB call to allow query expansion (synonyms,
+    /// spelling correction, harness-specific normalization). Payload:
+    /// [`RecallExpandQuery`] (writable). Distinct from `PreRecall`
+    /// because the budget is the recall p95 (50ms) — operators MUST
+    /// configure this hook in `mode = "daemon"` to amortize spawn
+    /// cost. Classified as [`crate::hooks::EventClass::HotPath`].
+    ///
+    /// Wires here at `src/mcp.rs:1543` (top of `pub fn handle_recall`).
+    PreRecallExpand,
 }
 
 // ---------------------------------------------------------------------------
@@ -213,6 +223,25 @@ pub struct RecallQuery {
     pub tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_tokens: Option<usize>,
+}
+
+/// G10 hot-path payload for [`HookEvent::PreRecallExpand`]. Carries
+/// only the three fields a query-expansion hook needs to make a
+/// rewrite decision — the original `query` text, the recall
+/// `namespace` filter (empty string when the caller did not pass
+/// one), and `k`, the recall limit. Kept narrow on purpose: the
+/// hook fires inside the 50ms recall budget, so the wire payload
+/// stays small to keep daemon-mode round-trip latency in the low
+/// micros.
+///
+/// All three fields are required (no `Option<…>`) because the hot
+/// path calls this hook with concrete values — the caller has
+/// already resolved namespace defaults and limit clamping.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecallExpandQuery {
+    pub query: String,
+    pub namespace: String,
+    pub k: u32,
 }
 
 /// Read-only snapshot of a recall's result returned to a
@@ -559,11 +588,17 @@ mod tests {
             (HookEvent::PreArchive, "\"pre_archive\""),
             (HookEvent::PreTranscriptStore, "\"pre_transcript_store\""),
             (HookEvent::PostTranscriptStore, "\"post_transcript_store\""),
+            (HookEvent::PreRecallExpand, "\"pre_recall_expand\""),
         ];
 
-        // Pin the count at the type boundary so adding a 21st
-        // variant without updating the table fails this test.
-        assert_eq!(table.len(), 20, "G2 ships exactly 20 lifecycle events");
+        // Pin the count at the type boundary so adding a 22nd
+        // variant without updating the table fails this test. G2
+        // shipped 20; G10 added the 21st (`pre_recall_expand`).
+        assert_eq!(
+            table.len(),
+            21,
+            "G10 raises the count from 20 to 21 (adds pre_recall_expand)"
+        );
 
         for (variant, expected_json) in table {
             let encoded = serde_json::to_string(&variant).expect("variant encodes");
@@ -615,6 +650,27 @@ mod tests {
         assert_eq!(back.limit, Some(10));
         assert_eq!(back.tier, Some(Tier::Long));
         assert_eq!(back.budget_tokens, Some(2_048));
+    }
+
+    #[test]
+    fn recall_expand_query_round_trips() {
+        // G10 hot-path payload: the wire shape MUST stay narrow
+        // (just `query`, `namespace`, `k`) so daemon-mode hooks can
+        // round-trip inside the 50ms recall budget.
+        let q = RecallExpandQuery {
+            query: "auht tokn".into(),
+            namespace: "team/security".into(),
+            k: 10,
+        };
+        let json = serde_json::to_string(&q).expect("encode");
+        let back: RecallExpandQuery = serde_json::from_str(&json).expect("decode");
+        assert_eq!(back.query, "auht tokn");
+        assert_eq!(back.namespace, "team/security");
+        assert_eq!(back.k, 10);
+        // Sanity: no unexpected fields snuck onto the wire.
+        let v: Value = serde_json::from_str(&json).expect("parse");
+        let obj = v.as_object().expect("object");
+        assert_eq!(obj.len(), 3, "RecallExpandQuery is exactly 3 wire fields");
     }
 
     #[test]

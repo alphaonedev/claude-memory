@@ -97,6 +97,14 @@ pub enum EventClass {
     /// out separately because the payload shape and call-site
     /// pressure profile differ.
     Transcript,
+    /// G10: synchronous hot-path hooks that fire *inside* the recall
+    /// p95 budget (50ms). Today's only inhabitant is
+    /// [`HookEvent::PreRecallExpand`]; future synchronous hot-path
+    /// hooks (e.g. a `pre_search_expand`) would join this class. The
+    /// 50ms ceiling is below the v0.6.3 recall budget by design — a
+    /// hook that can't return a decision in 50ms cannot be wired on
+    /// the read path without blowing SLO.
+    HotPath,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,14 +119,20 @@ pub const READ_CLASS_DEADLINE_MS: u64 = 2_000;
 pub const INDEX_CLASS_DEADLINE_MS: u64 = 1_000;
 /// Class deadline for [`EventClass::Transcript`].
 pub const TRANSCRIPT_CLASS_DEADLINE_MS: u64 = 5_000;
+/// G10 — class deadline for [`EventClass::HotPath`] (synchronous
+/// recall-budget hooks). 50ms = the v0.6.3 recall p95 budget; a
+/// hook that runs longer would blow the SLO. The class deadline is
+/// the *whole-chain* ceiling — individual hook `timeout_ms` may be
+/// configured smaller.
+pub const HOT_PATH_CLASS_DEADLINE_MS: u64 = 50;
 
 // ---------------------------------------------------------------------------
 // event_class — the canonical mapping
 // ---------------------------------------------------------------------------
 
-/// Map a [`HookEvent`] to its [`EventClass`]. Total over the 20
+/// Map a [`HookEvent`] to its [`EventClass`]. Total over the 21
 /// variants — the compiler's exhaustiveness check enforces the table
-/// stays in sync if a 21st event ever lands.
+/// stays in sync if a 22nd event ever lands.
 #[must_use]
 pub fn event_class(event: HookEvent) -> EventClass {
     match event {
@@ -145,6 +159,8 @@ pub fn event_class(event: HookEvent) -> EventClass {
         HookEvent::OnIndexEviction => EventClass::Index,
         // Transcripts: I-track interop.
         HookEvent::PreTranscriptStore | HookEvent::PostTranscriptStore => EventClass::Transcript,
+        // G10: synchronous hot-path query expansion (50ms budget).
+        HookEvent::PreRecallExpand => EventClass::HotPath,
     }
 }
 
@@ -159,6 +175,7 @@ pub fn class_deadline(class: EventClass) -> Duration {
         EventClass::Read => READ_CLASS_DEADLINE_MS,
         EventClass::Index => INDEX_CLASS_DEADLINE_MS,
         EventClass::Transcript => TRANSCRIPT_CLASS_DEADLINE_MS,
+        EventClass::HotPath => HOT_PATH_CLASS_DEADLINE_MS,
     })
 }
 
@@ -269,7 +286,7 @@ mod tests {
     /// flags the missing arm in `event_class`, but the assertion
     /// surface here is what an operator reading the test reads).
     #[test]
-    fn event_class_table_covers_all_20_variants() {
+    fn event_class_table_covers_all_21_variants() {
         let table = [
             // Write — 13 variants.
             (HookEvent::PreStore, EventClass::Write),
@@ -295,12 +312,14 @@ mod tests {
             // Transcript — 2 variants.
             (HookEvent::PreTranscriptStore, EventClass::Transcript),
             (HookEvent::PostTranscriptStore, EventClass::Transcript),
+            // HotPath — 1 variant (G10).
+            (HookEvent::PreRecallExpand, EventClass::HotPath),
         ];
 
         assert_eq!(
             table.len(),
-            20,
-            "G6 mapping must cover exactly the 20 HookEvent variants"
+            21,
+            "G6+G10 mapping must cover exactly the 21 HookEvent variants"
         );
         for (event, expected) in table {
             assert_eq!(
@@ -329,6 +348,11 @@ mod tests {
             class_deadline(EventClass::Transcript),
             Duration::from_millis(5_000)
         );
+        // G10: hot-path budget is the v0.6.3 recall p95 (50ms).
+        assert_eq!(
+            class_deadline(EventClass::HotPath),
+            Duration::from_millis(50)
+        );
     }
 
     #[test]
@@ -349,6 +373,11 @@ mod tests {
         assert_eq!(
             class_deadline_for_event(HookEvent::PostTranscriptStore),
             Duration::from_millis(TRANSCRIPT_CLASS_DEADLINE_MS)
+        );
+        // G10: PreRecallExpand is the inhabitant of HotPath.
+        assert_eq!(
+            class_deadline_for_event(HookEvent::PreRecallExpand),
+            Duration::from_millis(HOT_PATH_CLASS_DEADLINE_MS)
         );
     }
 
