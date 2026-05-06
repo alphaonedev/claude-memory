@@ -679,6 +679,16 @@ pub fn dispatch_approval_requested(conn: &Connection, pending_id: &str, db_path:
             None
         }
     };
+    // v0.7.0 K10 — publish on the in-process approval bus so HTTP SSE
+    // subscribers see the new pending row in real time. Best-effort
+    // (no receivers → swallowed); never blocks the gate path.
+    crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalRequested {
+        pending_id: pa.id.clone(),
+        action_type: pa.action_type.clone(),
+        namespace: pa.namespace.clone(),
+        requested_by: pa.requested_by.clone(),
+        requested_at: pa.requested_at.clone(),
+    });
     dispatch_event_with_details(
         conn,
         "approval_requested",
@@ -843,7 +853,7 @@ fn send(
 }
 
 /// Hash a plaintext secret (SHA-256 hex).
-fn sha256_hex(s: &str) -> String {
+pub(crate) fn sha256_hex(s: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(s.as_bytes());
     format!("{:x}", hasher.finalize())
@@ -853,7 +863,7 @@ fn sha256_hex(s: &str) -> String {
 /// construction manually using the hashed secret as key material.
 /// Matches the RFC-2104 HMAC construction with SHA-256 as the
 /// primitive.
-fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
+pub(crate) fn hmac_sha256_hex(key_hex: &str, body: &str) -> String {
     const BLOCK: usize = 64;
     // Decode key — if invalid hex, fall back to the raw bytes (which
     // keeps the signature stable for operators who set bad secrets;

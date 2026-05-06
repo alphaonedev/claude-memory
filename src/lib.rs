@@ -12,6 +12,7 @@
 
 // Library interface for ai-memory. Exposes public modules for testing and external use.
 
+pub mod approvals;
 pub mod audit;
 pub mod autonomy;
 pub mod bench;
@@ -194,6 +195,13 @@ pub fn build_router(
             "/api/v1/pending/{id}/reject",
             post(handlers::reject_pending),
         )
+        // v0.7.0 K10 — Approval API. POST is HMAC-gated; SSE rides on
+        // top of the existing api_key_auth middleware (no extra gate).
+        .route(
+            "/api/v1/approvals/{pending_id}",
+            post(handlers::approval_decide),
+        )
+        .route("/api/v1/approvals/stream", get(handlers::approvals_sse))
         // Phase 3 foundation (issue #224) — peer-to-peer sync endpoints.
         .route("/api/v1/sync/push", post(handlers::sync_push))
         .route("/api/v1/sync/since", get(handlers::sync_since))

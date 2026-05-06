@@ -42,6 +42,13 @@ rusqlite = { version = "0.32" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+# v0.7 K10 — Approval API SSE endpoint adapts a `tokio::sync::broadcast`
+# Receiver into the `futures_core::Stream` axum's `Sse` requires.
+# `tokio-stream`'s `BroadcastStream` wrapper does that bridging, and
+# `futures-core` exposes the `Stream` trait the wrapper implements.
+# Pure Rust, dep-light, both are in the tokio family.
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures-core = "0.3"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 # v0.6.3.1 (PR-5 / issue #487) — rolling file appender for the
@@ -203,6 +210,12 @@ predicates = "3"
 # reqwest calls can be exercised end-to-end without any network or daemon.
 # Used only by tests; never linked into the release binary.
 wiremock = "0.6"
+# v0.7 K10 — SSE integration tests need to pull individual body frames
+# off an `http_body::Body` to assert event boundaries, which is exactly
+# what `http_body_util::BodyExt::frame` exposes. Already in the
+# transitive tree via axum/hyper; declared explicitly so the test
+# imports compile without leaking the dep into the production crate.
+http-body-util = "0.1"
 # v0.7 J5 — direct sqlx access from `tests/age_cte_equivalence.rs` so
 # the dual-path harness can seed `memory_links` rows and the AGE
 # `memory_graph` projection without going through the SAL surface
