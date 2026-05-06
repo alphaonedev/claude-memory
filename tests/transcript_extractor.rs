@@ -17,17 +17,39 @@
 
 #![cfg(unix)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 
 use ai_memory::config::{TranscriptNamespaceConfig, TranscriptsConfig};
 use serde_json::{Value, json};
 
 /// Build the reference extractor binary and return the absolute
-/// path to it. Cached across tests in the same `cargo test`
-/// invocation by relying on `cargo`'s own incremental build —
-/// the second test pays only the manifest-load cost.
-fn build_extractor() -> PathBuf {
+/// path to it.
+///
+/// Historically each test fn invoked `cargo build` directly. With
+/// `--test-threads > 1`, several test threads in the same process
+/// raced parallel `cargo build` invocations against a shared
+/// `--target-dir`. On macOS that triggered two distinct flakes:
+///
+/// 1. `Command::spawn()` failed with `ETXTBSY` because one thread
+///    was rewriting `target/debug/transcript-extractor` while
+///    another tried to exec it.
+/// 2. `cargo` itself occasionally bailed when its build-graph
+///    lockfile (`.cargo-lock`) was contended, leaving the binary
+///    half-linked and `bin.exists()` momentarily false.
+///
+/// The fix is a process-wide `OnceLock`: the first test thread to
+/// reach `extractor_bin()` builds the binary; every other thread
+/// blocks on the `OnceLock`, then re-uses the cached `PathBuf`.
+/// All subsequent spawns observe a fully-linked, immutable
+/// executable.
+fn extractor_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(build_extractor_once)
+}
+
+fn build_extractor_once() -> PathBuf {
     let manifest_path = std::env::current_dir()
         .expect("cwd")
         .join("tools/transcript-extractor/Cargo.toml");
@@ -39,8 +61,13 @@ fn build_extractor() -> PathBuf {
 
     // Build into a per-test target dir so a parallel `cargo test`
     // invocation against the main crate doesn't race the
-    // sibling-crate build cache.
-    let target_dir = std::env::temp_dir().join("ai-memory-transcript-extractor-target");
+    // sibling-crate build cache. Scope the temp dir by current
+    // PID so two concurrent `cargo test` driver processes (e.g.
+    // CI sharding) cannot stomp each other's target/.
+    let target_dir = std::env::temp_dir().join(format!(
+        "ai-memory-transcript-extractor-target-{}",
+        std::process::id()
+    ));
 
     let status = Command::new("cargo")
         .args([
@@ -66,7 +93,7 @@ fn build_extractor() -> PathBuf {
 
 /// Pipe `envelope` to the extractor in one-shot mode and return
 /// the parsed decision JSON.
-fn run_once(bin: &PathBuf, envelope: &Value) -> Value {
+fn run_once(bin: &Path, envelope: &Value) -> Value {
     use std::io::Write;
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
@@ -103,7 +130,7 @@ fn run_once(bin: &PathBuf, envelope: &Value) -> Value {
 /// memories appear on the resulting decision.
 #[test]
 fn enabled_hook_extracts_memories_from_transcript() {
-    let bin = build_extractor();
+    let bin = extractor_bin();
 
     let content = "User: how does v0.7 hooks chain ordering work?\n\
         Assistant: G5 sorts by priority, ties broken by file order, first deny wins.\n\n\
@@ -122,7 +149,7 @@ fn enabled_hook_extracts_memories_from_transcript() {
         }
     });
 
-    let decision = run_once(&bin, &envelope);
+    let decision = run_once(bin, &envelope);
     assert_eq!(decision["action"], "modify");
 
     let extracted = &decision["delta"]["metadata"]["extracted_memories"];
@@ -146,7 +173,7 @@ fn enabled_hook_extracts_memories_from_transcript() {
 /// guards the substrate from misfiring on every `pre_store` fire.
 #[test]
 fn non_transcript_memory_returns_allow() {
-    let bin = build_extractor();
+    let bin = extractor_bin();
     let envelope = json!({
         "event": "pre_store",
         "payload": {
@@ -155,7 +182,7 @@ fn non_transcript_memory_returns_allow() {
             "content": "Reverted PR #555 because it broke v3 capabilities.",
         }
     });
-    let decision = run_once(&bin, &envelope);
+    let decision = run_once(bin, &envelope);
     assert_eq!(decision["action"], "allow");
 }
 
@@ -163,7 +190,7 @@ fn non_transcript_memory_returns_allow() {
 /// extractor is safe to attach to multiple chains.
 #[test]
 fn post_store_event_falls_through_to_allow() {
-    let bin = build_extractor();
+    let bin = extractor_bin();
     let envelope = json!({
         "event": "post_store",
         "payload": {
@@ -171,7 +198,7 @@ fn post_store_event_falls_through_to_allow() {
             "content": "User: x\nAssistant: y\n\nUser: z\nAssistant: w",
         }
     });
-    let decision = run_once(&bin, &envelope);
+    let decision = run_once(bin, &envelope);
     assert_eq!(decision["action"], "allow");
 }
 
