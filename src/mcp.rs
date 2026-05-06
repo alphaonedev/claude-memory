@@ -514,6 +514,20 @@ pub(crate) fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_find_paths",
+                "description": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_id": {"type": "string", "description": "Path origin memory ID."},
+                        "target_id": {"type": "string", "description": "Path destination memory ID."},
+                        "max_depth": {"type": "integer", "minimum": 1, "maximum": 7, "default": 4, "description": "Maximum hops between source and target. Default 4, ceiling 7."},
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum paths returned (shortest-first). Default 10, ceiling 50."}
+                    },
+                    "required": ["source_id", "target_id"]
+                }
+            },
+            {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
                 "inputSchema": {
@@ -1221,6 +1235,38 @@ fn handle_store(
         expires_at,
         metadata,
     };
+
+    // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
+    // composes declarative `[permissions.rules]` matchers + the K3
+    // `[permissions].mode` knob + (when wired) hook decisions into
+    // a single `Decision`. Deny-first: if a rule denies, we
+    // short-circuit before the K3 governance gate ever resolves a
+    // policy. Allow falls through to the existing K3 / governance
+    // gate so legacy `[governance]` policies continue to work.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let payload = serde_json::to_value(&mem).unwrap_or_default();
+        let ctx = PermissionContext {
+            op: Op::MemoryStore,
+            namespace: mem.namespace.clone(),
+            agent_id: agent_id.clone(),
+            payload,
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("store denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "store",
+                    "namespace": mem.namespace,
+                }));
+            }
+        }
+    }
 
     // Task 1.9: governance enforcement (store-side).
     {
@@ -2275,7 +2321,7 @@ pub fn build_capabilities_tools(
     use crate::config::{AllowlistDecision, ToolEntry};
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let mut entries: Vec<ToolEntry> = Vec::with_capacity(48);
+    let mut entries: Vec<ToolEntry> = Vec::with_capacity(49);
 
     for fam in Family::all() {
         let family_name = fam.name();
@@ -2899,6 +2945,48 @@ fn handle_kg_query(conn: &rusqlite::Connection, params: &Value) -> Result<Value,
     }))
 }
 
+/// v0.7 J7 — `memory_find_paths` handler. Enumerates up to `max_results`
+/// paths through the KG between two memories using BFS with cycle
+/// detection. Backend dispatch lives in the SAL — the SQLite path goes
+/// through `db::find_paths` (recursive CTE); a Postgres deployment
+/// would route through `PostgresStore::find_paths` which dispatches on
+/// the resolved [`crate::store::KgBackend`] (Cypher when AGE is
+/// installed, recursive CTE otherwise). The wire shape is identical
+/// across backends: `paths` is a list of id chains where each chain
+/// has `source_id` first and `target_id` last.
+pub fn handle_find_paths(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+    let source_id = params["source_id"]
+        .as_str()
+        .ok_or("source_id is required")?;
+    let target_id = params["target_id"]
+        .as_str()
+        .ok_or("target_id is required")?;
+    validate::validate_id(source_id).map_err(|e| e.to_string())?;
+    validate::validate_id(target_id).map_err(|e| e.to_string())?;
+
+    let max_depth = params["max_depth"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
+    let max_results = params["max_results"]
+        .as_u64()
+        .and_then(|n| usize::try_from(n).ok());
+
+    let paths =
+        db::find_paths(conn, source_id, target_id, max_depth, max_results).map_err(|e| {
+            // Match the kg_query convention: depth-budget violations
+            // surface their error message verbatim so callers can
+            // distinguish "you asked for too much" from a real fault.
+            e.to_string()
+        })?;
+
+    Ok(json!({
+        "source_id": source_id,
+        "target_id": target_id,
+        "paths": paths,
+        "count": paths.len(),
+    }))
+}
+
 fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
@@ -3052,6 +3140,34 @@ fn handle_delete(
         .get("agent_id")
         .and_then(|v| v.as_str())
         .map(str::to_string);
+
+    // v0.7.0 K9 — unified permission pipeline (delete-side).
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+            .map_err(|e| e.to_string())?;
+        let payload = json!({"id": target.id, "title": target.title});
+        let ctx = PermissionContext {
+            op: Op::MemoryDelete,
+            namespace: target.namespace.clone(),
+            agent_id,
+            payload,
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("delete denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "delete",
+                    "memory_id": target.id,
+                }));
+            }
+        }
+    }
 
     // Task 1.9: governance enforcement (delete-side).
     {
@@ -3445,6 +3561,46 @@ fn handle_link(
     let relation = params["relation"].as_str().unwrap_or("related_to");
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
+
+    // v0.7.0 K9 — unified permission pipeline (link-side).
+    // Link evaluation uses the *source* memory's namespace (the
+    // originating end of the relation) so policies can scope by
+    // who is allowed to outbound-link from a given namespace.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let link_ns = match db::get(conn, source_id) {
+            Ok(Some(m)) => m.namespace,
+            _ => "global".to_string(),
+        };
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryLink,
+            namespace: link_ns,
+            agent_id,
+            payload: json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("link denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "link",
+                    "source_id": source_id,
+                    "target_id": target_id,
+                }));
+            }
+        }
+    }
+
     // v0.7 H2 — sign with active keypair when present; falls through
     // to attest_level="unsigned" otherwise. The chosen attest_level is
     // surfaced in the wire response so callers can tell signed vs
@@ -3873,6 +4029,38 @@ fn handle_consolidate(
     };
 
     validate::validate_consolidate(&ids, title, &summary, namespace).map_err(|e| e.to_string())?;
+
+    // v0.7.0 K9 — unified permission pipeline (consolidate-side).
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryConsolidate,
+            namespace: namespace.to_string(),
+            agent_id,
+            payload: json!({
+                "title": title,
+                "summary_chars": summary.len(),
+                "source_ids": ids,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("consolidate denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "consolidate",
+                    "namespace": namespace,
+                    "source_count": ids.len(),
+                }));
+            }
+        }
+    }
 
     let auto_generated = params["summary"].as_str().is_none();
 
@@ -4579,6 +4767,36 @@ fn handle_archive_restore(conn: &rusqlite::Connection, params: &Value) -> Result
 
 fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let older_than_days = params["older_than_days"].as_i64();
+
+    // v0.7.0 K9 — unified permission pipeline (archive-side).
+    // Archive purge is a destructive across-namespace operation; we
+    // evaluate against the global namespace + caller's agent_id.
+    // Operators can still scope rules via `namespace_pattern = "**"`.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryArchive,
+            namespace: "global".to_string(),
+            agent_id,
+            payload: json!({"older_than_days": older_than_days}),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("archive denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "archive",
+                }));
+            }
+        }
+    }
+
     let purged = db::purge_archive(conn, older_than_days).map_err(|e| e.to_string())?;
     Ok(json!({"purged": purged}))
 }
@@ -4824,6 +5042,7 @@ fn handle_request(
                 "memory_kg_timeline" => handle_kg_timeline(conn, arguments),
                 "memory_kg_invalidate" => handle_kg_invalidate(conn, db_path, arguments),
                 "memory_kg_query" => handle_kg_query(conn, arguments),
+                "memory_find_paths" => handle_find_paths(conn, arguments),
                 "memory_delete" => {
                     handle_delete(conn, db_path, arguments, vector_index, mcp_client)
                 }
@@ -5381,7 +5600,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn tool_definitions_returns_48_tools() {
+    fn tool_definitions_returns_49_tools() {
         // v0.6.3 adds memory_get_taxonomy (Pillar 1 / Stream A),
         // memory_check_duplicate (Pillar 2 / Stream D),
         // memory_entity_register + memory_entity_get_by_alias
@@ -5393,15 +5612,16 @@ mod tests {
         // v0.7 B1 adds memory_load_family (Family::Core) → 46.
         // v0.7 K7 adds memory_subscription_replay +
         // memory_subscription_dlq_list (Family::Power) → 48.
+        // v0.7 J7 adds memory_find_paths (Family::Graph) → 49.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 48);
+        assert_eq!(tools.len(), 49);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
     /// registers exactly 6 family tools (5 baseline + v0.7 B1
     /// memory_load_family) + 1 always-on bootstrap (memory_capabilities)
-    /// = 7 visible tools. `--profile full` registers all 48.
+    /// = 7 visible tools. `--profile full` registers all 49.
     #[test]
     fn tool_definitions_for_profile_core_registers_6_plus_capabilities() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::core());
@@ -5443,31 +5663,32 @@ mod tests {
     }
 
     #[test]
-    fn tool_definitions_for_profile_full_registers_48() {
+    fn tool_definitions_for_profile_full_registers_49() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::full());
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            48,
+            49,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
-             v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) = 48"
+             v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
+             v0.7 J7 memory_find_paths (1) = 49"
         );
     }
 
     #[test]
-    fn tool_definitions_for_profile_graph_registers_seventeen() {
+    fn tool_definitions_for_profile_graph_registers_eighteen() {
         let defs = tool_definitions_for_profile(&crate::profile::Profile::graph());
         let tools = defs["tools"].as_array().unwrap();
-        // 6 core (with v0.7 B1 memory_load_family) + 10 graph (8
-        // baseline + memory_replay + memory_verify) + 1 always-on
-        // capabilities = 17 (capabilities is in meta but loaded as
-        // bootstrap; without it we'd have 16).
+        // 6 core (with v0.7 B1 memory_load_family) + 11 graph (8
+        // baseline + memory_replay + memory_verify + v0.7 J7
+        // memory_find_paths) + 1 always-on capabilities = 18.
         assert_eq!(
             tools.len(),
-            17,
+            18,
             "graph profile = core(6, with memory_load_family) + \
-             graph(10, with memory_replay+memory_verify) + capabilities-bootstrap(1)"
+             graph(11, with memory_replay+memory_verify+memory_find_paths) + \
+             capabilities-bootstrap(1)"
         );
     }
 
@@ -5479,8 +5700,8 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            17,
-            "core,graph = 6 (B1 memory_load_family) + 10 (I4 memory_replay + H4 memory_verify) + capabilities = 17"
+            18,
+            "core,graph = 6 (B1 memory_load_family) + 11 (I4 memory_replay + H4 memory_verify + J7 memory_find_paths) + capabilities = 18"
         );
     }
 
@@ -5499,9 +5720,9 @@ mod tests {
         assert_eq!(core_row["tool_count"], 6);
         let graph_row = families.iter().find(|r| r["name"] == "graph").unwrap();
         assert_eq!(graph_row["loaded"], false);
-        // v0.7 H4 — graph now ships 10 tools (8 baseline + memory_replay
-        // [I4] + memory_verify [H4]).
-        assert_eq!(graph_row["tool_count"], 10);
+        // v0.7 J7 — graph now ships 11 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4] + memory_find_paths [J7]).
+        assert_eq!(graph_row["tool_count"], 11);
 
         let always_on = v["always_on"].as_array().unwrap();
         assert_eq!(always_on.len(), 1);
@@ -5515,13 +5736,14 @@ mod tests {
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
-        // v0.7 H4 — graph now lists 10 tools (8 baseline + memory_replay
-        // [I4] + memory_verify [H4]).
-        assert_eq!(tools.len(), 10);
+        // v0.7 J7 — graph now lists 11 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4] + memory_find_paths [J7]).
+        assert_eq!(tools.len(), 11);
         // Spot-check known graph tool present.
         assert!(tools.iter().any(|t| t == "memory_kg_query"));
         assert!(tools.iter().any(|t| t == "memory_replay"));
         assert!(tools.iter().any(|t| t == "memory_verify"));
+        assert!(tools.iter().any(|t| t == "memory_find_paths"));
     }
 
     #[test]
@@ -5530,9 +5752,9 @@ mod tests {
         let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
-        // v0.7 H4 — graph now ships 10 schemas (8 baseline + memory_replay
-        // [I4] + memory_verify [H4]).
-        assert_eq!(tools.len(), 10);
+        // v0.7 J7 — graph now ships 11 schemas (8 baseline + memory_replay
+        // [I4] + memory_verify [H4] + memory_find_paths [J7]).
+        assert_eq!(tools.len(), 11);
         // Each row must carry the full MCP tool definition shape.
         for tool in tools {
             assert!(tool.get("name").is_some(), "missing name");
@@ -5893,10 +6115,11 @@ mod tests {
             "missing err outcome in: {captured}"
         );
     }
-    /// Parametrized smoke matrix for all 48 MCP tools (Justice of MCP pathway).
+    /// Parametrized smoke matrix for all 49 MCP tools (Justice of MCP pathway).
     /// v0.6.3 baseline = 43; v0.7.0 I4 added memory_replay (44);
     /// v0.7 H4 added memory_verify (45); v0.7 B1 added memory_load_family (46);
-    /// v0.7 K7 added memory_subscription_replay + memory_subscription_dlq_list (48).
+    /// v0.7 K7 added memory_subscription_replay + memory_subscription_dlq_list (48);
+    /// v0.7 J7 added memory_find_paths (49).
     /// Tier 1: happy path with canonical valid args.
     /// Tier 2: required arg validation (missing required arg → error).
     #[test]
@@ -5972,6 +6195,17 @@ mod tests {
             ToolCase {
                 name: "memory_kg_query",
                 valid_args: json!({"source_id": "fake-id-for-test"}),
+                required_arg: Some("source_id"),
+            },
+            // v0.7 J7 — memory_find_paths: an unknown source/target
+            // returns an empty `paths` list, not an error, so the happy
+            // path works without pre-seeding the DB.
+            ToolCase {
+                name: "memory_find_paths",
+                valid_args: json!({
+                    "source_id": "fake-src-for-test",
+                    "target_id": "fake-dst-for-test",
+                }),
                 required_arg: Some("source_id"),
             },
             ToolCase {

@@ -9,7 +9,7 @@
 // load, env-var seeding, clap parse) and immediately delegates. Coverage
 // for serve()/dispatch is now attributed to the lib crate.
 use ai_memory::daemon_runtime::Cli;
-use ai_memory::{audit, color, config, daemon_runtime, logging};
+use ai_memory::{audit, color, config, daemon_runtime, logging, permissions};
 use anyhow::Result;
 use clap::Parser;
 
@@ -36,6 +36,12 @@ async fn main() -> Result<()> {
     // `crate::config::active_hooks_hmac_secret` and falls back to the
     // per-subscription secret when unset.
     config::set_active_hooks_hmac_secret(app_config.effective_hooks_hmac_secret());
+
+    // v0.7.0 K9 — load `[[permissions.rules]]` into the process-wide
+    // registry consulted by `Permissions::evaluate`. Empty by default
+    // (pre-K9 behaviour: mode + hooks + governance gate decide
+    // everything).
+    permissions::set_active_permission_rules(app_config.effective_permission_rules());
 
     // PR-5 (issue #487): bootstrap operational logging + security
     // audit trail. Both are default-OFF; init returns silently when

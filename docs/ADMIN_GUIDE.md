@@ -473,6 +473,48 @@ The v0.6.x `governance` subsystem is refactored into three composable inputs tha
 
 Decisions are **deny-first**; ambiguous cases go to `AskUser` rather than silently approving.
 
+### Declarative `[[permissions.rules]]` (K9)
+
+The unified evaluator (`Permissions::evaluate`) consults declarative rules from `config.toml` before the K3 mode fall-through and the hook chain. Each rule is a `(namespace_pattern, op, agent_pattern, decision)` tuple. The five gated ops are `memory_store`, `memory_link`, `memory_delete`, `memory_archive`, `memory_consolidate`.
+
+```toml
+[permissions]
+mode = "enforce"
+
+# Block AI agents from writing to any `secrets/*` namespace.
+[[permissions.rules]]
+namespace_pattern = "secrets/*"
+op               = "memory_store"
+agent_pattern    = "ai:*"
+decision         = "deny"
+reason           = "ai agents may not write to secrets"
+
+# Require approval before consolidating sensitive memories.
+[[permissions.rules]]
+namespace_pattern = "sensitive/**"
+op               = "memory_consolidate"
+agent_pattern    = "*"
+decision         = "ask"
+reason           = "consolidating sensitive memories needs human review"
+
+# Allow a specific tool's writes everywhere (namespace tie-breaker:
+# longest literal-prefix wins on equal-decision matches).
+[[permissions.rules]]
+namespace_pattern = "**"
+op               = "memory_link"
+agent_pattern    = "ai:link-curator"
+decision         = "allow"
+```
+
+**Pattern syntax:** `*` matches one `/`-delimited segment; `**` matches across `/`. An exact string is a literal match. `agent_pattern` defaults to `"*"` if omitted.
+
+**Combination rule (deny-first):**
+
+1. First `Deny` across rules + hooks wins — the deny reason surfaces verbatim.
+2. Otherwise, if any hook returned `Modify`, the composed delta wins.
+3. Otherwise, an explicit `Allow` from any source short-circuits the fall-through.
+4. Otherwise, an `Ask` falls through to the active mode default — `enforce` promotes Ask to Deny; `advisory` and `off` surface the prompt to the K10 approval pipeline.
+
 **Migration tool** (idempotent, dry-run by default):
 
 ```bash
