@@ -208,13 +208,22 @@ pub(crate) fn families_overview(profile: &crate::profile::Profile) -> Value {
 /// (no-allowlist) default preserves Tier-1 single-process behavior —
 /// operators opt into the gate by writing the table.
 ///
+/// v0.7 C2 — `verbose` controls whether the per-tool `docs` field
+/// (long-form description + examples) is preserved in the response.
+/// When `verbose=false` (default), `docs` is stripped, matching the
+/// always-on `tools/list` shape; when `verbose=true` AND
+/// `include_schema=true`, callers receive the full documentation.
+/// `verbose=true` without `include_schema=true` is a no-op (the
+/// name-list response carries no `docs`).
+///
 /// Errors:
 /// - Unknown family → `Err` with diagnostic listing valid families.
 /// - Empty family name → `Err`.
 /// - Allowlist deny → `Err` with structured reason.
-pub(crate) fn handle_capabilities_family(
+pub fn handle_capabilities_family(
     family_name: &str,
     include_schema: bool,
+    verbose: bool,
     profile: &crate::profile::Profile,
     allowlist_cfg: Option<&crate::config::McpConfig>,
     agent_id: Option<&str>,
@@ -277,7 +286,7 @@ pub(crate) fn handle_capabilities_family(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let in_family: Vec<Value> = all_tools
+    let mut in_family: Vec<Value> = all_tools
         .into_iter()
         .filter(|t| {
             t.get("name")
@@ -286,6 +295,14 @@ pub(crate) fn handle_capabilities_family(
                 == Some(family)
         })
         .collect();
+
+    // v0.7 C2 — strip the verbose `docs` field unless the caller
+    // explicitly opted into the long-form payload via `verbose=true`.
+    // This keeps the family drilldown response consistent with the
+    // bare `tools/list` shape by default.
+    if !verbose {
+        strip_docs_from_tools(&mut in_family);
+    }
 
     if include_schema {
         Ok(json!({
@@ -314,7 +331,13 @@ pub(crate) fn handle_capabilities_family(
 /// other [`crate::profile::ALWAYS_ON_TOOLS`] are kept regardless of
 /// profile so the runtime-discovery dance still works on
 /// `--profile core`.
-pub(crate) fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
+///
+/// v0.7 C2 — the verbose `docs` field (long-form description + examples)
+/// is stripped from each entry so the always-on `tools/list` payload
+/// stays inside the C5 token budget. Callers that want the full docs
+/// invoke `memory_capabilities { family=<f>, verbose: true }`, which
+/// uses `tool_definitions()` directly without stripping.
+pub fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
     let mut defs = tool_definitions();
     if let Some(arr) = defs.get_mut("tools").and_then(|t| t.as_array_mut()) {
         arr.retain(|tool| {
@@ -322,18 +345,79 @@ pub(crate) fn tool_definitions_for_profile(profile: &crate::profile::Profile) ->
                 .and_then(Value::as_str)
                 .is_some_and(|name| profile.loads(name))
         });
+        strip_docs_from_tools(arr);
     }
     defs
 }
 
+/// v0.7 C2 — strip every long-form natural-language string from a
+/// `tools[]` array so the bare `tools/list` payload stays inside the
+/// C5 token budget (≤ 3500 cl100k tokens for 50 tools).
+///
+/// Removed:
+/// - The top-level `docs` field (the long-form prose mirror of
+///   `description`).
+/// - Every `description` string nested under
+///   `inputSchema.properties.*` — agents that need parameter prose
+///   should re-fetch with `memory_capabilities { family=<f>,
+///   include_schema: true, verbose: true }`, which calls
+///   [`tool_definitions`] directly without stripping.
+///
+/// Preserved on the bare path:
+/// - The top-level short `description` (≤ 50 cl100k tokens).
+/// - The full `inputSchema` shape (`type`, `enum`, `default`,
+///   `minimum`, `maximum`, `required`, `items`) so callers can still
+///   construct valid argument objects without a verbose drilldown.
+pub(crate) fn strip_docs_from_tools(tools: &mut Vec<Value>) {
+    for tool in tools.iter_mut() {
+        let Some(obj) = tool.as_object_mut() else {
+            continue;
+        };
+        obj.remove("docs");
+        if let Some(input_schema) = obj.get_mut("inputSchema").and_then(Value::as_object_mut)
+            && let Some(props) = input_schema
+                .get_mut("properties")
+                .and_then(Value::as_object_mut)
+        {
+            for (_param_name, prop_value) in props.iter_mut() {
+                if let Some(prop_obj) = prop_value.as_object_mut() {
+                    prop_obj.remove("description");
+                    // Sub-objects (e.g. governance.properties on
+                    // memory_namespace_set_standard) — recurse one
+                    // level so nested prose is also dropped.
+                    if let Some(nested) = prop_obj
+                        .get_mut("properties")
+                        .and_then(Value::as_object_mut)
+                    {
+                        for (_, nested_value) in nested.iter_mut() {
+                            if let Some(nested_obj) = nested_value.as_object_mut() {
+                                nested_obj.remove("description");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// v0.7 C2 — canonical tool catalog. Each tool entry carries a short
+/// one-sentence `description` (≤ 50 cl100k_base tokens) and a
+/// long-form `docs` field with the full prose + examples. The
+/// always-on `tools/list` payload strips `docs` via
+/// [`tool_definitions_for_profile`]; callers wanting the verbose form
+/// invoke `memory_capabilities { family=<f>, verbose: true }` which
+/// preserves `docs` so an NHI can drill in without reloading the
+/// full-fat catalog into context.
 #[allow(clippy::too_many_lines)]
-pub(crate) fn tool_definitions() -> Value {
+pub fn tool_definitions() -> Value {
     json!({
         "toolsVersion": TOOLS_VERSION,
         "tools": [
             {
                 "name": "memory_store",
-                "description": "Store a new memory. Deduplicates by title+namespace.",
+                "description": "Store a memory; deduplicates by title+namespace.",
+                "docs": "Store a new memory. Deduplicates by title+namespace. Tier defaults to mid (7d TTL); long is permanent. Caller-supplied agent_id is honored, otherwise an NHI-hardened default is synthesized. Use `on_conflict` to choose between error / merge / version policies for (title, namespace) collisions. Scope (private/team/unit/org/collective) gates Task 1.5 visibility.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -355,7 +439,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier.",
+                "description": "Recall memories relevant to a context (ranked).",
+                "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). Default response format is `toon_compact` (~79% smaller than JSON).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -376,6 +461,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_search",
                 "description": "Search memories by exact keyword match (AND semantics).",
+                "docs": "Search memories by exact keyword match (AND semantics). Faster and more deterministic than memory_recall but no fuzzy/semantic match. Filterable by namespace, tier, and agent_id; supports Task 1.5 scope-aware visibility via `as_agent`. Default response format is `toon_compact`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -393,6 +479,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_list",
                 "description": "List memories, optionally filtered by namespace or tier.",
+                "docs": "List memories, optionally filtered by namespace, tier, or agent_id. Browse mode for inspection; default response format is `toon_compact`. Limit caps at 200.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -406,7 +493,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_load_family",
-                "description": "v0.7 B1 — load top-k recent + high-priority memories tagged with metadata.family=<family>. Always-on alternative to memory_recall when the family is known.",
+                "description": "Load top-k recent + high-priority memories from a Family.",
+                "docs": "v0.7 B1 — load top-k recent + high-priority memories tagged with metadata.family=<family>. Always-on alternative to memory_recall when the family is known. Family enum: core / lifecycle / graph / governance / power / meta / archive / other.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -419,7 +507,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_smart_load",
-                "description": "v0.7 B2 — pick the best Family from a free-text intent and forward to memory_load_family. Always-on intent-routed loader.",
+                "description": "Intent-routed loader: free-text intent picks the best Family.",
+                "docs": "v0.7 B2 — pick the best Family from a free-text intent and forward to memory_load_family. Always-on intent-routed loader. Useful when the agent knows the goal (\"debug a flaky test\") but not the Family taxonomy.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -432,7 +521,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_get_taxonomy",
-                "description": "Pillar 1 / Stream A — return a hierarchical tree of namespaces with memory counts. Walks the `/`-delimited namespace paths grouped from live memories (expired rows excluded). Each node carries `count` (memories at exactly that namespace) and `subtree_count` (count plus all descendants visible within `depth`); the response also exposes `total_count` for the prefix and a `truncated` flag set when `limit` forced rows to be dropped from the tree.",
+                "description": "Return a hierarchical tree of namespaces with memory counts.",
+                "docs": "Pillar 1 / Stream A — return a hierarchical tree of namespaces with memory counts. Walks the `/`-delimited namespace paths grouped from live memories (expired rows excluded). Each node carries `count` (memories at exactly that namespace) and `subtree_count` (count plus all descendants visible within `depth`); the response also exposes `total_count` for the prefix and a `truncated` flag set when `limit` forced rows to be dropped from the tree.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -444,7 +534,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_check_duplicate",
-                "description": "Pillar 2 / Stream D — pre-write near-duplicate check. Embeds `title + content`, scans live memories with stored embeddings (optionally restricted to `namespace`), and returns the highest-cosine match. `is_duplicate` is `nearest.similarity >= threshold`; the response also surfaces `suggested_merge` (the nearest memory's id) when the threshold is met. Threshold is clamped to a hard floor of 0.5 so permissive callers can't dress unrelated content as a merge candidate. Requires the embedder to be loaded (semantic tier or above).",
+                "description": "Pre-write near-duplicate check via cosine over stored embeddings.",
+                "docs": "Pillar 2 / Stream D — pre-write near-duplicate check. Embeds `title + content`, scans live memories with stored embeddings (optionally restricted to `namespace`), and returns the highest-cosine match. `is_duplicate` is `nearest.similarity >= threshold`; the response also surfaces `suggested_merge` (the nearest memory's id) when the threshold is met. Threshold is clamped to a hard floor of 0.5 so permissive callers can't dress unrelated content as a merge candidate. Requires the embedder to be loaded (semantic tier or above).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -458,7 +549,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_entity_register",
-                "description": "Pillar 2 / Stream B — register an entity (canonical name + aliases) under a namespace. Entities are stored as long-tier memories tagged 'entity' with metadata.kind='entity', so the (title, namespace) coordinate is shared with regular memories without ambiguity. Idempotent: re-registering the same canonical_name+namespace reuses the existing entity_id and merges any new aliases. Errors when the namespace+canonical_name already names a non-entity memory.",
+                "description": "Register an entity (canonical name + aliases) under a namespace.",
+                "docs": "Pillar 2 / Stream B — register an entity (canonical name + aliases) under a namespace. Entities are stored as long-tier memories tagged 'entity' with metadata.kind='entity', so the (title, namespace) coordinate is shared with regular memories without ambiguity. Idempotent: re-registering the same canonical_name+namespace reuses the existing entity_id and merges any new aliases. Errors when the namespace+canonical_name already names a non-entity memory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -473,7 +565,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_entity_get_by_alias",
-                "description": "Pillar 2 / Stream B — resolve an alias to its registered entity. When 'namespace' is provided, only entities in that namespace are returned. When omitted, the most recently created matching entity wins. Returns null when no entity claims the alias under the given filter.",
+                "description": "Resolve an alias to its registered entity.",
+                "docs": "Pillar 2 / Stream B — resolve an alias to its registered entity. When 'namespace' is provided, only entities in that namespace are returned. When omitted, the most recently created matching entity wins. Returns null when no entity claims the alias under the given filter.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -485,7 +578,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_kg_timeline",
-                "description": "Pillar 2 / Stream C — ordered fact timeline for an entity. Returns outbound links from `source_id` (e.g. an entity registered via memory_entity_register) with their temporal-validity columns (valid_from, valid_until, observed_by) and the target memory's title/namespace. Events are ordered by valid_from ASC; rows with NULL valid_from are excluded. Cross-namespace by design — callers can post-filter by target_namespace if needed.",
+                "description": "Ordered fact timeline for an entity (outbound KG links by valid_from).",
+                "docs": "Pillar 2 / Stream C — ordered fact timeline for an entity. Returns outbound links from `source_id` (e.g. an entity registered via memory_entity_register) with their temporal-validity columns (valid_from, valid_until, observed_by) and the target memory's title/namespace. Events are ordered by valid_from ASC; rows with NULL valid_from are excluded. Cross-namespace by design — callers can post-filter by target_namespace if needed.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -499,7 +593,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_kg_invalidate",
-                "description": "Pillar 2 / Stream C — mark a KG link as superseded by setting its `valid_until` column. The link is identified by the (source_id, target_id, relation) triple (memory_links has no separate id column). When `valid_until` is omitted, the current wall-clock time is used. Idempotent: repeated calls overwrite the prior value and the response reports `previous_valid_until` so callers can detect the overwrite. Returns `found: false` when no link matches the triple.",
+                "description": "Mark a KG link as superseded by setting its valid_until column.",
+                "docs": "Pillar 2 / Stream C — mark a KG link as superseded by setting its `valid_until` column. The link is identified by the (source_id, target_id, relation) triple (memory_links has no separate id column). When `valid_until` is omitted, the current wall-clock time is used. Idempotent: repeated calls overwrite the prior value and the response reports `previous_valid_until` so callers can detect the overwrite. Returns `found: false` when no link matches the triple.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -513,7 +608,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_kg_query",
-                "description": "Pillar 2 / Stream C — outbound KG traversal from a source memory. Returns one node per link reachable from `source_id` within `max_depth` hops, with the link's temporal-validity columns (valid_from, valid_until, observed_by) and the target memory's title/namespace. Multi-hop traversal uses a recursive CTE with cycle detection — chains only extend through links that pass every filter on every hop. Filters: `valid_at` keeps only links valid at that instant; `allowed_agents` keeps only links observed by an agent in the set (empty list returns zero rows by design — empty allowlist means 'no agents are trusted'). Ordered by depth ASC, then COALESCE(valid_from, created_at) ASC, for stable shallow-first display. `max_depth` ceiling is 5 (matches the published performance budget); larger values return an explicit error.",
+                "description": "Outbound KG traversal from a source memory (≤5 hops).",
+                "docs": "Pillar 2 / Stream C — outbound KG traversal from a source memory. Returns one node per link reachable from `source_id` within `max_depth` hops, with the link's temporal-validity columns (valid_from, valid_until, observed_by) and the target memory's title/namespace. Multi-hop traversal uses a recursive CTE with cycle detection — chains only extend through links that pass every filter on every hop. Filters: `valid_at` keeps only links valid at that instant; `allowed_agents` keeps only links observed by an agent in the set (empty list returns zero rows by design — empty allowlist means 'no agents are trusted'). Ordered by depth ASC, then COALESCE(valid_from, created_at) ASC, for stable shallow-first display. `max_depth` ceiling is 5 (matches the published performance budget); larger values return an explicit error.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -528,7 +624,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_find_paths",
-                "description": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50.",
+                "description": "Enumerate up to N paths through the KG between two memories.",
+                "docs": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -543,6 +640,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_delete",
                 "description": "Delete a memory by ID.",
+                "docs": "Hard-delete a memory by ID. Removes the row, its embedding, FTS entry, and any links. Use memory_forget for bulk pattern-based deletion (which archives first).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -553,7 +651,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_promote",
-                "description": "Promote a memory. Default: bump tier to long-term (permanent, clears expiry). Task 1.7: when 'to_namespace' is supplied, clone the memory to a hierarchical-ancestor namespace and link clone → source with 'derived_from'. Original is untouched.",
+                "description": "Promote a memory to long-term, or clone to an ancestor namespace.",
+                "docs": "Promote a memory. Default: bump tier to long-term (permanent, clears expiry). Task 1.7: when 'to_namespace' is supplied, clone the memory to a hierarchical-ancestor namespace and link clone → source with 'derived_from'. Original is untouched.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -565,7 +664,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_forget",
-                "description": "Bulk delete memories matching a pattern, namespace, or tier. Archives before deletion. Use dry_run to preview.",
+                "description": "Bulk delete memories matching a pattern, namespace, or tier (archives first).",
+                "docs": "Bulk delete memories matching a pattern, namespace, or tier. Archives before deletion so memory_archive_restore can recover. Use dry_run to preview the affected set without mutating.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -578,12 +678,14 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_stats",
-                "description": "Get memory store statistics.",
+                "description": "Get memory store statistics (counts, tier breakdown, sizes).",
+                "docs": "Get memory store statistics — total counts, per-tier breakdown, namespace tallies, archive size, and DB file size.",
                 "inputSchema": { "type": "object", "properties": {} }
             },
             {
                 "name": "memory_update",
-                "description": "Update an existing memory by ID. Only provided fields are changed.",
+                "description": "Update an existing memory by ID (only provided fields change).",
+                "docs": "Update an existing memory by ID. Only provided fields are changed; omitted fields preserve their existing values. Tier may be raised but not silently downgraded by an update path that doesn't explicitly request it. metadata.agent_id is preserved across updates.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -604,6 +706,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_get",
                 "description": "Get a specific memory by ID, including its links.",
+                "docs": "Get a specific memory by ID. Response includes the memory row plus all linked memory IDs (both inbound and outbound). Use memory_get_links for the full link rows with relation labels and signature attestation.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -614,7 +717,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_link",
-                "description": "Create a link between two memories.",
+                "description": "Create a typed link between two memories.",
+                "docs": "Create a directional link between two memories with one of four relations: related_to, supersedes, contradicts, derived_from. v0.7 H-track signs the link with the active Ed25519 keypair when one is configured (verifiable via memory_verify).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -628,6 +732,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_get_links",
                 "description": "Get all links for a memory (both directions).",
+                "docs": "Get all links for a memory (both inbound and outbound). Returns relation labels, attestation level (unsigned/self_signed/peer_attested), and temporal validity columns (valid_from, valid_until, observed_by) per link.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -638,7 +743,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_verify",
-                "description": "v0.7 Track H4 — re-verify a stored memory_links row's Ed25519 signature on demand. Returns {signature_verified, attest_level, signed_by, signed_at}. attest_level is one of unsigned/self_signed/peer_attested. Pass either the link_id composite ('source--relation-->target') or the explicit source_id+target_id (+optional relation, default related_to).",
+                "description": "Re-verify a stored memory_links row's Ed25519 signature on demand.",
+                "docs": "v0.7 Track H4 — re-verify a stored memory_links row's Ed25519 signature on demand. Returns {signature_verified, attest_level, signed_by, signed_at}. attest_level is one of unsigned/self_signed/peer_attested. Pass either the link_id composite ('source--relation-->target') or the explicit source_id+target_id (+optional relation, default related_to).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -651,7 +757,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_replay",
-                "description": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript.",
+                "description": "Reconstruct the conversation transcript chain that produced a memory.",
+                "docs": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript. v0.7.0 I4 — when verbose=false (default), transcripts >100KB have content omitted with truncated=true; opt into verbose=true for the full multi-MB dump.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -663,7 +770,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_consolidate",
-                "description": "Consolidate multiple memories into one long-term summary. Deletes source memories and creates derived_from links. If summary is omitted and LLM is available (smart/autonomous tier), auto-generates a summary.",
+                "description": "Consolidate multiple memories into one long-term summary.",
+                "docs": "Consolidate multiple memories into one long-term summary. Deletes source memories and creates derived_from links from the consolidated memory back to each source. If summary is omitted and an LLM is available (smart/autonomous tier), the summary is auto-generated. Minimum 2, maximum 100 source ids per call.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -677,7 +785,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one; accept=v2/v1 for legacy.",
+                "description": "Discover runtime capabilities; family=<name> drills in.",
+                "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -696,13 +805,19 @@ pub(crate) fn tool_definitions() -> Value {
                             "type": "boolean",
                             "default": false,
                             "description": "v0.6.4 — when true, return full MCP-style tool definitions for each tool in the requested family. Requires family=<name>."
+                        },
+                        "verbose": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "v0.7 C2 — when true (with family=<name>+include_schema=true), preserve the per-tool `docs` field (long-form description + examples) on each entry. When false (default), `docs` is stripped, matching the always-on `tools/list` shape."
                         }
                     }
                 }
             },
             {
                 "name": "memory_expand_query",
-                "description": "Use LLM to expand a search query into additional semantically related terms. Requires smart or autonomous tier.",
+                "description": "LLM-expand a search query into related terms (smart/autonomous tier).",
+                "docs": "Use LLM to expand a search query into additional semantically related terms. Requires smart or autonomous tier (Ollama backend configured).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -713,7 +828,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_auto_tag",
-                "description": "Use LLM to auto-generate tags for a memory. Requires smart or autonomous tier.",
+                "description": "LLM-generate tags for a memory (smart/autonomous tier).",
+                "docs": "Use LLM to auto-generate tags for a memory. Requires smart or autonomous tier (Ollama backend configured).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -724,7 +840,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_detect_contradiction",
-                "description": "Use LLM to check if two memories contradict each other. Requires smart or autonomous tier.",
+                "description": "LLM-check whether two memories contradict each other (smart/autonomous tier).",
+                "docs": "Use LLM to check whether two memories contradict each other. Requires smart or autonomous tier (Ollama backend configured).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -736,7 +853,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_archive_list",
-                "description": "List archived (expired) memories. Archived memories are preserved before GC deletion.",
+                "description": "List archived (expired) memories.",
+                "docs": "List archived (expired) memories. Archived memories are preserved before GC deletion so memory_archive_restore can recover them. Filter by namespace, paginate via offset/limit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -748,7 +866,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_archive_restore",
-                "description": "Restore an archived memory back to the active memory store (expires_at cleared).",
+                "description": "Restore an archived memory back to the active store.",
+                "docs": "Restore an archived memory back to the active memory store. expires_at is cleared so the restored memory does not immediately re-expire.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -759,7 +878,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_archive_purge",
-                "description": "Permanently delete archived memories. Optionally only those older than N days.",
+                "description": "Permanently delete archived memories.",
+                "docs": "Permanently delete archived memories. Pass `older_than_days` to scope the purge; omit to purge every archived row. This is unrecoverable.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -769,7 +889,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_archive_stats",
-                "description": "Show archive statistics: total count and breakdown by namespace.",
+                "description": "Show archive statistics (total count and per-namespace breakdown).",
+                "docs": "Show archive statistics: total count and per-namespace breakdown of archived memories.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -777,7 +898,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_gc",
-                "description": "Trigger garbage collection on expired memories. Archives them before deletion. Supports dry_run mode.",
+                "description": "Trigger garbage collection on expired memories (archives first).",
+                "docs": "Trigger garbage collection on expired memories. Archives them before deletion when archive_on_gc is enabled (default). dry_run reports the affected set without mutating.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -787,7 +909,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_session_start",
-                "description": "Auto-recall recent memories on session start. Returns the most recently accessed/updated memories. If LLM is available (smart/autonomous tier), returns an AI-generated summary.",
+                "description": "Auto-recall recent memories on session start.",
+                "docs": "Auto-recall recent memories on session start. Returns the most recently accessed/updated memories. If an LLM is available (smart/autonomous tier), the response also includes an AI-generated summary of the recalled set.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -799,7 +922,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_namespace_set_standard",
-                "description": "Set a memory as the standard/policy for a namespace. Auto-prepended to recall and session_start. Supports rule layering (global '*' + parent chain + namespace). Task 1.8: accepts optional `governance` policy object merged into the standard memory's metadata.",
+                "description": "Set a memory as the standard/policy for a namespace.",
+                "docs": "Set a memory as the standard/policy for a namespace. The standard is auto-prepended to recall and session_start results. Supports rule layering (global '*' + parent chain + namespace). Task 1.8: accepts an optional `governance` policy object merged into the standard memory's metadata, with v0.6.3.1 P4/G1 inheritance flag.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -823,7 +947,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_namespace_get_standard",
-                "description": "Get the standard/policy memory for a namespace, if one is set. With inherit=true returns the full N-level resolved chain (Task 1.6).",
+                "description": "Get the standard/policy memory for a namespace.",
+                "docs": "Get the standard/policy memory for a namespace, if one is set. With inherit=true (Task 1.6) returns the full N-level resolved chain (global * → ancestors → namespace) instead of the single namespace's standard.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -836,6 +961,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_namespace_clear_standard",
                 "description": "Clear the standard/policy for a namespace.",
+                "docs": "Clear the standard/policy for a namespace. Future recall + session_start in that namespace stop auto-prepending the standard memory.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -846,7 +972,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_list",
-                "description": "List pending governance-queued actions (Task 1.9). Filter by status: pending (default) / approved / rejected.",
+                "description": "List pending governance-queued actions.",
+                "docs": "List pending governance-queued actions (Task 1.9). Filter by status: pending (default) / approved / rejected. Limit caps at 1000.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -857,7 +984,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_approve",
-                "description": "Approve a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic permission rule so the same context auto-decides next time.",
+                "description": "Approve a pending action; `remember` auto-decides next time.",
+                "docs": "Approve a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic permission rule so the same context auto-decides next time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -874,7 +1002,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_reject",
-                "description": "Reject a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic deny rule so the same context auto-rejects next time.",
+                "description": "Reject a pending action; `remember` auto-decides next time.",
+                "docs": "Reject a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic deny rule so the same context auto-rejects next time.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -891,7 +1020,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_agent_register",
-                "description": "Register an agent in the reserved _agents namespace. Stores agent_type and capabilities, refreshes last_seen_at on re-registration while preserving registered_at. agent_id is claimed, not attested.",
+                "description": "Register an agent in the reserved _agents namespace.",
+                "docs": "Register an agent in the reserved _agents namespace. Stores agent_type and capabilities, refreshes last_seen_at on re-registration while preserving registered_at. agent_id is *claimed*, not attested — pair with attestation if you need a security boundary.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -905,6 +1035,7 @@ pub(crate) fn tool_definitions() -> Value {
             {
                 "name": "memory_agent_list",
                 "description": "List every registered agent.",
+                "docs": "List every agent registered via memory_agent_register, ordered by registered_at.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -912,7 +1043,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_notify",
-                "description": "v0.6.0.0 — send a message from the caller to another agent. Stored as a memory in the reserved `_messages/<target>` namespace with sender metadata. The sender is the caller's resolved agent_id. Target agent reads via `memory_inbox`. Payload is a free-form string.",
+                "description": "Send a message from the caller to another agent's inbox.",
+                "docs": "v0.6.0.0 — send a message from the caller to another agent. Stored as a memory in the reserved `_messages/<target>` namespace with sender metadata. The sender is the caller's resolved agent_id. Target agent reads via `memory_inbox`. Payload is a free-form string.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -927,7 +1059,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_inbox",
-                "description": "v0.6.0.0 — list messages sent to an agent via memory_notify. Reads the reserved `_messages/<agent_id>` namespace. `access_count == 0` is the conventional unread marker; recalling/reading a memory increments access_count via the normal touch path.",
+                "description": "List messages sent to an agent via memory_notify.",
+                "docs": "v0.6.0.0 — list messages sent to an agent via memory_notify. Reads the reserved `_messages/<agent_id>` namespace. `access_count == 0` is the conventional unread marker; recalling/reading a memory increments access_count via the normal touch path.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -939,7 +1072,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_subscribe",
-                "description": "v0.6.0.0 — register a webhook subscription. Events fire on memory_store today and additional events in v0.6.1+. Payload is a JSON body signed with HMAC-SHA256 when a secret is supplied (header: X-Ai-Memory-Signature: sha256=<hex>). URL must be https unless the host is a loopback address. The shared secret is stored hashed only; the plaintext the operator supplies is what they verify signatures with.",
+                "description": "Register a webhook subscription for memory events.",
+                "docs": "v0.6.0.0 — register a webhook subscription. Events fire on memory_store today and additional events in v0.6.1+. Payload is a JSON body signed with HMAC-SHA256 when a secret is supplied (header: X-Ai-Memory-Signature: sha256=<hex>). URL must be https unless the host is a loopback address. The shared secret is stored hashed only; the plaintext the operator supplies is what they verify signatures with.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -954,7 +1088,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_unsubscribe",
-                "description": "v0.6.0.0 — delete a subscription by id.",
+                "description": "Delete a subscription by id.",
+                "docs": "v0.6.0.0 — delete a webhook subscription by id. Stops further deliveries; existing DLQ rows are retained for audit.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -965,7 +1100,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_list_subscriptions",
-                "description": "v0.6.0.0 — list active webhook subscriptions. Secrets are not exposed; only `secret_hash` is stored and even that is not returned.",
+                "description": "List active webhook subscriptions.",
+                "docs": "v0.6.0.0 — list active webhook subscriptions. Secrets are not exposed; only `secret_hash` is stored server-side and even that is not returned.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -973,7 +1109,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_subscription_replay",
-                "description": "v0.7 K7 — replay subscription_events for one subscription since an RFC3339 timestamp. Returns ordered audit envelope (delivered_at asc). Operator/governance tool.",
+                "description": "Replay subscription_events since an RFC3339 timestamp.",
+                "docs": "v0.7 K7 — replay subscription_events for one subscription since an RFC3339 timestamp. Returns ordered audit envelope (delivered_at asc). Operator/governance tool.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -985,7 +1122,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_subscription_dlq_list",
-                "description": "v0.7 K7 — list subscription_dlq rows (deliveries that exhausted the retry ladder). Filter by subscription_id; cap with limit. Operator/governance inspector.",
+                "description": "List subscription_dlq rows (exhausted retry ladder).",
+                "docs": "v0.7 K7 — list subscription_dlq rows (deliveries that exhausted the retry ladder). Filter by subscription_id; cap with limit. Operator/governance inspector.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -996,7 +1134,8 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_quota_status",
-                "description": "v0.7 K8 — report per-agent quota usage (memories/day, storage bytes, links/day). Omit agent_id to list all agents. Operator-facing.",
+                "description": "Report per-agent quota usage. Operator-facing.",
+                "docs": "v0.7 K8 — report per-agent quota usage (memories/day, storage bytes, links/day). Omit agent_id to list all agents. Operator-facing.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -5532,6 +5671,14 @@ fn handle_request(
                             .get("include_schema")
                             .and_then(Value::as_bool)
                             .unwrap_or(false);
+                        // v0.7 C2 — opt into the long-form `docs`
+                        // field on each tool entry. Default false so
+                        // the family drilldown matches the
+                        // always-on `tools/list` shape.
+                        let verbose = arguments
+                            .get("verbose")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         // v0.6.4-008 — agent_id resolution for the
                         // allowlist gate. Caller's explicit
                         // `arguments.agent_id` wins; otherwise fall
@@ -5544,6 +5691,7 @@ fn handle_request(
                         handle_capabilities_family(
                             fam_name,
                             include_schema,
+                            verbose,
                             profile,
                             mcp_config,
                             aid,
@@ -6201,7 +6349,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_lists_tool_names() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", false, &p, None, None, None).unwrap();
+        let v = handle_capabilities_family("graph", false, false, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         assert_eq!(v["loaded_under_active_profile"], false);
         let tools = v["tools"].as_array().unwrap();
@@ -6218,7 +6366,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_include_schema_returns_full_definitions() {
         let p = crate::profile::Profile::core();
-        let v = handle_capabilities_family("graph", true, &p, None, None, None).unwrap();
+        let v = handle_capabilities_family("graph", true, false, &p, None, None, None).unwrap();
         assert_eq!(v["family"], "graph");
         let tools = v["tools"].as_array().unwrap();
         // v0.7 J7 — graph now ships 11 schemas (8 baseline + memory_replay
@@ -6229,13 +6377,37 @@ mod tests {
             assert!(tool.get("name").is_some(), "missing name");
             assert!(tool.get("description").is_some(), "missing description");
             assert!(tool.get("inputSchema").is_some(), "missing inputSchema");
+            // v0.7 C2 — `docs` stripped on the default (verbose=false) path.
+            assert!(
+                tool.get("docs").is_none(),
+                "docs must be omitted when verbose=false; got {tool}"
+            );
         }
+    }
+
+    #[test]
+    fn handle_capabilities_family_verbose_preserves_docs_field() {
+        // v0.7 C2 — verbose=true with include_schema=true must restore the
+        // long-form `docs` payload on every tool entry that defines one.
+        let p = crate::profile::Profile::core();
+        let v = handle_capabilities_family("core", true, true, &p, None, None, None).unwrap();
+        let tools = v["tools"].as_array().unwrap();
+        assert!(!tools.is_empty());
+        let with_docs = tools
+            .iter()
+            .filter(|t| t.get("docs").and_then(Value::as_str).is_some())
+            .count();
+        assert!(
+            with_docs >= 1,
+            "verbose=true must surface at least one docs string in family=core; got 0"
+        );
     }
 
     #[test]
     fn handle_capabilities_family_unknown_returns_diagnostic_err() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("xyz", false, &p, None, None, None).unwrap_err();
+        let err =
+            handle_capabilities_family("xyz", false, false, &p, None, None, None).unwrap_err();
         assert!(err.contains("xyz"));
         assert!(err.contains("Valid families"));
         assert!(err.contains("core"));
@@ -6245,7 +6417,7 @@ mod tests {
     #[test]
     fn handle_capabilities_family_empty_name_errors() {
         let p = crate::profile::Profile::core();
-        let err = handle_capabilities_family("", false, &p, None, None, None).unwrap_err();
+        let err = handle_capabilities_family("", false, false, &p, None, None, None).unwrap_err();
         assert!(err.contains("must not be empty"));
     }
 
