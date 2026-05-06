@@ -650,7 +650,7 @@ pub(crate) fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Report the active feature tier, loaded models, and available capabilities of the memory system. Returns capabilities schema v2 by default (recommended). Pass accept=\"v1\" for the legacy shape used before v0.6.3.1. v0.6.4 — pass family=<name> to enumerate that family's tools; add include_schema=true to retrieve full schemas inline (NHI runtime-expansion path).",
+                "description": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one; accept=v2/v1 for legacy.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
