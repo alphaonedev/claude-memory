@@ -246,6 +246,19 @@ harness = false
 name = "harness_bench"
 harness = false
 
+# v0.7 J8 — AGE vs CTE kg_query depth-5 bench gate. Measures p50/p95/p99
+# for both KgBackend variants on a 200-node fixture and asserts the AGE
+# p95 is at least 30% faster than the CTE p95 (justifies the AGE
+# complexity per the J8 spec). Soft skip when the Postgres/AGE fixture
+# isn't reachable: prints "skipped" and exits 0 so CI can run the bench
+# unconditionally and surface the skip as a workflow warning.
+# Outputs `target/bench/age-vs-cte.json` + a markdown table to stdout.
+# Run with `AI_MEMORY_TEST_AGE_URL=postgresql://... cargo bench
+# --features sal-postgres --bench age_vs_cte`.
+[[bench]]
+name = "age_vs_cte"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
