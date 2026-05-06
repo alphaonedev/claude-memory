@@ -587,13 +587,25 @@ mod tests {
         assert!(s.ends_with("ai-memory/keys") || s.ends_with("ai-memory\\keys"));
     }
 
+    /// Process-wide guard for tests that mutate `AI_MEMORY_KEY_DIR`.
+    /// Without this any other test that reads the env var concurrently
+    /// can observe a half-written value, surfacing as
+    /// `assert_eq!(p, "/tmp/h4-override-test")` failing because another
+    /// thread cleared the var between set + read.
+    fn key_dir_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn default_key_dir_honours_env_override() {
         // v0.7 H4 — the override exists so `memory_verify` integration
         // tests can populate a hermetic key dir per test process. Pin
         // the contract here so a future refactor doesn't quietly drop
         // the override.
-        // SAFETY: single-threaded test block; no concurrent env writes.
+        let _g = key_dir_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialised by `key_dir_env_lock` for
+        // the duration of this test.
         unsafe {
             std::env::set_var("AI_MEMORY_KEY_DIR", "/tmp/h4-override-test");
         }

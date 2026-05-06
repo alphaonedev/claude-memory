@@ -2104,6 +2104,15 @@ mod tests {
     fn snippet_every_target_emits_under_budget() {
         // The full per-target sweep — every harness gets its own
         // snippet file, each within budget and carrying every anchor.
+        //
+        // Hold `snippet_env_lock` across the entire iteration. Without
+        // it, the per-target tests below (snippet_claude_code_*,
+        // snippet_cursor_*, etc.) can grab the lock between iterations
+        // and clobber `AI_MEMORY_SYSTEM_PROMPT_DIR`, racing with the
+        // emit + readback this loop performs. Observed as flaky
+        // assertion at `assert!(body.contains(harness))` under
+        // `cargo test` default `--test-threads=N` on Linux + macOS CI.
+        let _g = snippet_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         for target in [
             Target::ClaudeCode,
             Target::Openclaw,
@@ -2116,9 +2125,21 @@ mod tests {
             Target::GrokCli,
             Target::GeminiCli,
         ] {
-            let (path, body) = emit_snippet_isolated(target);
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let tmp_path = tmp.path().to_path_buf();
+            // SAFETY: env mutation serialised by the outer
+            // `snippet_env_lock` guard for the full iteration.
+            unsafe {
+                std::env::set_var("AI_MEMORY_SYSTEM_PROMPT_DIR", &tmp_path);
+            }
+            let snippet_path = write_system_prompt_snippet(target).expect("snippet write");
+            let body = fs::read_to_string(&snippet_path).expect("read snippet");
+            unsafe {
+                std::env::remove_var("AI_MEMORY_SYSTEM_PROMPT_DIR");
+            }
+            std::mem::forget(tmp);
             assert!(
-                path.exists(),
+                snippet_path.exists(),
                 "snippet file for {} not created",
                 target.name(),
             );
