@@ -1144,6 +1144,16 @@ pub struct TranscriptNamespaceConfig {
     pub default_ttl_secs: Option<i64>,
     /// Namespace-specific archive-grace override.
     pub archive_grace_secs: Option<i64>,
+    /// v0.7 I5 — opt in the namespace to the reference R5 pre_store
+    /// transcript-extractor hook (`tools/transcript-extractor/`).
+    /// Default `None` → disabled, matching the "default off" lesson
+    /// from G3-G11. Operators that wire the extractor binary into
+    /// their `hooks.toml` set this flag per namespace to gate the
+    /// derived-memory expansion. `Some(false)` is identical to
+    /// `None` and exists so an explicit "no, don't extract here"
+    /// can be expressed alongside a wildcard `Some(true)`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_extract: Option<bool>,
 }
 
 /// Resolved transcript-lifecycle parameters for a single namespace.
@@ -1250,6 +1260,60 @@ impl TranscriptsConfig {
             default_ttl_secs: ttl,
             archive_grace_secs: grace,
         }
+    }
+
+    /// v0.7 I5 — resolve the `auto_extract` opt-in for `namespace`.
+    ///
+    /// Same precedence walk as [`Self::resolve`] but folds the
+    /// boolean field of [`TranscriptNamespaceConfig::auto_extract`]:
+    ///
+    /// 1. Exact match.
+    /// 2. Longest-prefix `prefix/*` match.
+    /// 3. Bare wildcard `"*"`.
+    /// 4. `false` (default off — matches the "every reference hook
+    ///    ships off-by-default" lesson from G10/G11).
+    ///
+    /// The R5 reference extractor (`tools/transcript-extractor/`)
+    /// reads this flag at the namespace gate before doing any LLM
+    /// work, so a namespace that hasn't opted in pays the cost of
+    /// one HashMap lookup per `pre_store` fire and nothing more.
+    #[must_use]
+    pub fn auto_extract_for(&self, namespace: &str) -> bool {
+        let Some(table) = self.namespaces.as_ref() else {
+            return false;
+        };
+        // 1. Exact literal match.
+        if let Some(ns) = table.get(namespace) {
+            if let Some(v) = ns.auto_extract {
+                return v;
+            }
+        }
+        // 2. Longest-prefix `prefix/*` match.
+        let mut prefix_hits: Vec<(&str, &TranscriptNamespaceConfig)> = table
+            .iter()
+            .filter_map(|(k, v)| {
+                let prefix = k.strip_suffix("/*")?;
+                if namespace == prefix || namespace.starts_with(&format!("{prefix}/")) {
+                    Some((prefix, v))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        prefix_hits.sort_by_key(|(p, _)| std::cmp::Reverse(p.len()));
+        for (_, ns) in &prefix_hits {
+            if let Some(v) = ns.auto_extract {
+                return v;
+            }
+        }
+        // 3. Bare wildcard.
+        if let Some(ns) = table.get("*") {
+            if let Some(v) = ns.auto_extract {
+                return v;
+            }
+        }
+        // 4. Default off.
+        false
     }
 }
 
@@ -3170,5 +3234,87 @@ legacy_scoring = false
         let cfg = AppConfig::load_from(tmp.path());
         assert_eq!(cfg.tier.as_deref(), Some("smart"));
         assert_eq!(cfg.db.as_deref(), Some("/disk.db"));
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7 I5 — auto_extract opt-in resolver
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn auto_extract_default_off_when_no_namespaces_block() {
+        let cfg = TranscriptsConfig::default();
+        assert!(!cfg.auto_extract_for("agent/claude"));
+        assert!(!cfg.auto_extract_for("anything"));
+    }
+
+    #[test]
+    fn auto_extract_exact_namespace_match_wins() {
+        let mut nss = std::collections::HashMap::new();
+        nss.insert(
+            "agent/claude".into(),
+            TranscriptNamespaceConfig {
+                auto_extract: Some(true),
+                ..Default::default()
+            },
+        );
+        // Wildcard says "off" — exact match must still flip it on.
+        nss.insert(
+            "*".into(),
+            TranscriptNamespaceConfig {
+                auto_extract: Some(false),
+                ..Default::default()
+            },
+        );
+        let cfg = TranscriptsConfig {
+            namespaces: Some(nss),
+            ..Default::default()
+        };
+        assert!(cfg.auto_extract_for("agent/claude"));
+        assert!(!cfg.auto_extract_for("agent/gpt"));
+    }
+
+    #[test]
+    fn auto_extract_prefix_match_then_wildcard_fallback() {
+        let mut nss = std::collections::HashMap::new();
+        nss.insert(
+            "team/security/*".into(),
+            TranscriptNamespaceConfig {
+                auto_extract: Some(true),
+                ..Default::default()
+            },
+        );
+        nss.insert(
+            "*".into(),
+            TranscriptNamespaceConfig {
+                auto_extract: Some(false),
+                ..Default::default()
+            },
+        );
+        let cfg = TranscriptsConfig {
+            namespaces: Some(nss),
+            ..Default::default()
+        };
+        assert!(cfg.auto_extract_for("team/security/audit"));
+        assert!(!cfg.auto_extract_for("team/eng/main"));
+    }
+
+    #[test]
+    fn auto_extract_unset_field_inherits_default_off() {
+        // A namespace block that sets only TTL — auto_extract is None
+        // and so falls through to the next layer (wildcard, then off).
+        let mut nss = std::collections::HashMap::new();
+        nss.insert(
+            "agent/claude".into(),
+            TranscriptNamespaceConfig {
+                default_ttl_secs: Some(3600),
+                auto_extract: None,
+                ..Default::default()
+            },
+        );
+        let cfg = TranscriptsConfig {
+            namespaces: Some(nss),
+            ..Default::default()
+        };
+        assert!(!cfg.auto_extract_for("agent/claude"));
     }
 }

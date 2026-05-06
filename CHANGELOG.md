@@ -64,6 +64,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **v0.7.0 I5 — R5 reference `pre_store` transcript-extraction hook.**
+  New standalone Rust binary at `tools/transcript-extractor/`
+  (`ai-memory-transcript-extractor` crate, kept out of the published
+  crates.io upload via the parent `Cargo.toml`'s `include` allowlist).
+  The binary reads the same JSON `FireEnvelope` shape
+  (`src/hooks/executor.rs::FireEnvelope`) the production executor (G3)
+  writes to a hook subprocess, classifies the in-flight memory as a
+  transcript via three independent signals
+  (`metadata.kind == "transcript"`, namespace prefix
+  `transcript/`/`transcripts/`, or speaker tokens like `User:` /
+  `Assistant:` / `<|user|>` in the first 512 chars of content),
+  splits the content into paragraphs scored by a token-bag density
+  heuristic, and surfaces the top-K survivors as
+  `delta.metadata.extracted_memories` on a `Modify` decision —
+  preserving any existing metadata keys an upstream hook already
+  wrote. Each candidate carries a `score`, byte-span `span_start`/
+  `span_end` into the source content, and a 80-char-capped `title`
+  for the future `post_store` mint companion to fold into a
+  `memory_transcript_links` row. Both stdio framings are supported:
+  one-shot (default; matches `ExecExecutor`) and `--daemon`
+  (newline-delimited JSON; matches `DaemonExecutor`). The substrate
+  is the deliverable — the heuristic itself is *deliberately* a
+  bag-of-words approximation rather than an LLM call (see the
+  binary's README) so the reference impl runs in CI without an
+  Ollama daemon and without dragging the full `ai-memory` dep
+  graph into the tool. New per-namespace opt-in field
+  `TranscriptNamespaceConfig.auto_extract` (defaults `None` → off)
+  with matching resolver `TranscriptsConfig::auto_extract_for`
+  applying the same exact-match → longest `prefix/*` → `*` →
+  default-off precedence the I3 TTL resolver uses; 4 unit tests
+  cover the resolver. The reference binary ships 14 unit tests
+  (envelope round-trip in both modes, all three classification
+  signals, stop-word filtering, paragraph chunking floor,
+  `EXTRACTOR_TOP_K` env clipping, metadata-key preservation,
+  malformed-input degrade-to-Allow, byte-span correctness).
+  New integration test `tests/transcript_extractor.rs` builds the
+  sibling binary on the fly and asserts the end-to-end stdio
+  contract (extraction fires for a transcript memory, returns
+  `Allow` for non-transcript memories, falls through to `Allow` on
+  the wrong event class) plus the namespace opt-in resolver. R5
+  commitment recovered; production tightening of the heuristic is
+  scoped to a follow-up post-G11 task that will register the
+  `post_store` mint companion.
 - **v0.7.0 G2 — 20 hook lifecycle event types with payloads.** New
   `src/hooks/events.rs` module attaches a JSON-serializable payload
   struct to every variant of `HookEvent` (lifted out of G1's

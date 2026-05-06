@@ -1,4 +1,12 @@
 /target
+# v0.7 I5 — sibling binary tools each carry their own `target/`
+# tree; ignore them globally so a `cargo build` inside
+# `tools/<tool>/` doesn't dirty the worktree.
+tools/*/target/
+# Sibling tool crates aren't published — keep their lockfiles out
+# of the worktree so the main crate's `Cargo.lock` is the single
+# release-pinned document. Mirrors the `fuzz/` convention.
+tools/*/Cargo.lock
 *.db
 *.db-wal
 *.db-shm
