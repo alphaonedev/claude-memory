@@ -152,9 +152,16 @@ pub fn run(
         None
     };
 
-    // Initialize cross-encoder reranker for autonomous tier
+    // Initialize cross-encoder reranker for autonomous tier.
+    //
+    // v0.7 G9 — wrap in `BatchedReranker` so concurrent CLI invocations
+    // sharing the in-process model don't serialize through the per-
+    // candidate Mutex. For a single CLI call the worker short-circuits
+    // straight into `CrossEncoder::rerank` — no latency regression.
     let reranker = if tier_config.cross_encoder {
-        Some(reranker::CrossEncoder::new_neural())
+        Some(reranker::BatchedReranker::new(
+            reranker::CrossEncoder::new_neural(),
+        ))
     } else {
         None
     };
