@@ -59,10 +59,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/webhook_http_parity.rs` pin the contract.
 
 
-## [Unreleased] — v0.6.3.1 closure
+## [0.7.0] — 2026-05-06 — `attested-cortex`
 
+**Headline:** v0.7.0 closes the `attested-cortex` epic — **69/69 tasks across 11 tracks** (A/B/C/D/E/F/G/H/I/J/K). The substrate becomes both **more articulate** (capabilities v3 with pre-computed calibration strings, named loaders, 52% MCP-tool token reduction on the full profile) and **cryptographically trustworthy** (per-agent Ed25519 attestation with append-only `signed_events` audit chain, sidechain transcripts with `memory_replay`, programmable 20-event hook pipeline, opt-in Apache AGE acceleration, K1/G1 namespace-inheritance enforcement, real permission system with deny-first semantics, A2A maturity). Canonical scope: [`docs/v0.7/V0.7-EPIC.md`](docs/v0.7/V0.7-EPIC.md). Migration: [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md). What's new: [`docs/whats-new-v07.html`](docs/whats-new-v07.html). RFC: [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md).
 
-### Added
+> **Backward compatibility.** v3 capabilities are additive over v2; existing v0.6.4 SDKs continue to work against a v0.7.0 server. v0.6.4's `--profile core` 5-tool default surface is unchanged. The hook pipeline is **default off** — a v0.7.0 install with no `hooks.toml` behaves identically to v0.6.4 at the lifecycle layer. Schema migrations v20 → v22 (`audit_log` → `signed_events` → `memory_transcripts`) run automatically on first start and are idempotent.
+
+### Track summary (11 tracks, 69 tasks)
+
+- **Track A — Capabilities v3 response shape (5 tasks).** Adds `summary`, `to_describe_to_user`, `callable_now`, `agent_permitted_families` to the `memory_capabilities` response, plus `schema_version="3"` (additive over v2). Pre-computed per-agent calibration strings let LLMs converge on accurate first-answer descriptions instead of improvising. v3 fields are additive — v2 wire shape stays supported through the v0.7.x line. Canonical phrasings pinned in [`docs/v0.7/canonical-phrasings.md`](docs/v0.7/canonical-phrasings.md).
+- **Track B — Loader tools (5 tasks).** `memory_load_family` and `memory_smart_load(intent)` are promoted to **always-on first-class tools** (no longer hidden inside an introspection tool's parameter set). Reasoning-class LLMs find them on first ask. Includes harness detection from MCP `clientInfo` (Claude Code, Codex, Grok CLI, Gemini CLI, Continue, Cursor, Cline, Aider, Goose, Claude Desktop, generic JSON-RPC) and family-descriptor embeddings powering `memory_smart_load`'s intent-to-family routing.
+- **Track C — Schema compaction (5 tasks).** **52% MCP tool-token reduction** on the full profile. Description / docs split (long form moved to per-tool docs links), optional params hidden from default schema, inline examples stripped, hard CI gate enforces ≤ 3,500 input tokens for `--profile full` `tools/list`. Combined with v0.6.4's 76.4% default-profile reduction, the cortex now ships at < 3.5K tokens even when fully loaded.
+- **Track D — Per-harness positioning + tests (4 tasks).** Cross-harness benchmark across the 11 supported harnesses; landing-page compatibility matrix at [`docs/v0.7/compatibility-matrix.html`](docs/v0.7/compatibility-matrix.html); install-time system-prompt snippet emitted by `ai-memory install`; harness integration tests in `tests/harness_*.rs` covering both 5-tool default and full-profile loading paths.
+- **Track E — Discovery Gate T0 calibration cells (3 tasks).** Discovery Gate T1-T3 loader cells; T0 orchestration script driving 4 LLMs (Claude, Grok, Gemini, GPT) for ≥ 95% convergence verification on canonical phrasings; post-ship convergence verification scheduled against the released binary. See [`docs/v0.7/T0-ORCHESTRATION.md`](docs/v0.7/T0-ORCHESTRATION.md).
+- **Track F — Docs + release (6 tasks).** [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md) v0.6.4 → v0.7.0 guide; [`docs/whats-new-v07.html`](docs/whats-new-v07.html) what's-new page; [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md) RFC; `README.md` + `docs/ADMIN_GUIDE.md` updates; top-nav badges; this release-cut PR.
+- **Track G — Hook Pipeline (11 tasks, Bucket 0).** The substrate ships: `~/.config/ai-memory/hooks.toml` config file; **20 lifecycle event types** with payloads (`pre_store`, `post_store`, `pre_recall`, `post_recall`, `pre_search`, `post_search`, `pre_delete`, `post_delete`, `pre_promote`, `post_promote`, `pre_link`, `post_link`, `pre_consolidate`, `post_consolidate`, `pre_governance_decision`, `post_governance_decision`, `on_index_eviction`, `pre_archive`, `pre_transcript_store`, `post_transcript_store`); `ExecExecutor` + `DaemonExecutor` JSON-stdio IPC; decision types (`Allow`/`Deny`/`Modify`/`Defer`); chain ordering with priority; per-event timeouts; hot reload on `hooks.toml` mtime change; `on_index_eviction` for HNSW/cache eviction observability; reranker batching for concurrent recall; `pre_recall` daemon-mode hook; **R3 auto-link reference detector** as a reference hook binary.
+- **Track H — Ed25519 Attested Identity (6 tasks, Bucket 1).** `ai-memory identity generate` CLI mints per-agent Ed25519 keypairs; outbound link signing fills the v0.6.3 `memory_links.signature` "dead column"; inbound signature verification on every link write; `attest_level` enum (`unsigned` / `signed` / `verified` / `rejected`); `memory_verify` MCP tool surfaces signature state on demand; **append-only `signed_events` audit table** with hash-chained provenance; end-to-end test pinning the full mint → sign → verify → audit cycle.
+- **Track I — Sidechain Transcripts (5 tasks, Bucket 1.7).** `memory_transcripts` schema (BLOB + zstd-3); `memory_transcript_links` join table; per-namespace TTL with exact-match → longest `prefix/*` → `*` → default-off precedence; `memory_replay` MCP tool reconstructs full conversation context from a transcript link; **R5 `pre_store` transcript-extraction reference hook** ships as a standalone Rust binary at `tools/transcript-extractor/` (kept out of the published crates.io upload via the parent `Cargo.toml`'s `include` allowlist).
+- **Track J — Apache AGE Acceleration (8 tasks, Bucket 2).** AGE detected at Postgres-SAL connect-time via `pg_extension` probe (logged-only fallback to CTE on missing extension or probe error); Cypher implementations of `kg_query`, `kg_timeline`, `kg_invalidate`, and **R2 `find_paths`**; dual-path tests gated on `AI_MEMORY_TEST_AGE_URL`; AGE / CTE per-query performance budgets with bench-time gate; `KgBackend { Cte, Age }` enum exposed via `Capabilities` (`kg_backend` field) for `ai-memory doctor` and `memory_capabilities`.
+- **Track K — A2A + Permissions + G1 cutline (11 tasks, Bucket 3).** **K1/G1 namespace-inheritance enforcement** (the mandatory cutline — `resolve_governance_policy` walks the namespace chain; first non-null policy wins); `pending_actions` timeout sweeper (closes the v0.6.3.1 `default_timeout_seconds` honesty disclosure); `permissions.mode` enforcement gate (`advisory` preserves v0.6.4 first-boot semantics, `enforce` deny-firsts); approval-event routing; `permissions.rule_summary` re-instated; A2A correlation IDs + ACK retries + TTL + replay protection; subscription DLQ + replay-from-cursor + HMAC; per-agent quotas with daily reset; unified permission pipeline (rules + modes + hooks → decision); approval API on **HTTP + SSE + MCP** with HMAC and `remember=forever`; `ai-memory governance migrate-to-permissions` translator CLI for upgrading v0.6.x governance configs.
+
+### Quality
+
+- **Hard coverage gate ≥ 93%.** CI fails any PR below the line floor.
+- **Clippy `-D pedantic` clean baseline** restored across nine files (#614).
+- **Test race fixes** for the subscription `dispatch_count` race, the snippet env race, the keypair env race, the binary-spawn flake on macOS (OnceLock + PID-scoped target), and the b3 budget race.
+- **52% MCP tool token reduction** on the full profile (Track C), measured against `cl100k_base`.
+- **CI token budget gate** — hard 3,500-token ceiling on `--profile full` `tools/list` (Track C5).
+
+### Follow-ups (post-v0.7.0)
+
+- **v0.7.0.1 — issue [#625](https://github.com/alphaonedev/ai-memory-mcp/issues/625):** E1/E2 cross-platform Rust binaries for the Discovery Gate T0 / T1-T3 loader cell harnesses (currently shell-only on macOS / Linux).
+
+---
+
+### Granular task notes (folded forward from prior `[Unreleased]` block)
+
+The following per-task entries were authored as v0.7 tracks landed and are preserved here for reviewers tracing PR-level provenance:
 
 - **v0.7.0 I5 — R5 reference `pre_store` transcript-extraction hook.**
   New standalone Rust binary at `tools/transcript-extractor/`
