@@ -605,7 +605,7 @@ Beyond MCP, ai-memory also exposes a full HTTP REST API (50 endpoints on port 90
 - **GitHub Actions CI/CD** -- fmt, clippy, test, build on Ubuntu + macOS, release on tag
 
 ### Coverage Floor (hard CI gate)
-The `Code Coverage` job is a **required status check**. CI re-asserts two invariants on every PR: an absolute floor of **>= 93%** lines, and a ratchet against the value pinned in [`.coverage-baseline`](.coverage-baseline) with a 0.5% slack window. PRs that raise coverage should bump the baseline file in the same commit so future PRs benefit from the new floor; PRs that regress more than 0.5% are blocked from merging.
+The `Code Coverage` job is a **required status check**. CI re-asserts two invariants on every PR: an **absolute floor of >= 90% lines** (catastrophic-regression backstop, set at the current measurement rounded down to the nearest 5%), and a **ratchet against the value pinned in [`.coverage-baseline`](.coverage-baseline)** with a 0.5% slack window (the day-to-day enforcement). PRs that raise coverage should bump the baseline file in the same commit so future PRs benefit from the new floor; PRs that regress more than 0.5% are blocked from merging. Current measurement: **93.13%** lines.
 
 ### ML and LLM Dependencies (semantic tier+)
 - **candle-core, candle-nn, candle-transformers** -- Hugging Face Candle ML framework for native Rust inference
