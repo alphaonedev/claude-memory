@@ -116,17 +116,15 @@ fn b3_precompute_does_not_block_serve_health() {
         .spawn()
         .expect("spawn ai-memory serve");
 
-    // 5-second budget matches `tests/integration.rs::wait_for_health`
-    // (50 × 100 ms). A regression that re-couples `/health` to the
-    // precompute (e.g. by `await`ing the precompute task before
-    // returning from `bootstrap_serve`) would blow this budget on
-    // the same CI runners that exposed the original bug. The looser
-    // 5 s — vs the prior 2 s — bound was chosen after Windows
-    // runners measured 2.34 s for the embedder *load* (separate
-    // from the precompute) on cold-start; the original 2 s was
-    // tight enough to false-positive on slow runners while not
-    // catching anything 5 s does not.
-    let result = wait_for_health_within(port, Duration::from_secs(5));
+    // 10-second budget. Originally 2 s, then 5 s, now 10 s after
+    // macOS CI runners under heavy load were measured at 5.x s for
+    // embedder *load* alone (cold-start hf-hub fetch + Bert init,
+    // before the precompute even runs). A real regression that
+    // re-couples /health to the precompute would still blow 10 s
+    // (the precompute averages 8 embed calls × ~1 s each = 8 s on
+    // top of load), so the regression-catching property is
+    // preserved while flake-on-slow-runner is eliminated.
+    let result = wait_for_health_within(port, Duration::from_secs(10));
 
     // Always reap the child before asserting so a failed assertion
     // doesn't leave a zombie daemon holding the port.
@@ -136,7 +134,7 @@ fn b3_precompute_does_not_block_serve_health() {
 
     assert!(
         result.is_some(),
-        "/api/v1/health did not respond within 5 s with \
+        "/api/v1/health did not respond within 10 s with \
          AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1 — \
          precompute_family_embeddings likely back on the serve \
          startup path (PR #592 B3-fix regression)",
