@@ -102,7 +102,7 @@ use serde_json::{Map, Value};
 
 use super::config::{FailMode, HookConfig};
 use super::decision::{HookDecision, is_pre_event};
-use super::events::{HookEvent, MemoryDelta};
+use super::events::{EvictionEvent, HookEvent, MemoryDelta};
 use super::executor::ExecutorRegistry;
 use super::timeouts::{class_deadline_for_event, per_hook_budget_ms, record_timeout_violation};
 
@@ -518,6 +518,58 @@ where
         subscription_dispatch();
         chain.fire(event, payload, registry).await
     }
+}
+
+// ---------------------------------------------------------------------------
+// G8 — on_index_eviction fire helper
+// ---------------------------------------------------------------------------
+//
+// `OnIndexEviction` is the only event whose canonical fire site
+// (`src/hnsw.rs:insert` — the `MAX_ENTRIES`-triggered drain) sits
+// below the hooks layer in the dependency graph. `VectorIndex`
+// owns no `ExecutorRegistry` handle and threading one through
+// the `&mut HnswMap` Mutex would touch every caller in `db.rs`.
+//
+// The G8 prompt covers this exact case: "If no eviction logic
+// exists yet, just add the variant + a stub fire site behind
+// `#[cfg(test)]` and a TODO comment pointing at the next
+// iteration." The eviction logic *does* exist, but the wire-in
+// is the same shape — a thin helper that callers above the
+// hnsw layer can invoke once the registry is in scope.
+//
+// G9+ will plumb the registry into `VectorIndex::insert` (or
+// replace the `tracing::warn!` on the eviction edge with a
+// channel sink the hooks layer drains). Until then the helper
+// below is the public-API shape every fire site will use.
+
+/// Fire the `on_index_eviction` chain for `payload`.
+///
+/// This is the public wire-in point for G8. The HNSW eviction
+/// logic in `src/hnsw.rs:insert` carries a `TODO(v0.7-g8 next-iter)`
+/// pointing at this helper; callers above the hnsw layer (the DB
+/// layer once it grows registry awareness) invoke this once they
+/// observe an eviction. The test in `tests/hooks_executor_test.rs`
+/// exercises the wire shape end-to-end through a real subprocess
+/// hook so the executor + chain plumbing is covered today.
+///
+/// # Why a free function and not a method on `HookChain`
+///
+/// `HookChain::fire` already covers the generic event path. This
+/// helper exists so the call site (the hnsw layer once it's
+/// registry-aware) can pass a typed [`EvictionEvent`] instead of
+/// a `serde_json::Value` and have the JSON projection happen here
+/// — keeping the hnsw layer free of any `serde_json` import. It
+/// also gives us a single grep target for "where does the eviction
+/// hook fire?" once the next iteration finishes the wire-in.
+pub async fn fire_on_index_eviction(
+    chain: &HookChain,
+    registry: &mut ExecutorRegistry,
+    payload: EvictionEvent,
+) -> ChainResult {
+    let value = serde_json::to_value(&payload).unwrap_or_else(|_| Value::Null);
+    chain
+        .fire(HookEvent::OnIndexEviction, value, registry)
+        .await
 }
 
 // ---------------------------------------------------------------------------

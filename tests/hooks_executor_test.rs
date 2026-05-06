@@ -322,3 +322,121 @@ printf '%s\n' '{"action":"deny","reason":"redact required","code":451}'
         other => panic!("expected Deny, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// G8 — on_index_eviction wire-shape end-to-end
+// ---------------------------------------------------------------------------
+
+/// G8 widened the `EvictionEvent` payload from `{ memory_id }` to
+/// `{ memory_id, namespace, evicted_at, reason }` and added the
+/// `fire_on_index_eviction` chain helper. This test wires the
+/// helper end-to-end through a real subprocess hook so we cover:
+///
+///   1. The chain helper builds an `OnIndexEviction` envelope and
+///      fires it through a `HookChain`.
+///   2. The subprocess hook receives the full G8 payload shape on
+///      stdin (all four fields present).
+///   3. The hook's `Allow` decision routes back through
+///      `ChainResult::Allow`, matching the spec's "post-/on- event
+///      with no veto" semantics.
+///
+/// The hook script writes the received payload to a sidecar file
+/// before responding so the test can assert the exact bytes the
+/// child saw — closing the wire-format invariant the executor +
+/// chain plumbing must preserve.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_index_eviction_fires_with_full_payload() {
+    use ai_memory::hooks::{ChainResult, EvictionEvent, HookChain, fire_on_index_eviction};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let sidecar = dir.path().join("payload.json");
+
+    // The script reads the NDJSON envelope, snips off the trailing
+    // newline, writes it to the sidecar, then emits Allow. Using
+    // `head -n 1` rather than `cat` so we don't block on EOF if the
+    // executor leaves the pipe half-open across versions.
+    let script = write_script(
+        &dir,
+        "capture_eviction.sh",
+        &format!(
+            r#"#!/bin/sh
+read -r line
+printf '%s' "$line" > "{sidecar}"
+printf '%s\n' '{{"action":"allow"}}'
+"#,
+            sidecar = sidecar.display(),
+        ),
+    );
+
+    // Build a one-hook chain subscribed to OnIndexEviction.
+    let cfg = HookConfig {
+        event: HookEvent::OnIndexEviction,
+        command: script,
+        priority: 0,
+        timeout_ms: 5_000,
+        mode: HookMode::Exec,
+        enabled: true,
+        namespace: "*".into(),
+        fail_mode: FailMode::Open,
+    };
+    let chain = HookChain::new(vec![cfg.clone()]);
+    let mut registry = ExecutorRegistry::from_hooks(&[cfg]);
+
+    let payload = EvictionEvent::new(
+        "01HZX0R5GZ8R3KJYV1Y3M9YW2T",
+        "team/ops",
+        "max_entries_reached",
+    );
+    let payload_for_assert = payload.clone();
+
+    let result = fire_on_index_eviction(&chain, &mut registry, payload).await;
+    assert_eq!(
+        result,
+        ChainResult::Allow,
+        "single-hook chain returning Allow should resolve to ChainResult::Allow",
+    );
+
+    // Read the sidecar — the child should have captured the full
+    // wire envelope. Parse it back and assert each G8 field landed.
+    let captured = std::fs::read_to_string(&sidecar).expect("sidecar exists after fire");
+    let envelope: serde_json::Value =
+        serde_json::from_str(&captured).expect("captured envelope parses as JSON");
+
+    // The executor wraps the payload in a `{ event, payload }`
+    // envelope (see `FireEnvelope` in src/hooks/executor.rs).
+    assert_eq!(envelope["event"], json!("on_index_eviction"));
+    assert_eq!(
+        envelope["payload"]["memory_id"],
+        json!(payload_for_assert.memory_id)
+    );
+    assert_eq!(envelope["payload"]["namespace"], json!("team/ops"));
+    assert_eq!(envelope["payload"]["reason"], json!("max_entries_reached"));
+    let evicted_at = envelope["payload"]["evicted_at"]
+        .as_str()
+        .expect("evicted_at is a string");
+    assert_eq!(
+        evicted_at.len(),
+        20,
+        "evicted_at should be RFC-3339 second-precision UTC, got {evicted_at:?}"
+    );
+    assert!(
+        evicted_at.ends_with('Z'),
+        "evicted_at should end with Z, got {evicted_at:?}"
+    );
+}
+
+/// G8 sanity: legacy `{ memory_id }`-only payloads (G2-stub on-disk
+/// fixtures) must still decode after the field widening. Mirrors
+/// the unit test in `src/hooks/events.rs` but validated through the
+/// public `crate::hooks::EvictionEvent` re-export so the integration
+/// surface is what consumers see.
+#[test]
+fn eviction_event_legacy_payload_decodes_via_public_reexport() {
+    use ai_memory::hooks::EvictionEvent;
+    let legacy = r#"{"memory_id":"m-legacy"}"#;
+    let back: EvictionEvent = serde_json::from_str(legacy).expect("decode legacy payload");
+    assert_eq!(back.memory_id, "m-legacy");
+    assert!(back.namespace.is_empty());
+    assert!(back.evicted_at.is_empty());
+    assert!(back.reason.is_empty());
+}

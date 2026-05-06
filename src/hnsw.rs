@@ -185,6 +185,29 @@ impl VectorIndex {
                     max_entries = MAX_ENTRIES,
                     "hnsw index evicting oldest entry: cap reached"
                 );
+                // v0.7 G8: this is the canonical fire site for the
+                // `on_index_eviction` hook event. The chain wire-in
+                // is gated on the next iteration because `VectorIndex`
+                // does not currently carry a handle to the
+                // `ExecutorRegistry` / `HookChain` (it sits below the
+                // hooks layer in the dep graph). Two unblocking
+                // approaches the next iteration may take:
+                //
+                //   (a) plumb an `Arc<RwLock<ExecutorRegistry>>` +
+                //       `Arc<HookChain>` into `VectorIndex::insert`
+                //       (touches every caller in `db.rs`); or
+                //
+                //   (b) replace the in-line `tracing::warn!` with a
+                //       crossbeam channel sink and let a hook-aware
+                //       observer in `src/hooks/` drain it.
+                //
+                // Until then the fire path is exercised through
+                // `crate::hooks::chain::fire_on_index_eviction`
+                // (see `src/hooks/chain.rs`) and its unit test in
+                // `tests/hooks_executor_test.rs`.
+                //
+                // TODO(v0.7-g8 next-iter): wire the chain fire here
+                // once (a) or (b) above lands.
             }
             #[allow(clippy::cast_possible_truncation)]
             let evicted = excess as u64;

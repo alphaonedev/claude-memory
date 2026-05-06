@@ -389,9 +389,78 @@ pub struct GovernanceDecision {
 /// evicts an entry under capacity pressure. Lets observability
 /// hooks (datadog, prometheus pushgateway, etc.) surface the
 /// eviction without polling the `index_evictions_total` counter.
+///
+/// G8 (v0.7) widened the wire shape from `{ memory_id }` to the
+/// full `{ memory_id, namespace, evicted_at, reason }` so a hook
+/// can re-index, archive, or notify with enough context to do
+/// its job without re-querying the DB. Older `{ memory_id }`-only
+/// payloads still parse — `namespace`, `evicted_at`, and `reason`
+/// default to empty strings on the decode side via
+/// `serde(default)` so v0.7 hooks remain backward-compatible with
+/// any v0.7-rc / G2-stub fixtures that might still be on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvictionEvent {
+    /// Stringified id of the memory whose embedding was evicted
+    /// from the HNSW hot index. Matches the `evicted_id` field in
+    /// the `hnsw.eviction` tracing event so log + hook payloads
+    /// correlate.
     pub memory_id: String,
+    /// Namespace the evicted memory lived in. The current HNSW
+    /// fire site (G8) does not have the namespace in scope at
+    /// eviction time; G9+ will plumb it through. Empty string
+    /// today; populated from the test-only `fire_on_index_eviction`
+    /// helper so the wire contract is exercised.
+    #[serde(default)]
+    pub namespace: String,
+    /// RFC-3339 wall-clock timestamp of the eviction. Matches the
+    /// format used by `Memory.created_at` so hook authors can
+    /// reuse the same date parser.
+    #[serde(default)]
+    pub evicted_at: String,
+    /// Free-form machine-tag for *why* the eviction happened.
+    /// Today the only fire site uses `"max_entries_reached"`
+    /// (matching the existing `hnsw.eviction` tracing event); G9+
+    /// may add `"ttl_expired"`, `"manual"`, etc.
+    #[serde(default)]
+    pub reason: String,
+}
+
+impl EvictionEvent {
+    /// Construct an eviction payload tagged with the current
+    /// wall-clock time (RFC-3339, matching the rest of the
+    /// codebase's timestamp shape).
+    #[must_use]
+    pub fn new(
+        memory_id: impl Into<String>,
+        namespace: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            memory_id: memory_id.into(),
+            namespace: namespace.into(),
+            evicted_at: rfc3339_now(),
+            reason: reason.into(),
+        }
+    }
+}
+
+/// Tiny RFC-3339 formatter used by `EvictionEvent::new`. Keeps
+/// the chrono dep out of `events.rs` — a UNIX-seconds → ISO 8601
+/// projection is cheap and lossless for the second-precision
+/// timestamps every other model in this crate uses.
+fn rfc3339_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    // The hooks subsystem already pulls chrono in transitively via
+    // `crate::models`; reach for it here too so the wire shape
+    // matches `Memory.created_at` byte-for-byte.
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // chrono is already a workspace dep — see Cargo.toml.
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs as i64, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------------------
@@ -698,13 +767,54 @@ mod tests {
 
     #[test]
     fn eviction_event_round_trips() {
+        // G8 widened the payload to carry the namespace, the
+        // RFC-3339 wall-clock eviction time, and a machine-tag
+        // for the reason. The full wire shape must round-trip
+        // verbatim.
         let ev = EvictionEvent {
             memory_id: "m-1".into(),
+            namespace: "team/ops".into(),
+            evicted_at: "2026-05-05T12:34:56Z".into(),
+            reason: "max_entries_reached".into(),
         };
         let json = serde_json::to_string(&ev).expect("encode");
-        assert_eq!(json, "{\"memory_id\":\"m-1\"}");
         let back: EvictionEvent = serde_json::from_str(&json).expect("decode");
         assert_eq!(back.memory_id, "m-1");
+        assert_eq!(back.namespace, "team/ops");
+        assert_eq!(back.evicted_at, "2026-05-05T12:34:56Z");
+        assert_eq!(back.reason, "max_entries_reached");
+    }
+
+    #[test]
+    fn eviction_event_decodes_legacy_memory_id_only_payload() {
+        // G2 shipped `EvictionEvent { memory_id }`; G8 widened it.
+        // Backward compatibility: a legacy `{ memory_id }`-only
+        // fixture must still parse so any v0.7-rc on-disk hook
+        // payloads keep loading. `serde(default)` on the new fields
+        // gives empty-string defaults.
+        let legacy = r#"{"memory_id":"m-legacy"}"#;
+        let back: EvictionEvent = serde_json::from_str(legacy).expect("decode legacy");
+        assert_eq!(back.memory_id, "m-legacy");
+        assert!(back.namespace.is_empty());
+        assert!(back.evicted_at.is_empty());
+        assert!(back.reason.is_empty());
+    }
+
+    #[test]
+    fn eviction_event_new_stamps_rfc3339_timestamp() {
+        let ev = EvictionEvent::new("m-1", "team/ops", "max_entries_reached");
+        assert_eq!(ev.memory_id, "m-1");
+        assert_eq!(ev.namespace, "team/ops");
+        assert_eq!(ev.reason, "max_entries_reached");
+        // RFC-3339 second-precision UTC: `YYYY-MM-DDTHH:MM:SSZ`.
+        // The cheapest invariant to assert without freezing the
+        // clock: trailing `Z`, length 20, all ASCII.
+        assert_eq!(ev.evicted_at.len(), 20, "got {:?}", ev.evicted_at);
+        assert!(
+            ev.evicted_at.ends_with('Z'),
+            "expected trailing Z, got {:?}",
+            ev.evicted_at
+        );
     }
 
     #[test]
