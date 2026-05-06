@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+#![allow(clippy::zombie_processes)]
+
 //! Wave 7 / I7 — HTTP daemon spawn-and-poke regression guards.
 //!
 //! These tests spawn `ai-memory serve` as a child process and drive it

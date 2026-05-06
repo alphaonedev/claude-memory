@@ -62,13 +62,16 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// `memory_transcripts.archived_at` column backing the per-namespace
 /// TTL with archive→prune lifecycle, v26 from H5's append-only
 /// `signed_events` audit table backing the immutable attestation
-/// chain, and v27 from K6's `subscription_events.correlation_id`
+/// chain, v27 from K6's `subscription_events.correlation_id`
 /// column + `subscription_dlq` table backing A2A correlation IDs,
-/// ACK/retry semantics, and the dead-letter queue — all part of the
-/// attested-cortex epic). When a DB's `schema_version` exceeds this,
-/// the binary is too old for a newer DB and we surface a warning.
-/// v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 27;
+/// ACK/retry semantics, and the dead-letter queue, and v28 from K8's
+/// `agent_quotas` table backing the per-agent rate-limit + storage-cap
+/// substrate (memories/day, storage bytes, links/day, with daily reset
+/// at UTC midnight) — all part of the attested-cortex epic). When a
+/// DB's `schema_version` exceeds this, the binary is too old for a
+/// newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR
+/// #497 req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 28;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

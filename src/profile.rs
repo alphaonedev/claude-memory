@@ -32,7 +32,7 @@
 //! - `power` — adds the 8 LLM-augmented + operator tools (consolidate,
 //!   auto_tag, …, plus the v0.7 K7 subscription-reliability pair).
 //!   ~15 tools.
-//! - `full` — every family. 50 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
+//! - `full` — every family. 51 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` + v0.7 K8 `memory_quota_status`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -58,13 +58,13 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-05. Counts must sum to 50 (the v0.6.3.1 baseline of 43 +
+/// 2026-05-05. Counts must sum to 51 (the v0.6.3.1 baseline of 43 +
 /// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` (both in
 /// `Family::Graph`) + v0.7 B1 `memory_load_family` and v0.7 B2
 /// `memory_smart_load` in `Family::Core` +
 /// v0.7 K7 `memory_subscription_replay` and `memory_subscription_dlq_list`
-/// in `Family::Power` +
-/// v0.7 J7 `memory_find_paths` in `Family::Graph`).
+/// in `Family::Power` + v0.7 J7 `memory_find_paths` in `Family::Graph` +
+/// v0.7 K8 `memory_quota_status` in `Family::Power`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     /// store, recall, list, get, search, load_family, smart_load — 7
@@ -88,9 +88,12 @@ pub enum Family {
     /// subscribe, unsubscribe — 8
     Governance,
     /// consolidate, detect_contradiction, check_duplicate, auto_tag,
-    /// expand_query, inbox, subscription_replay, subscription_dlq_list — 8
-    /// (v0.7 K7 added the two operator/governance subscription-reliability
-    /// tools — replay events from the audit log + inspect the DLQ.)
+    /// expand_query, inbox, subscription_replay, subscription_dlq_list,
+    /// quota_status — 9 (v0.7 K7 added the two
+    /// operator/governance subscription-reliability tools — replay
+    /// events from the audit log + inspect the DLQ; v0.7 K8 added
+    /// `memory_quota_status` for the per-agent rate-limit + storage-cap
+    /// substrate.)
     Power,
     /// capabilities, agent_register, agent_list, session_start, stats — 5
     Meta,
@@ -149,9 +152,10 @@ impl Family {
             | "memory_namespace_clear_standard"
             | "memory_subscribe"
             | "memory_unsubscribe" => Some(Self::Governance),
-            // power (8 — v0.7 K7 added the subscription-reliability pair:
-            // `memory_subscription_replay` + `memory_subscription_dlq_list`,
-            // both operator/governance tools, not data-plane.)
+            // power (9 — v0.7 K7 added the subscription-reliability pair:
+            // `memory_subscription_replay` + `memory_subscription_dlq_list`;
+            // v0.7 K8 added `memory_quota_status` for the per-agent quota
+            // substrate. All operator/governance, not data-plane.)
             "memory_consolidate"
             | "memory_detect_contradiction"
             | "memory_check_duplicate"
@@ -159,7 +163,8 @@ impl Family {
             | "memory_expand_query"
             | "memory_inbox"
             | "memory_subscription_replay"
-            | "memory_subscription_dlq_list" => Some(Self::Power),
+            | "memory_subscription_dlq_list"
+            | "memory_quota_status" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -220,7 +225,9 @@ impl Family {
             // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) +
             // memory_find_paths (v0.7 J7) = 11.
             Self::Graph => 11,
-            Self::Governance | Self::Power => 8,
+            Self::Governance => 8,
+            // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) = 9.
+            Self::Power => 9,
             Self::Archive => 4,
             Self::Other => 2,
         }
@@ -305,6 +312,10 @@ impl Family {
                 // payloads that exhausted the [200ms, 1s, 5s] retry ladder.
                 "memory_subscription_replay",
                 "memory_subscription_dlq_list",
+                // v0.7 K8 — per-agent quota status (memories/day, storage
+                // bytes, links/day). Operator-facing inspector for the K8
+                // rate-limit substrate.
+                "memory_quota_status",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -405,11 +416,11 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 50 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `full` — every family. 51 tools (v0.6.3 baseline 43 + v0.7.0 I4
     /// `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1
     /// `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7
     /// `memory_subscription_replay` + `memory_subscription_dlq_list` +
-    /// v0.7 J7 `memory_find_paths`).
+    /// v0.7 J7 `memory_find_paths` + v0.7 K8 `memory_quota_status`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -588,16 +599,16 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_50() {
+    fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 50,
+            total, 51,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
              + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` \
-             = 50. If this drifts, update Family::expected_tool_count and \
-             the family map docs together."
+             + v0.7 K8 `memory_quota_status` = 51. If this drifts, update \
+             Family::expected_tool_count and the family map docs together."
         );
     }
 
@@ -669,27 +680,26 @@ mod tests {
     }
 
     #[test]
-    fn profile_power_has_fifteen_tools() {
+    fn profile_power_has_sixteen_tools() {
         let p = Profile::power();
         // v0.7 B1 + v0.7 B2 — Core now ships 7 tools (was 5).
-        // v0.7 K7 — Power now ships 8 tools (was 6) after the
-        // subscription-reliability pair landed.
-        assert_eq!(p.expected_tool_count(), 7 + 8);
+        // v0.7 K7 — Power got the subscription-reliability pair (+2 → 8).
+        // v0.7 K8 — Power got memory_quota_status (+1 → 9).
+        assert_eq!(p.expected_tool_count(), 7 + 9);
     }
 
     #[test]
-    fn profile_full_has_fifty_tools() {
+    fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7 B2 (post-J7) — full surface = 43 baseline +
-        // memory_replay (I4) + memory_verify (H4) + memory_load_family
-        // (B1) + memory_smart_load (B2) + memory_subscription_replay
-        // (K7) + memory_subscription_dlq_list (K7) + memory_find_paths
-        // (J7) = 50.
-        assert_eq!(p.expected_tool_count(), 50);
+        // v0.7 K8 (post-B2/J7) — full surface = 43 baseline + memory_replay (I4) +
+        // memory_verify (H4) + memory_load_family (B1) + memory_smart_load (B2) +
+        // memory_subscription_replay (K7) + memory_subscription_dlq_list (K7) +
+        // memory_find_paths (J7) + memory_quota_status (K8) = 51.
+        assert_eq!(p.expected_tool_count(), 51);
 
-        // The K7 additions live in Family::Power (operator/governance),
+        // The K7+K8 additions live in Family::Power (operator/governance),
         // so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 8);
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 9);
     }
 
     // ---------- Profile::parse ----------
@@ -854,6 +864,8 @@ mod tests {
             // power (v0.7 K7 additions — subscription reliability)
             "memory_subscription_replay",
             "memory_subscription_dlq_list",
+            // power (v0.7 K8 addition — per-agent quota status)
+            "memory_quota_status",
             // meta
             "memory_capabilities",
             "memory_agent_register",
@@ -871,12 +883,12 @@ mod tests {
         ];
         assert_eq!(
             baseline.len(),
-            50,
+            51,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
              2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
-             1 (v0.7 J7 memory_find_paths) = 50"
+             1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) = 51"
         );
         for name in baseline {
             assert!(

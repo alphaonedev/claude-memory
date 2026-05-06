@@ -1,5 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
+
+#![allow(clippy::doc_lazy_continuation)]
+
 //
 // v0.7.0 K3 — `permissions.mode` consulted by gate.
 //
