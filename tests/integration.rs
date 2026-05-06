@@ -7561,9 +7561,22 @@ fn test_budget_mcp_tool_schema_and_response() {
         .iter()
         .find(|t| t["name"] == "memory_recall")
         .unwrap();
+    // v0.7 C4 — `budget_tokens` is an OPTIONAL param and is hidden
+    // from the default `tools/list` payload (verbose=false). The
+    // contract changed from "must be advertised" to "must NOT be
+    // advertised by default; runtime call still works". Verbose
+    // discovery is exercised below via memory_capabilities.
     assert!(
-        recall_tool["inputSchema"]["properties"]["budget_tokens"].is_object(),
-        "memory_recall must advertise budget_tokens"
+        recall_tool["inputSchema"]["properties"]
+            .get("budget_tokens")
+            .is_none(),
+        "v0.7 C4: memory_recall must NOT advertise optional `budget_tokens` in the \
+         default tools/list payload. Pass verbose=true to memory_capabilities to opt in."
+    );
+    // The required param `context` survives the trim.
+    assert!(
+        recall_tool["inputSchema"]["properties"]["context"].is_object(),
+        "memory_recall must keep required param `context`"
     );
 
     let call_resp: serde_json::Value = serde_json::from_str(lines[2]).unwrap();
