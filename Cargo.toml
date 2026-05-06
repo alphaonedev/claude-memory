@@ -203,6 +203,18 @@ predicates = "3"
 # reqwest calls can be exercised end-to-end without any network or daemon.
 # Used only by tests; never linked into the release binary.
 wiremock = "0.6"
+# v0.7 J5 — direct sqlx access from `tests/age_cte_equivalence.rs` so
+# the dual-path harness can seed `memory_links` rows and the AGE
+# `memory_graph` projection without going through the SAL surface
+# (`MemoryStore::link` returns `UnsupportedCapability` on the v0.7
+# Postgres adapter — see `src/store/postgres.rs::link`). Same feature
+# set as the production `sqlx` dep so both crates compile against an
+# identical driver. Pulled in unconditionally so it's available to the
+# integration test even when the `sal-postgres` cargo feature isn't
+# selected at top-level — the test file itself is `#[cfg(feature =
+# "sal-postgres")]` so default builds don't compile anything that
+# touches sqlx.
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "chrono"] }
 # `libc` for the SIGINT graceful-shutdown integration test on unix —
 # already transitively in the dep tree via tokio, declared explicitly
 # here so the test can `use libc::SIGINT` without `rustc_private` errors.
