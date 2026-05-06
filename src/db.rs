@@ -3430,6 +3430,138 @@ pub fn kg_query(
         .map_err(Into::into)
 }
 
+/// Default cap on paths returned by [`find_paths`] when the caller does
+/// not specify one. Matches the v0.7 J7 charter.
+pub const FIND_PATHS_DEFAULT_LIMIT: usize = 10;
+
+/// Hard ceiling on paths returned by [`find_paths`]. A crafted call
+/// asking for more than this many paths is clamped down. Matches the
+/// v0.7 J7 charter.
+pub const FIND_PATHS_MAX_LIMIT: usize = 50;
+
+/// Hard ceiling on traversal depth supported by [`find_paths`].
+/// Distinct from [`KG_QUERY_MAX_SUPPORTED_DEPTH`] because path
+/// enumeration is more expensive than reachability — we can afford a
+/// slightly deeper budget for the BFS but not by much.
+pub const FIND_PATHS_MAX_DEPTH: usize = 7;
+
+/// Default depth used when the caller omits `max_depth`. Mirrors the
+/// v0.7 J7 charter's "shallow by default, opt-in deep traversal" rule.
+pub const FIND_PATHS_DEFAULT_DEPTH: usize = 4;
+
+/// v0.7 J7 — enumerate up to N undirected paths between two memories.
+///
+/// Walks `memory_links` with a recursive CTE that carries the full
+/// visited-id chain on each row, both as the outbound `path` rendered
+/// for callers and as the cycle-detection set so the traversal cannot
+/// loop on a cyclic link graph. Each row of the CTE represents one
+/// candidate prefix; rows that reach `target_id` are projected out as
+/// completed paths.
+///
+/// Treated as undirected: we traverse `memory_links` in both directions
+/// at every hop. The KG corpus uses directional links to model temporal
+/// ordering of an assertion (`source → target`), but path queries are
+/// asking "are these two memories connected via *any* relation chain?",
+/// which requires the symmetric closure. The CTE achieves that by
+/// `UNION ALL` over the original edge and the reverse edge at each hop.
+///
+/// `max_depth` defaults to [`FIND_PATHS_DEFAULT_DEPTH`] and is clamped
+/// at [`FIND_PATHS_MAX_DEPTH`]; passing a larger value yields an
+/// explicit error rather than silent truncation. `max_results`
+/// defaults to [`FIND_PATHS_DEFAULT_LIMIT`] and is clamped at
+/// [`FIND_PATHS_MAX_LIMIT`]; passing a larger value collapses to the
+/// ceiling without error (paths beyond the cap are dropped, the
+/// shortest paths win on the `ORDER BY`).
+///
+/// Returns `Vec<Vec<String>>` — one inner vector per discovered path,
+/// each carrying the chain of memory ids from `source_id` (first) to
+/// `target_id` (last). Self-paths (`source_id == target_id`) collapse
+/// to a single one-element path. Disconnected pairs return an empty
+/// outer vector.
+pub fn find_paths(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    max_depth: Option<usize>,
+    max_results: Option<usize>,
+) -> Result<Vec<Vec<String>>> {
+    let depth = max_depth.unwrap_or(FIND_PATHS_DEFAULT_DEPTH);
+    if depth == 0 {
+        anyhow::bail!("max_depth must be >= 1");
+    }
+    if depth > FIND_PATHS_MAX_DEPTH {
+        anyhow::bail!("max_depth={depth} exceeds supported depth={FIND_PATHS_MAX_DEPTH}");
+    }
+    let cap = max_results
+        .unwrap_or(FIND_PATHS_DEFAULT_LIMIT)
+        .clamp(1, FIND_PATHS_MAX_LIMIT);
+
+    // Self-path short-circuit. The recursive CTE below requires depth>=1
+    // before it can match `target_id`; the trivial chain is just the
+    // single-element path through the start node.
+    if source_id == target_id {
+        return Ok(vec![vec![source_id.to_string()]]);
+    }
+
+    // The CTE walks symmetric edges: for each row in `memory_links` we
+    // also generate its reverse so the traversal is undirected. Cycle
+    // detection uses the JSON-encoded path array (same trick as
+    // `kg_query`) — `NOT EXISTS (... json_each ...)` short-circuits the
+    // recursion as soon as the next hop would revisit a node already in
+    // the prefix.
+    //
+    // The completed-path filter sits in the outer SELECT rather than
+    // the recursive member because a partial prefix that lands on
+    // `target_id` should be reported AND continue to extend (a longer
+    // path through `target_id` might reach itself through a different
+    // route — though for the KG that should be rare, the CTE doesn't
+    // need to know that). `ORDER BY depth, path` keeps the shortest
+    // paths first so the `LIMIT` cap drops the longest tail.
+    let sql = format!(
+        "WITH RECURSIVE traversal(current_id, depth, path) AS (
+            SELECT ?1, 0, json_array(?1)
+            UNION ALL
+            SELECT next_id, t.depth + 1,
+                   json_insert(t.path, '$[' || json_array_length(t.path) || ']', next_id)
+            FROM traversal t
+            JOIN (
+                SELECT source_id AS from_id, target_id AS next_id FROM memory_links
+                UNION
+                SELECT target_id AS from_id, source_id AS next_id FROM memory_links
+            ) edges ON edges.from_id = t.current_id
+            WHERE t.depth < ?3
+              AND NOT EXISTS (
+                  SELECT 1 FROM json_each(t.path) WHERE value = next_id
+              )
+         )
+         SELECT path
+         FROM traversal
+         WHERE current_id = ?2 AND depth >= 1
+         ORDER BY depth ASC, path ASC
+         LIMIT ?4"
+    );
+
+    let depth_i64 = i64::try_from(depth).unwrap_or(i64::MAX);
+    let cap_i64 = i64::try_from(cap).unwrap_or(i64::MAX);
+
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![source_id, target_id, depth_i64, cap_i64], |row| {
+        let json_path: String = row.get(0)?;
+        Ok(json_path)
+    })?;
+
+    let mut paths: Vec<Vec<String>> = Vec::new();
+    for row in rows {
+        let json = row?;
+        let parsed: Vec<String> = serde_json::from_str(&json).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?;
+        paths.push(parsed);
+    }
+
+    Ok(paths)
+}
+
 /// List all aliases registered for an entity, ordered by registration
 /// time then alphabetical for stable display.
 fn list_entity_aliases(conn: &Connection, entity_id: &str) -> Result<Vec<String>> {

@@ -26,12 +26,12 @@
 //!
 //! - `core` — 6 tools, the new v0.6.4 default (v0.7 B1 added
 //!   `memory_load_family`). Always loaded.
-//! - `graph` — adds the 10 KG/entity/replay/verify tools. ~16 tools.
+//! - `graph` — adds the 11 KG/entity/replay/verify/find_paths tools. ~17 tools.
 //! - `admin` — adds lifecycle (5) + governance (8). ~19 tools.
 //! - `power` — adds the 8 LLM-augmented + operator tools (consolidate,
 //!   auto_tag, …, plus the v0.7 K7 subscription-reliability pair).
 //!   ~14 tools.
-//! - `full` — every family. 48 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list`).
+//! - `full` — every family. 49 tools (v0.6.3 baseline 43 + v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 K7 `memory_subscription_replay` + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
 //! - `custom` — comma-separated family list (`core,graph,archive` …).
 //!   `core` is implicitly added if missing — there's no profile that
 //!   ships *less than* the 5 core tools.
@@ -57,11 +57,12 @@
 use std::str::FromStr;
 
 /// A tool family. Source-anchored at `src/mcp.rs::tool_definitions()`
-/// 2026-05-05. Counts must sum to 48 (the v0.6.3.1 baseline of 43 +
+/// 2026-05-05. Counts must sum to 49 (the v0.6.3.1 baseline of 43 +
 /// v0.7.0 I4 `memory_replay` + v0.7 H4 `memory_verify` (both in
 /// `Family::Graph`) + v0.7 B1 `memory_load_family` in `Family::Core` +
 /// v0.7 K7 `memory_subscription_replay` and `memory_subscription_dlq_list`
-/// in `Family::Power`).
+/// in `Family::Power` +
+/// v0.7 J7 `memory_find_paths` in `Family::Graph`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Family {
     /// store, recall, list, get, search, load_family — 6
@@ -73,7 +74,7 @@ pub enum Family {
     Lifecycle,
     /// kg_query, kg_timeline, kg_invalidate, link, get_links,
     /// entity_register, entity_get_by_alias, get_taxonomy, replay,
-    /// verify — 10 (replay added in v0.7.0 I4 — joins to the I2
+    /// verify, find_paths — 11 (replay added in v0.7.0 I4 — joins to the I2
     /// transcript-link substrate to reconstruct a memory's source
     /// transcript chain; verify added in v0.7 H4 — re-checks the
     /// Ed25519 signature on a stored memory_links row.)
@@ -119,7 +120,8 @@ impl Family {
             // lifecycle (5)
             "memory_update" | "memory_delete" | "memory_forget" | "memory_gc"
             | "memory_promote" => Some(Self::Lifecycle),
-            // graph (10 — v0.7.0 I4 added memory_replay; v0.7 H4 added memory_verify)
+            // graph (11 — v0.7.0 I4 added memory_replay; v0.7 H4 added memory_verify;
+            // v0.7 J7 added memory_find_paths)
             "memory_kg_query"
             | "memory_kg_timeline"
             | "memory_kg_invalidate"
@@ -129,7 +131,8 @@ impl Family {
             | "memory_entity_get_by_alias"
             | "memory_get_taxonomy"
             | "memory_replay"
-            | "memory_verify" => Some(Self::Graph),
+            | "memory_verify"
+            | "memory_find_paths" => Some(Self::Graph),
             // governance (8)
             "memory_pending_list"
             | "memory_pending_approve"
@@ -206,8 +209,9 @@ impl Family {
             // Core: 5 baseline + memory_load_family (v0.7 B1) = 6.
             Self::Core => 6,
             Self::Lifecycle | Self::Meta => 5,
-            // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) = 10.
-            Self::Graph => 10,
+            // Graph: 8 baseline + memory_replay (v0.7.0 I4) + memory_verify (v0.7 H4) +
+            // memory_find_paths (v0.7 J7) = 11.
+            Self::Graph => 11,
             Self::Governance | Self::Power => 8,
             Self::Archive => 4,
             Self::Other => 2,
@@ -261,6 +265,9 @@ impl Family {
                 // v0.7 H4 — re-verifies a stored link's Ed25519
                 // signature on demand, returning attest_level.
                 "memory_verify",
+                // v0.7 J7 — enumerate up to N paths between two memories
+                // (BFS with cycle detection over memory_links).
+                "memory_find_paths",
             ],
             Self::Governance => &[
                 "memory_pending_list",
@@ -351,9 +358,9 @@ impl Profile {
         }
     }
 
-    /// `graph` — core + graph. 16 tools (v0.7.0 I4 added `memory_replay`;
+    /// `graph` — core + graph. 17 tools (v0.7.0 I4 added `memory_replay`;
     /// v0.7 H4 added `memory_verify`; v0.7 B1 added `memory_load_family`
-    /// to core).
+    /// to core; v0.7 J7 added `memory_find_paths`).
     #[must_use]
     pub fn graph() -> Self {
         Self {
@@ -380,10 +387,10 @@ impl Profile {
         }
     }
 
-    /// `full` — every family. 48 tools (v0.6.3 baseline 43 + v0.7.0 I4
+    /// `full` — every family. 49 tools (v0.6.3 baseline 43 + v0.7.0 I4
     /// `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1
     /// `memory_load_family` + v0.7 K7 `memory_subscription_replay`
-    /// + `memory_subscription_dlq_list`).
+    /// + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths`).
     #[must_use]
     pub fn full() -> Self {
         Self {
@@ -562,14 +569,15 @@ mod tests {
     }
 
     #[test]
-    fn family_expected_tool_counts_sum_to_48() {
+    fn family_expected_tool_counts_sum_to_49() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 48,
+            total, 49,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 K7 \
              `memory_subscription_replay` + `memory_subscription_dlq_list` \
-             = 48. If this drifts, update Family::expected_tool_count and \
+             + v0.7 J7 `memory_find_paths` \
+             = 49. If this drifts, update Family::expected_tool_count and \
              the family map docs together."
         );
     }
@@ -619,12 +627,12 @@ mod tests {
     }
 
     #[test]
-    fn profile_graph_has_sixteen_tools() {
+    fn profile_graph_has_seventeen_tools() {
         let p = Profile::graph();
-        // v0.7 H4 — Graph now ships 10 tools (8 baseline + memory_replay
-        // [I4] + memory_verify [H4]); v0.7 B1 added memory_load_family
-        // to core (6 instead of 5).
-        assert_eq!(p.expected_tool_count(), 6 + 10);
+        // v0.7 J7 — Graph now ships 11 tools (8 baseline + memory_replay
+        // [I4] + memory_verify [H4] + memory_find_paths [J7]); v0.7 B1
+        // added memory_load_family to core (6 instead of 5).
+        assert_eq!(p.expected_tool_count(), 6 + 11);
         assert!(p.includes(Family::Graph));
     }
 
@@ -647,13 +655,13 @@ mod tests {
     }
 
     #[test]
-    fn profile_full_has_forty_eight_tools() {
+    fn profile_full_has_forty_nine_tools() {
         let p = Profile::full();
-        // v0.7 K7 — full surface = 43 baseline + memory_replay (I4) +
+        // v0.7 J7 (post-K7) — full surface = 43 baseline + memory_replay (I4) +
         // memory_verify (H4) + memory_load_family (B1) +
-        // memory_subscription_replay (K7) + memory_subscription_dlq_list
-        // (K7) = 48.
-        assert_eq!(p.expected_tool_count(), 48);
+        // memory_subscription_replay (K7) + memory_subscription_dlq_list (K7) +
+        // memory_find_paths (J7) = 49.
+        assert_eq!(p.expected_tool_count(), 49);
 
         // The K7 additions live in Family::Power (operator/governance),
         // so the `power` profile picks them up too.
@@ -679,14 +687,14 @@ mod tests {
 
     #[test]
     fn parse_custom_comma_list_dedup() {
-        // `core,graph` → core (6, after v0.7 B1) + graph (10, after v0.7
-        // H4) = 16 tools. Meta is NOT included — `memory_capabilities`
+        // `core,graph` → core (6, after v0.7 B1) + graph (11, after v0.7
+        // J7) = 17 tools. Meta is NOT included — `memory_capabilities`
         // is always-on bootstrapped outside the family map (v0.6.4-002).
         let p = Profile::parse("core,graph").unwrap();
         assert!(p.includes(Family::Core));
         assert!(!p.includes(Family::Meta));
         assert!(p.includes(Family::Graph));
-        assert_eq!(p.expected_tool_count(), 16);
+        assert_eq!(p.expected_tool_count(), 17);
     }
 
     #[test]
@@ -798,6 +806,8 @@ mod tests {
             "memory_replay",
             // graph (v0.7 H4 addition)
             "memory_verify",
+            // graph (v0.7 J7 addition)
+            "memory_find_paths",
             // governance
             "memory_pending_list",
             "memory_pending_approve",
@@ -834,10 +844,11 @@ mod tests {
         ];
         assert_eq!(
             baseline.len(),
-            48,
+            49,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
-             2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) = 48"
+             2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
+             1 (v0.7 J7 memory_find_paths) = 49"
         );
         for name in baseline {
             assert!(
