@@ -1,0 +1,52 @@
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# v0.7.0.1 — closes #625.
+#
+# `ai-memory-post-ship-converge` is the cross-platform Rust
+# replacement for the (planned) `scripts/post-ship-converge.sh`
+# (E2). It walks the post-release distribution channels (cargo,
+# brew, prebuilt binary tarballs) for a given version and asserts
+# they all converge on the same release artifact. Standalone Rust
+# crate — kept out of the published `ai-memory` package via the
+# parent `Cargo.toml`'s `include = [...]` allowlist (the same
+# allowlist that excludes `tools/` from the crates.io upload).
+#
+# This crate is *not* part of any Cargo workspace on purpose —
+# same precedent as `tools/transcript-extractor/` (I5),
+# `tools/auto-link-detector/` (G11), and the sibling
+# `tools/t0-orchestrate/` (E1). The integration test in
+# `tests/e2_post_ship_dry_run.rs` builds it on the fly through
+# `cargo build --manifest-path tools/post-ship-converge/Cargo.toml`,
+# behind a `OnceLock` to avoid the parallel-rebuild flake handled
+# in PR #623.
+
+[package]
+name = "ai-memory-post-ship-converge"
+version = "0.1.0"
+edition = "2024"
+authors = ["AlphaOne LLC"]
+description = "v0.7 E2 cross-platform post-ship distribution-channel convergence verifier"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[[bin]]
+name = "post-ship-converge"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
