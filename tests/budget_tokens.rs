@@ -20,7 +20,30 @@
 
 use ai_memory::db::{BudgetOutcome, apply_token_budget, count_tokens_cl100k};
 use ai_memory::models::{Memory, Tier};
+use ai_memory::sizes::full_profile_total_tokens;
 use serde_json::json;
+
+/// v0.7 C5 — hard CI ceiling on the full-profile MCP `tools/list` payload.
+///
+/// C2 (split tool description from `docs` field), C3 (collapse repeated
+/// schema boilerplate), and C4 (hide rarely-used optional params) together
+/// drive the full-profile `cl100k_base` cost from the v0.6.4 baseline (~7.4K
+/// tokens) down to ~3.49K. C5 locks in that win so a future PR cannot
+/// silently grow the surface back toward the old baseline. The 3500-token
+/// ceiling has ~8 tokens of headroom over the C2-shipped 3492 figure;
+/// future PRs that add tools or expand descriptions must claw back budget
+/// elsewhere (or move the tool out of the default `core` family).
+///
+/// **Why `#[ignore]` by default?** This test is the load-bearing assertion
+/// for the v0.7 schema-compaction track. Running it from a plain
+/// `cargo test --test budget_tokens` invocation would couple this gate's
+/// pass/fail to whether C2-C4 has fully landed on the current branch — a
+/// surprising failure mode for unrelated PRs. The CI workflow
+/// (`.github/workflows/token-budget.yml`) explicitly opts in via
+/// `--ignored` so the gate remains enforced at the merge boundary while
+/// local `cargo test` runs stay green on branches that haven't yet
+/// rebased over the C2-C4 merge.
+const FULL_PROFILE_TOKEN_CEILING: usize = 3_500;
 
 fn mem_with_content(id: &str, content: &str) -> Memory {
     Memory {
@@ -213,6 +236,28 @@ fn cl100k_tokenizer_is_deterministic() {
     // character count. (The exact value for cl100k on this string is 10
     // — pin it so a future-tiktoken regression jumps out in CI logs.)
     assert_eq!(a, 10, "cl100k_base count for the canonical pangram");
+}
+
+// ---------------------------------------------------------------------------
+// v0.7 C5 — full-profile tools/list ceiling (3500 cl100k_base tokens).
+// ---------------------------------------------------------------------------
+
+#[test]
+#[ignore = "v0.7 C5 — opt-in gate, run via `cargo test -- --ignored` or the \
+            `.github/workflows/token-budget.yml` C5 step. Depends on C2-C4 \
+            having landed on the branch."]
+fn full_profile_tools_list_under_3500_tokens() {
+    let total = full_profile_total_tokens();
+    assert!(
+        total <= FULL_PROFILE_TOKEN_CEILING,
+        "v0.7 C5 CI gate: full-profile tools/list payload is {total} cl100k_base \
+         tokens (ceiling: {FULL_PROFILE_TOKEN_CEILING}). C2 (split docs field), \
+         C3 (collapse schema boilerplate), and C4 (hide rare optional params) \
+         together drove this from ~7.4K to ~3.49K; this assertion locks in the \
+         win. Inspect `cargo run --release -- doctor --tokens --raw-table` to \
+         find the tool whose schema grew, and either trim it back or claw back \
+         budget elsewhere."
+    );
 }
 
 #[test]

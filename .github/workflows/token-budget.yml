@@ -1,15 +1,28 @@
 # v0.6.4-011 — token-budget CI gate.
+# v0.7 C5 — extended with the full-profile <= 3500 tokens hard ceiling.
 #
-# Runs the per-tool ceiling (1500 tokens) and the full-profile honest-
-# range (5K–8K cl100k_base) assertions on every push and PR. Either
-# failing blocks merge to main per branch protection.
+# Runs the per-tool ceiling (1500 tokens), the full-profile honest-
+# range (5K–8K cl100k_base) assertion, and the v0.7 C5 hard ceiling
+# (full-profile tools/list <= 3500 cl100k_base tokens) on every push
+# and PR. Any failing gate blocks merge to main per branch protection.
 #
-# These two gates together protect against a regression that would
-# silently grow the v0.6.4 default surface back toward the v0.6.3
-# 6K-token baseline. The actual `core` profile cost is bounded
-# transitively: even if every family except `core` doubled in size,
-# `core` itself would not move (it depends only on the 5 core tools
-# + the always-on `memory_capabilities` bootstrap).
+# The 5K–8K honest-range gate from v0.6.4 stays in place as the
+# bottom-of-the-range backstop (it asserts the surface hasn't shrunk
+# pathologically, which would be a sign of accidentally dropping tools).
+# The v0.7 C5 ceiling enforces the schema-compaction win from the C2-C4
+# track: C2 split the verbose `docs` field out of every tool description,
+# C3 collapsed repeated boilerplate inputSchema fragments, and C4 hid
+# rarely-used optional params behind opt-in registration. Together they
+# drove the full-profile cost from ~7.4K cl100k_base tokens to ~3.49K,
+# leaving ~8 tokens of headroom under the 3500 ceiling. Future PRs that
+# add tools or expand descriptions must claw back budget elsewhere.
+#
+# These gates together protect against a regression that would silently
+# grow the v0.6.4 default surface back toward the v0.6.3 6K-token
+# baseline. The actual `core` profile cost is bounded transitively: even
+# if every family except `core` doubled in size, `core` itself would not
+# move (it depends only on the 5 core tools + the always-on
+# `memory_capabilities` bootstrap).
 name: token-budget
 
 on:
@@ -42,3 +55,37 @@ jobs:
         env:
           AI_MEMORY_NO_CONFIG: "1"
         run: cargo test --lib cli::doctor::tests::run_tokens_human_default_profile_is_core -- --exact
+      # v0.7 C5 — hard ceiling on the full-profile tools/list payload.
+      # The ignored test must be opted into explicitly so that local
+      # `cargo test --test budget_tokens` stays green on branches that
+      # have not yet rebased over the C2-C4 schema-compaction merge.
+      # The CI gate runs it unconditionally so the ceiling is enforced
+      # at every merge.
+      - name: full-profile <= 3500 tokens (v0.7 C5 hard ceiling)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          cargo test --test budget_tokens \
+            full_profile_tools_list_under_3500_tokens \
+            -- --exact --ignored
+      # Belt-and-braces: also drive the assertion through the operator-
+      # facing `doctor --tokens --json` reporter so a regression in the
+      # JSON shape (renamed field, dropped key) trips the gate too. We
+      # parse the documented `full_profile_total_tokens` field and fail
+      # with a pointer to the C2-C4 audit if the value exceeds 3500.
+      - name: doctor --tokens --json reports total <= 3500 (v0.7 C5)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: |
+          set -euo pipefail
+          cargo build --release --bin ai-memory
+          PAYLOAD="$(./target/release/ai-memory doctor --tokens --json)"
+          TOTAL="$(printf '%s' "$PAYLOAD" \
+            | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["full_profile_total_tokens"])')"
+          echo "doctor --tokens --json: full_profile_total_tokens=$TOTAL (ceiling 3500)"
+          if [ "$TOTAL" -gt 3500 ]; then
+            echo "::error::v0.7 C5 CI gate FAILED: full-profile tools/list payload is $TOTAL cl100k_base tokens (ceiling: 3500)."
+            echo "::error::C2 (split docs field), C3 (collapse schema boilerplate) and C4 (hide rare optional params) drove this from ~7.4K to ~3.49K tokens; this gate locks in that win."
+            echo "::error::Inspect 'cargo run --release -- doctor --tokens --raw-table' to find the offending tool. See docs/v0.7/schema-compaction-audit.md."
+            exit 1
+          fi
