@@ -1,6 +1,12 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// E2's post-ship-converge.sh is a bash script. Windows runners don't
+// ship bash by default, so the dry-run harness check only runs on
+// Unix. The script itself works on any platform with a bash interpreter
+// (WSL/Git-Bash); CI just doesn't validate that path.
+#![cfg(unix)]
+
 //! v0.7 Track E task E2 — post-ship convergence verification dry-run.
 //!
 //! `scripts/post-ship-converge.sh` is the runbook script the release
