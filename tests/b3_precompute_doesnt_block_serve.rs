@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! v0.7 B3-fix regression — `bootstrap_serve` must not block HTTP
-//! `/health` on the family-descriptor embedding precompute.
+//! `/health` on the family-descriptor embedding precompute, even
+//! when the precompute is explicitly opted-in.
 //!
 //! ## What this guards against
 //!
@@ -16,13 +17,18 @@
 //! integration tests to fail at `tests/integration.rs:8924` on
 //! Linux, macOS, and Windows.
 //!
-//! The fix moves the precompute to a detached `tokio::spawn` task
-//! whose result lands in `AppState::family_embeddings`
-//! (`Arc<RwLock<Option<…>>>`) when ready. This test boots `ai-memory
-//! serve` in the same way `DaemonGuard::spawn` does and asserts the
-//! `/health` endpoint responds within **2 s** — well under the
-//! original 5 s budget — proving the precompute is no longer on the
-//! serve startup path.
+//! v0.7 B3-fix2 then gated the precompute behind
+//! `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1` (default OFF) after a
+//! follow-up CI failure pattern showed the *detached* spawn_blocking
+//! variant still serialised request-path embeds on the embedder's
+//! `std::sync::Mutex<BertModel>` under parallel test load — surfacing
+//! as `http_notify_fans_out_…` 503 quorum failures and
+//! `test_serve_mtls_…` POST timeouts that did not occur on
+//! `origin/main`. This test sets the env var ON to exercise the
+//! enabled-precompute path and proves `/health` still responds in
+//! the integration-suite budget — so the day B2 wires the smart
+//! loader and the gate flips on by default, the boot path is still
+//! safe.
 //!
 //! Cross-platform: `assert_cmd` + `std::process::Command` only,
 //! no shell, no Unix-only signals.
@@ -91,6 +97,13 @@ fn b3_precompute_does_not_block_serve_health() {
         // when the precompute is on a background task, this guards
         // against the test itself making CI slow.
         .env("HF_HUB_OFFLINE", "1")
+        // v0.7 B3-fix2 — the precompute is gated OFF by default
+        // (see `bootstrap_serve` in `src/daemon_runtime.rs`). Flip
+        // it ON here so the test actually exercises the precompute
+        // path: a regression that re-blocks `/health` on the
+        // precompute *under the explicit opt-in* would still fail
+        // the integration suite the day B2 enables the gate.
+        .env("AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS", "1")
         .args([
             "--db",
             db.to_str().unwrap(),
@@ -103,11 +116,17 @@ fn b3_precompute_does_not_block_serve_health() {
         .spawn()
         .expect("spawn ai-memory serve");
 
-    // 2-second budget: well under the 5 s `wait_for_health` budget
-    // in `tests/integration.rs` that the original CI regression
-    // overran. If the precompute ever creeps back onto the serve
-    // startup path, this fails first.
-    let result = wait_for_health_within(port, Duration::from_secs(2));
+    // 5-second budget matches `tests/integration.rs::wait_for_health`
+    // (50 × 100 ms). A regression that re-couples `/health` to the
+    // precompute (e.g. by `await`ing the precompute task before
+    // returning from `bootstrap_serve`) would blow this budget on
+    // the same CI runners that exposed the original bug. The looser
+    // 5 s — vs the prior 2 s — bound was chosen after Windows
+    // runners measured 2.34 s for the embedder *load* (separate
+    // from the precompute) on cold-start; the original 2 s was
+    // tight enough to false-positive on slow runners while not
+    // catching anything 5 s does not.
+    let result = wait_for_health_within(port, Duration::from_secs(5));
 
     // Always reap the child before asserting so a failed assertion
     // doesn't leave a zombie daemon holding the port.
@@ -117,7 +136,8 @@ fn b3_precompute_does_not_block_serve_health() {
 
     assert!(
         result.is_some(),
-        "/api/v1/health did not respond within 2 s — \
+        "/api/v1/health did not respond within 5 s with \
+         AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1 — \
          precompute_family_embeddings likely back on the serve \
          startup path (PR #592 B3-fix regression)",
     );

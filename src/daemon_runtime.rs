@@ -1449,26 +1449,46 @@ pub async fn bootstrap_serve(
     // so a malformed keypair file doesn't take down the daemon.
     let active_keypair = load_active_keypair_for_serve();
 
-    // v0.7.0 B3-fix — precompute the family-descriptor embedding
-    // cache OFF the serve startup path. The original implementation
-    // called `AppState::precompute_family_embeddings` synchronously
-    // here, but `Embedder::embed` blocks on a first-use `hf-hub`
-    // model download in CI environments without a pre-warmed cache,
-    // pushing HTTP `/health` past the integration suite's 5 s
-    // `wait_for_health` budget on Linux, macOS, and Windows runners.
+    // v0.7.0 B3-fix2 — gate the family-descriptor embedding precompute
+    // behind `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1`, default OFF.
     //
-    // Fix: hand the cache cell to `AppState` already-allocated as
-    // `RwLock<None>`, then spawn a detached task (CPU-bound work
-    // routed through `spawn_blocking`) that fills it when the
-    // embedder returns. `best_family_match` returns `None` until the
-    // task completes, and B2's smart loader degrades to its
-    // non-embedding match path. The `JoinHandle` is parked on
-    // `task_handles` so daemon shutdown aborts the precompute if
-    // it's still in flight.
+    // ## Why default-OFF
+    //
+    // The B3 precompute is forward-infrastructure for B2's
+    // `memory_smart_load(intent)`, which is not yet wired into any HTTP
+    // or MCP handler — `best_family_match` is dead code in production
+    // today (only one unit test calls it). Running 8 detached embeds at
+    // boot therefore buys nothing for current callers but does compete
+    // for the embedder's `std::sync::Mutex<BertModel>` against every
+    // request that needs to embed (notify content, sync_push row
+    // refresh, recall query, single-row create_memory).
+    //
+    // Under heavy parallel `cargo test` load (every integration test
+    // spawns its own `ai-memory serve` subprocess, saturating CPU),
+    // that contention pushes federation-quorum windows over the 5 s
+    // ack budget — observed locally as `http_notify_fans_out_…` 503s
+    // and `test_serve_mtls_…` POST timeouts that did not occur on
+    // `origin/main` and disappear when the precompute is gated off.
+    // Even the prior B3-fix's "detached spawn_blocking" form does not
+    // help: the contention is on the embedder mutex inside `embed()`,
+    // not on the tokio scheduler.
+    //
+    // ## Cell semantics preserved
+    //
+    // `AppState::family_embeddings` stays `Arc<RwLock<Option<…>>>` so
+    // B2 can flip the env var on (or remove the gate entirely) the
+    // day the smart loader actually consumes the cache, without an
+    // `AppState` field-shape change. `None` continues to mean "not
+    // yet populated" and `best_family_match` already short-circuits
+    // to its non-embedding fallback in that state.
     let family_embeddings: Arc<
         tokio::sync::RwLock<Option<Vec<(crate::profile::Family, Vec<f32>)>>>,
     > = Arc::new(tokio::sync::RwLock::new(None));
     let embedder_arc = Arc::new(embedder);
+    if std::env::var("AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS")
+        .ok()
+        .as_deref()
+        == Some("1")
     {
         let cache = family_embeddings.clone();
         let embedder_for_task = embedder_arc.clone();
@@ -1493,6 +1513,13 @@ pub async fn bootstrap_serve(
             }
             *cache.write().await = Some(computed);
         }));
+    } else {
+        tracing::debug!(
+            "B3: family-descriptor precompute disabled \
+             (AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS != 1); \
+             best_family_match will return None until B2 wires \
+             the smart loader and the gate is flipped on"
+        );
     }
 
     let app_state = AppState {
@@ -2711,13 +2738,16 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Five task handles spawned (gc + wal_checkpoint + v0.7 K2
+        // Four task handles spawned (gc + wal_checkpoint + v0.7 K2
         // pending_actions timeout sweep + v0.7 I3 transcript
-        // archive→prune lifecycle sweep + v0.7 B3-fix family-
-        // descriptor embedding precompute that was moved off the
-        // serve startup path to fix the CI `wait_for_health`
-        // regression).
-        assert_eq!(bs.task_handles.len(), 5);
+        // archive→prune lifecycle sweep). v0.7 B3-fix2 gates the
+        // family-descriptor embedding precompute behind
+        // `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1` (default OFF) so
+        // it does not contend with HTTP request-path embeds under
+        // parallel CI load — see the gate site in `bootstrap_serve`
+        // for the rationale. The task count reverts to four when the
+        // env var is unset.
+        assert_eq!(bs.task_handles.len(), 4);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();
