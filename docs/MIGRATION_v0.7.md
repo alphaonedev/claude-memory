@@ -2,7 +2,7 @@
 
 **v0.7.0 — `attested-cortex`** rolls together the v0.6.5 cortex-fluent legibility work with ROADMAP2 §7.3's full v0.7 trust + A2A maturity scope. The substrate becomes both **more articulate** (capabilities v3, named loaders, compacted schemas) and **cryptographically trustworthy** (Ed25519 attestation, sidechain transcripts, programmable hook pipeline, enforced namespace inheritance).
 
-> **Status:** v0.7.0 migration draft — refined as tracks G/H/I/J/K land. Sections marked TODO point at work not yet merged.
+> **Status:** Released 2026-05-06. v0.7.0 closes the `attested-cortex` epic at 69/69 tasks across 11 tracks (A/B/C/D/E/F/G/H/I/J/K). See [`CHANGELOG.md`](../CHANGELOG.md#070--2026-05-06--attested-cortex) for the full release entry. Any sections still marked TODO below are post-v0.7.0 follow-ups (e.g. v0.7.0.1 cross-platform Rust binaries — issue [#625](https://github.com/alphaonedev/ai-memory-mcp/issues/625)).
 
 ---
 
@@ -282,5 +282,5 @@ Schema migration v20 → v22 (audit_log → signed_events → memory_transcripts
 - [`docs/MIGRATION_v0.6.4.md`](MIGRATION_v0.6.4.md) — predecessor migration guide
 - [`docs/MIGRATION-v0.6.2-to-v0.6.3.md`](MIGRATION-v0.6.2-to-v0.6.3.md) — earlier migration
 - [`ROADMAP2.md §7.3`](../ROADMAP2.md) — original v0.7 spec
-- [`CHANGELOG.md`](../CHANGELOG.md) — full v0.7.0 entry (TODO until release tagged)
+- [`CHANGELOG.md`](../CHANGELOG.md) — full v0.7.0 entry (released 2026-05-06)
 - v0.7.0 cert campaign in [`alphaonedev/ai-memory-test-hub`](https://github.com/alphaonedev/ai-memory-test-hub) (TODO — `campaigns/v0.7.md` filed at release)
