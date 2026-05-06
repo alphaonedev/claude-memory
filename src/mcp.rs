@@ -439,7 +439,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_recall",
-                "description": "Recall memories relevant to a context (ranked, TOON-compact by default).",
+                "description": "Recall memories relevant to a context (ranked).",
                 "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). Default response format is `toon_compact` (~79% smaller than JSON).",
                 "inputSchema": {
                     "type": "object",
@@ -785,7 +785,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_capabilities",
-                "description": "Discover the runtime capability surface; family=<name> drills in.",
+                "description": "Discover runtime capabilities; family=<name> drills in.",
                 "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget.",
                 "inputSchema": {
                     "type": "object",
@@ -984,7 +984,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_approve",
-                "description": "Approve a pending action; remember=once|session|forever to auto-decide next time.",
+                "description": "Approve a pending action; `remember` auto-decides next time.",
                 "docs": "Approve a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic permission rule so the same context auto-decides next time.",
                 "inputSchema": {
                     "type": "object",
@@ -1002,7 +1002,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_pending_reject",
-                "description": "Reject a pending action; remember=once|session|forever to auto-decide next time.",
+                "description": "Reject a pending action; `remember` auto-decides next time.",
                 "docs": "Reject a pending action by id (Task 1.9). Caller identity is stamped as decided_by. v0.7 K10 — optional `remember` (\"once\"|\"session\"|\"forever\") records a synthetic deny rule so the same context auto-rejects next time.",
                 "inputSchema": {
                     "type": "object",
@@ -1109,7 +1109,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_subscription_replay",
-                "description": "Replay subscription_events for one subscription since an RFC3339 timestamp.",
+                "description": "Replay subscription_events since an RFC3339 timestamp.",
                 "docs": "v0.7 K7 — replay subscription_events for one subscription since an RFC3339 timestamp. Returns ordered audit envelope (delivered_at asc). Operator/governance tool.",
                 "inputSchema": {
                     "type": "object",
@@ -1122,7 +1122,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_subscription_dlq_list",
-                "description": "List subscription_dlq rows (deliveries that exhausted the retry ladder).",
+                "description": "List subscription_dlq rows (exhausted retry ladder).",
                 "docs": "v0.7 K7 — list subscription_dlq rows (deliveries that exhausted the retry ladder). Filter by subscription_id; cap with limit. Operator/governance inspector.",
                 "inputSchema": {
                     "type": "object",
@@ -1134,7 +1134,8 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_quota_status",
-                "description": "v0.7 K8 — report per-agent quota usage (memories/day, storage bytes, links/day). Omit agent_id to list all agents. Operator-facing.",
+                "description": "Report per-agent quota usage. Operator-facing.",
+                "docs": "v0.7 K8 — report per-agent quota usage (memories/day, storage bytes, links/day). Omit agent_id to list all agents. Operator-facing.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
