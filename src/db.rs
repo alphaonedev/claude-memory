@@ -3229,6 +3229,32 @@ pub struct InvalidateResult {
 /// column for the supersession reason; that arrives with v0.7
 /// attestation. Until then, callers should record the rationale in
 /// their own logs or a paired memory.
+///
+/// # v0.7.0 #628 H5 — signed-row preservation
+///
+/// `valid_until` is one of the six fields the H2 outbound signer
+/// commits to (see [`crate::identity::sign::SignableLink`]). Mutating
+/// it on a previously self-signed link silently flips every future
+/// `memory_verify` to `signature_verified=false / attest_level=unsigned`
+/// — legitimate supersession would be indistinguishable from
+/// tampering on the wire. To preserve the audit chain we:
+///
+/// 1. NULL the `signature` column (and reset `attest_level` to
+///    `"unsigned"`) so a future verify reports an honest "no
+///    signature on this row" rather than a misleading "signature
+///    mismatch".
+/// 2. Append a `memory_link.invalidated` row to `signed_events` whose
+///    `payload_hash` binds to the post-supersession canonical CBOR —
+///    the auditor can replay both the original `memory_link.created`
+///    row AND the matching `memory_link.invalidated` row to prove the
+///    supersession was an intentional act by the same agent.
+///
+/// The audit append is best-effort: if the `signed_events` write
+/// fails (vanishingly unlikely outside disk-full / schema-drift
+/// scenarios), the supersession still persists and the failure is
+/// surfaced in `tracing::warn!`. Cratering the supersession on an
+/// audit-write failure would punish the legitimate caller for a
+/// substrate problem they cannot fix.
 pub fn invalidate_link(
     conn: &Connection,
     source_id: &str,
@@ -3238,22 +3264,113 @@ pub fn invalidate_link(
 ) -> Result<Option<InvalidateResult>> {
     let stamp = valid_until.map_or_else(|| Utc::now().to_rfc3339(), str::to_string);
 
-    let prior = match conn.query_row(
-        "SELECT valid_until FROM memory_links \
-         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+    // Pull the prior `valid_until` AND the signing surface so the
+    // audit append can reflect the row's pre-mutation attest state.
+    // A single round-trip keeps the SELECT cheap.
+    let prior_row: (
+        Option<String>,
+        Option<Vec<u8>>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = match conn.query_row(
+        "SELECT valid_until, signature, attest_level, observed_by, valid_from \
+             FROM memory_links \
+             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
         params![source_id, target_id, relation],
-        |r| r.get::<_, Option<String>>(0),
+        |r| {
+            Ok((
+                r.get::<_, Option<String>>(0)?,
+                r.get::<_, Option<Vec<u8>>>(1)?,
+                r.get::<_, Option<String>>(2)?,
+                r.get::<_, Option<String>>(3)?,
+                r.get::<_, Option<String>>(4)?,
+            ))
+        },
     ) {
         Ok(v) => v,
         Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
         Err(e) => return Err(e.into()),
     };
+    let (prior, prior_signature, _prior_attest, observed_by, valid_from) = prior_row;
+    let was_signed = prior_signature.is_some();
 
-    conn.execute(
-        "UPDATE memory_links SET valid_until = ?4 \
-         WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
-        params![source_id, target_id, relation, &stamp],
-    )?;
+    if was_signed {
+        // v0.7.0 #628 H5 — clear the signing surface so a future
+        // `memory_verify` honestly reports "unsigned" instead of
+        // "signature mismatch". Resetting `attest_level` keeps the
+        // column consistent with the now-NULL signature blob.
+        conn.execute(
+            "UPDATE memory_links \
+                SET valid_until = ?4, signature = NULL, attest_level = 'unsigned' \
+              WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+            params![source_id, target_id, relation, &stamp],
+        )?;
+    } else {
+        conn.execute(
+            "UPDATE memory_links SET valid_until = ?4 \
+             WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
+            params![source_id, target_id, relation, &stamp],
+        )?;
+    }
+
+    // v0.7.0 #628 H5 — append an `invalidated` audit row when we
+    // cleared a signature. The `payload_hash` commits to the
+    // canonical CBOR over the post-supersession SignableLink so the
+    // auditor sees exactly what the row looks like now (`valid_until`
+    // populated). The `signature` column on the audit row is the
+    // *previous* signature — the auditor can compare it byte-for-byte
+    // against the original `memory_link.created` row's signature to
+    // confirm the same key issued both events. We deliberately do NOT
+    // re-sign here: this writer has no guarantee that the original
+    // signing keypair is loaded (federation may have applied an
+    // inbound `peer_attested` row), so an honest "the signing surface
+    // was cleared" event is the only response that doesn't risk
+    // forgery.
+    if was_signed {
+        let signable = crate::identity::sign::SignableLink {
+            src_id: source_id,
+            dst_id: target_id,
+            relation,
+            observed_by: observed_by.as_deref(),
+            valid_from: valid_from.as_deref(),
+            valid_until: Some(stamp.as_str()),
+        };
+        match crate::identity::sign::canonical_cbor(&signable) {
+            Ok(cbor) => {
+                let event = crate::signed_events::SignedEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    // Best-effort agent_id: the `observed_by` claim
+                    // from the original signed row (the agent that
+                    // attested the supersession's source row). Falls
+                    // back to "unknown" when the legacy row carried
+                    // no observed_by — vanishingly rare for signed
+                    // rows since H2 always populates the column on
+                    // self-signed inserts.
+                    agent_id: observed_by.clone().unwrap_or_else(|| "unknown".to_string()),
+                    event_type: "memory_link.invalidated".to_string(),
+                    payload_hash: crate::signed_events::payload_hash(&cbor),
+                    signature: prior_signature,
+                    attest_level: "unsigned".to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
+                    tracing::warn!(
+                        target: "signed_events",
+                        source_id, target_id, relation,
+                        "failed to append memory_link.invalidated audit row: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "signed_events",
+                    source_id, target_id, relation,
+                    "failed to encode canonical CBOR for invalidation audit: {e}"
+                );
+            }
+        }
+    }
 
     Ok(Some(InvalidateResult {
         valid_until: stamp,

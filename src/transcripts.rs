@@ -32,16 +32,27 @@
 //! decompressing every blob. Both values are derived from the byte
 //! length of the encoded / source content respectively.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, Duration, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
-use std::io::Write;
+use std::io::{Read, Write};
 
 use crate::config::{ResolvedTranscriptLifecycle, TranscriptsConfig};
 
 /// Default zstd compression level. Matches `cli::logs::zstd_compress`
 /// for cross-codebase consistency.
 const ZSTD_LEVEL: i32 = 3;
+
+/// v0.7.0 I1 hardening — hard cap on the size of a single decompressed
+/// transcript. A pathological zstd blob (e.g. 1 KB compressed → 1 GB
+/// decompressed) would otherwise OOM the daemon when [`fetch`] runs.
+/// 16 MiB is large enough that no legitimate transcript stored via
+/// [`store`] is rejected (the store path itself ingests `&str`, so
+/// rows above this ceiling could only have been hand-crafted by a
+/// hostile writer with direct DB access). Surfaced as a constant so a
+/// downstream operator can audit the boundary in a code review without
+/// chasing magic numbers across modules.
+pub const MAX_DECOMPRESSED_BYTES: usize = 16 * 1024 * 1024;
 
 /// Lightweight handle for a stored transcript. Does NOT carry the blob
 /// itself — callers fetch the decompressed content on demand via
@@ -570,10 +581,49 @@ fn zstd_compress(input: &[u8]) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+/// v0.7.0 I1 hardening — bounded zstd decoder.
+///
+/// Streams the decoder one fixed-size chunk at a time and bails the
+/// moment the accumulated decompressed length would exceed
+/// [`MAX_DECOMPRESSED_BYTES`]. Without this cap a hostile writer with
+/// direct DB access could ship a small (~1 KB) zstd blob that decodes
+/// into gigabytes and OOMs the daemon (a classic decompression bomb).
+///
+/// On overflow the function returns an error AND emits a structured
+/// `tracing::warn!` line under the `transcripts.bomb` target so a
+/// downstream audit log captures the rejection without the SQLite
+/// row id (the caller does not pass it in here — the surrounding
+/// [`fetch`] caller logs the id alongside the bubbled error).
 fn zstd_decompress(input: &[u8]) -> Result<Vec<u8>> {
-    let mut out = Vec::with_capacity(input.len() * 4);
+    // Cap the initial allocation too — a blob whose compressed size
+    // alone is enormous is itself a smell, but `with_capacity` on a
+    // hostile input shouldn't reserve gigabytes upfront either.
+    let init_cap = std::cmp::min(input.len() * 4, MAX_DECOMPRESSED_BYTES);
+    let mut out = Vec::with_capacity(init_cap);
     let mut decoder = zstd::stream::read::Decoder::new(input)?;
-    std::io::copy(&mut decoder, &mut out)?;
+    // 64 KiB read window — large enough to amortise syscall overhead
+    // on a normal-sized transcript, small enough to bound the
+    // post-overflow drain to a single buffer.
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = decoder.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        if out.len().saturating_add(n) > MAX_DECOMPRESSED_BYTES {
+            tracing::warn!(
+                target: "transcripts.bomb",
+                cap_bytes = MAX_DECOMPRESSED_BYTES,
+                so_far = out.len(),
+                "rejecting transcript: decompressed size would exceed cap"
+            );
+            return Err(anyhow!(
+                "transcript decompression exceeded {} byte cap (decompression bomb defence)",
+                MAX_DECOMPRESSED_BYTES
+            ));
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
     Ok(out)
 }
 

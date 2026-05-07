@@ -43,8 +43,10 @@ use crate::hooks::events::MemoryDelta;
 
 /// The operation a permission check is gating. K9 wires the
 /// pipeline into five callsites: store, link, delete, archive,
-/// consolidate. The wire string is the canonical name surfaced in
-/// rule matchers (`op = "memory_store"` etc.).
+/// consolidate. v0.7.0 #628 H6 added a sixth — `memory_replay` —
+/// so cross-tenant transcript reads are gated by the same evaluator
+/// that already gates writes. The wire string is the canonical name
+/// surfaced in rule matchers (`op = "memory_store"` etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
@@ -53,6 +55,10 @@ pub enum Op {
     MemoryDelete,
     MemoryArchive,
     MemoryConsolidate,
+    /// v0.7.0 #628 H6 — `memory_replay` MCP tool (transcript read).
+    /// Gated so an agent cannot fetch verbatim transcript content
+    /// from a namespace they are not authorised to read.
+    MemoryReplay,
 }
 
 impl Op {
@@ -66,6 +72,7 @@ impl Op {
             Op::MemoryDelete => "memory_delete",
             Op::MemoryArchive => "memory_archive",
             Op::MemoryConsolidate => "memory_consolidate",
+            Op::MemoryReplay => "memory_replay",
         }
     }
 
@@ -78,6 +85,7 @@ impl Op {
             "memory_delete" => Some(Op::MemoryDelete),
             "memory_archive" => Some(Op::MemoryArchive),
             "memory_consolidate" => Some(Op::MemoryConsolidate),
+            "memory_replay" => Some(Op::MemoryReplay),
             _ => None,
         }
     }
@@ -616,6 +624,7 @@ mod tests {
             Op::MemoryDelete,
             Op::MemoryArchive,
             Op::MemoryConsolidate,
+            Op::MemoryReplay,
         ] {
             assert_eq!(Op::from_str(op.as_str()), Some(op));
         }
