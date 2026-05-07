@@ -1405,18 +1405,21 @@ mod tests {
         // for `::ffff:127.0.0.1`, but on dual-stack hosts the kernel routes
         // these to the v4 loopback service. `normalize_ip` collapses to v4
         // before checking.
-        assert!(validate_url("https://[::ffff:127.0.0.1]/hook").is_err());
-        assert!(validate_url("https://[::ffff:7f00:1]/hook").is_err());
+        // Use `validate_url_with(.., false)` (loopback-disabled) to
+        // avoid racing with parallel tests that flip the process-wide
+        // allow_loopback flag (matches the `loopback_blocked_by_default`
+        // test pattern below).
         assert!(validate_url_with("https://[::ffff:127.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:7f00:1]/hook", false).is_err());
     }
 
     #[test]
     fn rejects_v4_mapped_ipv6_private() {
-        assert!(validate_url("https://[::ffff:10.0.0.1]/hook").is_err());
-        assert!(validate_url("https://[::ffff:192.168.1.1]/hook").is_err());
-        assert!(validate_url("https://[::ffff:172.16.0.1]/hook").is_err());
-        assert!(validate_url("https://[::ffff:169.254.1.1]/hook").is_err());
-        assert!(validate_url("https://[::ffff:0.0.0.0]/hook").is_err());
+        assert!(validate_url_with("https://[::ffff:10.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:192.168.1.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:172.16.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:169.254.1.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[::ffff:0.0.0.0]/hook", false).is_err());
     }
 
     #[test]
@@ -1425,9 +1428,9 @@ mod tests {
         // NAT64 deployed, packets to `64:ff9b::a.b.c.d` are translated to
         // `a.b.c.d` and forwarded; an SSRF gadget if `a.b.c.d` is loopback
         // or private.
-        assert!(validate_url("https://[64:ff9b::127.0.0.1]/hook").is_err());
-        assert!(validate_url("https://[64:ff9b::10.0.0.1]/hook").is_err());
-        assert!(validate_url("https://[64:ff9b::169.254.1.1]/hook").is_err());
+        assert!(validate_url_with("https://[64:ff9b::127.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[64:ff9b::10.0.0.1]/hook", false).is_err());
+        assert!(validate_url_with("https://[64:ff9b::169.254.1.1]/hook", false).is_err());
     }
 
     #[test]
