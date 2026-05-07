@@ -5816,8 +5816,14 @@ pub async fn approvals_sse(
                             .event(event_name)
                             .data(data))));
                     }
-                    Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
-                        let body = serde_json::json!({"lagged": n}).to_string();
+                    Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_n)))) => {
+                        // P4 (#628 agent-4): the lagged-event count `n`
+                        // reflects cross-tenant traffic volume — leaking
+                        // it lets a noisy-neighbour fingerprint other
+                        // tenants' approval rates. Surface only "we
+                        // lagged"; subscribers re-sync via
+                        // GET /api/v1/pending and don't need the count.
+                        let body = serde_json::json!({"lagged": true}).to_string();
                         return Poll::Ready(Some(Ok(Event::default().event("lagged").data(body))));
                     }
                 }
