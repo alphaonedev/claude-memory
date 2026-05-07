@@ -420,12 +420,37 @@ impl Permissions {
                 // The hooks pass is empty here so the recursion
                 // terminates after a single rule pass.
                 let rebound = Self::evaluate_with(&rebound_ctx, &[], rules, mode);
-                if let Decision::Deny(reason) = rebound {
-                    return Decision::Deny(format!(
-                        "namespace escalation rejected: hook proposed Modify into \
-                         namespace {new_ns:?} (from pinned {pinned_ns:?}) which is denied: \
-                         {reason}"
-                    ));
+                match rebound {
+                    Decision::Deny(reason) => {
+                        return Decision::Deny(format!(
+                            "namespace escalation rejected: hook proposed Modify into \
+                             namespace {new_ns:?} (from pinned {pinned_ns:?}) which is denied: \
+                             {reason}"
+                        ));
+                    }
+                    // P2 (#628 agent-2 follow-up): an `Ask` decision on
+                    // the rebound namespace must NOT silently elevate
+                    // into a Modify. The hook is asking the operator to
+                    // approve a cross-namespace write — surface the Ask
+                    // up the stack so the same approval flow that
+                    // governs an explicit cross-namespace store also
+                    // governs hook-driven rebinds. Without this, a hook
+                    // could launder a write into any namespace that
+                    // lacks an explicit Allow rule (rules-opt-in
+                    // design); the prior code silently accepted that.
+                    Decision::Ask(reason) => {
+                        return Decision::Ask(format!(
+                            "namespace escalation requires approval: hook proposed Modify \
+                             into namespace {new_ns:?} (from pinned {pinned_ns:?}); \
+                             rebound rule prompts: {reason}"
+                        ));
+                    }
+                    // Allow / Modify on the rebound namespace are fine —
+                    // the hook's namespace rewrite is explicitly
+                    // permitted by an Allow rule covering the new
+                    // namespace, so the originally-pinned context's
+                    // permission decision was the correct one.
+                    Decision::Allow | Decision::Modify(_) => {}
                 }
             }
             return Decision::Modify(delta);
