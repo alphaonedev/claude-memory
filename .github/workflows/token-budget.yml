@@ -71,9 +71,13 @@ jobs:
       # Belt-and-braces: also drive the assertion through the operator-
       # facing `doctor --tokens --json` reporter so a regression in the
       # JSON shape (renamed field, dropped key) trips the gate too. We
-      # parse the documented `full_profile_total_tokens` field and fail
-      # with a pointer to the C2-C4 audit if the value exceeds 3500.
-      - name: doctor --tokens --json reports total <= 3500 (v0.7 C5)
+      # parse the documented `trimmed_full_profile_total_tokens` field
+      # — the bare `tools/list` wire payload after C2/C3/C4 trims —
+      # and fail with a pointer to the C2-C4 audit if it exceeds 3500.
+      # The verbose sibling `full_profile_total_tokens` is only reachable
+      # via the opt-in `memory_capabilities { verbose: true, … }` path
+      # and is not gated here (see tests/budget_tokens.rs rationale).
+      - name: doctor --tokens --json reports trimmed total <= 3500 (v0.7 C5)
         env:
           AI_MEMORY_NO_CONFIG: "1"
         run: |
@@ -81,11 +85,11 @@ jobs:
           cargo build --release --bin ai-memory
           PAYLOAD="$(./target/release/ai-memory doctor --tokens --json)"
           TOTAL="$(printf '%s' "$PAYLOAD" \
-            | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["full_profile_total_tokens"])')"
-          echo "doctor --tokens --json: full_profile_total_tokens=$TOTAL (ceiling 3500)"
+            | python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["trimmed_full_profile_total_tokens"])')"
+          echo "doctor --tokens --json: trimmed_full_profile_total_tokens=$TOTAL (ceiling 3500)"
           if [ "$TOTAL" -gt 3500 ]; then
-            echo "::error::v0.7 C5 CI gate FAILED: full-profile tools/list payload is $TOTAL cl100k_base tokens (ceiling: 3500)."
-            echo "::error::C2 (split docs field), C3 (collapse schema boilerplate) and C4 (hide rare optional params) drove this from ~7.4K to ~3.49K tokens; this gate locks in that win."
-            echo "::error::Inspect 'cargo run --release -- doctor --tokens --raw-table' to find the offending tool. See docs/v0.7/schema-compaction-audit.md."
+            echo "::error::v0.7 C5 CI gate FAILED: trimmed full-profile tools/list payload is $TOTAL cl100k_base tokens (ceiling: 3500)."
+            echo "::error::C2 (split docs field), C3 (collapse schema boilerplate) and C4 (hide rare optional params) drove the wire form from ~7.4K to ~2.3K tokens; this gate locks in that win."
+            echo "::error::Inspect 'cargo run --release -- doctor --tokens --raw-table' to find the offending tool (the per-tool 'tokens' column already reflects the trim). See docs/v0.7/schema-compaction-audit.md."
             exit 1
           fi
