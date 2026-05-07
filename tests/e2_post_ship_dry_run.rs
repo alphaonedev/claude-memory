@@ -3,13 +3,13 @@
 //
 // v0.7.0.1 — closes #625.
 //
-// E2's `post-ship-converge` was implemented directly as a
-// cross-platform Rust binary at `tools/post-ship-converge/`. The
-// originally-planned bash script (PR #622, never merged) was
-// superseded — this test validates the Rust binary, which builds
-// on the fly via `cargo build --manifest-path
-// tools/post-ship-converge/Cargo.toml` behind a `OnceLock` to
-// avoid the parallel-rebuild flake handled in PR #623.
+// E2's `post-ship-converge` is implemented as a cross-platform Rust
+// binary at `tools/post-ship-converge/`. The bash variant landed in
+// PR #622 (shipped with v0.7.0 as a transitional runbook script) is
+// superseded by this binary — this test validates the Rust binary,
+// which builds on the fly via `cargo build --manifest-path
+// tools/post-ship-converge/Cargo.toml` behind a `OnceLock` to avoid
+// the parallel-rebuild flake handled in PR #623.
 
 //! v0.7.0.1 task E2 — minimal harness check on the
 //! `post-ship-converge` Rust binary.

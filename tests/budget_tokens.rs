@@ -20,19 +20,37 @@
 
 use ai_memory::db::{BudgetOutcome, apply_token_budget, count_tokens_cl100k};
 use ai_memory::models::{Memory, Tier};
-use ai_memory::sizes::full_profile_total_tokens;
+use ai_memory::sizes::trimmed_full_profile_total_tokens;
 use serde_json::json;
 
 /// v0.7 C5 — hard CI ceiling on the full-profile MCP `tools/list` payload.
 ///
 /// C2 (split tool description from `docs` field), C3 (collapse repeated
 /// schema boilerplate), and C4 (hide rarely-used optional params) together
-/// drive the full-profile `cl100k_base` cost from the v0.6.4 baseline (~7.4K
-/// tokens) down to ~3.49K. C5 locks in that win so a future PR cannot
-/// silently grow the surface back toward the old baseline. The 3500-token
-/// ceiling has ~8 tokens of headroom over the C2-shipped 3492 figure;
-/// future PRs that add tools or expand descriptions must claw back budget
-/// elsewhere (or move the tool out of the default `core` family).
+/// drive the full-profile `cl100k_base` cost (the trimmed wire form) from
+/// the v0.6.4 baseline (~7.4K tokens) down to ~2.3K post-trim. C5 locks
+/// in that win so a future PR cannot silently grow the surface back toward
+/// the old baseline. The 3500-token ceiling has ~1.2K of headroom over the
+/// post-trim figure; future PRs that add tools or expand descriptions must
+/// claw back budget elsewhere (or move the tool out of the default `core`
+/// family).
+///
+/// **What this measures**: the cost of the bare `tools/list` MCP payload
+/// — i.e. [`trimmed_full_profile_total_tokens`], which mirrors what
+/// [`mcp::tool_definitions_for_profile`] actually serialises onto the wire
+/// (per-tool `docs` field stripped, per-property `description` prose
+/// stripped, optional params hidden — all C2/C3/C4 trims applied). This is
+/// the always-on payload every MCP client pays per session.
+///
+/// The verbose form (with full `docs` + per-property `description` prose +
+/// optional params) is reachable only via the opt-in
+/// `memory_capabilities { verbose: true, family: …, include_schema: true }`
+/// path; its growth is tracked separately via
+/// [`ai_memory::sizes::full_profile_total_tokens`] (no CI gate — the
+/// verbose path is rarely materialised and is bounded by the C2/C3/C4
+/// invariants on the base table). Mismeasuring against the verbose total
+/// here was the root cause of the v0.7.0 #628 15th-blocker token-budget
+/// regression — see PR ref in CHANGELOG.
 ///
 /// **Why `#[ignore]` by default?** This test is the load-bearing assertion
 /// for the v0.7 schema-compaction track. Running it from a plain
@@ -247,16 +265,18 @@ fn cl100k_tokenizer_is_deterministic() {
             `.github/workflows/token-budget.yml` C5 step. Depends on C2-C4 \
             having landed on the branch."]
 fn full_profile_tools_list_under_3500_tokens() {
-    let total = full_profile_total_tokens();
+    let total = trimmed_full_profile_total_tokens();
     assert!(
         total <= FULL_PROFILE_TOKEN_CEILING,
         "v0.7 C5 CI gate: full-profile tools/list payload is {total} cl100k_base \
          tokens (ceiling: {FULL_PROFILE_TOKEN_CEILING}). C2 (split docs field), \
          C3 (collapse schema boilerplate), and C4 (hide rare optional params) \
-         together drove this from ~7.4K to ~3.49K; this assertion locks in the \
-         win. Inspect `cargo run --release -- doctor --tokens --raw-table` to \
-         find the tool whose schema grew, and either trim it back or claw back \
-         budget elsewhere."
+         together drove the bare wire payload from ~7.4K to ~2.3K post-trim; \
+         this assertion locks in the win. Inspect \
+         `cargo run --release -- doctor --tokens --raw-table` to find the \
+         tool whose trimmed schema grew (look at the per-tool `tokens` column \
+         which already reflects the trim), and either trim it back or claw \
+         back budget elsewhere."
     );
 }
 

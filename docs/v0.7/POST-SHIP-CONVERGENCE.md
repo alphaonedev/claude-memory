@@ -1,7 +1,8 @@
 # Post-ship distribution-channel convergence (v0.7.0 task E2)
 
 > **Status:** SHIPPING with v0.7.0.1 — E2 cross-platform Rust binary
-> (closes #625; supersedes the never-merged bash variant in PR #622)
+> (closes #625; supersedes the bash variant landed in PR #622, which
+> shipped with v0.7.0 as a transitional runbook script)
 > **Date:** 2026-05-06
 > **Tool:** [`tools/post-ship-converge/`](../../tools/post-ship-converge/)
 > (binary `post-ship-converge`)

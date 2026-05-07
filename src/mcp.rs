@@ -640,7 +640,7 @@ pub fn tool_definitions() -> Value {
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "intent": {"type": "string", "description": "Free-text description of what you're about to do (e.g. \"debug a flaky test\")."},
+                        "intent": {"type": "string", "description": "Free-text description of what you're about to do."},
                         "namespace": {"type": "string", "description": "Restrict to this namespace. Defaults to all namespaces when omitted."},
                         "k": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20, "description": "Top-k to return. Capped at 100."}
                     },
@@ -683,7 +683,7 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "canonical_name": {"type": "string", "description": "Display name for the entity. Stored as the entity memory's title."},
-                        "namespace": {"type": "string", "description": "Namespace under which the entity lives. Hierarchy paths (e.g. 'projects/alpha') are accepted."},
+                        "namespace": {"type": "string", "description": "Namespace under which the entity lives. Hierarchy paths are accepted."},
                         "aliases": {"type": "array", "items": {"type": "string"}, "description": "Aliases that should resolve to this entity. Blank entries are skipped; duplicates are de-duped via the entity_aliases primary key."},
                         "metadata": {"type": "object", "description": "Arbitrary metadata to attach to the entity memory. Caller-supplied 'kind' is overwritten with 'entity'; agent_id is stamped from the NHI caller when not specified."},
                         "agent_id": {"type": "string", "description": "Override the caller's resolved NHI for the entity memory's metadata.agent_id."}
@@ -728,7 +728,7 @@ pub fn tool_definitions() -> Value {
                     "properties": {
                         "source_id": {"type": "string", "description": "Source memory ID of the link to invalidate."},
                         "target_id": {"type": "string", "description": "Target memory ID of the link to invalidate."},
-                        "relation": {"type": "string", "description": "Relation label of the link (e.g. 'related_to', 'supersedes', 'derived_from'). Must be a recognized relation."},
+                        "relation": {"type": "string", "description": "Relation label of the link. Must be a recognized relation."},
                         "valid_until": {"type": "string", "description": "RFC3339 timestamp marking when the assertion stops being valid. Defaults to the current time when omitted."}
                     },
                     "required": ["source_id", "target_id", "relation"]
@@ -1278,7 +1278,7 @@ pub fn tool_definitions() -> Value {
 // --- MCP Prompts ---
 
 /// Return the list of available prompts.
-fn prompt_definitions() -> Value {
+pub fn prompt_definitions() -> Value {
     json!({
         "prompts": [
             {
@@ -1287,7 +1287,7 @@ fn prompt_definitions() -> Value {
                 "arguments": [
                     {
                         "name": "namespace",
-                        "description": "Optional namespace to scope recall (e.g. project name)",
+                        "description": "Optional namespace to scope recall.",
                         "required": false
                     }
                 ]
