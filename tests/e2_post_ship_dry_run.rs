@@ -180,8 +180,7 @@ fn e2_dry_run_emits_json_envelope_with_plan_entries() {
     assert!(status.success(), "E2: --dry-run --out exited non-zero");
 
     let body = std::fs::read_to_string(&out_path).expect("read envelope");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).expect("envelope is valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("envelope is valid JSON");
 
     assert_eq!(parsed["mode"], "dry-run");
     assert_eq!(parsed["expected_version"], "0.7.0");

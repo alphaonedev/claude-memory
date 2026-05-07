@@ -193,14 +193,10 @@ fn e1_dry_run_emits_24_entry_json_envelope() {
     assert!(status.success(), "E1: --dry-run --out exited non-zero");
 
     let body = std::fs::read_to_string(&out_path).expect("read envelope");
-    let parsed: serde_json::Value =
-        serde_json::from_str(&body).expect("envelope is valid JSON");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("envelope is valid JSON");
 
     assert_eq!(parsed["mode"], "dry-run");
-    assert!(
-        parsed["plan"].is_array(),
-        "E1: envelope missing plan array"
-    );
+    assert!(parsed["plan"].is_array(), "E1: envelope missing plan array");
     let plan = parsed["plan"].as_array().expect("plan array");
     assert_eq!(
         plan.len(),
@@ -210,13 +206,7 @@ fn e1_dry_run_emits_24_entry_json_envelope() {
     );
     for entry in plan {
         for field in &[
-            "llm",
-            "model",
-            "api_url",
-            "auth_env",
-            "qid",
-            "profile",
-            "question",
+            "llm", "model", "api_url", "auth_env", "qid", "profile", "question",
         ] {
             assert!(
                 entry.get(field).is_some(),
