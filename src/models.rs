@@ -859,6 +859,25 @@ impl GovernancePolicy {
         }
         Some(serde_json::from_value(gov.clone()))
     }
+
+    /// NHI-P4-T19 (v0.7.0 NHI testing): default policy for namespaces
+    /// that have a standard set but no explicit `metadata.governance`.
+    /// Differs from [`Default::default`] (write=Any) by tightening
+    /// `write` to `Owner` — calling `memory_namespace_set_standard`
+    /// implies the operator wants enforcement, not advisory-only.
+    /// Operators who want write=Any must set it explicitly in the
+    /// standard memory's metadata. Tested in
+    /// `db::tests::namespace_set_standard_default_write_is_owner`.
+    #[must_use]
+    pub fn default_for_managed_namespace() -> Self {
+        Self {
+            write: GovernanceLevel::Owner,
+            promote: default_promote_level(),
+            delete: default_delete_level(),
+            approver: default_approver(),
+            inherit: default_inherit(),
+        }
+    }
 }
 
 /// Closed set of visibility scopes stamped into `metadata.scope` (Task 1.5).

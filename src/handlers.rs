@@ -2722,6 +2722,12 @@ pub struct KgQueryBody {
     pub valid_at: Option<String>,
     pub allowed_agents: Option<Vec<String>>,
     pub limit: Option<usize>,
+    /// NHI-P3-T7 (v0.7.0 NHI testing): when omitted or false, the
+    /// "current view" filter excludes edges whose `valid_until` lies
+    /// in the past (invalidated via `memory_kg_invalidate`). Pass
+    /// `true` to traverse the full historical link graph.
+    #[serde(default)]
+    pub include_invalidated: bool,
 }
 
 /// `POST /api/v1/kg/query` — REST mirror of the MCP `memory_kg_query`
@@ -2779,6 +2785,7 @@ pub async fn kg_query(State(state): State<Db>, Json(body): Json<KgQueryBody>) ->
         valid_at,
         allowed_agents.as_deref(),
         body.limit,
+        body.include_invalidated,
     ) {
         Ok(nodes) => {
             let memories_json: Vec<serde_json::Value> = nodes

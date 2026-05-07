@@ -3017,9 +3017,13 @@ pub fn entity_register(
             "INSERT OR IGNORE INTO entity_aliases (entity_id, alias, created_at)
              VALUES (?1, ?2, ?3)",
         )?;
+        // canonical_name is always reachable via entity_get_by_alias.
+        // Without this row, registering an entity with no aliases makes
+        // it unreachable by name (NHI-P3-T2).
+        stmt.execute(params![entity_id, canonical_name, now])?;
         for alias in aliases {
             let trimmed = alias.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || trimmed == canonical_name {
                 continue;
             }
             stmt.execute(params![entity_id, trimmed, now])?;
@@ -3432,6 +3436,7 @@ pub fn kg_query(
     valid_at: Option<&str>,
     allowed_agents: Option<&[String]>,
     limit: Option<usize>,
+    include_invalidated: bool,
 ) -> Result<Vec<crate::models::KgQueryNode>> {
     use crate::models::KgQueryNode;
 
@@ -3469,6 +3474,16 @@ pub fn kg_query(
         binds.push(Box::new(t.to_string()));
         hop_filter.push_str(&binds.len().to_string());
         hop_filter.push(')');
+    } else if !include_invalidated {
+        // "Current view" default — exclude edges that have been
+        // invalidated via memory_kg_invalidate (valid_until set in the
+        // past). NHI-P3-T7 regression: prior versions returned
+        // invalidated edges in default kg_query results.
+        // Caller can pass include_invalidated=true to opt in to the
+        // full-history view.
+        hop_filter.push_str(
+            " AND (ml.valid_until IS NULL OR ml.valid_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+        );
     }
     if let Some(agents) = allowed_agents {
         // Already short-circuited the empty case above.
@@ -3615,6 +3630,7 @@ pub fn find_paths(
     target_id: &str,
     max_depth: Option<usize>,
     max_results: Option<usize>,
+    include_invalidated: bool,
 ) -> Result<Vec<Vec<String>>> {
     let depth = max_depth.unwrap_or(FIND_PATHS_DEFAULT_DEPTH);
     if depth == 0 {
@@ -3633,6 +3649,17 @@ pub fn find_paths(
     if source_id == target_id {
         return Ok(vec![vec![source_id.to_string()]]);
     }
+
+    // "Current view" filter — exclude edges whose `valid_until` lies in
+    // the past (invalidated via `memory_kg_invalidate`). Caller can pass
+    // `include_invalidated=true` to traverse the full historical link
+    // graph. NHI-P3-T7 regression: prior versions enumerated paths
+    // through invalidated edges by default.
+    let invalidated_filter = if include_invalidated {
+        ""
+    } else {
+        " WHERE (valid_until IS NULL OR valid_until > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))"
+    };
 
     // The CTE walks symmetric edges: for each row in `memory_links` we
     // also generate its reverse so the traversal is undirected. Cycle
@@ -3656,9 +3683,11 @@ pub fn find_paths(
                    json_insert(t.path, '$[' || json_array_length(t.path) || ']', next_id)
             FROM traversal t
             JOIN (
-                SELECT source_id AS from_id, target_id AS next_id FROM memory_links
+                SELECT source_id AS from_id, target_id AS next_id
+                FROM memory_links{invalidated_filter}
                 UNION
-                SELECT target_id AS from_id, source_id AS next_id FROM memory_links
+                SELECT target_id AS from_id, source_id AS next_id
+                FROM memory_links{invalidated_filter}
             ) edges ON edges.from_id = t.current_id
             WHERE t.depth < ?3
               AND NOT EXISTS (
@@ -5184,6 +5213,17 @@ pub fn build_namespace_chain(conn: &Connection, namespace: &str) -> Vec<String> 
 /// standard memory. Does **not** walk the inheritance chain — callers
 /// that want hierarchical resolution should use
 /// [`resolve_governance_policy`] instead.
+///
+/// **NHI-P4-T19 (v0.7.0 NHI testing):** returns `None` when the
+/// standard carries no explicit `metadata.governance`. Operators who
+/// want enforcement-by-default can either (a) write
+/// `metadata.governance = {"write": "owner", ...}` into their standard
+/// memory, or (b) use the
+/// [`crate::models::GovernancePolicy::default_for_managed_namespace`]
+/// helper as a starting template. Changing the implicit fallback to
+/// Owner is deferred to v0.7.1 because it can break inheritance chains
+/// where a parent's standard was registered under a distinct agent
+/// identity from descendant operations.
 fn read_namespace_policy(conn: &Connection, namespace: &str) -> Option<GovernancePolicy> {
     let standard_id = get_namespace_standard(conn, namespace).ok()??;
     let mem = get(conn, &standard_id).ok()??;
@@ -8087,8 +8127,17 @@ mod tests {
         assert_eq!(reg.canonical_name, "Project Alpha");
         assert_eq!(reg.namespace, "projects/alpha");
         // Aliases inserted in one call share a created_at; the
-        // secondary `alias ASC` sort orders 'P' before 'p'.
-        assert_eq!(reg.aliases, vec!["Project A".to_string(), "pa".to_string()]);
+        // secondary `alias ASC` sort orders by ASCII codepoint, so
+        // uppercase 'P' (80) < lowercase 'p' (112). canonical_name is
+        // auto-inserted as an alias so entity_get_by_alias resolves it.
+        assert_eq!(
+            reg.aliases,
+            vec![
+                "Project A".to_string(),
+                "Project Alpha".to_string(),
+                "pa".to_string()
+            ]
+        );
 
         let m = get(&conn, &reg.entity_id).unwrap().unwrap();
         assert_eq!(m.title, "Project Alpha");
@@ -8122,7 +8171,17 @@ mod tests {
         assert!(first.created);
         assert!(!second.created, "second call must reuse the entity");
         assert_eq!(first.entity_id, second.entity_id);
-        assert_eq!(second.aliases, vec!["pa".to_string(), "alpha".to_string()]);
+        // First call inserted ["Project Alpha", "pa"] at ts1; second
+        // call inserted "alpha" at ts2 (ts1 < ts2). Sort is created_at
+        // ASC, alias ASC.
+        assert_eq!(
+            second.aliases,
+            vec![
+                "Project Alpha".to_string(),
+                "pa".to_string(),
+                "alpha".to_string()
+            ]
+        );
     }
 
     #[test]
@@ -8158,7 +8217,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(reg.aliases, vec!["ok".to_string()]);
+        // canonical_name "Trim Test" auto-included; "T" (84) < "o" (111).
+        assert_eq!(reg.aliases, vec!["Trim Test".to_string(), "ok".to_string()]);
     }
 
     #[test]
@@ -8190,8 +8250,46 @@ mod tests {
         assert_eq!(got.canonical_name, "Project Alpha");
         assert_eq!(got.namespace, "projects/alpha");
         // Same-batch aliases share a created_at; alphabetical
-        // tiebreak puts "alpha" before "pa".
-        assert_eq!(got.aliases, vec!["alpha".to_string(), "pa".to_string()]);
+        // tiebreak orders by ASCII codepoint: "Project Alpha" (P=80)
+        // < "alpha" (a=97) < "pa" (p=112). canonical_name auto-included.
+        assert_eq!(
+            got.aliases,
+            vec![
+                "Project Alpha".to_string(),
+                "alpha".to_string(),
+                "pa".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn entity_register_canonical_name_resolves_via_get_by_alias() {
+        // Regression test for NHI-P3-T2 (v0.7.0 NHI test playbook):
+        // registering an entity with no aliases must still leave it
+        // reachable via entity_get_by_alias("<canonical_name>") so the
+        // alias-resolution pathway isn't dead-on-arrival when the
+        // caller only knows the canonical name.
+        let conn = test_db();
+        let reg = entity_register(
+            &conn,
+            "OnlyCanonical",
+            "test",
+            &[],
+            &serde_json::json!({}),
+            None,
+        )
+        .unwrap();
+        assert!(reg.created);
+        assert_eq!(
+            reg.aliases,
+            vec!["OnlyCanonical".to_string()],
+            "canonical_name must be auto-inserted as an alias"
+        );
+        let got = entity_get_by_alias(&conn, "OnlyCanonical", Some("test"))
+            .unwrap()
+            .expect("canonical_name must resolve via entity_get_by_alias");
+        assert_eq!(got.entity_id, reg.entity_id);
+        assert_eq!(got.canonical_name, "OnlyCanonical");
     }
 
     #[test]
@@ -8294,8 +8392,10 @@ mod tests {
             None,
         )
         .unwrap();
-        // INSERT OR IGNORE collapses the duplicate "x".
-        assert_eq!(reg.aliases.len(), 2);
+        // INSERT OR IGNORE collapses the duplicate "x"; canonical
+        // ("Dedup") auto-inserted as well, so 3 distinct aliases.
+        assert_eq!(reg.aliases.len(), 3);
+        assert!(reg.aliases.contains(&"Dedup".to_string()));
         assert!(reg.aliases.contains(&"x".to_string()));
         assert!(reg.aliases.contains(&"y".to_string()));
     }
@@ -8811,6 +8911,117 @@ mod tests {
         assert_eq!(ca, now);
     }
 
+    #[test]
+    fn kg_query_default_excludes_invalidated_edges() {
+        // NHI-P3-T7 regression: prior versions returned invalidated
+        // edges in default kg_query results. The "current view" filter
+        // must exclude any edge whose `valid_until` lies in the past.
+        let conn = test_db();
+        let src = make_memory("inv-src", "ns", Tier::Long, 5);
+        let live = make_memory("inv-live", "ns", Tier::Long, 5);
+        let dead = make_memory("inv-dead", "ns", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &live).unwrap();
+        insert(&conn, &dead).unwrap();
+        // Live edge — no valid_until.
+        insert_link_full(&conn, &src.id, &live.id, "related_to", None, None, None);
+        // Dead edge — valid_until set in the past.
+        insert_link_full(
+            &conn,
+            &src.id,
+            &dead.id,
+            "supersedes",
+            None,
+            Some("2020-01-01T00:00:00+00:00"),
+            None,
+        );
+
+        // Default ("current view"): only the live edge shows up.
+        let current = kg_query(&conn, &src.id, 1, None, None, None, false).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].target_id, live.id);
+
+        // Opt-in: include_invalidated=true returns both edges.
+        let full = kg_query(&conn, &src.id, 1, None, None, None, true).unwrap();
+        assert_eq!(full.len(), 2);
+    }
+
+    #[test]
+    fn default_for_managed_namespace_helper_yields_write_owner() {
+        // NHI-P4-T19 (v0.7.0 NHI testing): the
+        // `GovernancePolicy::default_for_managed_namespace` helper
+        // exists so operators can opt into K9 namespace-lock semantics
+        // by writing the policy into their standard memory's metadata.
+        // Changing the implicit fallback in `read_namespace_policy`
+        // is deferred to v0.7.1 because it would break inheritance
+        // chains where parent and child standards were registered
+        // under distinct agent identities. Tests ensures the helper
+        // returns the documented shape.
+        let policy = crate::models::GovernancePolicy::default_for_managed_namespace();
+        assert_eq!(policy.write, crate::models::GovernanceLevel::Owner);
+        assert_eq!(policy.promote, crate::models::GovernanceLevel::Any);
+        assert_eq!(policy.delete, crate::models::GovernanceLevel::Owner);
+        assert!(policy.inherit);
+    }
+
+    #[test]
+    fn namespace_set_standard_with_explicit_owner_policy_enforces_lock() {
+        // NHI-P4-T19 regression: when the operator explicitly writes
+        // `governance.write=owner` into the standard memory's
+        // metadata, the namespace lock is enforced. This is the
+        // opt-in path the v0.7.0 verdict recommends documenting; the
+        // helper `default_for_managed_namespace` is the canonical
+        // shape.
+        let conn = test_db();
+        let mut standard = make_memory("std", "ns/locked", Tier::Long, 8);
+        let policy =
+            serde_json::to_value(crate::models::GovernancePolicy::default_for_managed_namespace())
+                .unwrap();
+        standard.metadata = serde_json::json!({"governance": policy});
+        let standard_id = insert(&conn, &standard).unwrap();
+        set_namespace_standard(&conn, "ns/locked", &standard_id, None).unwrap();
+
+        let resolved = resolve_governance_policy(&conn, "ns/locked")
+            .expect("policy must resolve when explicitly set");
+        assert_eq!(resolved.write, crate::models::GovernanceLevel::Owner);
+    }
+
+    #[test]
+    fn find_paths_default_excludes_invalidated_edges() {
+        // NHI-P3-T7 regression: find_paths must skip edges whose
+        // valid_until lies in the past unless the caller asks for the
+        // full historical link graph.
+        let conn = test_db();
+        let a = make_memory("fp-a", "ns", Tier::Long, 5);
+        let b = make_memory("fp-b", "ns", Tier::Long, 5);
+        let c = make_memory("fp-c", "ns", Tier::Long, 5);
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        insert(&conn, &c).unwrap();
+        // Live path A → C.
+        insert_link_full(&conn, &a.id, &c.id, "related_to", None, None, None);
+        // Dead path A → B → C (the A→B leg is invalidated).
+        insert_link_full(
+            &conn,
+            &a.id,
+            &b.id,
+            "supersedes",
+            None,
+            Some("2020-01-01T00:00:00+00:00"),
+            None,
+        );
+        insert_link_full(&conn, &b.id, &c.id, "related_to", None, None, None);
+
+        // Default: only the live A→C path.
+        let current = find_paths(&conn, &a.id, &c.id, Some(3), None, false).unwrap();
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0], vec![a.id.clone(), c.id.clone()]);
+
+        // Opt-in: include_invalidated=true returns both paths.
+        let full = find_paths(&conn, &a.id, &c.id, Some(3), None, true).unwrap();
+        assert_eq!(full.len(), 2);
+    }
+
     // -- Pillar 2 / Stream C — kg_query (depth=1) ---------------------------
 
     /// Insert a link with explicit `temporal/observed_by` columns so the
@@ -8871,7 +9082,7 @@ mod tests {
             Some("agent-2"),
         );
 
-        let nodes = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        let nodes = kg_query(&conn, &src.id, 1, None, None, None, false).unwrap();
         assert_eq!(nodes.len(), 2);
         // Ordered by COALESCE(valid_from, created_at) ASC.
         assert_eq!(nodes[0].target_id, n1.id);
@@ -8921,6 +9132,7 @@ mod tests {
             Some("2026-01-15T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(n_jan.len(), 1);
@@ -8935,6 +9147,7 @@ mod tests {
             Some("2026-02-15T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(n_feb.is_empty());
@@ -8947,6 +9160,7 @@ mod tests {
             Some("2026-04-01T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(n_apr.len(), 1);
@@ -8971,12 +9185,13 @@ mod tests {
             Some("2026-01-15T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(with_filter.is_empty());
 
         // Without the filter, the same link IS returned.
-        let without = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        let without = kg_query(&conn, &src.id, 1, None, None, None, false).unwrap();
         assert_eq!(without.len(), 1);
         assert_eq!(without[0].target_id, t.id);
     }
@@ -9023,12 +9238,12 @@ mod tests {
         );
 
         let allow_a = vec!["agent-a".to_string()];
-        let only_a = kg_query(&conn, &src.id, 1, None, Some(&allow_a), None).unwrap();
+        let only_a = kg_query(&conn, &src.id, 1, None, Some(&allow_a), None, false).unwrap();
         assert_eq!(only_a.len(), 1);
         assert_eq!(only_a[0].target_id, t1.id);
 
         let allow_both = vec!["agent-a".to_string(), "agent-b".to_string()];
-        let both = kg_query(&conn, &src.id, 1, None, Some(&allow_both), None).unwrap();
+        let both = kg_query(&conn, &src.id, 1, None, Some(&allow_both), None, false).unwrap();
         assert_eq!(both.len(), 2);
     }
 
@@ -9050,13 +9265,13 @@ mod tests {
         );
 
         // Sanity: no filter returns the link.
-        let unfiltered = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        let unfiltered = kg_query(&conn, &src.id, 1, None, None, None, false).unwrap();
         assert_eq!(unfiltered.len(), 1);
 
         // Empty allowlist == "no agents trusted" — must return zero
         // rows, not silently fall through to the unfiltered path.
         let empty: Vec<String> = Vec::new();
-        let none = kg_query(&conn, &src.id, 1, None, Some(&empty), None).unwrap();
+        let none = kg_query(&conn, &src.id, 1, None, Some(&empty), None, false).unwrap();
         assert!(none.is_empty());
     }
 
@@ -9065,7 +9280,7 @@ mod tests {
         let conn = test_db();
         let src = make_memory("s", "ns", Tier::Long, 5);
         insert(&conn, &src).unwrap();
-        let err = kg_query(&conn, &src.id, 0, None, None, None).unwrap_err();
+        let err = kg_query(&conn, &src.id, 0, None, None, None, false).unwrap_err();
         assert!(err.to_string().contains("max_depth"));
     }
 
@@ -9084,6 +9299,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap_err();
         let msg = err.to_string();
@@ -9122,13 +9338,13 @@ mod tests {
         );
 
         // depth=1 sees only mid.
-        let d1 = kg_query(&conn, &src.id, 1, None, None, None).unwrap();
+        let d1 = kg_query(&conn, &src.id, 1, None, None, None, false).unwrap();
         assert_eq!(d1.len(), 1);
         assert_eq!(d1[0].target_id, mid.id);
         assert_eq!(d1[0].depth, 1);
 
         // depth=2 sees both, ordered shallow-first.
-        let d2 = kg_query(&conn, &src.id, 2, None, None, None).unwrap();
+        let d2 = kg_query(&conn, &src.id, 2, None, None, None, false).unwrap();
         assert_eq!(d2.len(), 2);
         assert_eq!(d2[0].target_id, mid.id);
         assert_eq!(d2[0].depth, 1);
@@ -9178,6 +9394,7 @@ mod tests {
             Some("2026-01-15T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(mid_only.len(), 1);
@@ -9190,6 +9407,7 @@ mod tests {
             Some("2026-04-15T00:00:00+00:00"),
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(neither.is_empty());
@@ -9235,7 +9453,7 @@ mod tests {
             None,
         );
 
-        let nodes = kg_query(&conn, &a.id, 5, None, None, None).unwrap();
+        let nodes = kg_query(&conn, &a.id, 5, None, None, None, false).unwrap();
         // Expect b at depth 1 and c at depth 2; the cycle back to a is
         // pruned. (The c->a edge could in principle surface a again at
         // depth 3, but only if a is not on its own path — and the
@@ -9279,12 +9497,12 @@ mod tests {
         );
 
         let allow_a = vec!["agent-a".to_string()];
-        let only_first = kg_query(&conn, &src.id, 3, None, Some(&allow_a), None).unwrap();
+        let only_first = kg_query(&conn, &src.id, 3, None, Some(&allow_a), None, false).unwrap();
         assert_eq!(only_first.len(), 1);
         assert_eq!(only_first[0].target_id, mid.id);
 
         let allow_both = vec!["agent-a".to_string(), "agent-b".to_string()];
-        let both = kg_query(&conn, &src.id, 3, None, Some(&allow_both), None).unwrap();
+        let both = kg_query(&conn, &src.id, 3, None, Some(&allow_both), None, false).unwrap();
         assert_eq!(both.len(), 2);
         assert_eq!(both[1].target_id, leaf.id);
         assert_eq!(both[1].depth, 2);
@@ -9311,18 +9529,18 @@ mod tests {
 
         // limit=usize::MAX clamps to KG_QUERY_MAX_LIMIT (1000),
         // which is bigger than our 3 rows — all returned.
-        let all = kg_query(&conn, &src.id, 1, None, None, Some(usize::MAX)).unwrap();
+        let all = kg_query(&conn, &src.id, 1, None, None, Some(usize::MAX), false).unwrap();
         assert_eq!(all.len(), 3);
 
         // limit=0 clamps up to 1.
-        let one = kg_query(&conn, &src.id, 1, None, None, Some(0)).unwrap();
+        let one = kg_query(&conn, &src.id, 1, None, None, Some(0), false).unwrap();
         assert_eq!(one.len(), 1);
     }
 
     #[test]
     fn kg_query_empty_for_unknown_source() {
         let conn = test_db();
-        let nodes = kg_query(&conn, "no-such-id", 1, None, None, None).unwrap();
+        let nodes = kg_query(&conn, "no-such-id", 1, None, None, None, false).unwrap();
         assert!(nodes.is_empty());
     }
 

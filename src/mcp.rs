@@ -745,7 +745,8 @@ pub fn tool_definitions() -> Value {
                         "max_depth": {"type": "integer", "minimum": 1, "maximum": 5, "default": 1, "description": "Hops from the source. Supported range: 1..=5 (matches the published performance budget for `memory_kg_query`). Larger values return an explicit error."},
                         "valid_at": {"type": "string", "description": "RFC3339 timestamp; only links valid at this instant (valid_from <= valid_at AND (valid_until IS NULL OR valid_until > valid_at)) are returned. Omit to skip the temporal filter (NULL valid_from rows are then included)."},
                         "allowed_agents": {"type": "array", "items": {"type": "string"}, "description": "If provided, only links whose observed_by is in this set are returned. An empty array returns zero rows. Omit to skip the agent filter."},
-                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200, "description": "Max nodes returned across all depths. Clamped to [1, 1000]."}
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "default": 200, "description": "Max nodes returned across all depths. Clamped to [1, 1000]."},
+                        "include_invalidated": {"type": "boolean", "default": false, "description": "When false (default), excludes edges whose valid_until lies in the past — i.e. edges invalidated via memory_kg_invalidate are dropped from the 'current view'. Pass true to traverse the full historical link graph (memory_kg_timeline always returns the full history regardless)."}
                     },
                     "required": ["source_id"]
                 }
@@ -753,14 +754,15 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_find_paths",
                 "description": "Enumerate up to N paths through the KG between two memories.",
-                "docs": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50.",
+                "docs": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50. By default the BFS skips edges invalidated via `memory_kg_invalidate`; pass `include_invalidated=true` to traverse the full historical link graph.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "source_id": {"type": "string", "description": "Path origin memory ID."},
                         "target_id": {"type": "string", "description": "Path destination memory ID."},
                         "max_depth": {"type": "integer", "minimum": 1, "maximum": 7, "default": 4, "description": "Maximum hops between source and target. Default 4, ceiling 7."},
-                        "max_results": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum paths returned (shortest-first). Default 10, ceiling 50."}
+                        "max_results": {"type": "integer", "minimum": 1, "maximum": 50, "default": 10, "description": "Maximum paths returned (shortest-first). Default 10, ceiling 50."},
+                        "include_invalidated": {"type": "boolean", "default": false, "description": "When false (default), excludes edges whose valid_until lies in the past. Pass true to enumerate paths through the full historical link graph."}
                     },
                     "required": ["source_id", "target_id"]
                 }
@@ -3252,6 +3254,11 @@ fn handle_kg_query(conn: &rusqlite::Connection, params: &Value) -> Result<Value,
         .as_u64()
         .and_then(|n| usize::try_from(n).ok());
 
+    // NHI-P3-T7 (v0.7.0 NHI testing): default to "current view" —
+    // exclude edges whose `valid_until` lies in the past. Pass
+    // `include_invalidated=true` to traverse the full historical graph.
+    let include_invalidated = params["include_invalidated"].as_bool().unwrap_or(false);
+
     let nodes = db::kg_query(
         conn,
         source_id,
@@ -3259,6 +3266,7 @@ fn handle_kg_query(conn: &rusqlite::Connection, params: &Value) -> Result<Value,
         valid_at,
         allowed_agents.as_deref(),
         limit,
+        include_invalidated,
     )
     .map_err(|e| e.to_string())?;
 
@@ -3314,14 +3322,26 @@ pub fn handle_find_paths(conn: &rusqlite::Connection, params: &Value) -> Result<
     let max_results = params["max_results"]
         .as_u64()
         .and_then(|n| usize::try_from(n).ok());
+    // NHI-P3-T7 (v0.7.0 NHI testing): default to "current view" —
+    // exclude edges whose `valid_until` lies in the past. Caller can
+    // pass `include_invalidated=true` to traverse the full historical
+    // link graph (still covered by `memory_kg_timeline`).
+    let include_invalidated = params["include_invalidated"].as_bool().unwrap_or(false);
 
-    let paths =
-        db::find_paths(conn, source_id, target_id, max_depth, max_results).map_err(|e| {
-            // Match the kg_query convention: depth-budget violations
-            // surface their error message verbatim so callers can
-            // distinguish "you asked for too much" from a real fault.
-            e.to_string()
-        })?;
+    let paths = db::find_paths(
+        conn,
+        source_id,
+        target_id,
+        max_depth,
+        max_results,
+        include_invalidated,
+    )
+    .map_err(|e| {
+        // Match the kg_query convention: depth-budget violations
+        // surface their error message verbatim so callers can
+        // distinguish "you asked for too much" from a real fault.
+        e.to_string()
+    })?;
 
     Ok(json!({
         "source_id": source_id,
