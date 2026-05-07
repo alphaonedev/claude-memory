@@ -3264,6 +3264,18 @@ pub fn invalidate_link(
 ) -> Result<Option<InvalidateResult>> {
     let stamp = valid_until.map_or_else(|| Utc::now().to_rfc3339(), str::to_string);
 
+    // P2 (#628 agent-3 follow-up): wrap the SELECT-then-UPDATE-then-
+    // audit-INSERT in a single `BEGIN IMMEDIATE` transaction. Without
+    // this, a daemon crash between the UPDATE (which clears the
+    // signature) and the audit INSERT leaves H5's silent-supersession
+    // state — the exact thing H5 was added to prevent. RESERVED-lock
+    // semantics also serialise concurrent writers across processes.
+    conn.execute("BEGIN IMMEDIATE", [])?;
+    // From here on, every early return MUST `ROLLBACK` first.
+    let rollback = || {
+        let _ = conn.execute("ROLLBACK", []);
+    };
+
     // Pull the prior `valid_until` AND the signing surface so the
     // audit append can reflect the row's pre-mutation attest state.
     // A single round-trip keeps the SELECT cheap.
@@ -3289,13 +3301,19 @@ pub fn invalidate_link(
         },
     ) {
         Ok(v) => v,
-        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-        Err(e) => return Err(e.into()),
+        Err(rusqlite::Error::QueryReturnedNoRows) => {
+            rollback();
+            return Ok(None);
+        }
+        Err(e) => {
+            rollback();
+            return Err(e.into());
+        }
     };
     let (prior, prior_signature, _prior_attest, observed_by, valid_from) = prior_row;
     let was_signed = prior_signature.is_some();
 
-    if was_signed {
+    let update_result = if was_signed {
         // v0.7.0 #628 H5 — clear the signing surface so a future
         // `memory_verify` honestly reports "unsigned" instead of
         // "signature mismatch". Resetting `attest_level` keeps the
@@ -3305,13 +3323,17 @@ pub fn invalidate_link(
                 SET valid_until = ?4, signature = NULL, attest_level = 'unsigned' \
               WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
             params![source_id, target_id, relation, &stamp],
-        )?;
+        )
     } else {
         conn.execute(
             "UPDATE memory_links SET valid_until = ?4 \
              WHERE source_id = ?1 AND target_id = ?2 AND relation = ?3",
             params![source_id, target_id, relation, &stamp],
-        )?;
+        )
+    };
+    if let Err(e) = update_result {
+        rollback();
+        return Err(e.into());
     }
 
     // v0.7.0 #628 H5 — append an `invalidated` audit row when we
@@ -3355,23 +3377,28 @@ pub fn invalidate_link(
                     timestamp: Utc::now().to_rfc3339(),
                 };
                 if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
-                    tracing::warn!(
-                        target: "signed_events",
-                        source_id, target_id, relation,
-                        "failed to append memory_link.invalidated audit row: {e}"
-                    );
+                    // P2 (#628 agent-3): refuse to commit the UPDATE if
+                    // the audit row can't be appended. Otherwise the
+                    // signature clearing happens silently and we lose
+                    // the audit trail H5 was added to provide.
+                    rollback();
+                    return Err(anyhow::anyhow!(
+                        "failed to append memory_link.invalidated audit row \
+                         (rolled back signature clearing): {e}"
+                    ));
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    target: "signed_events",
-                    source_id, target_id, relation,
-                    "failed to encode canonical CBOR for invalidation audit: {e}"
-                );
+                rollback();
+                return Err(anyhow::anyhow!(
+                    "failed to encode canonical CBOR for invalidation audit \
+                     (rolled back signature clearing): {e}"
+                ));
             }
         }
     }
 
+    conn.execute("COMMIT", [])?;
     Ok(Some(InvalidateResult {
         valid_until: stamp,
         previous_valid_until: prior,
