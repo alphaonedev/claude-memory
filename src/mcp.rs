@@ -5378,11 +5378,23 @@ fn record_mcp_decision(
         crate::approvals::Remember::Session => "session",
         crate::approvals::Remember::Forever => "forever",
     };
+    // Carry the originating namespace + requester onto the bus so the
+    // K10 SSE handler can scope this decision to the right tenant
+    // (review #628 blocker C2). Snapshot may be absent if the row was
+    // already swept; the SSE filter treats empty fields as "no tenant
+    // hint" and falls back to the subscriber's K9 policy.
+    let evt_namespace = pa.as_ref().map(|p| p.namespace.clone()).unwrap_or_default();
+    let evt_requested_by = pa
+        .as_ref()
+        .map(|p| p.requested_by.clone())
+        .unwrap_or_default();
     crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalDecided {
         pending_id: pending_id.to_string(),
         decision: decision_label.to_string(),
         decided_by: decided_by.to_string(),
         remember: remember_label.to_string(),
+        namespace: evt_namespace,
+        requested_by: evt_requested_by,
     });
     if matches!(
         remember,

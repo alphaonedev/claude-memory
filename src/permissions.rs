@@ -305,7 +305,20 @@ impl Permissions {
     /// decision).
     #[must_use]
     pub fn evaluate(ctx: &PermissionContext, hook_decisions: &[HookDecision]) -> Decision {
-        let rules = active_permission_rules();
+        // Review #628 H10: K10's `remember=forever` writes a
+        // [`crate::approvals::SyntheticPermissionRule`] into a
+        // separate registry that the v0.7.0-ship evaluator did not
+        // consult — so an operator who clicked "remember" was
+        // re-prompted on every subsequent matching call. We promote
+        // each synthetic entry into a virtual [`PermissionRule`] and
+        // splice them onto the front of the rule list so the
+        // existing combiner sees them. The combiner is deny-first
+        // across all sources, which preserves the safety property
+        // that an explicit config Deny still beats an operator's
+        // `remember=forever`-Allow — and a synthetic Allow shadows a
+        // config-level Ask (the whole point of "remember").
+        let mut rules = synthetic_rules_as_permission_rules();
+        rules.extend(active_permission_rules());
         Self::evaluate_with(ctx, hook_decisions, &rules, active_permissions_mode())
     }
 
@@ -475,6 +488,83 @@ fn merge_delta(prior: Option<MemoryDelta>, next: MemoryDelta) -> MemoryDelta {
     }
     if next.metadata.is_some() {
         out.metadata = next.metadata;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic rule integration (review #628 H10)
+// ---------------------------------------------------------------------------
+
+/// Map a K10 `pending_actions.action_type` string onto a K9 [`Op`].
+///
+/// K10 records synthetic rules with the wire-level `action_type`
+/// (`"store"`, `"delete"`, `"promote"`) — the same shape the
+/// `pending_actions` table uses. K9 evaluates against an [`Op`]
+/// enum (`memory_store`, `memory_delete`, …). This adapter bridges
+/// the two so `remember=forever` rules become consultable by the
+/// store / delete pipeline without the rule loader having to know
+/// about K9 internals.
+fn op_matches_action_type(op: Op, action_type: &str) -> bool {
+    match (op, action_type) {
+        (Op::MemoryStore, "store")
+        | (Op::MemoryDelete, "delete")
+        | (Op::MemoryArchive, "archive" | "promote")
+        | (Op::MemoryConsolidate, "consolidate")
+        | (Op::MemoryLink, "link") => true,
+        _ => false,
+    }
+}
+
+/// Promote every entry in
+/// [`crate::approvals::list_synthetic_rules`] into the equivalent
+/// [`PermissionRule`] shape so the K9 evaluator can consume them
+/// alongside the config-loaded rules. Empty agent_id is rendered as
+/// the wildcard `"*"`. Unknown decision verbs are dropped with a
+/// WARN — the K10 transports only ever write `"approve"` /
+/// `"deny"`, so this is defence-in-depth, not load-bearing.
+///
+/// Each synthetic entry yields one `PermissionRule` per K9 [`Op`]
+/// the `action_type` maps to (via [`op_matches_action_type`]).
+/// `pending_actions.action_type == "store"` produces a
+/// `memory_store` rule; `"delete"` produces `memory_delete`; etc.
+fn synthetic_rules_as_permission_rules() -> Vec<PermissionRule> {
+    let synth = crate::approvals::list_synthetic_rules();
+    let mut out: Vec<PermissionRule> = Vec::with_capacity(synth.len());
+    let ops = [
+        Op::MemoryStore,
+        Op::MemoryDelete,
+        Op::MemoryArchive,
+        Op::MemoryConsolidate,
+        Op::MemoryLink,
+    ];
+    for s in synth {
+        let decision = match s.decision.as_str() {
+            "approve" | "allow" => RuleDecision::Allow,
+            "deny" | "reject" => RuleDecision::Deny,
+            other => {
+                tracing::warn!(
+                    "ignoring synthetic permission rule with unknown decision verb: {other:?}"
+                );
+                continue;
+            }
+        };
+        let agent_pattern = s.agent_id.clone().unwrap_or_else(|| "*".to_string());
+        for op in ops {
+            if !op_matches_action_type(op, &s.action_type) {
+                continue;
+            }
+            out.push(PermissionRule {
+                namespace_pattern: s.namespace.clone(),
+                op: op.as_str().to_string(),
+                agent_pattern: agent_pattern.clone(),
+                decision,
+                reason: Some(format!(
+                    "remembered operator decision (recorded_at={})",
+                    s.recorded_at
+                )),
+            });
+        }
     }
     out
 }
