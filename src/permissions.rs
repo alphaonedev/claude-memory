@@ -313,6 +313,18 @@ impl Permissions {
     /// mode as explicit parameters. Used by the K9 test matrix so
     /// scenarios can exercise specific rule-set / mode combinations
     /// without poking the process-wide registry.
+    ///
+    /// # H8 invariant — namespace cannot be elevated by `Modify`
+    ///
+    /// The pinned namespace for rule evaluation is taken from
+    /// `ctx.namespace` BEFORE any rule pass. If a hook returns
+    /// `Modify { namespace: <other_ns> }` the pipeline RE-EVALUATES
+    /// the entire rule set against the new namespace; if that
+    /// re-evaluation returns `Decision::Deny`, the modification is
+    /// rejected (the original `Deny` reason is surfaced — annotated
+    /// with the rejected escalation). This closes the v0.7.0 review
+    /// blocker H8 / #628 where a `Modify`-rewrite of `namespace`
+    /// could bypass a rule that targeted the destination namespace.
     #[must_use]
     pub fn evaluate_with(
         ctx: &PermissionContext,
@@ -325,6 +337,13 @@ impl Permissions {
         if mode == PermissionsMode::Off {
             return Decision::Allow;
         }
+
+        // H8 — pin the namespace at entry. The original namespace
+        // is the only one that may participate in this evaluation;
+        // any hook that proposes a different namespace must survive
+        // a re-evaluation against the rules pinned to the *new*
+        // namespace below.
+        let pinned_ns = ctx.namespace.clone();
 
         // Collect rule decisions matching this context.
         let matched = matched_rules(ctx, rules);
@@ -360,6 +379,34 @@ impl Permissions {
             }
         }
         if let Some(delta) = composed {
+            // H8 — if the composed delta rewrites `namespace` to a
+            // value other than the pinned one, RE-EVALUATE the rule
+            // pipeline against the new namespace. A Deny on the new
+            // namespace rejects the modification (the hook cannot
+            // launder a write into a denied namespace).
+            if let Some(new_ns) = delta.namespace.as_deref()
+                && new_ns != pinned_ns
+            {
+                let rebound_ctx = PermissionContext {
+                    op: ctx.op,
+                    namespace: new_ns.to_string(),
+                    agent_id: ctx.agent_id.clone(),
+                    payload: ctx.payload.clone(),
+                };
+                // Re-evaluate against rules ONLY (we already drained
+                // the hooks slice above; re-running them would either
+                // loop indefinitely or re-Modify the same delta).
+                // The hooks pass is empty here so the recursion
+                // terminates after a single rule pass.
+                let rebound = Self::evaluate_with(&rebound_ctx, &[], rules, mode);
+                if let Decision::Deny(reason) = rebound {
+                    return Decision::Deny(format!(
+                        "namespace escalation rejected: hook proposed Modify into \
+                         namespace {new_ns:?} (from pinned {pinned_ns:?}) which is denied: \
+                         {reason}"
+                    ));
+                }
+            }
             return Decision::Modify(delta);
         }
 

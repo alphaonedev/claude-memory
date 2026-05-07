@@ -43,6 +43,9 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 static K7_HMAC_GLOBAL_LOCK: Mutex<()> = Mutex::new(());
 
 fn fresh_db() -> (NamedTempFile, std::path::PathBuf) {
+    // H11 (#628 blocker): wiremock binds to 127.0.0.1; loopback
+    // webhook URLs are rejected by default, so opt in here.
+    ai_memory::config::set_allow_loopback_webhooks(true);
     let f = NamedTempFile::new().expect("tempfile");
     let p = f.path().to_path_buf();
     let _ = ai_memory::db::open(&p).expect("db::open");

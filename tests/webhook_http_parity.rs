@@ -135,6 +135,9 @@ impl HttpHarness {
 /// Insert a wildcard subscription pointing at the wiremock URL via a
 /// fresh DB connection (the dispatch thread will reopen anyway).
 fn subscribe_all(db_path: &Path, mock_url: &str) -> String {
+    // H11 (#628 blocker): wiremock binds to 127.0.0.1; loopback
+    // webhook URLs are rejected by default, so opt in here.
+    ai_memory::config::set_allow_loopback_webhooks(true);
     let conn = Connection::open(db_path).expect("open db");
     subscriptions::insert(
         &conn,

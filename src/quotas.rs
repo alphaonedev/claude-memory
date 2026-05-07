@@ -285,9 +285,208 @@ impl std::fmt::Display for QuotaCheckError {
 
 impl std::error::Error for QuotaCheckError {}
 
+/// v0.7 K8 / H12 (#628 blocker) — atomic check + record. Combines the
+/// quota check with the counter increment under a single
+/// `BEGIN IMMEDIATE` SQLite transaction so concurrent writers cannot
+/// each pass the check and then both increment the counter past the
+/// cap. `BEGIN IMMEDIATE` acquires a `RESERVED` lock on the database
+/// at the start of the transaction; SQLite serialises every other
+/// would-be writer behind the lock until COMMIT/ROLLBACK, which is
+/// the SQLite analogue of `SELECT ... FOR UPDATE` against the single
+/// `agent_quotas` row.
+///
+/// On a clean check + increment, returns `Ok(())`. On a quota breach,
+/// returns `Err(QuotaError)` naming the limit that was hit and the
+/// counter / ceiling values at the moment of the check; the
+/// transaction is rolled back so no counter mutation persists.
+///
+/// Callers replace the previous two-step `check_quota(...)?;
+/// op(...)?; record_op(...)?` pattern with `check_and_record(...)?;
+/// op(...)?;` (then `refund_op(...)` on op-failure if needed) so the
+/// gap between check and record cannot be raced.
+///
+/// # Errors
+///
+/// - [`QuotaCheckError::Quota`] when one of the three limits would be
+///   exceeded by the pending op.
+/// - [`QuotaCheckError::Sql`] when the substrate read or write fails.
+pub fn check_and_record(
+    conn: &Connection,
+    agent_id: &str,
+    op: QuotaOp,
+) -> std::result::Result<(), QuotaCheckError> {
+    // Make sure the row exists OUTSIDE the immediate transaction;
+    // `INSERT OR IGNORE` itself is atomic and contention-free.
+    let _ = ensure_row(conn, agent_id).map_err(QuotaCheckError::Sql)?;
+
+    // BEGIN IMMEDIATE — acquires a RESERVED lock immediately. This is
+    // the SQLite shape of "SELECT ... FOR UPDATE": no other connection
+    // can begin a write transaction until we COMMIT or ROLLBACK. The
+    // window between SELECT and UPDATE inside the transaction is
+    // therefore safe from another writer's UPDATE racing past us.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("BEGIN IMMEDIATE failed: {e}")))?;
+
+    let result: std::result::Result<(), QuotaCheckError> = (|| {
+        let row = load_row(conn, agent_id)
+            .map_err(QuotaCheckError::Sql)?
+            .ok_or_else(|| {
+                QuotaCheckError::Sql(anyhow::anyhow!(
+                    "quota row vanished mid-transaction for agent {agent_id}"
+                ))
+            })?;
+
+        // Inline daily-bucket roll: if the stored bucket isn't today,
+        // the daily counters are treated as zero for the check AND
+        // the UPDATE below resets them.
+        let now = chrono::Utc::now().to_rfc3339();
+        let today = day_bucket(&now);
+        let stored_day = day_bucket(&row.day_started_at);
+        let day_rolled = stored_day != today;
+        let (memories_today, links_today) = if day_rolled {
+            (0, 0)
+        } else {
+            (row.current_memories_today, row.current_links_today)
+        };
+
+        match op {
+            QuotaOp::Memory { bytes } => {
+                if memories_today + 1 > row.max_memories_per_day {
+                    return Err(QuotaCheckError::Quota(QuotaError {
+                        agent_id: agent_id.to_string(),
+                        limit: QuotaLimit::MemoriesPerDay,
+                        current: memories_today,
+                        max: row.max_memories_per_day,
+                    }));
+                }
+                if row.current_storage_bytes + bytes > row.max_storage_bytes {
+                    return Err(QuotaCheckError::Quota(QuotaError {
+                        agent_id: agent_id.to_string(),
+                        limit: QuotaLimit::StorageBytes,
+                        current: row.current_storage_bytes,
+                        max: row.max_storage_bytes,
+                    }));
+                }
+                if day_rolled {
+                    conn.execute(
+                        "UPDATE agent_quotas SET
+                           current_memories_today = 1,
+                           current_links_today = 0,
+                           current_storage_bytes = current_storage_bytes + ?1,
+                           day_started_at = ?2,
+                           updated_at = ?2
+                         WHERE agent_id = ?3",
+                        params![bytes, now, agent_id],
+                    )
+                    .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("update failed: {e}")))?;
+                } else {
+                    conn.execute(
+                        "UPDATE agent_quotas SET
+                           current_memories_today = current_memories_today + 1,
+                           current_storage_bytes = current_storage_bytes + ?1,
+                           updated_at = ?2
+                         WHERE agent_id = ?3",
+                        params![bytes, now, agent_id],
+                    )
+                    .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("update failed: {e}")))?;
+                }
+            }
+            QuotaOp::Link => {
+                if links_today + 1 > row.max_links_per_day {
+                    return Err(QuotaCheckError::Quota(QuotaError {
+                        agent_id: agent_id.to_string(),
+                        limit: QuotaLimit::LinksPerDay,
+                        current: links_today,
+                        max: row.max_links_per_day,
+                    }));
+                }
+                if day_rolled {
+                    conn.execute(
+                        "UPDATE agent_quotas SET
+                           current_memories_today = 0,
+                           current_links_today = 1,
+                           day_started_at = ?1,
+                           updated_at = ?1
+                         WHERE agent_id = ?2",
+                        params![now, agent_id],
+                    )
+                    .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("update failed: {e}")))?;
+                } else {
+                    conn.execute(
+                        "UPDATE agent_quotas SET
+                           current_links_today = current_links_today + 1,
+                           updated_at = ?1
+                         WHERE agent_id = ?2",
+                        params![now, agent_id],
+                    )
+                    .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("update failed: {e}")))?;
+                }
+            }
+        }
+        Ok(())
+    })();
+
+    match result {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| QuotaCheckError::Sql(anyhow::anyhow!("quota commit failed: {e}")))?;
+            Ok(())
+        }
+        Err(e) => {
+            // Rollback is best-effort — even if it fails, the
+            // transaction is implicitly aborted on connection drop.
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
+}
+
+/// v0.7 K8 / H12 — refund a previously-recorded op. Used by callers
+/// that have already incremented the counters via
+/// [`check_and_record`] but whose downstream insert failed AFTER the
+/// quota commit. Decrements the same counters [`check_and_record`]
+/// incremented; storage bytes is decremented for `QuotaOp::Memory`.
+///
+/// Counters never go below zero (saturating) so a buggy double-refund
+/// cannot poison the substrate.
+///
+/// # Errors
+///
+/// Wrapped SQL errors on update failure.
+pub fn refund_op(conn: &Connection, agent_id: &str, op: QuotaOp) -> Result<()> {
+    let now = chrono::Utc::now().to_rfc3339();
+    match op {
+        QuotaOp::Memory { bytes } => {
+            conn.execute(
+                "UPDATE agent_quotas SET
+                   current_memories_today = MAX(current_memories_today - 1, 0),
+                   current_storage_bytes = MAX(current_storage_bytes - ?1, 0),
+                   updated_at = ?2
+                 WHERE agent_id = ?3",
+                params![bytes, now, agent_id],
+            )?;
+        }
+        QuotaOp::Link => {
+            conn.execute(
+                "UPDATE agent_quotas SET
+                   current_links_today = MAX(current_links_today - 1, 0),
+                   updated_at = ?1
+                 WHERE agent_id = ?2",
+                params![now, agent_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// v0.7 K8 — record a successful write against the agent's quota
 /// counters. Called AFTER the underlying insert succeeds so a failed
 /// store does not consume quota.
+///
+/// **DEPRECATED for new code paths**: prefer [`check_and_record`]
+/// which combines the check + record into a single atomic transaction
+/// (closes H12 TOCTOU). `record_op` remains for callers (and tests)
+/// that bypass the check phase entirely.
 ///
 /// If the stored `day_started_at` rolled over since the row was last
 /// touched, the daily counters are reset before the new op posts —

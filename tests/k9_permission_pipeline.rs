@@ -280,6 +280,89 @@ fn k9_longest_pattern_wins_specificity() {
     }
 }
 
+/// H8 (#628 blocker) — a hook returning `Modify { namespace: <ns> }`
+/// where `<ns>` is denied by a rule must NOT be allowed to launder
+/// the write into the denied namespace. The pipeline pins the
+/// original namespace at entry, lets the rule pass evaluate against
+/// it, and then — if a Modify proposes a different namespace —
+/// re-evaluates the rules against the new namespace before accepting
+/// the modification. A deny on the destination escalates the result
+/// from `Modify` to `Deny`.
+#[test]
+fn k9_modify_cannot_escalate_into_denied_namespace() {
+    // Rules: deny stores into `secrets/*`, allow stores into
+    // `public/*`. The starting namespace is `public/blog` — the rule
+    // pass returns Allow. A hook proposes Modify { namespace:
+    // "secrets/x" } and the H8 fix must catch the escalation.
+    let rules = vec![
+        rule(
+            "secrets/*",
+            "memory_store",
+            "*",
+            RuleDecision::Deny,
+            Some("ai agents may not write to secrets"),
+        ),
+        rule("public/*", "memory_store", "*", RuleDecision::Allow, None),
+    ];
+    let hook = HookDecision::Modify(ModifyPayload {
+        delta: MemoryDelta {
+            namespace: Some("secrets/x".into()),
+            ..Default::default()
+        },
+    });
+    let d = Permissions::evaluate_with(
+        &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+        &[hook],
+        &rules,
+        PermissionsMode::Enforce,
+    );
+    match d {
+        Decision::Deny(reason) => {
+            assert!(
+                reason.contains("namespace escalation rejected"),
+                "expected H8 escalation marker in deny reason, got: {reason}"
+            );
+            assert!(
+                reason.contains("secrets/x"),
+                "deny reason should name the rejected destination namespace, got: {reason}"
+            );
+        }
+        other => panic!("expected Deny (escalation rejected), got {other:?}"),
+    }
+}
+
+/// H8 — a Modify proposing a namespace that is also allowed by the
+/// rule pipeline still surfaces as `Decision::Modify(delta)`. The
+/// fix only rejects on a Deny re-evaluation; legitimate
+/// namespace-rewrite hooks continue to work.
+#[test]
+fn k9_modify_into_allowed_namespace_still_succeeds() {
+    let rules = vec![
+        rule("public/*", "memory_store", "*", RuleDecision::Allow, None),
+        rule("staging/*", "memory_store", "*", RuleDecision::Allow, None),
+    ];
+    let hook = HookDecision::Modify(ModifyPayload {
+        delta: MemoryDelta {
+            namespace: Some("staging/x".into()),
+            tags: Some(vec!["rewritten".into()]),
+            ..Default::default()
+        },
+    });
+    let d = Permissions::evaluate_with(
+        &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+        &[hook],
+        &rules,
+        PermissionsMode::Enforce,
+    );
+    match d {
+        Decision::Modify(delta) => {
+            assert_eq!(delta.namespace.as_deref(), Some("staging/x"));
+            assert_eq!(delta.tags.as_deref(), Some(&["rewritten".to_string()][..]));
+        }
+        other => panic!("expected Modify, got {other:?}"),
+    }
+}
+
 /// Bonus: Off mode short-circuits the entire pipeline, even past a
 /// rule that would otherwise deny. This is the documented freeze-
 /// thaw escape hatch (mirrors K3 `Off` semantics — the gate is

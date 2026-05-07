@@ -912,6 +912,14 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
 /// we let reqwest surface the error rather than fail closed, because
 /// transient DNS outages should not silently drop webhook delivery.
 pub fn validate_url_dns(url: &str) -> Result<()> {
+    validate_url_dns_with(url, crate::config::allow_loopback_webhooks())
+}
+
+/// H11 inner helper: takes `allow_loopback` explicitly so tests can
+/// assert both branches without poking the process-wide atomic
+/// (which would race with parallel tests). Production callers go
+/// through `validate_url_dns`.
+fn validate_url_dns_with(url: &str, allow_loopback: bool) -> Result<()> {
     let lower = url.to_ascii_lowercase();
     let (_scheme, rest) = lower
         .split_once("://")
@@ -952,6 +960,17 @@ pub fn validate_url_dns(url: &str) -> Result<()> {
                 "host resolves to private/link-local IP {ip}: {url}"
             ));
         }
+        // H11 (#628 blocker) — DNS-rebind protection for loopback.
+        // Default-OFF; operators with `[subscriptions]
+        // allow_loopback_webhooks = true` accept loopback-resolving
+        // hostnames.
+        if ip.is_loopback() && !allow_loopback {
+            return Err(anyhow!(
+                "host resolves to loopback IP {ip}: {url} — rejected by default \
+                 (SSRF guard); set `[subscriptions] allow_loopback_webhooks = true` \
+                 to opt in"
+            ));
+        }
     }
     Ok(())
 }
@@ -960,6 +979,14 @@ pub fn validate_url_dns(url: &str) -> Result<()> {
 /// to private-range addresses, link-local, loopback (except
 /// explicitly), or non-HTTPS remote hosts.
 pub fn validate_url(url: &str) -> Result<()> {
+    validate_url_with(url, crate::config::allow_loopback_webhooks())
+}
+
+/// H11 inner helper: takes `allow_loopback` explicitly so tests can
+/// assert both branches without poking the process-wide atomic
+/// (which would race with parallel tests). Production callers go
+/// through `validate_url`.
+fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     // Cheap scheme check without pulling the `url` crate.
     let lower = url.to_ascii_lowercase();
     let (scheme, rest) = lower
@@ -986,12 +1013,27 @@ pub fn validate_url(url: &str) -> Result<()> {
             .map_or(host_port.to_string(), |(h, _)| h.to_string())
     };
     let host = host.as_str();
-    // Allow localhost for dev / CI.
+    // H11 (#628 blocker): loopback hostnames + IPs are rejected by
+    // default. Operators who need to point a webhook at a local
+    // listener (CI, dev) opt in via `[subscriptions]
+    // allow_loopback_webhooks = true`. Default-OFF closes an
+    // authenticated SSRF gadget against local services (Postgres on
+    // 5432, the hooks daemon, etc.).
     let is_loopback_hostname = matches!(host, "localhost" | "localhost.localdomain" | "");
-    if scheme == "http" && !is_loopback_hostname {
+    let parsed_ip = IpAddr::from_str(host).ok();
+    let is_loopback_ip = parsed_ip.is_some_and(|ip| ip.is_loopback());
+    let is_loopback = is_loopback_hostname || is_loopback_ip;
+    if is_loopback && !allow_loopback {
+        return Err(anyhow!(
+            "webhook URL targets loopback address {url} — rejected by default \
+             (SSRF guard); set `[subscriptions] allow_loopback_webhooks = true` \
+             to opt in (testing / dev only)"
+        ));
+    }
+    if scheme == "http" && !is_loopback {
         // Accept http only to parsed-loopback IPs; everything else
         // requires https.
-        if let Ok(ip) = IpAddr::from_str(host) {
+        if let Some(ip) = parsed_ip {
             if !ip.is_loopback() {
                 return Err(anyhow!(
                     "webhook URL must be https for non-loopback host: {url}"
@@ -1008,7 +1050,7 @@ pub fn validate_url(url: &str) -> Result<()> {
     // caught here — the dispatch thread will still be able to reach
     // them; operators who want to reach internal services should set
     // up reverse proxies or allow explicitly in config.
-    if let Ok(ip) = IpAddr::from_str(host)
+    if let Some(ip) = parsed_ip
         && is_private(ip)
         && !ip.is_loopback()
     {
@@ -1257,12 +1299,53 @@ mod tests {
 
     #[test]
     fn http_only_to_loopback() {
-        assert!(validate_url("http://localhost/hook").is_ok());
-        assert!(validate_url("http://127.0.0.1:8080/hook").is_ok());
+        // H11 inner helper — assert with allow_loopback=true so the
+        // test does not depend on the test-build default and does not
+        // race with parallel tests poking the global atomic.
+        assert!(validate_url_with("http://localhost/hook", true).is_ok());
+        assert!(validate_url_with("http://127.0.0.1:8080/hook", true).is_ok());
         // IPv6 in URLs must be bracketed per RFC 3986 §3.2.2.
-        assert!(validate_url("http://[::1]/hook").is_ok());
-        assert!(validate_url("http://example.com/hook").is_err());
-        assert!(validate_url("http://8.8.8.8/hook").is_err());
+        assert!(validate_url_with("http://[::1]/hook", true).is_ok());
+        assert!(validate_url_with("http://example.com/hook", true).is_err());
+        assert!(validate_url_with("http://8.8.8.8/hook", true).is_err());
+    }
+
+    #[test]
+    fn loopback_rejected_by_default_h11() {
+        // H11 (#628 blocker) — loopback URLs are rejected without an
+        // explicit opt-in. This closes an authenticated SSRF gadget
+        // against local services (Postgres on 5432, hooks daemon, …).
+        // Uses the inner helper so the assertion does not race with
+        // parallel tests that touch `crate::config` or use real
+        // loopback URLs through `validate_url`.
+        for url in [
+            "http://127.0.0.1:5432/hook",
+            "http://localhost/hook",
+            "http://[::1]/hook",
+            "https://127.0.0.1/hook",
+            "https://localhost/hook",
+        ] {
+            let res = validate_url_with(url, false);
+            assert!(
+                res.is_err(),
+                "loopback URL {url} must be rejected when allow_loopback=false (H11), got {res:?}"
+            );
+            let msg = res.unwrap_err().to_string();
+            assert!(
+                msg.contains("loopback") || msg.contains("SSRF"),
+                "rejection message should explain loopback policy, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_accepted_when_opted_in_h11() {
+        // H11 — operators who need loopback for CI/testing opt in via
+        // `[subscriptions] allow_loopback_webhooks = true`. Inner
+        // helper isolates this test from the global atomic.
+        assert!(validate_url_with("http://127.0.0.1:9999/hook", true).is_ok());
+        assert!(validate_url_with("http://localhost/hook", true).is_ok());
+        assert!(validate_url_with("http://[::1]/hook", true).is_ok());
     }
 
     #[test]
@@ -1446,34 +1529,49 @@ mod tests {
 
     #[test]
     fn test_validate_url_dns_accepts_loopback_v4() {
-        // DESIGN: loopback is allowed by `validate_url_dns` for dev/CI;
-        // the layered defence is `validate_url`, which forces https for
-        // non-loopback hosts. We document that current behaviour here
-        // so a regression that *tightens* loopback handling is visible.
+        // H11 inner helper — assert with allow_loopback=true so the
+        // test does not race with parallel tests poking the global
+        // atomic. Dev/CI workflows opt in via config to get this
+        // behaviour at runtime.
         assert!(
-            validate_url_dns("http://127.0.0.1/foo").is_ok(),
-            "127.0.0.1 should be accepted by validate_url_dns (dev/CI)"
+            validate_url_dns_with("http://127.0.0.1/foo", true).is_ok(),
+            "127.0.0.1 should be accepted by validate_url_dns when opted in"
         );
         assert!(
-            validate_url_dns("http://127.0.0.1:8080/").is_ok(),
-            "127.0.0.1:8080 should be accepted by validate_url_dns"
+            validate_url_dns_with("http://127.0.0.1:8080/", true).is_ok(),
+            "127.0.0.1:8080 should be accepted by validate_url_dns when opted in"
         );
         assert!(
-            validate_url_dns("http://localhost/").is_ok(),
-            "localhost should be accepted by validate_url_dns"
+            validate_url_dns_with("http://localhost/", true).is_ok(),
+            "localhost should be accepted by validate_url_dns when opted in"
         );
     }
 
     #[test]
     fn test_validate_url_dns_accepts_loopback_v6() {
-        // Same as v4: loopback is documented-allowed.
+        // Same as v4 — loopback opt-in via inner helper.
         assert!(
-            validate_url_dns("http://[::1]/").is_ok(),
-            "[::1] should be accepted by validate_url_dns"
+            validate_url_dns_with("http://[::1]/", true).is_ok(),
+            "[::1] should be accepted by validate_url_dns when opted in"
         );
         assert!(
-            validate_url_dns("http://[0:0:0:0:0:0:0:1]/").is_ok(),
-            "[::1] expanded form should be accepted"
+            validate_url_dns_with("http://[0:0:0:0:0:0:0:1]/", true).is_ok(),
+            "[::1] expanded form should be accepted when opted in"
+        );
+    }
+
+    #[test]
+    fn test_validate_url_dns_rejects_loopback_by_default_h11() {
+        // H11 — loopback DNS-resolves are rejected by default to
+        // close DNS-rebind SSRF against local services. Inner helper
+        // pins allow_loopback=false without touching the global.
+        assert!(
+            validate_url_dns_with("http://127.0.0.1/foo", false).is_err(),
+            "127.0.0.1 must be rejected by validate_url_dns when allow_loopback=false (H11)"
+        );
+        assert!(
+            validate_url_dns_with("http://[::1]/", false).is_err(),
+            "[::1] must be rejected by validate_url_dns when allow_loopback=false (H11)"
         );
     }
 

@@ -18,6 +18,13 @@ fn cmd(binary: &str) -> std::process::Command {
     // so opt these scenarios into Enforce explicitly. Per-test
     // overrides win because env-vars are shadowed at .env() call time.
     c.env("AI_MEMORY_PERMISSIONS_MODE", "enforce");
+    // v0.7.0 H11 (#628 blocker) — webhook subscriber tests bind
+    // wiremock to `127.0.0.1:0` and POST loopback URLs to
+    // `/api/v1/subscriptions`. The H11 SSRF guard rejects loopback
+    // by default; the integration suite opts in via env so it
+    // exercises the production happy path without permanently
+    // relaxing the production default.
+    c.env("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "1");
     c
 }
 /// Spawn a command and collect its output, panicking with a descriptive
@@ -8754,6 +8761,14 @@ impl OneshotDaemon {
     /// against in-process mock peers (see `spawn_inproc_mock_peer`).
     #[allow(dead_code)]
     fn with_federation(federation: Option<ai_memory::federation::FederationConfig>) -> Self {
+        // v0.7.0 H11 (#628 blocker) — webhook-subscriber tests POST
+        // loopback URLs (`http://localhost/...`, `127.0.0.1:0`) into
+        // `/api/v1/subscriptions`. The H11 SSRF guard rejects loopback
+        // by default; the in-process integration suite opts in here
+        // (mirrors the env-var opt-in for subprocess-spawned daemon
+        // tests in `cmd()`) so the production happy path is exercised
+        // without permanently relaxing the production default.
+        ai_memory::config::set_allow_loopback_webhooks(true);
         let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
         let path = std::path::PathBuf::from(":memory:");
         let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((

@@ -1682,7 +1682,11 @@ fn handle_store(
                 .unwrap_or(0),
     )
     .unwrap_or(i64::MAX);
-    if let Err(e) = crate::quotas::check_quota(
+    // H12 (#628 blocker): combine the quota check + counter
+    // increment in a single atomic transaction so concurrent writers
+    // cannot each pass the check and then both bump the counter past
+    // the cap.
+    if let Err(e) = crate::quotas::check_and_record(
         conn,
         &agent_id,
         crate::quotas::QuotaOp::Memory {
@@ -1692,21 +1696,23 @@ fn handle_store(
         return Err(e.to_string());
     }
 
-    let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
-
-    // v0.7 K8 — record the successful write against the agent's
-    // counters. Best-effort: a counter update failure is logged but
-    // does not roll back the insert (the inline-roll branch in
-    // check_quota would re-derive any missed delta on the next call).
-    if let Err(e) = crate::quotas::record_op(
-        conn,
-        &agent_id,
-        crate::quotas::QuotaOp::Memory {
-            bytes: payload_bytes,
-        },
-    ) {
-        tracing::warn!("quota record_op failed for agent {}: {}", &agent_id, e);
-    }
+    let actual_id = match db::insert(conn, &mem) {
+        Ok(id) => id,
+        Err(e) => {
+            // Insert failed AFTER we committed quota — refund so the
+            // counter reflects only successful stores.
+            if let Err(re) = crate::quotas::refund_op(
+                conn,
+                &agent_id,
+                crate::quotas::QuotaOp::Memory {
+                    bytes: payload_bytes,
+                },
+            ) {
+                tracing::warn!("quota refund_op failed for agent {}: {}", &agent_id, re);
+            }
+            return Err(e.to_string());
+        }
+    };
 
     // PR-5 (issue #487): security audit trail. No-op when disabled.
     crate::audit::emit(crate::audit::EventBuilder::new(
@@ -4207,8 +4213,12 @@ fn handle_link(
             .and_then(|v| v.as_str())
             .map(str::to_string)
     });
+    // H12 (#628 blocker): combine the link quota check + counter
+    // increment in a single atomic transaction. The check + record
+    // pair was previously a TOCTOU window; `check_and_record` closes
+    // it.
     if let Some(ref aid) = link_agent_id {
-        if let Err(e) = crate::quotas::check_quota(conn, aid, crate::quotas::QuotaOp::Link) {
+        if let Err(e) = crate::quotas::check_and_record(conn, aid, crate::quotas::QuotaOp::Link) {
             return Err(e.to_string());
         }
     }
@@ -4217,17 +4227,22 @@ fn handle_link(
     // to attest_level="unsigned" otherwise. The chosen attest_level is
     // surfaced in the wire response so callers can tell signed vs
     // unsigned without re-querying.
-    let attest_level = db::create_link_signed(conn, source_id, target_id, relation, active_keypair)
-        .map_err(|e| e.to_string())?;
-
-    // v0.7 K8 — record the successful link against the agent's
-    // counters (best-effort; does not roll back the link insert on
-    // counter-update failure).
-    if let Some(ref aid) = link_agent_id {
-        if let Err(e) = crate::quotas::record_op(conn, aid, crate::quotas::QuotaOp::Link) {
-            tracing::warn!("quota record_op failed for agent {}: {}", aid, e);
-        }
-    }
+    let attest_level =
+        match db::create_link_signed(conn, source_id, target_id, relation, active_keypair) {
+            Ok(v) => v,
+            Err(e) => {
+                // Refund the link counter we already committed: insert
+                // failed downstream of the quota commit.
+                if let Some(ref aid) = link_agent_id {
+                    if let Err(re) =
+                        crate::quotas::refund_op(conn, aid, crate::quotas::QuotaOp::Link)
+                    {
+                        tracing::warn!("quota refund_op failed for agent {}: {}", aid, re);
+                    }
+                }
+                return Err(e.to_string());
+            }
+        };
 
     // P5 (G9): fire `memory_link_created` webhook AFTER the link is
     // persisted. Resolve the source memory to populate `namespace` /
