@@ -1511,6 +1511,13 @@ pub struct AppConfig {
     /// When unset, only per-subscription secrets are used (legacy
     /// pre-K7 behaviour).
     pub hooks: Option<HooksConfig>,
+    /// v0.7.0 H11 (#628 blocker) — `[subscriptions]` block. Carries
+    /// the `allow_loopback_webhooks` opt-in that re-enables loopback
+    /// webhook URLs (`127.0.0.1`, `localhost`, `[::1]`). Default-OFF
+    /// closes an authenticated SSRF gadget against local services
+    /// (Postgres on 5432, the hooks daemon, etc.). Operators who need
+    /// loopback for testing must set this explicitly.
+    pub subscriptions: Option<SubscriptionsConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1550,6 +1557,30 @@ pub struct HooksSubscriptionConfig {
     pub hmac_secret: Option<String>,
 }
 
+/// v0.7.0 H11 (#628 blocker) — `[subscriptions]` block. Operator
+/// knobs for the outgoing-webhook surface that are NOT specific to
+/// HMAC signing (which lives under `[hooks.subscription]`).
+///
+/// Wire format:
+/// ```toml
+/// [subscriptions]
+/// allow_loopback_webhooks = true   # default false; opt-in for testing
+/// ```
+///
+/// When unset (or false), the SSRF guard rejects webhook URLs that
+/// resolve to loopback addresses (`127.0.0.0/8`, `localhost`, `::1`).
+/// Loopback hosts are reachable from the daemon process itself, so
+/// permitting them by default exposes any locally-bound service
+/// (database, internal admin sockets) to authenticated SSRF.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SubscriptionsConfig {
+    /// Re-enable loopback webhook URLs. Default `false` (loopback
+    /// rejected). Operators who need to point a webhook at a local
+    /// listener (CI, dev) set this to `true` explicitly.
+    #[serde(default)]
+    pub allow_loopback_webhooks: bool,
+}
+
 impl AppConfig {
     /// v0.7.0 K7 — resolved server-wide webhook HMAC secret. `None`
     /// means no server-wide override (per-subscription secrets still
@@ -1560,6 +1591,41 @@ impl AppConfig {
             .as_ref()
             .and_then(|h| h.subscription.as_ref())
             .and_then(|s| s.hmac_secret.clone())
+    }
+
+    /// v0.7.0 H11 (#628 blocker) — resolved loopback-webhook opt-in
+    /// flag. Defaults to `false` (loopback rejected — closes the
+    /// authenticated SSRF gadget against local services). Operators
+    /// who need loopback for testing set
+    /// `[subscriptions] allow_loopback_webhooks = true`.
+    ///
+    /// Resolution order (mirrors `effective_permissions_mode`):
+    /// 1. `AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS` env var (`1` / `true` —
+    ///    case-insensitive). Lets the integration suite — which
+    ///    sets `AI_MEMORY_NO_CONFIG=1` and therefore cannot use
+    ///    `[subscriptions]` from `config.toml` — bind wiremock at
+    ///    `127.0.0.1:0` and drive webhooks through it without
+    ///    touching the production default.
+    /// 2. `[subscriptions].allow_loopback_webhooks` from `config.toml`.
+    /// 3. Compiled default (`false` — loopback rejected).
+    #[must_use]
+    pub fn effective_allow_loopback_webhooks(&self) -> bool {
+        if let Ok(raw) = std::env::var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS") {
+            match raw.to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => return true,
+                "0" | "false" | "no" | "off" | "" => return false,
+                other => {
+                    eprintln!(
+                        "ai-memory: AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS={other:?} is not a valid \
+                         boolean (expected 1/true/yes/on or 0/false/no/off); falling back to \
+                         config.toml"
+                    );
+                }
+            }
+        }
+        self.subscriptions
+            .as_ref()
+            .is_some_and(|s| s.allow_loopback_webhooks)
     }
 }
 
@@ -1593,6 +1659,42 @@ pub fn set_active_hooks_hmac_secret(secret: Option<String>) {
 #[must_use]
 pub fn active_hooks_hmac_secret() -> Option<String> {
     ACTIVE_HOOKS_HMAC_SECRET.read().ok().and_then(|g| g.clone())
+}
+
+// ---------------------------------------------------------------------------
+// H11 — process-wide handle for the loopback-webhook opt-in
+// ---------------------------------------------------------------------------
+//
+// `validate_url` in `subscriptions.rs` consults this handle to decide
+// whether to accept loopback webhook destinations. Default-OFF closes
+// the SSRF gadget; the boot code in `main` / daemon reads
+// `[subscriptions] allow_loopback_webhooks` and sets the flag here.
+
+// Default-OFF in production builds so the SSRF guard rejects loopback
+// without explicit opt-in. Defaults to `true` under `cfg(test)` so
+// the existing test surface (which binds wiremock to `127.0.0.1:0`
+// and drives validate_url/validate_url_dns through real loopback
+// URLs) passes without 16-test fan-out modifications. The H11
+// default-OFF behaviour is independently asserted via the
+// `validate_url_with` / `validate_url_dns_check_addrs` inner helpers
+// in `subscriptions.rs`, so flipping the test-build default here
+// does NOT relax the H11 ship-gate test coverage.
+static ALLOW_LOOPBACK_WEBHOOKS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(cfg!(test));
+
+/// v0.7.0 H11 — set the process-wide loopback-webhook opt-in. Called
+/// from boot with the value of `[subscriptions] allow_loopback_webhooks`.
+/// Defaults to `false` (loopback rejected).
+pub fn set_allow_loopback_webhooks(allow: bool) {
+    ALLOW_LOOPBACK_WEBHOOKS.store(allow, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// v0.7.0 H11 — read the process-wide loopback-webhook opt-in.
+/// Returns `false` when unset (the safe default — loopback URLs are
+/// rejected by the SSRF guard).
+#[must_use]
+pub fn allow_loopback_webhooks() -> bool {
+    ALLOW_LOOPBACK_WEBHOOKS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 // ---------------------------------------------------------------------------

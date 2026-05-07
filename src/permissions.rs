@@ -43,8 +43,10 @@ use crate::hooks::events::MemoryDelta;
 
 /// The operation a permission check is gating. K9 wires the
 /// pipeline into five callsites: store, link, delete, archive,
-/// consolidate. The wire string is the canonical name surfaced in
-/// rule matchers (`op = "memory_store"` etc.).
+/// consolidate. v0.7.0 #628 H6 added a sixth — `memory_replay` —
+/// so cross-tenant transcript reads are gated by the same evaluator
+/// that already gates writes. The wire string is the canonical name
+/// surfaced in rule matchers (`op = "memory_store"` etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Op {
@@ -53,6 +55,10 @@ pub enum Op {
     MemoryDelete,
     MemoryArchive,
     MemoryConsolidate,
+    /// v0.7.0 #628 H6 — `memory_replay` MCP tool (transcript read).
+    /// Gated so an agent cannot fetch verbatim transcript content
+    /// from a namespace they are not authorised to read.
+    MemoryReplay,
 }
 
 impl Op {
@@ -66,6 +72,7 @@ impl Op {
             Op::MemoryDelete => "memory_delete",
             Op::MemoryArchive => "memory_archive",
             Op::MemoryConsolidate => "memory_consolidate",
+            Op::MemoryReplay => "memory_replay",
         }
     }
 
@@ -78,6 +85,7 @@ impl Op {
             "memory_delete" => Some(Op::MemoryDelete),
             "memory_archive" => Some(Op::MemoryArchive),
             "memory_consolidate" => Some(Op::MemoryConsolidate),
+            "memory_replay" => Some(Op::MemoryReplay),
             _ => None,
         }
     }
@@ -305,7 +313,20 @@ impl Permissions {
     /// decision).
     #[must_use]
     pub fn evaluate(ctx: &PermissionContext, hook_decisions: &[HookDecision]) -> Decision {
-        let rules = active_permission_rules();
+        // Review #628 H10: K10's `remember=forever` writes a
+        // [`crate::approvals::SyntheticPermissionRule`] into a
+        // separate registry that the v0.7.0-ship evaluator did not
+        // consult — so an operator who clicked "remember" was
+        // re-prompted on every subsequent matching call. We promote
+        // each synthetic entry into a virtual [`PermissionRule`] and
+        // splice them onto the front of the rule list so the
+        // existing combiner sees them. The combiner is deny-first
+        // across all sources, which preserves the safety property
+        // that an explicit config Deny still beats an operator's
+        // `remember=forever`-Allow — and a synthetic Allow shadows a
+        // config-level Ask (the whole point of "remember").
+        let mut rules = synthetic_rules_as_permission_rules();
+        rules.extend(active_permission_rules());
         Self::evaluate_with(ctx, hook_decisions, &rules, active_permissions_mode())
     }
 
@@ -313,6 +334,18 @@ impl Permissions {
     /// mode as explicit parameters. Used by the K9 test matrix so
     /// scenarios can exercise specific rule-set / mode combinations
     /// without poking the process-wide registry.
+    ///
+    /// # H8 invariant — namespace cannot be elevated by `Modify`
+    ///
+    /// The pinned namespace for rule evaluation is taken from
+    /// `ctx.namespace` BEFORE any rule pass. If a hook returns
+    /// `Modify { namespace: <other_ns> }` the pipeline RE-EVALUATES
+    /// the entire rule set against the new namespace; if that
+    /// re-evaluation returns `Decision::Deny`, the modification is
+    /// rejected (the original `Deny` reason is surfaced — annotated
+    /// with the rejected escalation). This closes the v0.7.0 review
+    /// blocker H8 / #628 where a `Modify`-rewrite of `namespace`
+    /// could bypass a rule that targeted the destination namespace.
     #[must_use]
     pub fn evaluate_with(
         ctx: &PermissionContext,
@@ -325,6 +358,13 @@ impl Permissions {
         if mode == PermissionsMode::Off {
             return Decision::Allow;
         }
+
+        // H8 — pin the namespace at entry. The original namespace
+        // is the only one that may participate in this evaluation;
+        // any hook that proposes a different namespace must survive
+        // a re-evaluation against the rules pinned to the *new*
+        // namespace below.
+        let pinned_ns = ctx.namespace.clone();
 
         // Collect rule decisions matching this context.
         let matched = matched_rules(ctx, rules);
@@ -360,6 +400,34 @@ impl Permissions {
             }
         }
         if let Some(delta) = composed {
+            // H8 — if the composed delta rewrites `namespace` to a
+            // value other than the pinned one, RE-EVALUATE the rule
+            // pipeline against the new namespace. A Deny on the new
+            // namespace rejects the modification (the hook cannot
+            // launder a write into a denied namespace).
+            if let Some(new_ns) = delta.namespace.as_deref()
+                && new_ns != pinned_ns
+            {
+                let rebound_ctx = PermissionContext {
+                    op: ctx.op,
+                    namespace: new_ns.to_string(),
+                    agent_id: ctx.agent_id.clone(),
+                    payload: ctx.payload.clone(),
+                };
+                // Re-evaluate against rules ONLY (we already drained
+                // the hooks slice above; re-running them would either
+                // loop indefinitely or re-Modify the same delta).
+                // The hooks pass is empty here so the recursion
+                // terminates after a single rule pass.
+                let rebound = Self::evaluate_with(&rebound_ctx, &[], rules, mode);
+                if let Decision::Deny(reason) = rebound {
+                    return Decision::Deny(format!(
+                        "namespace escalation rejected: hook proposed Modify into \
+                         namespace {new_ns:?} (from pinned {pinned_ns:?}) which is denied: \
+                         {reason}"
+                    ));
+                }
+            }
             return Decision::Modify(delta);
         }
 
@@ -475,6 +543,83 @@ fn merge_delta(prior: Option<MemoryDelta>, next: MemoryDelta) -> MemoryDelta {
     }
     if next.metadata.is_some() {
         out.metadata = next.metadata;
+    }
+    out
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic rule integration (review #628 H10)
+// ---------------------------------------------------------------------------
+
+/// Map a K10 `pending_actions.action_type` string onto a K9 [`Op`].
+///
+/// K10 records synthetic rules with the wire-level `action_type`
+/// (`"store"`, `"delete"`, `"promote"`) — the same shape the
+/// `pending_actions` table uses. K9 evaluates against an [`Op`]
+/// enum (`memory_store`, `memory_delete`, …). This adapter bridges
+/// the two so `remember=forever` rules become consultable by the
+/// store / delete pipeline without the rule loader having to know
+/// about K9 internals.
+fn op_matches_action_type(op: Op, action_type: &str) -> bool {
+    match (op, action_type) {
+        (Op::MemoryStore, "store")
+        | (Op::MemoryDelete, "delete")
+        | (Op::MemoryArchive, "archive" | "promote")
+        | (Op::MemoryConsolidate, "consolidate")
+        | (Op::MemoryLink, "link") => true,
+        _ => false,
+    }
+}
+
+/// Promote every entry in
+/// [`crate::approvals::list_synthetic_rules`] into the equivalent
+/// [`PermissionRule`] shape so the K9 evaluator can consume them
+/// alongside the config-loaded rules. Empty agent_id is rendered as
+/// the wildcard `"*"`. Unknown decision verbs are dropped with a
+/// WARN — the K10 transports only ever write `"approve"` /
+/// `"deny"`, so this is defence-in-depth, not load-bearing.
+///
+/// Each synthetic entry yields one `PermissionRule` per K9 [`Op`]
+/// the `action_type` maps to (via [`op_matches_action_type`]).
+/// `pending_actions.action_type == "store"` produces a
+/// `memory_store` rule; `"delete"` produces `memory_delete`; etc.
+fn synthetic_rules_as_permission_rules() -> Vec<PermissionRule> {
+    let synth = crate::approvals::list_synthetic_rules();
+    let mut out: Vec<PermissionRule> = Vec::with_capacity(synth.len());
+    let ops = [
+        Op::MemoryStore,
+        Op::MemoryDelete,
+        Op::MemoryArchive,
+        Op::MemoryConsolidate,
+        Op::MemoryLink,
+    ];
+    for s in synth {
+        let decision = match s.decision.as_str() {
+            "approve" | "allow" => RuleDecision::Allow,
+            "deny" | "reject" => RuleDecision::Deny,
+            other => {
+                tracing::warn!(
+                    "ignoring synthetic permission rule with unknown decision verb: {other:?}"
+                );
+                continue;
+            }
+        };
+        let agent_pattern = s.agent_id.clone().unwrap_or_else(|| "*".to_string());
+        for op in ops {
+            if !op_matches_action_type(op, &s.action_type) {
+                continue;
+            }
+            out.push(PermissionRule {
+                namespace_pattern: s.namespace.clone(),
+                op: op.as_str().to_string(),
+                agent_pattern: agent_pattern.clone(),
+                decision,
+                reason: Some(format!(
+                    "remembered operator decision (recorded_at={})",
+                    s.recorded_at
+                )),
+            });
+        }
     }
     out
 }
@@ -616,6 +761,7 @@ mod tests {
             Op::MemoryDelete,
             Op::MemoryArchive,
             Op::MemoryConsolidate,
+            Op::MemoryReplay,
         ] {
             assert_eq!(Op::from_str(op.as_str()), Some(op));
         }

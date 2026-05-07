@@ -129,10 +129,15 @@ async fn http_sse_endpoint_emits_event_to_attached_client() {
     // Initiate the SSE request. axum returns immediately with the
     // streaming body; we hold the response body and pull a single
     // chunk after publishing an event.
+    // K10 review #628 blocker C2: SSE subscribers must self-identify
+    // so the receive-side filter can scope events to the right tenant.
+    // The pending row this test fires sets `requested_by="operator"`,
+    // so the subscriber identifies as the same agent.
     let req = Request::builder()
         .method("GET")
         .uri("/api/v1/approvals/stream")
         .header("accept", "text/event-stream")
+        .header("x-agent-id", "operator")
         .body(Body::empty())
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();

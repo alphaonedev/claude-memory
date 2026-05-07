@@ -1682,7 +1682,11 @@ fn handle_store(
                 .unwrap_or(0),
     )
     .unwrap_or(i64::MAX);
-    if let Err(e) = crate::quotas::check_quota(
+    // H12 (#628 blocker): combine the quota check + counter
+    // increment in a single atomic transaction so concurrent writers
+    // cannot each pass the check and then both bump the counter past
+    // the cap.
+    if let Err(e) = crate::quotas::check_and_record(
         conn,
         &agent_id,
         crate::quotas::QuotaOp::Memory {
@@ -1692,21 +1696,23 @@ fn handle_store(
         return Err(e.to_string());
     }
 
-    let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
-
-    // v0.7 K8 — record the successful write against the agent's
-    // counters. Best-effort: a counter update failure is logged but
-    // does not roll back the insert (the inline-roll branch in
-    // check_quota would re-derive any missed delta on the next call).
-    if let Err(e) = crate::quotas::record_op(
-        conn,
-        &agent_id,
-        crate::quotas::QuotaOp::Memory {
-            bytes: payload_bytes,
-        },
-    ) {
-        tracing::warn!("quota record_op failed for agent {}: {}", &agent_id, e);
-    }
+    let actual_id = match db::insert(conn, &mem) {
+        Ok(id) => id,
+        Err(e) => {
+            // Insert failed AFTER we committed quota — refund so the
+            // counter reflects only successful stores.
+            if let Err(re) = crate::quotas::refund_op(
+                conn,
+                &agent_id,
+                crate::quotas::QuotaOp::Memory {
+                    bytes: payload_bytes,
+                },
+            ) {
+                tracing::warn!("quota refund_op failed for agent {}: {}", &agent_id, re);
+            }
+            return Err(e.to_string());
+        }
+    };
 
     // PR-5 (issue #487): security audit trail. No-op when disabled.
     crate::audit::emit(crate::audit::EventBuilder::new(
@@ -4207,8 +4213,12 @@ fn handle_link(
             .and_then(|v| v.as_str())
             .map(str::to_string)
     });
+    // H12 (#628 blocker): combine the link quota check + counter
+    // increment in a single atomic transaction. The check + record
+    // pair was previously a TOCTOU window; `check_and_record` closes
+    // it.
     if let Some(ref aid) = link_agent_id {
-        if let Err(e) = crate::quotas::check_quota(conn, aid, crate::quotas::QuotaOp::Link) {
+        if let Err(e) = crate::quotas::check_and_record(conn, aid, crate::quotas::QuotaOp::Link) {
             return Err(e.to_string());
         }
     }
@@ -4217,17 +4227,22 @@ fn handle_link(
     // to attest_level="unsigned" otherwise. The chosen attest_level is
     // surfaced in the wire response so callers can tell signed vs
     // unsigned without re-querying.
-    let attest_level = db::create_link_signed(conn, source_id, target_id, relation, active_keypair)
-        .map_err(|e| e.to_string())?;
-
-    // v0.7 K8 — record the successful link against the agent's
-    // counters (best-effort; does not roll back the link insert on
-    // counter-update failure).
-    if let Some(ref aid) = link_agent_id {
-        if let Err(e) = crate::quotas::record_op(conn, aid, crate::quotas::QuotaOp::Link) {
-            tracing::warn!("quota record_op failed for agent {}: {}", aid, e);
-        }
-    }
+    let attest_level =
+        match db::create_link_signed(conn, source_id, target_id, relation, active_keypair) {
+            Ok(v) => v,
+            Err(e) => {
+                // Refund the link counter we already committed: insert
+                // failed downstream of the quota commit.
+                if let Some(ref aid) = link_agent_id {
+                    if let Err(re) =
+                        crate::quotas::refund_op(conn, aid, crate::quotas::QuotaOp::Link)
+                    {
+                        tracing::warn!("quota refund_op failed for agent {}: {}", aid, re);
+                    }
+                }
+                return Err(e.to_string());
+            }
+        };
 
     // P5 (G9): fire `memory_link_created` webhook AFTER the link is
     // persisted. Resolve the source memory to populate `namespace` /
@@ -4506,7 +4521,15 @@ const REPLAY_VERBOSE_THRESHOLD_BYTES: i64 = 100 * 1024;
 /// `original_size`, `span_start`, `span_end`, `created_at`) is always
 /// returned regardless of truncation so the caller can decide whether
 /// to re-issue with `verbose=true`.
-fn handle_replay(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+/// `pub` so the v0.7.0 #628 H6 cross-tenant test in
+/// `tests/i4_memory_replay_authz.rs` can drive the handler directly.
+/// Other handlers in this module remain private; the dispatcher is
+/// their sole caller.
+pub fn handle_replay(
+    conn: &rusqlite::Connection,
+    params: &Value,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
     let memory_id = params["memory_id"]
         .as_str()
         .ok_or("memory_id is required")?;
@@ -4546,6 +4569,45 @@ fn handle_replay(conn: &rusqlite::Connection, params: &Value) -> Result<Value, S
                 );
             }
             Err(e) => return Err(format!("fetch_metadata failed: {e}")),
+        }
+    }
+
+    // v0.7.0 #628 H6 — authorise the replay against EACH transcript's
+    // namespace before any decompressed content leaves the daemon. K9
+    // is the unified surface; calling it per-transcript means an
+    // operator's `[[permissions.rules]]` can scope by the transcript's
+    // owning namespace rather than the calling memory's namespace
+    // (the two diverge when an agent links a transcript stored in
+    // namespace A to a memory in namespace B). On Deny we return an
+    // MCP error WITHOUT leaking which transcripts existed; on Ask we
+    // surface the prompt verbatim so the operator can wire the K10
+    // approval pipeline. Allow / Modify let the read proceed.
+    let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
+        .map_err(|e| e.to_string())?;
+    for (_, meta) in &entries {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let ctx = PermissionContext {
+            op: Op::MemoryReplay,
+            namespace: meta.namespace.clone(),
+            agent_id: agent_id.clone(),
+            payload: json!({
+                "memory_id": memory_id,
+                "transcript_id": meta.id,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("replay denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "replay",
+                    "memory_id": memory_id,
+                }));
+            }
         }
     }
 
@@ -5378,11 +5440,23 @@ fn record_mcp_decision(
         crate::approvals::Remember::Session => "session",
         crate::approvals::Remember::Forever => "forever",
     };
+    // Carry the originating namespace + requester onto the bus so the
+    // K10 SSE handler can scope this decision to the right tenant
+    // (review #628 blocker C2). Snapshot may be absent if the row was
+    // already swept; the SSE filter treats empty fields as "no tenant
+    // hint" and falls back to the subscriber's K9 policy.
+    let evt_namespace = pa.as_ref().map(|p| p.namespace.clone()).unwrap_or_default();
+    let evt_requested_by = pa
+        .as_ref()
+        .map(|p| p.requested_by.clone())
+        .unwrap_or_default();
     crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalDecided {
         pending_id: pending_id.to_string(),
         decision: decision_label.to_string(),
         decided_by: decided_by.to_string(),
         remember: remember_label.to_string(),
+        namespace: evt_namespace,
+        requested_by: evt_requested_by,
     });
     if matches!(
         remember,
@@ -5780,7 +5854,7 @@ fn handle_request(
                 "memory_link" => handle_link(conn, db_path, arguments, active_keypair),
                 "memory_get_links" => handle_get_links(conn, arguments),
                 "memory_verify" => handle_verify(conn, arguments),
-                "memory_replay" => handle_replay(conn, arguments),
+                "memory_replay" => handle_replay(conn, arguments, mcp_client),
                 "memory_consolidate" => handle_consolidate(
                     conn,
                     db_path,

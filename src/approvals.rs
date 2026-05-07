@@ -171,7 +171,43 @@ pub enum ApprovalEvent {
         decision: String,
         decided_by: String,
         remember: String,
+        /// Originating namespace of the pending row this decision
+        /// targets. Required by the K10 SSE filter (review #628
+        /// blocker C2): without it the receive-side filter cannot
+        /// scope the event to the right tenant.
+        #[serde(default)]
+        namespace: String,
+        /// Original requester for the pending row this decision
+        /// targets. Same rationale as `namespace` — the decision
+        /// frame is delivered to the original requester even if a
+        /// different operator pressed the approve button.
+        #[serde(default)]
+        requested_by: String,
     },
+}
+
+impl ApprovalEvent {
+    /// Tenant agent the event belongs to — `requested_by` for both
+    /// variants. Used by the SSE handler to scope broadcasts to the
+    /// originating agent (review #628 blocker C2).
+    #[must_use]
+    pub fn tenant_agent_id(&self) -> &str {
+        match self {
+            ApprovalEvent::ApprovalRequested { requested_by, .. }
+            | ApprovalEvent::ApprovalDecided { requested_by, .. } => requested_by.as_str(),
+        }
+    }
+
+    /// Namespace the event belongs to. Used by the SSE handler in
+    /// concert with K9's permission rules to decide whether a
+    /// subscriber may see a cross-agent event.
+    #[must_use]
+    pub fn tenant_namespace(&self) -> &str {
+        match self {
+            ApprovalEvent::ApprovalRequested { namespace, .. }
+            | ApprovalEvent::ApprovalDecided { namespace, .. } => namespace.as_str(),
+        }
+    }
 }
 
 /// Process-wide broadcast channel for [`ApprovalEvent`]. Lazily

@@ -5331,13 +5331,37 @@ fn default_remember() -> crate::approvals::Remember {
     crate::approvals::Remember::Once
 }
 
+/// Maximum age (in seconds) the `X-AI-Memory-Timestamp` header may
+/// claim before we treat the request as a replay. v0.7.0 K10 review
+/// #628 (blocker C1): without an upper bound on timestamp age, any
+/// captured signed request can be re-issued indefinitely.
+///
+/// 300s mirrors the AWS SigV4 / Stripe webhook windows — long enough
+/// to absorb client-side retry jitter, short enough that an exfiltrated
+/// signature expires before an attacker can weaponise it.
+pub(crate) const APPROVAL_HMAC_MAX_AGE_SECS: i64 = 300;
+
+/// Maximum future-skew (in seconds) the `X-AI-Memory-Timestamp` header
+/// may claim ahead of the server clock. NTP drift is real and we don't
+/// want to 401 a legitimate signer whose clock is 30s fast; 60s is the
+/// industry-standard tolerance.
+pub(crate) const APPROVAL_HMAC_MAX_SKEW_SECS: i64 = 60;
+
 /// HMAC-verify an inbound approval request.
 ///
 /// Mirrors the K7 outbound construction: signature value is
 /// `sha256=<hex>` where `<hex>` = `HMAC-SHA256(SHA256(secret),
 /// "<timestamp>.<body>")`. Returns `Ok(())` on a valid signature;
 /// `Err(StatusCode)` (always 401) on any failure mode (missing
-/// header, missing timestamp, bad encoding, mismatch).
+/// header, missing timestamp, stale timestamp, bad encoding,
+/// mismatch).
+///
+/// **Replay-window enforcement (review #628 blocker C1)**: the
+/// `X-AI-Memory-Timestamp` header is parsed as a Unix epoch in
+/// seconds and rejected if it is older than
+/// [`APPROVAL_HMAC_MAX_AGE_SECS`] OR newer than
+/// [`APPROVAL_HMAC_MAX_SKEW_SECS`]. A captured-and-replayed signed
+/// request becomes unusable after the 5-minute window expires.
 ///
 /// The caller MUST send the body verbatim — even a single
 /// reformatted byte invalidates the signature, which is the whole
@@ -5367,6 +5391,31 @@ fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCo
         .get("x-ai-memory-timestamp")
         .and_then(|v| v.to_str().ok())
         .ok_or(StatusCode::UNAUTHORIZED)?;
+    // Replay-window check: the timestamp MUST parse as a Unix epoch
+    // (seconds) and fall inside the [now-300s, now+60s] window. Any
+    // failure here is a hard 401 — we log a diagnostic so operators
+    // can tell a stale-replay attempt apart from a torn signature.
+    let ts_secs: i64 = timestamp.parse().map_err(|_| {
+        tracing::warn!(
+            "K10 approval rejected: X-AI-Memory-Timestamp not a Unix epoch integer: {timestamp:?}"
+        );
+        StatusCode::UNAUTHORIZED
+    })?;
+    let now_secs = Utc::now().timestamp();
+    let delta = now_secs - ts_secs;
+    if delta > APPROVAL_HMAC_MAX_AGE_SECS {
+        tracing::warn!(
+            "K10 approval rejected: stale signature (age {delta}s > {APPROVAL_HMAC_MAX_AGE_SECS}s window)"
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    if delta < -APPROVAL_HMAC_MAX_SKEW_SECS {
+        tracing::warn!(
+            "K10 approval rejected: future-dated signature (skew {}s > {APPROVAL_HMAC_MAX_SKEW_SECS}s tolerance)",
+            -delta
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let body_str = std::str::from_utf8(body).map_err(|_| StatusCode::UNAUTHORIZED)?;
     let canonical = format!("{timestamp}.{body_str}");
     let key_hash = crate::subscriptions::sha256_hex(&secret);
@@ -5514,11 +5563,24 @@ pub async fn approval_decide(
         crate::approvals::Remember::Session => "session",
         crate::approvals::Remember::Forever => "forever",
     };
+    // Capture the namespace + original requester from the snapshot so
+    // the published `ApprovalDecided` event carries enough metadata for
+    // the SSE handler's tenant filter (review #628 blocker C2).
+    let evt_namespace = pending_snapshot
+        .as_ref()
+        .map(|p| p.namespace.clone())
+        .unwrap_or_default();
+    let evt_requested_by = pending_snapshot
+        .as_ref()
+        .map(|p| p.requested_by.clone())
+        .unwrap_or_default();
     crate::approvals::publish(crate::approvals::ApprovalEvent::ApprovalDecided {
         pending_id: id.clone(),
         decision: decision_label.to_string(),
         decided_by: agent_id.clone(),
         remember: remember_label.to_string(),
+        namespace: evt_namespace,
+        requested_by: evt_requested_by,
     });
     if matches!(
         body.remember,
@@ -5536,6 +5598,59 @@ pub async fn approval_decide(
     Json(outcome).into_response()
 }
 
+/// Predicate: should the SSE subscriber identified by
+/// `subscriber_agent` receive the given approval event?
+///
+/// Review #628 blocker C2: the K10 broadcast channel is
+/// process-wide, so without a receive-side filter every authenticated
+/// subscriber sees every other tenant's pending rows — a critical
+/// cross-tenant leak.
+///
+/// Visibility rules:
+///   1. The subscriber sees events that originated from their own
+///      `agent_id` (the original requester for an `ApprovalRequested`,
+///      or the requester whose pending row was decided for an
+///      `ApprovalDecided`).
+///   2. The subscriber sees events whose `namespace` is reachable by
+///      a K9 [`PermissionRule`] entry whose `agent_pattern` matches
+///      the subscriber. This lets a designated approver agent watch
+///      the rows it is actually allowed to act on, without needing
+///      to share an `agent_id` with the requester.
+///   3. The historical "anonymous" subscriber (agent_id empty) sees
+///      nothing — opt-in is the safe default for a privileged feed.
+///   4. If the subscriber agent is a server-internal id starting with
+///      `host:` (the daemon's own boot id), they see everything —
+///      this preserves the operator-CLI affordance of attaching to
+///      the local socket and observing all activity for diagnostics.
+#[must_use]
+pub fn sse_event_visible_to(
+    subscriber_agent: &str,
+    event: &crate::approvals::ApprovalEvent,
+) -> bool {
+    if subscriber_agent.is_empty() {
+        return false;
+    }
+    if subscriber_agent.starts_with("host:") {
+        return true;
+    }
+    let event_agent = event.tenant_agent_id();
+    if !event_agent.is_empty() && event_agent == subscriber_agent {
+        return true;
+    }
+    let event_namespace = event.tenant_namespace();
+    if event_namespace.is_empty() {
+        // No namespace hint on the event → fall back to the strict
+        // agent-id match above; we will not leak cross-agent.
+        return false;
+    }
+    let rules = crate::permissions::active_permission_rules();
+    rules.iter().any(|r| {
+        matches!(r.decision, crate::permissions::RuleDecision::Allow)
+            && crate::permissions::glob_matches(&r.agent_pattern, subscriber_agent)
+            && crate::permissions::glob_matches(&r.namespace_pattern, event_namespace)
+    })
+}
+
 /// `GET /api/v1/approvals/stream` — SSE endpoint streaming
 /// `approval_requested` and `approval_decided` events from the
 /// process-wide broadcast bus.
@@ -5544,8 +5659,17 @@ pub async fn approval_decide(
 /// [`crate::approvals::ApprovalEvent`] payload tagged with `event:
 /// approval_requested` (or `_decided`) per the SSE spec. A keepalive
 /// comment line fires every 15 s to prevent intermediary timeouts.
+///
+/// **Tenant isolation (review #628 blocker C2)**: the subscriber's
+/// `agent_id` is captured at subscribe time from the `X-Agent-Id`
+/// header (HMAC is impractical on a long-lived empty-body GET) and
+/// every event is filtered through [`sse_event_visible_to`] before
+/// fan-out. Cross-tenant events are silently dropped — the
+/// subscriber sees only their own pending rows and decisions, plus
+/// rows in namespaces an active K9 `Allow` rule grants them.
 pub async fn approvals_sse(
     State(_app): State<AppState>,
+    headers: HeaderMap,
 ) -> axum::response::Sse<
     impl futures_core::Stream<Item = Result<axum::response::sse::Event, std::convert::Infallible>>,
 > {
@@ -5557,39 +5681,65 @@ pub async fn approvals_sse(
     use tokio_stream::wrappers::BroadcastStream;
     use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 
+    // Resolve the subscriber's agent_id from the `X-Agent-Id` header
+    // (the K10 SSE endpoint sits behind `api_key_auth`; HMAC signing
+    // is impractical on a long-lived GET stream with an empty body).
+    // An unidentified subscriber gets an empty agent_id and
+    // `sse_event_visible_to` refuses all events (fail-closed).
+    let subscriber_agent = headers
+        .get("x-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
     /// Bridges a `BroadcastStream<ApprovalEvent>` into the
     /// `Stream<Item = Result<Event, Infallible>>` axum's `Sse` requires.
     /// We swallow `Lagged` by emitting a synthetic `lagged` SSE event
     /// so subscribers can re-sync via `GET /api/v1/pending` instead of
     /// silently missing frames; channel `Closed` ends the stream.
+    /// Cross-tenant events are silently dropped via the
+    /// `subscriber_agent` filter so a noisy neighbour cannot leak
+    /// metadata into a different tenant's SSE feed.
     struct ApprovalSseStream {
         inner: BroadcastStream<crate::approvals::ApprovalEvent>,
+        subscriber_agent: String,
     }
 
     impl Stream for ApprovalSseStream {
         type Item = Result<Event, std::convert::Infallible>;
 
         fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-            match Pin::new(&mut self.inner).poll_next(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(None) => Poll::Ready(None),
-                Poll::Ready(Some(Ok(evt))) => {
-                    let (event_name, json_value) = match &evt {
-                        crate::approvals::ApprovalEvent::ApprovalRequested { .. } => (
-                            "approval_requested",
-                            serde_json::to_value(&evt).unwrap_or_default(),
-                        ),
-                        crate::approvals::ApprovalEvent::ApprovalDecided { .. } => (
-                            "approval_decided",
-                            serde_json::to_value(&evt).unwrap_or_default(),
-                        ),
-                    };
-                    let data = serde_json::to_string(&json_value).unwrap_or_else(|_| "{}".into());
-                    Poll::Ready(Some(Ok(Event::default().event(event_name).data(data))))
-                }
-                Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
-                    let body = serde_json::json!({"lagged": n}).to_string();
-                    Poll::Ready(Some(Ok(Event::default().event("lagged").data(body))))
+            loop {
+                match Pin::new(&mut self.inner).poll_next(cx) {
+                    Poll::Pending => return Poll::Pending,
+                    Poll::Ready(None) => return Poll::Ready(None),
+                    Poll::Ready(Some(Ok(evt))) => {
+                        if !sse_event_visible_to(&self.subscriber_agent, &evt) {
+                            // Cross-tenant: skip without surfacing
+                            // anything to this subscriber. Loop to
+                            // poll the next frame.
+                            continue;
+                        }
+                        let (event_name, json_value) = match &evt {
+                            crate::approvals::ApprovalEvent::ApprovalRequested { .. } => (
+                                "approval_requested",
+                                serde_json::to_value(&evt).unwrap_or_default(),
+                            ),
+                            crate::approvals::ApprovalEvent::ApprovalDecided { .. } => (
+                                "approval_decided",
+                                serde_json::to_value(&evt).unwrap_or_default(),
+                            ),
+                        };
+                        let data =
+                            serde_json::to_string(&json_value).unwrap_or_else(|_| "{}".into());
+                        return Poll::Ready(Some(Ok(Event::default()
+                            .event(event_name)
+                            .data(data))));
+                    }
+                    Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
+                        let body = serde_json::json!({"lagged": n}).to_string();
+                        return Poll::Ready(Some(Ok(Event::default().event("lagged").data(body))));
+                    }
                 }
             }
         }
@@ -5598,6 +5748,7 @@ pub async fn approvals_sse(
     let rx = crate::approvals::subscribe();
     let stream = ApprovalSseStream {
         inner: BroadcastStream::new(rx),
+        subscriber_agent,
     };
     Sse::new(stream).keep_alive(KeepAlive::new().interval(StdDuration::from_secs(15)))
 }
