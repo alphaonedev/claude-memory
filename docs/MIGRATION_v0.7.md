@@ -47,7 +47,7 @@ Most users on v0.6.4 see **no behavior change** unless they opt in. The exceptio
 
 | Field | Type | Purpose |
 |---|---|---|
-| `summary` | string | Top-level pre-computed description ("AI Memory MCP exposes a 5-tool core with N additional families available via runtime expansion.") |
+| `summary` | string | Top-level pre-computed description ("AI Memory MCP exposes a 7-tool core with N additional families available via runtime expansion.") |
 | `to_describe_to_user` | string | Human-shaped summary the agent can paraphrase verbatim — eliminates calibration drift |
 | `callable_now` | bool (per tool) | Whether this caller may invoke the tool right now (allowlist + profile aware) |
 | `agent_permitted_families` | array<string> | Families this caller is allowed to expand into via `memory_load_family` |
@@ -57,7 +57,7 @@ Most users on v0.6.4 see **no behavior change** unless they opt in. The exceptio
 ```json
 {
   "schema_version": 3,
-  "summary": "AI Memory MCP exposes a 5-tool core ...",
+  "summary": "AI Memory MCP exposes a 7-tool core ...",
   "to_describe_to_user": "I have access to a memory substrate ...",
   "agent_permitted_families": ["core", "graph"],
   "tools": [
@@ -266,7 +266,7 @@ Schema migration v20 → v22 (audit_log → signed_events → memory_transcripts
 
 ## What did **not** change
 
-- v0.6.4 default tool surface (`--profile core`) is **unchanged**. The five core tools stay the only advertised tools by default.
+- v0.6.4 default tool surface (`--profile core`) is **unchanged in spirit**. The seven core tools (the original 5 — `store`, `recall`, `list`, `get`, `search` — plus v0.7 B1's `memory_load_family` and v0.7 B2's `memory_smart_load`) stay the only advertised tools by default.
 - Existing v0.6.4 SDKs continue to work against a v0.7.0 server. Capabilities v3 fields are additive; v2 fields stay at their existing paths.
 - Memory data — no migration required for stored memories; embeddings, archives, links, governance policies all carry forward.
 - HTTP API endpoints — every v0.6.4 route stays at the same path with the same shape.

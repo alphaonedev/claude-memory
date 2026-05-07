@@ -41,6 +41,10 @@ use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 /// Stand up a fresh on-disk `SQLite` at a tempfile path with the
 /// production schema applied (incl. P5 migration v17).
 fn fresh_db() -> (NamedTempFile, PathBuf) {
+    // H11 (#628 blocker): loopback webhook URLs are rejected by
+    // default. These tests use wiremock on 127.0.0.1, so opt in
+    // explicitly for the duration of the test process.
+    ai_memory::config::set_allow_loopback_webhooks(true);
     let f = NamedTempFile::new().expect("tempfile");
     let p = f.path().to_path_buf();
     let _ = ai_memory::db::open(&p).expect("db::open");

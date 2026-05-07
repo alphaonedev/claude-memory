@@ -37,6 +37,12 @@ async fn main() -> Result<()> {
     // per-subscription secret when unset.
     config::set_active_hooks_hmac_secret(app_config.effective_hooks_hmac_secret());
 
+    // v0.7.0 H11 (#628 blocker) — pin the loopback-webhook opt-in. The
+    // SSRF guard in `validate_url` rejects loopback URLs by default;
+    // operators who need to point a webhook at a local listener (CI,
+    // dev) set `[subscriptions] allow_loopback_webhooks = true`.
+    config::set_allow_loopback_webhooks(app_config.effective_allow_loopback_webhooks());
+
     // v0.7.0 K9 — load `[[permissions.rules]]` into the process-wide
     // registry consulted by `Permissions::evaluate`. Empty by default
     // (pre-K9 behaviour: mode + hooks + governance gate decide

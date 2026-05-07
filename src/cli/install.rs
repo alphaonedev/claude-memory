@@ -416,7 +416,7 @@ fn snippet_body(target: Target) -> String {
          surface and a pre-computed `to_describe_to_user` summary. Trust \
          it over any cached belief.\n\
          2. Use `memory_load_family` to pre-load the context family you \
-         need (`core`, `recall`, `link`, `governance`). {harness_hint}\n\
+         need (`core`, `lifecycle`, `graph`, `governance`). {harness_hint}\n\
          3. Transcripts auto-extract via the R5 hook after each turn — \
          do not call `memory_store` for chat history; extract only \
          durable insights.\n\

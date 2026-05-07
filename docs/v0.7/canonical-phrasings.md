@@ -32,10 +32,10 @@ Substitution variables:
 
 | Variable | Value | Example (`--profile core`) |
 |---|---|---|
-| `{visible}` | tools advertised in `tools/list` under the active profile (includes always-on bootstraps not already in profile) | `6` |
-| `{total}` | total tool count across all families | `43` |
+| `{visible}` | tools advertised in `tools/list` under the active profile (includes always-on bootstraps not already in profile) | `8` |
+| `{total}` | total tool count across all families | `51` |
 | `{label}` | profile name (`core`/`graph`/`admin`/`power`/`full`) or comma-joined family list for custom profiles | `core` |
-| `{unloaded}` | `total − visible` | `37` |
+| `{unloaded}` | `total − visible` | `43` |
 
 The four recovery paths (a–d) appear verbatim in the canonical phrasing **regardless of the active profile** — so an LLM exposed only to `--profile full` still learns the recovery vocabulary for environments where it isn't.
 
@@ -43,9 +43,9 @@ The four recovery paths (a–d) appear verbatim in the canonical phrasing **rega
 
 | Profile | Opening |
 |---|---|
-| `core` | `6 of 43 tools are advertised in tools/list under the current profile (core). The other 37 …` |
-| `graph` | `14 of 43 tools are advertised in tools/list under the current profile (graph). The other 29 …` |
-| `full` | `43 of 43 tools are advertised in tools/list under the current profile (full). The other 0 …` |
+| `core` | `8 of 51 tools are advertised in tools/list under the current profile (core). The other 43 …` |
+| `graph` | `19 of 51 tools are advertised in tools/list under the current profile (graph). The other 32 …` |
+| `full` | `51 of 51 tools are advertised in tools/list under the current profile (full). The other 0 …` |
 
 ---
 
@@ -69,10 +69,10 @@ Substitution variables:
 
 | Variable | Value | Notes |
 |---|---|---|
-| `{n_loaded}` | tools loaded by family membership, EXCLUDING the always-on bootstrap (`memory_capabilities`) | `core`: 5; `graph`: 13; `full`: 42 |
+| `{n_loaded}` | tools loaded by family membership, EXCLUDING the always-on bootstrap (`memory_capabilities`) | `core`: 7; `graph`: 18; `full`: 50 |
 | `{preview_loaded}` | comma-joined first 5 loaded tool names with the `memory_` prefix STRIPPED | `core`: `store, recall, list, get, search` |
-| `{ellipsis}` | `, ...` if `n_loaded > 5`, else empty | `graph` and larger get the ellipsis |
-| `{n_unloaded}` | `42 − n_loaded` — the 42 excludes the always-on bootstrap from BOTH sides for honest counting | `core`: 37; `graph`: 29; `full`: 0 |
+| `{ellipsis}` | `, ...` if `n_loaded > 5`, else empty | `core` (7 loaded) and larger get the ellipsis |
+| `{n_unloaded}` | `50 − n_loaded` — the 50 excludes the always-on bootstrap from BOTH sides for honest counting | `core`: 43; `graph`: 32; `full`: 0 |
 | `{preview_unloaded}` | comma-joined first 4 unloaded tool names, prefix-stripped | `core`: `update, delete, forget, gc` |
 | `{s}` | `s` if `n_loaded != 1`, else empty | always `s` in practice |
 
@@ -94,9 +94,9 @@ If a future increment adds MCP-internal vocabulary to this string, that test goe
 
 | Profile | `to_describe_to_user` |
 |---|---|
-| `core` | `I can directly use 5 memory tools right now (store, recall, list, get, search). 37 more (update, delete, forget, gc, etc.) are available on demand — I can load them if you ask for something that needs them, or you can restart the server with a different profile.` |
-| `graph` | `I can directly use 13 memory tools right now (store, recall, list, get, search, ...). 29 more (update, delete, forget, gc, etc.) are available on demand — I can load them if you ask for something that needs them, or you can restart the server with a different profile.` |
-| `full` | `I can directly use all 42 memory tools right now (store, recall, list, get, search, ...). Nothing more to load — the full memory surface is already active.` |
+| `core` | `I can directly use 7 memory tools right now (store, recall, list, get, search, ...). 43 more (update, delete, forget, gc, etc.) are available on demand — I can load them if you ask for something that needs them, or you can restart the server with a different profile.` |
+| `graph` | `I can directly use 18 memory tools right now (store, recall, list, get, search, ...). 32 more (update, delete, forget, gc, etc.) are available on demand — I can load them if you ask for something that needs them, or you can restart the server with a different profile.` |
+| `full` | `I can directly use all 50 memory tools right now (store, recall, list, get, search, ...). Nothing more to load — the full memory surface is already active.` |
 
 ---
 

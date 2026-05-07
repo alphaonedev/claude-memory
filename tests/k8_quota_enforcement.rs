@@ -138,6 +138,122 @@ fn k8_link_at_links_per_day_limit_returns_quota_exceeded() {
     }
 }
 
+/// H12 (#628 blocker) — concurrent writers must not each pass the
+/// quota check and then both record_op past the cap. The
+/// `check_and_record` API combines both operations into a single
+/// `BEGIN IMMEDIATE` SQLite transaction so SQLite serialises every
+/// other would-be writer behind the row lock. Spawn 10 threads each
+/// trying to store one memory at a quota cap of 1; exactly 1 must
+/// succeed and 9 must see `QUOTA_EXCEEDED`.
+#[test]
+fn k8_check_and_record_serialises_concurrent_writers_h12() {
+    let (_keep, db_path) = fresh_db();
+
+    // Seed the row with the default caps, then tighten memories cap
+    // to 1. The first thread that wins the BEGIN IMMEDIATE lock will
+    // commit a count of 1; every other thread must see QUOTA_EXCEEDED.
+    {
+        let conn = Connection::open(&db_path).unwrap();
+        ai_memory::quotas::check_and_record(&conn, "race-agent", QuotaOp::Memory { bytes: 1 })
+            .expect("seed insert");
+        // Reset the counter back to zero so the cap-1 race below can
+        // play out from a clean slate.
+        conn.execute(
+            "UPDATE agent_quotas SET
+               max_memories_per_day = 1,
+               current_memories_today = 0
+             WHERE agent_id = ?1",
+            params!["race-agent"],
+        )
+        .unwrap();
+    }
+
+    // Spawn 10 threads. Each opens its own connection to the shared
+    // on-disk database, then races to call `check_and_record`. SQLite
+    // WAL mode permits concurrent readers, but writers serialise on
+    // the RESERVED lock acquired by `BEGIN IMMEDIATE` — exactly the
+    // shape `check_and_record` relies on.
+    let path = std::sync::Arc::new(db_path.clone());
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let p = path.clone();
+        handles.push(std::thread::spawn(move || -> bool {
+            // Each thread retries on `SQLITE_BUSY` (the lock-waiter
+            // signal) so the race is decided by quota state, not by
+            // the OS scheduler dropping a busy retry. Cap retries to
+            // avoid an infinite loop if something unexpected fails.
+            let conn = {
+                let c = Connection::open(&*p).expect("open");
+                c.busy_timeout(std::time::Duration::from_secs(5))
+                    .expect("set busy timeout");
+                c
+            };
+            matches!(
+                ai_memory::quotas::check_and_record(
+                    &conn,
+                    "race-agent",
+                    QuotaOp::Memory { bytes: 1 },
+                ),
+                Ok(()),
+            )
+        }));
+    }
+
+    let mut successes = 0;
+    let mut failures = 0;
+    for h in handles {
+        if h.join().expect("thread join") {
+            successes += 1;
+        } else {
+            failures += 1;
+        }
+    }
+
+    assert_eq!(
+        successes, 1,
+        "exactly one thread must commit past the cap-1 quota; got {successes} successes / {failures} failures"
+    );
+    assert_eq!(
+        failures, 9,
+        "the other nine threads must see QUOTA_EXCEEDED; got {successes} successes / {failures} failures"
+    );
+
+    // The persisted counter must read exactly 1 — no double-increment
+    // could have slipped past the BEGIN IMMEDIATE lock.
+    let conn = Connection::open(&db_path).unwrap();
+    let s = ai_memory::quotas::get_status(&conn, "race-agent").unwrap();
+    assert_eq!(
+        s.current_memories_today, 1,
+        "counter should be exactly 1 after the race"
+    );
+}
+
+/// H12 — `refund_op` rolls back a successfully-recorded op when the
+/// downstream insert fails. Callers use this to keep the quota
+/// counter coherent with the actual successful-write count.
+#[test]
+fn k8_refund_op_decrements_counters_h12() {
+    let (_keep, db_path) = fresh_db();
+    let conn = Connection::open(&db_path).unwrap();
+
+    ai_memory::quotas::check_and_record(&conn, "refund-agent", QuotaOp::Memory { bytes: 100 })
+        .unwrap();
+    let pre = ai_memory::quotas::get_status(&conn, "refund-agent").unwrap();
+    assert_eq!(pre.current_memories_today, 1);
+    assert_eq!(pre.current_storage_bytes, 100);
+
+    ai_memory::quotas::refund_op(&conn, "refund-agent", QuotaOp::Memory { bytes: 100 }).unwrap();
+    let post = ai_memory::quotas::get_status(&conn, "refund-agent").unwrap();
+    assert_eq!(post.current_memories_today, 0);
+    assert_eq!(post.current_storage_bytes, 0);
+
+    // Saturating: extra refunds must not push counters below zero.
+    ai_memory::quotas::refund_op(&conn, "refund-agent", QuotaOp::Memory { bytes: 100 }).unwrap();
+    let saturated = ai_memory::quotas::get_status(&conn, "refund-agent").unwrap();
+    assert_eq!(saturated.current_memories_today, 0);
+    assert_eq!(saturated.current_storage_bytes, 0);
+}
+
 #[test]
 fn k8_record_op_after_check_increments_counters() {
     let (_keep, db_path) = fresh_db();
