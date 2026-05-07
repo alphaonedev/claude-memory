@@ -74,6 +74,7 @@
 //   only.
 // * G7-G11 firing at the actual memory operation points.
 
+use std::collections::VecDeque;
 use std::io;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -82,10 +83,90 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+/// Capacity of the per-child stderr ring buffer (in bytes). Sized to
+/// `4 KiB` — large enough to surface a typical Python/Node traceback
+/// (the diagnostic shape operators reach for first), small enough to
+/// keep the per-daemon overhead irrelevant. The drain task pops from
+/// the front whenever the buffer would exceed this on push, so the
+/// invariant is "the most recent 4 KiB of stderr is always retained".
+const STDERR_RING_CAPACITY: usize = 4 * 1024;
+
+/// Bounded ring buffer used by the daemon-mode stderr drain. Wrapped
+/// in an `Arc<Mutex<…>>` so the drain task and the executor (which
+/// snapshots the contents on timeout / drop) can both reach it without
+/// fighting over ownership of the underlying `ChildStderr` handle.
+type StderrRing = Arc<Mutex<VecDeque<u8>>>;
+
+/// Spawn a background task that drains `stderr` into `ring`, bounding
+/// the retained bytes at [`STDERR_RING_CAPACITY`]. The task exits when
+/// the child closes its stderr (EOF) or on any read error — both
+/// terminal cases the executor will rediscover on the next exchange,
+/// so silent task exit here does not desync the caller.
+///
+/// Returning the `JoinHandle` lets the caller await/abort on shutdown
+/// if it wants to (the daemon executor stores it on the connection so
+/// the buffered bytes are still snapshot-able after the child dies).
+fn spawn_stderr_drain(mut stderr: ChildStderr, ring: StderrRing) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        // 4 KiB read buffer matches the ring capacity — one read at
+        // most fills the ring, so the worst case is a single
+        // pop-from-front pass per chunk.
+        let mut chunk = [0u8; 4 * 1024];
+        loop {
+            match stderr.read(&mut chunk).await {
+                Ok(0) => break, // EOF — child closed stderr.
+                Ok(n) => {
+                    let mut guard = ring.lock().await;
+                    guard.extend(&chunk[..n]);
+                    // Drop oldest bytes until we're back under cap.
+                    // VecDeque's pop_front is O(1) amortised so this
+                    // stays cheap even on a flood.
+                    while guard.len() > STDERR_RING_CAPACITY {
+                        guard.pop_front();
+                    }
+                }
+                Err(_) => break, // Read error — surface as silent EOF; the
+                                 // executor will rediscover the failure on
+                                 // the next stdout exchange.
+            }
+        }
+    })
+}
+
+/// Emit a WARN log carrying the buffered stderr tail iff non-empty.
+/// Free function (rather than a method) so it can be called from the
+/// `exchange` failure arms without re-borrowing `&self` or the
+/// connection guard — the borrow-checker won't let us hold `conn`
+/// (a `&mut DaemonConnection` from `guard.as_mut()`) and call a
+/// method on `&self` that would also need to read `self.config` while
+/// `conn` is live.
+fn warn_stderr_tail(command: &std::path::Path, stage: &str, tail: &str) {
+    if !tail.is_empty() {
+        tracing::warn!(
+            command = %command.display(),
+            stage,
+            stderr_tail = %tail,
+            "hooks: daemon child stderr at failure"
+        );
+    }
+}
+
+/// Snapshot the current contents of a stderr ring as a UTF-8 string.
+/// Lossy decoding so a stray non-UTF-8 byte (a hook author's binary
+/// dump, an emoji split mid-sequence by the ring's pop_front) doesn't
+/// suppress the diagnostic — operators get the closest readable
+/// rendering of what the child actually wrote.
+async fn snapshot_stderr_ring(ring: &StderrRing) -> String {
+    let guard = ring.lock().await;
+    let bytes: Vec<u8> = guard.iter().copied().collect();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
 
 use super::config::HookConfig;
 use super::decision::HookDecision;
@@ -344,8 +425,13 @@ impl ExecExecutor {
 
         let started = Instant::now();
         let deadline = Duration::from_millis(u64::from(self.config.timeout_ms));
+        let command_str = self.config.command.display().to_string();
 
-        let driven = timeout(deadline, drive_exec_child(child, envelope_bytes)).await;
+        let driven = timeout(
+            deadline,
+            drive_exec_child(child, envelope_bytes, &command_str),
+        )
+        .await;
 
         match driven {
             Ok(Ok(decision)) => {
@@ -386,7 +472,11 @@ impl HookExecutor for ExecExecutor {
     }
 }
 
-async fn drive_exec_child(mut child: Child, envelope: Vec<u8>) -> Result<HookDecision> {
+async fn drive_exec_child(
+    mut child: Child,
+    envelope: Vec<u8>,
+    command: &str,
+) -> Result<HookDecision> {
     // Write the envelope, then close stdin so the child knows it
     // can finish. `take()` drops the handle on the way out.
     if let Some(mut stdin) = child.stdin.take() {
@@ -402,6 +492,24 @@ async fn drive_exec_child(mut child: Child, envelope: Vec<u8>) -> Result<HookDec
             code: output.status.code(),
             stderr,
         });
+    }
+
+    // H9 fix — surface stderr on the success path too. Operators
+    // debugging a flapping hook need to see whatever diagnostics the
+    // child wrote even when the decision parses cleanly; silently
+    // dropping stderr here was the v0.7.0 review #628 blocker. Cap
+    // the logged slice at the same `STDERR_RING_CAPACITY` the daemon
+    // path uses so an over-eager hook can't pin tracing's allocator.
+    if !output.stderr.is_empty() {
+        let trimmed_len = output.stderr.len().min(STDERR_RING_CAPACITY);
+        let start = output.stderr.len() - trimmed_len;
+        let stderr_tail = String::from_utf8_lossy(&output.stderr[start..]);
+        tracing::debug!(
+            command,
+            stderr_bytes = output.stderr.len(),
+            stderr = %stderr_tail,
+            "hooks: exec child wrote stderr on success path"
+        );
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -435,6 +543,35 @@ struct DaemonConnection {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    /// Bounded ring of the most recent [`STDERR_RING_CAPACITY`] bytes
+    /// the child wrote to stderr. Populated by `stderr_drain` in the
+    /// background; snapshotted by the executor on timeout / error /
+    /// drop so operators see the child's diagnostics next to the
+    /// failure that surfaced them.
+    stderr_buf: StderrRing,
+    /// Handle to the stderr-drain task. Held so we can `abort()` it
+    /// when the connection is torn down — without this the task
+    /// would linger until the kernel closes stderr after the child's
+    /// reaping, which is racy under stress.
+    stderr_task: JoinHandle<()>,
+}
+
+impl DaemonConnection {
+    /// Snapshot the buffered stderr (lossy UTF-8) for inclusion in a
+    /// failure log. Only called on the slow / failure paths; the
+    /// happy path never touches the ring.
+    async fn stderr_tail(&self) -> String {
+        snapshot_stderr_ring(&self.stderr_buf).await
+    }
+}
+
+impl Drop for DaemonConnection {
+    fn drop(&mut self) {
+        // Abort the drain task — the ChildStderr it owns is going
+        // out of scope and the OS will close the pipe; no point
+        // waiting for the EOF roundtrip.
+        self.stderr_task.abort();
+    }
 }
 
 impl DaemonExecutor {
@@ -477,7 +614,27 @@ impl DaemonExecutor {
                 // a slow daemon may still write the response into
                 // the pipe after we've moved on, which would desync
                 // subsequent fires.
+                //
+                // H9 fix — before tearing down the connection, snapshot
+                // the buffered stderr so the operator log carries
+                // whatever the child was complaining about right up
+                // to the deadline. Without this, a hook that's
+                // genuinely failing inside its handler (panic
+                // backtrace on stderr, but no decision on stdout)
+                // would just look like a generic "Timeout" with no
+                // diagnostic context.
                 let mut guard = self.conn.lock().await;
+                if let Some(conn) = guard.as_ref() {
+                    let tail = conn.stderr_tail().await;
+                    if !tail.is_empty() {
+                        tracing::warn!(
+                            command = %self.config.command.display(),
+                            timeout_ms = self.config.timeout_ms,
+                            stderr_tail = %tail,
+                            "hooks: daemon child stderr at timeout"
+                        );
+                    }
+                }
                 *guard = None;
                 Err(ExecutorError::Timeout {
                     ms: u64::from(self.config.timeout_ms),
@@ -498,10 +655,16 @@ impl DaemonExecutor {
         let conn = guard.as_mut().expect("connection just inserted");
 
         if let Err(e) = conn.stdin.write_all(envelope).await {
+            // H9 fix — snapshot buffered stderr before tearing down
+            // so the operator log carries the child's diagnostics.
+            let tail = conn.stderr_tail().await;
+            warn_stderr_tail(&self.config.command, "stdin write", &tail);
             *guard = None;
             return Err(ExecutorError::Io(e));
         }
         if let Err(e) = conn.stdin.flush().await {
+            let tail = conn.stderr_tail().await;
+            warn_stderr_tail(&self.config.command, "stdin flush", &tail);
             *guard = None;
             return Err(ExecutorError::Io(e));
         }
@@ -510,19 +673,35 @@ impl DaemonExecutor {
         match conn.stdout.read_line(&mut line).await {
             Ok(0) => {
                 // EOF — child closed its stdout (likely crashed).
+                // H9 fix — surface buffered stderr in the error so
+                // the operator sees the child's last words instead
+                // of a generic "closed stdout".
+                let tail = conn.stderr_tail().await;
+                let stderr = if tail.is_empty() {
+                    "daemon child closed stdout".into()
+                } else {
+                    format!("daemon child closed stdout; stderr tail: {tail}")
+                };
                 *guard = None;
-                Err(ExecutorError::ChildExit {
-                    code: None,
-                    stderr: "daemon child closed stdout".into(),
-                })
+                Err(ExecutorError::ChildExit { code: None, stderr })
             }
-            Ok(_) => parse_decision_line(&line).map_err(|e| {
-                // Framing error — reset the connection so the next
-                // fire doesn't read into a half-consumed envelope.
-                *guard = None;
-                e
-            }),
+            Ok(_) => match parse_decision_line(&line) {
+                Ok(d) => Ok(d),
+                Err(e) => {
+                    // Framing error — reset the connection so the
+                    // next fire doesn't read into a half-consumed
+                    // envelope. Log buffered stderr at WARN so the
+                    // operator can correlate the bad framing with
+                    // any hook-side panic that produced it.
+                    let tail = conn.stderr_tail().await;
+                    warn_stderr_tail(&self.config.command, "framing error", &tail);
+                    *guard = None;
+                    Err(e)
+                }
+            },
             Err(e) => {
+                let tail = conn.stderr_tail().await;
+                warn_stderr_tail(&self.config.command, "stdout read", &tail);
                 *guard = None;
                 Err(ExecutorError::Io(e))
             }
@@ -585,10 +764,26 @@ impl DaemonExecutor {
                 "child stdout not piped",
             ))
         })?;
+        // H9 fix — drain stderr in the background so a verbose hook
+        // can't fill the OS pipe buffer (typically 64 KiB on Linux,
+        // ~16 KiB on macOS) and deadlock the child on its next
+        // `write(2)` to stderr — which would in turn deadlock us
+        // waiting for the next NDJSON response on stdout.
+        let stderr = child.stderr.take().ok_or_else(|| {
+            ExecutorError::Io(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "child stderr not piped",
+            ))
+        })?;
+        let stderr_buf: StderrRing =
+            Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_RING_CAPACITY)));
+        let stderr_task = spawn_stderr_drain(stderr, Arc::clone(&stderr_buf));
         Ok(DaemonConnection {
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr_buf,
+            stderr_task,
         })
     }
 }
