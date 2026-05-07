@@ -5367,7 +5367,28 @@ pub(crate) const APPROVAL_HMAC_MAX_SKEW_SECS: i64 = 60;
 /// reformatted byte invalidates the signature, which is the whole
 /// point of HMAC. We compare in constant time via `constant_time_eq`
 /// to avoid timing oracles on the hex digest.
-fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
+///
+/// **Canonical request (#628 P1, agent-4 finding)**: the signed
+/// payload binds **method + URL path + body**, not just `<ts>.<body>`.
+/// Without the path binding, a captured signature for pending row A
+/// could be replayed against pending row B by simply changing the URL
+/// — a row-substitution attack inside the 300s replay window. The
+/// canonical is now:
+///
+/// ```text
+/// canonical = "<unix_ts>.<METHOD>.<pending_id>.<body>"
+/// ```
+///
+/// Both signer and verifier MUST use the exact same join. Callers
+/// that previously signed `<ts>.<body>` will now hard-fail (401), so
+/// any in-tree test fixture or external client must be updated in
+/// lockstep with this change.
+fn verify_approval_hmac(
+    headers: &HeaderMap,
+    body: &[u8],
+    method: &str,
+    pending_id: &str,
+) -> Result<(), StatusCode> {
     let secret = match crate::config::active_hooks_hmac_secret() {
         Some(s) => s,
         None => {
@@ -5417,7 +5438,9 @@ fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCo
         return Err(StatusCode::UNAUTHORIZED);
     }
     let body_str = std::str::from_utf8(body).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let canonical = format!("{timestamp}.{body_str}");
+    // P1 (#628 agent-4): bind method + pending_id so a captured
+    // signature can't be redirected to a different approval row.
+    let canonical = format!("{timestamp}.{method}.{pending_id}.{body_str}");
     let key_hash = crate::subscriptions::sha256_hex(&secret);
     let expected = crate::subscriptions::hmac_sha256_hex(&key_hash, &canonical);
     if constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
@@ -5436,7 +5459,7 @@ pub async fn approval_decide(
     Path(id): Path<String>,
     body_bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Err(status) = verify_approval_hmac(&headers, &body_bytes) {
+    if let Err(status) = verify_approval_hmac(&headers, &body_bytes, "POST", &id) {
         return (
             status,
             Json(json!({"error": "invalid or missing X-AI-Memory-Signature"})),

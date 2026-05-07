@@ -97,7 +97,7 @@ async fn seed_pending_row_via_db(
 }
 
 /// Compute the K7-style HMAC signature header value for a request body.
-fn sign(secret: &str, timestamp: &str, body: &str) -> String {
+fn sign(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
     use sha2::Digest;
     use sha2::Sha256;
     fn sha256_hex(s: &str) -> String {
@@ -140,7 +140,9 @@ fn sign(secret: &str, timestamp: &str, body: &str) -> String {
             .collect()
     }
     let key_hash = sha256_hex(secret);
-    let canonical = format!("{timestamp}.{body}");
+    // P1 (#628 agent-4): canonical request now binds method + pending_id
+    // so a captured signature can't be redirected to a different row.
+    let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
     let sig = hmac_sha256_hex(&key_hash, &canonical);
     format!("sha256={sig}")
 }
@@ -154,7 +156,7 @@ async fn http_approve_with_valid_hmac_returns_200() {
 
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let timestamp = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("k10-test-secret", &timestamp, &body);
+    let sig = sign("k10-test-secret", &timestamp, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
@@ -216,7 +218,7 @@ async fn http_approve_without_server_secret_returns_401() {
     // Even with a "looks-valid" signature, no server secret → 401.
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let timestamp = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("anything-since-no-server-secret", &timestamp, &body);
+    let sig = sign("anything-since-no-server-secret", &timestamp, &pending_id, &body);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/approvals/{pending_id}"))
@@ -244,7 +246,7 @@ async fn http_approve_with_wrong_signature_returns_401() {
     let timestamp = chrono::Utc::now().timestamp().to_string();
     // Sign with the wrong key — must be rejected even though header
     // is well-formed.
-    let sig = sign("wrong-secret", &timestamp, &body);
+    let sig = sign("wrong-secret", &timestamp, &pending_id, &body);
     let req = Request::builder()
         .method("POST")
         .uri(format!("/api/v1/approvals/{pending_id}"))

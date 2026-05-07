@@ -114,7 +114,7 @@ async fn seed_pending_delete_row(
 /// Verbatim copy of the helper in `tests/k10_approval_http.rs` — the
 /// logic is small enough to duplicate without the cost of a shared
 /// crate, and keeping it inline lets each blocker test stand alone.
-fn sign(secret: &str, timestamp: &str, body: &str) -> String {
+fn sign(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
     use sha2::Digest;
     use sha2::Sha256;
     fn sha256_hex(s: &str) -> String {
@@ -157,7 +157,8 @@ fn sign(secret: &str, timestamp: &str, body: &str) -> String {
             .collect()
     }
     let key_hash = sha256_hex(secret);
-    let canonical = format!("{timestamp}.{body}");
+    // P1 (#628 agent-4): canonical request now binds method + pending_id.
+    let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
     let sig = hmac_sha256_hex(&key_hash, &canonical);
     format!("sha256={sig}")
 }
@@ -183,7 +184,7 @@ async fn hmac_replay_rejected() {
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     // 600s in the past — well outside the 300s allowed window.
     let stale_ts = (chrono::Utc::now().timestamp() - 600).to_string();
-    let sig = sign("k10-replay-secret", &stale_ts, &body);
+    let sig = sign("k10-replay-secret", &stale_ts, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
@@ -215,7 +216,7 @@ async fn hmac_fresh_timestamp_accepted() {
 
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let now_ts = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("k10-replay-secret", &now_ts, &body);
+    let sig = sign("k10-replay-secret", &now_ts, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
