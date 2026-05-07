@@ -20,7 +20,7 @@
 //!   shared secret; the plaintext is returned **once** at
 //!   subscription time and never leaves the DB after.
 
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
@@ -955,7 +955,7 @@ fn validate_url_dns_with(url: &str, allow_loopback: bool) -> Result<()> {
     };
     for addr in &addrs {
         let ip = addr.ip();
-        if is_private(ip) && !ip.is_loopback() {
+        if is_private(ip) && !is_loopback_normalized(ip) {
             return Err(anyhow!(
                 "host resolves to private/link-local IP {ip}: {url}"
             ));
@@ -964,7 +964,7 @@ fn validate_url_dns_with(url: &str, allow_loopback: bool) -> Result<()> {
         // Default-OFF; operators with `[subscriptions]
         // allow_loopback_webhooks = true` accept loopback-resolving
         // hostnames.
-        if ip.is_loopback() && !allow_loopback {
+        if is_loopback_normalized(ip) && !allow_loopback {
             return Err(anyhow!(
                 "host resolves to loopback IP {ip}: {url} — rejected by default \
                  (SSRF guard); set `[subscriptions] allow_loopback_webhooks = true` \
@@ -1021,7 +1021,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     // 5432, the hooks daemon, etc.).
     let is_loopback_hostname = matches!(host, "localhost" | "localhost.localdomain" | "");
     let parsed_ip = IpAddr::from_str(host).ok();
-    let is_loopback_ip = parsed_ip.is_some_and(|ip| ip.is_loopback());
+    let is_loopback_ip = parsed_ip.is_some_and(is_loopback_normalized);
     let is_loopback = is_loopback_hostname || is_loopback_ip;
     if is_loopback && !allow_loopback {
         return Err(anyhow!(
@@ -1034,7 +1034,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
         // Accept http only to parsed-loopback IPs; everything else
         // requires https.
         if let Some(ip) = parsed_ip {
-            if !ip.is_loopback() {
+            if !is_loopback_normalized(ip) {
                 return Err(anyhow!(
                     "webhook URL must be https for non-loopback host: {url}"
                 ));
@@ -1052,7 +1052,7 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     // up reverse proxies or allow explicitly in config.
     if let Some(ip) = parsed_ip
         && is_private(ip)
-        && !ip.is_loopback()
+        && !is_loopback_normalized(ip)
     {
         return Err(anyhow!(
             "webhook URL targets private / link-local address: {url}"
@@ -1061,8 +1061,42 @@ fn validate_url_with(url: &str, allow_loopback: bool) -> Result<()> {
     Ok(())
 }
 
-fn is_private(ip: IpAddr) -> bool {
+// SSRF fix (#628 H3 follow-up): canonicalize IPv6 addresses that wrap an
+// IPv4 address (4-mapped `::ffff:a.b.c.d`, deprecated 4-compatible
+// `::a.b.c.d`, and the well-known NAT64 prefix `64:ff9b::/96`) into their
+// IPv4 form before applying SSRF checks. Without this, `Ipv6Addr::is_loopback()`
+// and the v6 branch of `is_private` silently miss `::ffff:127.0.0.1`,
+// `::ffff:10.0.0.1`, `::ffff:169.254.1.1`, and similar bypasses.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
+        IpAddr::V6(v6) => {
+            let canonical = v6.to_canonical();
+            if matches!(canonical, IpAddr::V4(_)) {
+                return canonical;
+            }
+            let segs = v6.segments();
+            if segs[0] == 0x0064
+                && segs[1] == 0xff9b
+                && segs[2] == 0
+                && segs[3] == 0
+                && segs[4] == 0
+                && segs[5] == 0
+            {
+                let v4_bits = (u32::from(segs[6]) << 16) | u32::from(segs[7]);
+                return IpAddr::V4(Ipv4Addr::from(v4_bits));
+            }
+            IpAddr::V6(v6)
+        }
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
+fn is_loopback_normalized(ip: IpAddr) -> bool {
+    normalize_ip(ip).is_loopback()
+}
+
+fn is_private(ip: IpAddr) -> bool {
+    match normalize_ip(ip) {
         IpAddr::V4(v4) => {
             // SSRF fix (W11): include `is_unspecified` (0.0.0.0). On most
             // OSes the kernel routes 0.0.0.0 to a local listener, so an
@@ -1363,6 +1397,45 @@ mod tests {
         assert!(validate_url("ftp://example.com").is_err());
         assert!(validate_url("notaurl").is_err());
         assert!(validate_url("").is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_ipv6_loopback() {
+        // SSRF (#628 H3 follow-up): `Ipv6Addr::is_loopback()` returns false
+        // for `::ffff:127.0.0.1`, but on dual-stack hosts the kernel routes
+        // these to the v4 loopback service. `normalize_ip` collapses to v4
+        // before checking.
+        assert!(validate_url("https://[::ffff:127.0.0.1]/hook").is_err());
+        assert!(validate_url("https://[::ffff:7f00:1]/hook").is_err());
+        assert!(validate_url_with("https://[::ffff:127.0.0.1]/hook", false).is_err());
+    }
+
+    #[test]
+    fn rejects_v4_mapped_ipv6_private() {
+        assert!(validate_url("https://[::ffff:10.0.0.1]/hook").is_err());
+        assert!(validate_url("https://[::ffff:192.168.1.1]/hook").is_err());
+        assert!(validate_url("https://[::ffff:172.16.0.1]/hook").is_err());
+        assert!(validate_url("https://[::ffff:169.254.1.1]/hook").is_err());
+        assert!(validate_url("https://[::ffff:0.0.0.0]/hook").is_err());
+    }
+
+    #[test]
+    fn rejects_nat64_well_known_prefix() {
+        // 64:ff9b::/96 — RFC 6052 well-known NAT64 prefix. On hosts with
+        // NAT64 deployed, packets to `64:ff9b::a.b.c.d` are translated to
+        // `a.b.c.d` and forwarded; an SSRF gadget if `a.b.c.d` is loopback
+        // or private.
+        assert!(validate_url("https://[64:ff9b::127.0.0.1]/hook").is_err());
+        assert!(validate_url("https://[64:ff9b::10.0.0.1]/hook").is_err());
+        assert!(validate_url("https://[64:ff9b::169.254.1.1]/hook").is_err());
+    }
+
+    #[test]
+    fn allows_v4_mapped_loopback_when_opted_in() {
+        // Symmetric with the existing loopback opt-in: when allow_loopback
+        // is true, `::ffff:127.0.0.1` should be accepted (same as plain
+        // `127.0.0.1`).
+        assert!(validate_url_with("http://[::ffff:127.0.0.1]/hook", true).is_ok());
     }
 
     #[test]
