@@ -1172,77 +1172,92 @@ pub fn build_vector_index(conn: &Connection, embedder_present: bool) -> Option<V
 // v0.7 Track H — H2 active keypair loading
 // ---------------------------------------------------------------------------
 
-/// Best-effort load of the daemon's active Ed25519 signing keypair.
+/// The well-known stable label used by the daemon when auto-generating
+/// and loading its outbound link-signing keypair.
 ///
-/// Resolution order:
-///   1. `AI_MEMORY_AGENT_ID` environment variable (set explicitly by
-///      operators who want a specific identity at serve time).
-///   2. Otherwise, `crate::identity::resolve_agent_id(None, None)` —
-///      same NHI-default an HTTP request without `X-Agent-Id` would
-///      resolve to. This produces the `host:` / `anonymous:` shape;
-///      that file is rarely on disk, which is fine — we simply degrade
-///      to unsigned.
+/// Round-3 F12 fix — the daemon's signing identity is process-wide
+/// (one daemon = one signing key) and decoupled from the per-request
+/// `agent_id` resolution. Using a fixed label avoids two prior bugs:
+///   1. The pre-fix code resolved `agent_id` via
+///      [`crate::identity::resolve_agent_id`] which produces a
+///      hostname/PID-bearing default (`host:<host>:pid-…-<uuid>`).
+///      That value differs across daemon restarts, so `load_*` looked
+///      for a file that `ensure_keypair("daemon", …)` never created.
+///   2. The auto-gen call ran AFTER the load attempt, so even if the
+///      labels matched, the load would fire on a freshly-built
+///      deployment before the file existed.
+const DAEMON_KEYPAIR_LABEL: &str = "daemon";
+
+/// Round-3 F12 — ensure the daemon's signing keypair exists on disk and
+/// load it for the serve [`AppState`]. Returns the in-memory keypair
+/// (if any) plus the lifecycle outcome (Generated/AlreadyExists/
+/// SkippedDisabled/None) so the startup banner can surface the
+/// auto-gen line.
 ///
-/// Errors at every step are swallowed (logged at INFO/WARN). Missing
-/// keypairs are the common first-run state — we don't want a failed
-/// `keypair::load` to make the daemon refuse to start. Malformed key
-/// files DO log at `WARN` so an operator with a corrupt
-/// `~/.config/ai-memory/keys/<id>.priv` notices.
-fn load_active_keypair_for_serve() -> Option<crate::identity::keypair::AgentKeypair> {
+/// Resolution:
+///   1. Resolve the default key directory
+///      ([`crate::identity::keypair::default_key_dir`]).
+///   2. Call [`crate::identity::keypair::ensure_keypair`] under the
+///      stable [`DAEMON_KEYPAIR_LABEL`]. Idempotent: a daemon restart
+///      never overwrites an existing keypair (which would silently
+///      invalidate every prior signed link).
+///   3. Load the keypair from disk and return it.
+///
+/// Failure at any step degrades the daemon to unsigned-link mode (the
+/// pre-v0.7 posture) without aborting startup. Log lines describe
+/// which path was taken so an operator inspecting daemon logs sees
+/// the cause.
+fn ensure_and_load_daemon_keypair() -> (
+    Option<crate::identity::keypair::AgentKeypair>,
+    Option<crate::identity::keypair::EnsureOutcome>,
+) {
     let dir = match crate::identity::keypair::default_key_dir() {
         Ok(d) => d,
         Err(e) => {
             tracing::info!("identity: no default key dir available, link signing disabled: {e}");
-            return None;
+            return (None, None);
         }
     };
-    let agent_id = match crate::identity::resolve_agent_id(None, None) {
-        Ok(id) => id,
+    // The `[identity].disabled` config field is not yet wired in
+    // v0.7.0; pass `false` so the helper auto-generates unless the
+    // operator pre-staged a keypair. A future config field can opt
+    // out without changing this call site.
+    let outcome = match crate::identity::keypair::ensure_keypair(DAEMON_KEYPAIR_LABEL, &dir, false)
+    {
+        Ok(o) => o,
         Err(e) => {
-            tracing::info!("identity: agent_id resolution failed, link signing disabled: {e}");
-            return None;
+            tracing::warn!("identity: keypair auto-gen failed: {e:#}");
+            return (None, None);
         }
     };
-    // Common first-run state: directory doesn't exist yet because the
-    // operator hasn't run `ai-memory identity generate`. Silent skip.
-    if !dir.exists() {
-        tracing::info!(
-            "identity: key dir {} not present, link signing disabled (run \
-             `ai-memory identity generate --agent-id {agent_id}` to enable)",
-            dir.display()
-        );
-        return None;
+    if matches!(
+        outcome,
+        crate::identity::keypair::EnsureOutcome::SkippedDisabled
+    ) {
+        return (None, Some(outcome));
     }
-    match crate::identity::keypair::load(&agent_id, &dir) {
+    let kp = match crate::identity::keypair::load(DAEMON_KEYPAIR_LABEL, &dir) {
         Ok(kp) if kp.can_sign() => {
             tracing::info!(
-                "identity: loaded signing keypair for {agent_id} from {}",
+                "identity: loaded signing keypair for {DAEMON_KEYPAIR_LABEL} from {}",
                 dir.display()
             );
             Some(kp)
         }
         Ok(_) => {
             tracing::info!(
-                "identity: only public key on disk for {agent_id}; link signing disabled"
+                "identity: only public key on disk for {DAEMON_KEYPAIR_LABEL}; link signing disabled"
             );
             None
         }
         Err(e) => {
-            // File-not-found for the .pub file produces an Err; treat it
-            // the same as missing dir (common first-run). For other
-            // failures (malformed bytes, priv/pub mismatch) WARN so the
-            // operator notices.
-            let msg = format!("{e:#}");
-            if msg.contains("No such file") || msg.contains("not found") {
-                tracing::info!(
-                    "identity: no keypair on disk for {agent_id}; link signing disabled"
-                );
-            } else {
-                tracing::warn!("identity: keypair load failed for {agent_id}: {msg}");
-            }
+            tracing::warn!(
+                "identity: keypair load failed for {DAEMON_KEYPAIR_LABEL}: {e:#}; link signing disabled"
+            );
             None
         }
-    }
+    };
+    (kp, Some(outcome))
 }
 
 // ---------------------------------------------------------------------------
@@ -1473,6 +1488,11 @@ pub struct ServeBootstrap {
     pub db_state: Db,
     pub archive_max_days: Option<i64>,
     pub task_handles: Vec<JoinHandle<()>>,
+    /// Round-3 F12 — lifecycle outcome of the daemon's signing-keypair
+    /// auto-gen path, captured by [`ensure_and_load_daemon_keypair`].
+    /// Read by [`serve`] when composing the F8/F12 startup banner so
+    /// operators see whether a fresh key was created on first boot.
+    pub daemon_keypair_outcome: Option<crate::identity::keypair::EnsureOutcome>,
 }
 
 /// Build all daemon state and spawn background tasks. Returns the
@@ -1551,14 +1571,15 @@ pub async fn bootstrap_serve(
         .effective_profile(None)
         .unwrap_or_else(|_| crate::profile::Profile::core());
     let mcp_config_for_http = app_config.mcp.clone();
-    // v0.7 Track H — H2: load the active agent's Ed25519 keypair so
-    // outbound link writes can sign. Best-effort: if the keypair file
-    // doesn't exist (operator hasn't run `ai-memory identity generate`
-    // yet) we leave `active_keypair = None` and links go in unsigned —
-    // preserving v0.6.4 behaviour for unmigrated deployments. Errors
-    // other than "file not found" are logged and degraded the same way
-    // so a malformed keypair file doesn't take down the daemon.
-    let active_keypair = load_active_keypair_for_serve();
+    // v0.7 Track H — H2 + Round-3 F12: ensure-and-load the daemon's
+    // outbound-link signing keypair. The helper auto-generates the
+    // well-known `daemon` keypair under `~/.config/ai-memory/keys/` on
+    // first start (idempotent — a restart never overwrites an existing
+    // keypair) and returns it for the AppState. The lifecycle outcome
+    // is captured separately so the startup banner can surface the
+    // auto-gen path. Failure at any step degrades to unsigned-link
+    // mode without aborting startup.
+    let (active_keypair, daemon_keypair_outcome) = ensure_and_load_daemon_keypair();
 
     // v0.7.0 B3-fix2 — gate the family-descriptor embedding precompute
     // behind `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1`, default OFF.
@@ -1718,6 +1739,7 @@ pub async fn bootstrap_serve(
         db_state,
         archive_max_days: app_config.archive_max_days,
         task_handles,
+        daemon_keypair_outcome,
     })
 }
 
@@ -1745,49 +1767,23 @@ pub async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &AppConfig) ->
 
     let bootstrap = bootstrap_serve(&db_path, &args, app_config).await?;
 
-    // Round-2 F12 — auto-generate the daemon's signing keypair if one
-    // does not already exist. Idempotent: a daemon restart never
-    // overwrites an existing keypair (which would silently invalidate
-    // every prior signed link). The well-known `daemon` agent_id is
-    // used as the stable label; operators can rotate via the existing
-    // `ai-memory identity generate` CLI.
-    //
-    // Failure here is non-fatal: link signing simply stays disabled and
-    // the operator sees the warning in the banner below.
-    let keypair_outcome = match crate::identity::keypair::default_key_dir() {
-        Ok(dir) => {
-            // The `[identity].disabled` config field is not yet wired in
-            // v0.7.0; pass `false` so the helper auto-generates unless
-            // the operator pre-staged a keypair. A future config field
-            // can opt out without changing this call site.
-            match crate::identity::keypair::ensure_keypair("daemon", &dir, false) {
-                Ok(o) => Some(o),
-                Err(e) => {
-                    tracing::warn!("identity: keypair auto-gen failed: {e}");
-                    None
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!("identity: could not resolve key dir: {e}");
-            None
-        }
-    };
-
-    // Round-2 F8 — startup banner. Surfaces the effective permissions
-    // mode (and the v0.7.0 enforce-default migration warning when the
-    // operator has no `[permissions]` block in config) plus the F12
-    // keypair-autogen result.
+    // Round-2 F8 + Round-3 F12 — startup banner. Surfaces the effective
+    // permissions mode (and the v0.7.0 enforce-default migration warning
+    // when the operator has no `[permissions]` block in config) plus the
+    // F12 keypair-autogen result captured by `ensure_and_load_daemon_keypair`
+    // earlier in this fn.
     let banner_inputs = crate::cli::serve_banner::BannerInputs {
         configured_permissions_mode: app_config.permissions.as_ref().map(|p| p.mode),
-        auto_generated_keypair_path: keypair_outcome.as_ref().and_then(|o| match o {
-            crate::identity::keypair::EnsureOutcome::Generated { pub_path } => {
-                Some(pub_path.display().to_string())
-            }
-            _ => None,
-        }),
+        auto_generated_keypair_path: bootstrap.daemon_keypair_outcome.as_ref().and_then(
+            |o| match o {
+                crate::identity::keypair::EnsureOutcome::Generated { pub_path } => {
+                    Some(pub_path.display().to_string())
+                }
+                _ => None,
+            },
+        ),
         identity_disabled: matches!(
-            keypair_outcome,
+            bootstrap.daemon_keypair_outcome,
             Some(crate::identity::keypair::EnsureOutcome::SkippedDisabled)
         ),
     };

@@ -753,7 +753,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_find_paths",
-                "description": "Enumerate up to N paths through the KG between two memories.",
+                "description": "Enumerate up to N paths through the KG between two memories. Undirected BFS with cycle detection; max_depth ceiling 7.",
                 "docs": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50. By default the BFS skips edges invalidated via `memory_kg_invalidate`; pass `include_invalidated=true` to traverse the full historical link graph.",
                 "inputSchema": {
                     "type": "object",

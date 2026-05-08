@@ -2316,7 +2316,16 @@ impl AppConfig {
     ///    cannot use `[permissions]` from `config.toml` — flip the
     ///    gate to Enforce per scenario.
     /// 2. `[permissions].mode` from `config.toml`.
-    /// 3. Compiled default ([`PermissionsMode::default`] = `advisory`).
+    /// 3. v0.7.0 secure default ([`PermissionsMode::Enforce`]) when no
+    ///    explicit configuration is present. Round-2 F8 / Round-3
+    ///    re-verify: prior to this round the unconfigured fallback was
+    ///    [`PermissionsMode::default`] (= `advisory`), which left an
+    ///    upgrading deployment with `metadata.governance.write=owner`
+    ///    bypassable. We now resolve via
+    ///    [`crate::permissions::resolve_v07_default_mode`] so every
+    ///    process-wide entry point (CLI, MCP, HTTP serve) shares the
+    ///    same secure-by-default posture; operators who want advisory
+    ///    set `[permissions].mode = "advisory"` explicitly.
     #[must_use]
     pub fn effective_permissions_mode(&self) -> PermissionsMode {
         if let Ok(raw) = std::env::var("AI_MEMORY_PERMISSIONS_MODE") {
@@ -2332,9 +2341,9 @@ impl AppConfig {
                 }
             }
         }
-        self.permissions
-            .as_ref()
-            .map_or_else(PermissionsMode::default, |p| p.mode)
+        let configured = self.permissions.as_ref().map(|p| p.mode);
+        let (mode, _warn) = crate::permissions::resolve_v07_default_mode(configured);
+        mode
     }
 
     /// v0.7.0 K9 — resolve the effective declarative rule set
