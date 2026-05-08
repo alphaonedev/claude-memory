@@ -11894,9 +11894,23 @@ fn test_cli_smoke_canonical_paths() {
     assert!(link_output.status.success(), "link failed");
 
     // 13. forget: dry-run delete by pattern
+    //
+    // Round-2 F11: `forget --pattern X` without `--namespace` is a
+    // GLOBAL scope delete and now requires `--confirm-global` to
+    // proceed. The smoke test exercises the CLI shape (not actual
+    // deletion — `nomatch` deliberately matches nothing), so we opt
+    // into the global confirmation.
     let forget_output = cmd_output_or_panic(
         binary,
-        &["--db", db_str, "--json", "forget", "--pattern", "nomatch"],
+        &[
+            "--db",
+            db_str,
+            "--json",
+            "forget",
+            "--pattern",
+            "nomatch",
+            "--confirm-global",
+        ],
     );
     assert!(forget_output.status.success(), "forget failed");
 
