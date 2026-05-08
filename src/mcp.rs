@@ -1156,7 +1156,22 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "agent_id": {"type": "string", "description": "Agent identifier (same validation as metadata.agent_id)"},
-                        "agent_type": {"type": "string", "enum": ["ai:claude-opus-4.6", "ai:claude-opus-4.7", "ai:codex-5.4", "ai:grok-4.2", "human", "system"]},
+                        // Round-2 F16 — agent_type is OPEN-form at
+                        // the schema layer. The daemon's
+                        // `validate::validate_agent_type` accepts
+                        // the curated short-list (human, system,
+                        // ai:claude-opus-*, ai:codex-*, ai:grok-*)
+                        // PLUS any `ai:<name>` form (alnum/_-.) up
+                        // to 64 chars, so the closed wire enum was
+                        // lagging the daemon's forward-compat
+                        // surface. Document the canonical labels
+                        // in prose so well-behaved clients pick
+                        // sensible defaults, but don't reject
+                        // `ai:<future-model>` at the schema layer.
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Agent type label. Curated: human, system, ai:claude-opus-4.6, ai:claude-opus-4.7, ai:codex-5.4, ai:grok-4.2. Open-form: any `ai:<name>` (alnum/_-.) up to 64 chars — register e.g. ai:claude-opus-4.8 without a code release. Anything outside the curated list and the `ai:` namespace is rejected by the handler with a 400."
+                        },
                         "capabilities": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Optional capability tags"}
                     },
                     "required": ["agent_id", "agent_type"]
@@ -2528,26 +2543,37 @@ pub fn format_rule_summary(namespace: &str, policy: &crate::models::GovernancePo
 pub fn build_capabilities_summary(profile: &crate::profile::Profile) -> String {
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
-
-    // Tools advertised in tools/list = sum of family counts the profile
-    // includes, plus any always-on bootstrap tool whose owning family is
-    // NOT included (so it isn't double-counted). In v0.6.4
-    // `memory_capabilities` lives in `Family::Meta` and is also in
-    // `ALWAYS_ON_TOOLS`; on `--profile core` the meta family isn't
-    // loaded, so the bootstrap injection adds it back here.
-    let from_families: usize = profile.expected_tool_count();
-    let always_on_extra: usize = ALWAYS_ON_TOOLS
+    // Round-2 F13 — substantive memory-tool count, EXCLUDING the
+    // always-on bootstrap (`memory_capabilities`). Reconciles with
+    // `build_capabilities_describe_to_user`'s "{n_loaded} memory
+    // tool{s}" phrasing so the summary number agrees with the
+    // user-facing sentence (e.g. both report 50 for `--profile full`,
+    // not "51 of 51 tools" in the summary alongside "50 memory
+    // tools" in the describe — which was the F13 off-by-one).
+    let total: usize = Family::all()
         .iter()
-        .filter(|name| Family::for_tool(name).is_none_or(|f| !profile.includes(f)))
+        .map(|f| f.expected_tool_count())
+        .sum::<usize>()
+        .saturating_sub(ALWAYS_ON_TOOLS.len());
+
+    // Visible memory tools = profile-loaded family tools, minus any
+    // always-on bootstrap that lives in a family the profile loads
+    // (otherwise `memory_capabilities` would be double-counted for
+    // profiles that load `Meta`). The bootstrap still appears in
+    // `tools/list` — it just isn't a "memory tool" in the user-facing
+    // sense.
+    let from_families: usize = profile.expected_tool_count();
+    let always_on_in_loaded_family: usize = ALWAYS_ON_TOOLS
+        .iter()
+        .filter(|name| Family::for_tool(name).is_some_and(|f| profile.includes(f)))
         .count();
-    let visible = from_families + always_on_extra;
+    let visible = from_families.saturating_sub(always_on_in_loaded_family);
     let unloaded = total.saturating_sub(visible);
     let label = profile_summary_label(profile);
 
     format!(
-        "{visible} of {total} tools are advertised in tools/list under the current profile \
-         ({label}). The other {unloaded} are listed in this manifest but NOT directly \
+        "{visible} of {total} memory tools are advertised in tools/list under the current \
+         profile ({label}). The other {unloaded} are listed in this manifest but NOT directly \
          callable. To use any unloaded tool, choose one of: \
          (a) restart the server with --profile <family> or --profile full, \
          (b) call memory_load_family(family=<name>) — preferred, \
@@ -2785,6 +2811,116 @@ fn profile_summary_label(profile: &crate::profile::Profile) -> String {
             .map(|f| f.name())
             .collect::<Vec<_>>()
             .join(",")
+    }
+}
+
+/// Round-2 F13 — derive the runtime-effective tier label from the
+/// presence of the LLM, embedder, and reranker handles. Mirrors the
+/// boot banner string emitted by `serve_mcp` so the
+/// `memory_capabilities` response and the daemon log agree on what
+/// the daemon is actually doing — independent of `tier_config.tier`,
+/// which only reflects the configured (build-time) tier and can lag
+/// the runtime when an embedder/LLM fails to load.
+#[must_use]
+pub fn effective_tier_label(has_llm: bool, has_embedder: bool, has_reranker: bool) -> &'static str {
+    if has_llm && has_embedder && has_reranker {
+        "autonomous"
+    } else if has_llm && has_embedder {
+        "smart"
+    } else if has_embedder {
+        "semantic"
+    } else {
+        "keyword"
+    }
+}
+
+/// Round-2 F13 — overlay per-tool `inputSchema` and/or `docstring`
+/// onto the top-level `tools[]` array of a v2/v3 capabilities
+/// response. Called on the no-family path when `include_schema=true`
+/// and/or `verbose=true` is set on the top-level
+/// `memory_capabilities` invocation. Without an overlay, those
+/// flags were inert at the top level (only the family drilldown
+/// honoured them).
+///
+/// `include_schema=true` — inject the canonical
+/// `tool_definitions()[name].inputSchema` for every tool entry.
+/// `verbose=true` — inject `docstring` (sourced from the long-form
+/// `docs` field on `tool_definitions()`).
+///
+/// Tools that aren't currently loaded under the active profile (i.e.
+/// `loaded=false` in the v3 `tools[]`) get the same overlay so a
+/// caller can decide whether to drill in via
+/// `memory_load_family`/`memory_smart_load`.
+pub fn overlay_tool_payloads(
+    obj: &mut serde_json::Map<String, Value>,
+    _profile: &crate::profile::Profile,
+    include_schema: bool,
+    verbose: bool,
+) {
+    if !include_schema && !verbose {
+        return;
+    }
+
+    // Build a name → (docs, inputSchema) lookup from the canonical
+    // tool catalog. Done once per call; cheap (~50 entries).
+    let defs = tool_definitions();
+    let lookup: std::collections::HashMap<String, (Option<Value>, Option<Value>)> = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| {
+                    let name = t.get("name").and_then(Value::as_str)?.to_string();
+                    let docs = t.get("docs").cloned();
+                    let schema = t.get("inputSchema").cloned();
+                    Some((name, (docs, schema)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The v3 response carries a top-level `tools` array of
+    // `ToolEntry` objects; the v2 response does not. For v2 callers
+    // passing include_schema/verbose, synthesize a parallel
+    // `tool_payloads` array so the overlay is still discoverable
+    // without disturbing the v2 wire shape.
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools.iter_mut() {
+            let Some(tool_obj) = tool.as_object_mut() else {
+                continue;
+            };
+            let Some(name) = tool_obj.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some((docs, schema)) = lookup.get(name) else {
+                continue;
+            };
+            if include_schema && let Some(s) = schema {
+                tool_obj.insert("inputSchema".to_string(), s.clone());
+            }
+            if verbose && let Some(d) = docs {
+                tool_obj.insert("docstring".to_string(), d.clone());
+            }
+        }
+    } else {
+        // v2 path — no `tools` field exists. Synthesize a flat
+        // `tool_payloads` array so the overlay is still on the wire.
+        let payloads: Vec<Value> = lookup
+            .iter()
+            .map(|(name, (docs, schema))| {
+                let mut entry = serde_json::Map::new();
+                entry.insert("name".to_string(), Value::String(name.clone()));
+                if include_schema && let Some(s) = schema {
+                    entry.insert("inputSchema".to_string(), s.clone());
+                }
+                if verbose && let Some(d) = docs {
+                    entry.insert("docstring".to_string(), d.clone());
+                }
+                Value::Object(entry)
+            })
+            .collect();
+        obj.insert("tool_payloads".to_string(), Value::Array(payloads));
     }
 }
 
@@ -3637,15 +3773,30 @@ fn best_family_via_embedder(emb: &Embedder, intent: &str) -> Option<(crate::prof
 /// available (e.g. the `keyword` feature tier) or when the embedder
 /// returns an error mid-call. Splits `intent` on ASCII non-alphanumeric
 /// boundaries, lowercases, and counts how many tokens overlap each
-/// family's descriptor token set. Returns the family with the highest
-/// overlap; ties broken by family declaration order so the routing is
-/// stable.
+/// family's combined token set (descriptor ∪ tool-name tokens).
 ///
-/// When no descriptor matches at all the routing falls back to
-/// `Family::Core` with score 0.0 and source `"fallback"`. This mirrors
-/// the spec's "embedder not yet ready" branch: callers see
-/// `chosen_family_source: "fallback"` and can decide whether to retry
-/// with a richer intent.
+/// Round-2 F14 — the family token set is the union of:
+/// 1. The family's descriptor (free-text intent vocabulary).
+/// 2. The family's tool names tokenised on underscore boundaries
+///    (`memory_notify` → `memory`, `notify`).
+/// 3. The family's tool names as full identifiers (`memory_notify`
+///    kept as a single token so an intent that names the tool
+///    verbatim still scores).
+///
+/// Tool-name overlaps are weighted 2x descriptor overlaps: a tool
+/// name is a stronger signal than a generic intent vocabulary
+/// keyword. Without this, intents like "send a notification to
+/// another agent" mis-routed to `meta` (because "agent" appears in
+/// the meta descriptor) instead of `other` (where `memory_notify`
+/// lives).
+///
+/// The universal `memory` prefix on every tool name is excluded
+/// from the tool-name overlap count so it doesn't dominate the
+/// score across all families.
+///
+/// Ties broken by family declaration order so routing is stable.
+/// When no token matches at all, routing falls back to
+/// `Family::Core` with score 0.0 and source `"fallback"`.
 fn fallback_via_keywords(intent: &str) -> (crate::profile::Family, f32, &'static str) {
     use crate::profile::Family;
 
@@ -3661,19 +3812,105 @@ fn fallback_via_keywords(intent: &str) -> (crate::profile::Family, f32, &'static
     let mut best: Option<(Family, f32)> = None;
     for family in Family::all() {
         let descriptor = family_descriptor(*family).to_ascii_lowercase();
-        let desc_tokens: Vec<&str> = descriptor
+        let desc_tokens: Vec<String> = descriptor
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
             .collect();
-        let overlap = intent_tokens
+        // Round-2 F14 — for each tool in the family, compute the
+        // count of DISTINCT intent tokens that match the tool's
+        // segments (or its full identifier). A tool whose name
+        // encodes BOTH intent keywords (e.g. `expand_query` matches
+        // intent="expand a query" on both `expand` AND `query`)
+        // contributes a stronger signal than a tool whose name only
+        // matches one keyword (e.g. `kg_query` only matches `query`).
+        // The per-tool distinct-token count is summed across the
+        // family AND tracked as a max so a single highly-specific
+        // tool can pull a family above one that matches via several
+        // weak tools.
+        //
+        // Match relation = exact token equality OR shared 5+ char
+        // prefix when both tokens are ≥ 5 chars long. The prefix
+        // relaxation lets "notification" match `notify` segment
+        // (shared "notif" prefix), which the strict-equality form
+        // missed. Without this, intents that use a different
+        // English surface form than the tool name's stem
+        // (notify/notification, subscribe/subscription, etc.) only
+        // matched via the wider descriptor vocabulary.
+        let token_matches = |a: &str, b: &str| -> bool {
+            if a == b {
+                return true;
+            }
+            // Prefix relaxation guard: both tokens ≥ 5 chars and
+            // share a 5-char prefix. Threshold 5 keeps "store"/
+            // "stories", "task"/"taskbar" from cross-matching.
+            if a.len() >= 5 && b.len() >= 5 && a[..5] == b[..5] {
+                return true;
+            }
+            false
+        };
+
+        let mut tool_distinct_sum: usize = 0;
+        let mut tool_distinct_max: usize = 0;
+        let mut full_id_hits: usize = 0;
+        for tool_name in family.tool_names() {
+            let lower = tool_name.to_ascii_lowercase();
+            // Segments from underscore-split. Skip the universal
+            // `memory` prefix (it's noise — every tool has it).
+            let segments: Vec<&str> = lower
+                .split('_')
+                .filter(|s| !s.is_empty() && *s != "memory")
+                .collect();
+            // Distinct intent tokens that match any segment of THIS
+            // tool name (exact OR 5-char-prefix relaxed match).
+            let distinct = intent_tokens
+                .iter()
+                .filter(|t| segments.iter().any(|seg| token_matches(seg, t.as_str())))
+                .count();
+            tool_distinct_sum += distinct;
+            if distinct > tool_distinct_max {
+                tool_distinct_max = distinct;
+            }
+            // Full-identifier hit — when an intent token EQUALS the
+            // full tool name (with underscores), the caller has
+            // named the tool verbatim. Strongest signal.
+            if intent_tokens.iter().any(|t| t.as_str() == lower) {
+                full_id_hits += 1;
+            }
+        }
+
+        let desc_overlap = intent_tokens
             .iter()
-            .filter(|t| desc_tokens.iter().any(|d| d == t))
+            .filter(|t| desc_tokens.iter().any(|d| d == *t))
             .count();
-        if overlap == 0 {
+
+        if desc_overlap == 0 && tool_distinct_sum == 0 && full_id_hits == 0 {
             continue;
         }
+
+        // Round-2 F14 — composite score:
+        //   2.0 * descriptor overlap (curated intent vocabulary —
+        //         each family's descriptor is hand-tuned to capture
+        //         the family's purpose, so a hit is high-signal)
+        // + 1.0 * sum of distinct-intent-tokens-per-tool (boost
+        //         when a tool name's segments encode intent
+        //         keywords — broader, more false-positive prone
+        //         than the descriptor)
+        // + 2.0 * tool_distinct_max (strong extra boost when ONE
+        //         tool name matches MULTIPLE intent keywords —
+        //         distinguishes `expand_query` matching both
+        //         "expand" and "query" from `kg_query` matching
+        //         only "query")
+        // + 4.0 * full-identifier hits (caller named the tool
+        //         verbatim — overwhelming signal)
+        // Normalised by intent token count so single-token intents
+        // still produce a sensible score in [0, ~1+].
         #[allow(clippy::cast_precision_loss)]
-        let score = (overlap as f32) / (intent_tokens.len() as f32);
+        let score = (2.0 * desc_overlap as f32
+            + tool_distinct_sum as f32
+            + 2.0 * tool_distinct_max as f32
+            + 4.0 * full_id_hits as f32)
+            / (intent_tokens.len() as f32);
         if best.is_none_or(|(_, s)| score > s) {
             best = Some((*family, score));
         }
@@ -3725,7 +3962,17 @@ fn family_descriptor(family: crate::profile::Family) -> &'static str {
             "archive backup restore purge old historical retention cold \
              storage"
         }
-        Family::Other => "subscription notify subscribe webhook event other miscellaneous",
+        // Round-2 F14 — extended with "notification message send
+        // dm direct another recipient inbox" so an intent like "I
+        // want to send a notification to another agent" routes to
+        // `other` (where `memory_notify` lives). The tool-name boost
+        // (2x weight on `memory_notify` → `notify`) plus the wider
+        // vocabulary covers both "notify" and "notification" surface
+        // forms.
+        Family::Other => {
+            "subscription notify subscribe webhook event other miscellaneous \
+             notification message send dm direct another recipient inbox"
+        }
     }
 }
 
@@ -5932,6 +6179,22 @@ fn handle_request(
                             .get("accept")
                             .and_then(Value::as_str)
                             .map_or(CapabilitiesAccept::V3, CapabilitiesAccept::parse);
+                        // Round-2 F13 — top-level `verbose` and
+                        // `include_schema` were declared in the
+                        // inputSchema but inert when no family was
+                        // specified. Make them functional:
+                        // `verbose=true` overlays per-tool
+                        // `docstring`s into `tools[]`;
+                        // `include_schema=true` overlays per-tool
+                        // `inputSchema`s into `tools[]`.
+                        let top_verbose = arguments
+                            .get("verbose")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let top_include_schema = arguments
+                            .get("include_schema")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         // v0.6.4-006 — when no family is requested, augment
                         // the v2/v3 response with a top-level `families` field
                         // describing the family taxonomy and which families
@@ -5947,6 +6210,16 @@ fn handle_request(
                             .get("agent_id")
                             .and_then(Value::as_str)
                             .or(mcp_client);
+                        // Round-2 F13 — runtime-effective tier (matches
+                        // the `serve_mcp` boot banner). Used to
+                        // overlay the top-level `tier` field so the
+                        // capabilities response and the daemon log
+                        // converge on a single tier source-of-truth.
+                        let runtime_tier = effective_tier_label(
+                            llm.is_some(),
+                            embedder.is_some(),
+                            reranker.is_some(),
+                        );
                         let result = match accept {
                             CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
                                 tier_config,
@@ -5975,6 +6248,51 @@ fn handle_request(
                                 if let Some(obj) = value.as_object_mut() {
                                     obj.insert("families".to_string(), families_overview(profile));
                                 }
+                            }
+                            // Round-2 F13 — keep `schema_version`
+                            // present on every accept variant. v1's
+                            // `to_v1()` drops the field at the struct
+                            // boundary because the v1 shape predates
+                            // schema_version; a v1 client still needs
+                            // the discriminator to detect that it's
+                            // looking at v1. Inject it on the wire.
+                            if matches!(accept, CapabilitiesAccept::V1)
+                                && let Some(obj) = value.as_object_mut()
+                                && !obj.contains_key("schema_version")
+                            {
+                                obj.insert(
+                                    "schema_version".to_string(),
+                                    Value::String("1".to_string()),
+                                );
+                            }
+                            // Round-2 F13 — overlay the runtime-
+                            // effective tier so the top-level `tier`
+                            // field reflects what the daemon is
+                            // actually doing, not what
+                            // `tier_config.tier.as_str()` was at
+                            // build/config time. v1, v2, v3 all carry
+                            // `tier`.
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert(
+                                    "tier".to_string(),
+                                    Value::String(runtime_tier.to_string()),
+                                );
+                            }
+                            // Round-2 F13 — when `include_schema=true`
+                            // and/or `verbose=true` is set with no
+                            // family, overlay per-tool `inputSchema`
+                            // and/or `docstring` into the v3 `tools[]`
+                            // array. Sourced from `tool_definitions()`.
+                            if (top_include_schema || top_verbose)
+                                && matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3)
+                                && let Some(obj) = value.as_object_mut()
+                            {
+                                overlay_tool_payloads(
+                                    obj,
+                                    profile,
+                                    top_include_schema,
+                                    top_verbose,
+                                );
                             }
                             value
                         })
@@ -8139,8 +8457,17 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
 
-        // v1 has no schema_version
-        assert!(val.get("schema_version").is_none());
+        // Round-2 F13 — v1 wire shape now carries
+        // `schema_version: "1"` so clients can negotiate wire-version.
+        // The struct itself (`CapabilitiesV1`) still doesn't have the
+        // field; the dispatcher injects it on the wire. This is the
+        // F13 fix: clients need the discriminator to detect they're
+        // looking at v1 vs an accidental v2.
+        assert_eq!(
+            val.get("schema_version").and_then(Value::as_str),
+            Some("1"),
+            "Round-2 F13 — v1 must carry schema_version on the wire"
+        );
         // v2-only blocks are absent
         assert!(val.get("permissions").is_none());
         assert!(val.get("hooks").is_none());
