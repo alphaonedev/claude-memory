@@ -625,6 +625,80 @@ fn synthetic_rules_as_permission_rules() -> Vec<PermissionRule> {
 }
 
 // ---------------------------------------------------------------------------
+// v0.7.0 F8 — secure-by-default mode resolution
+// ---------------------------------------------------------------------------
+//
+// Round-2 evidence: a namespace with `metadata.governance.write=owner`
+// accepted writes from an unrelated agent_id because `permissions.mode`
+// was unconfigured and therefore fell back to the v0.7.0-ship default
+// of `advisory` — which logs but does not block. We flip the default
+// for unconfigured deployments to `enforce` so an upgrader who has
+// not yet authored a `[permissions]` block gets the secure posture
+// out of the box. Operators who wanted advisory must opt in
+// explicitly.
+//
+// The compiled `Default for PermissionsMode` in `config.rs` continues
+// to return `Advisory` because that default is also consumed by the
+// serde-deserialise of an empty `[permissions]` block — flipping it
+// there would silently change the meaning of `[permissions]` blocks
+// that lack `mode = ` while preserving every other field. Instead we
+// expose [`default_v07_secure_mode`] / [`resolve_v07_default_mode`]
+// here for the daemon's bootstrap path to consult at startup, and for
+// the migration-warning surface to detect the "config exists, mode
+// unset" upgrade case.
+
+/// The v0.7.0 secure-by-default permissions mode. Returns
+/// [`PermissionsMode::Enforce`].
+///
+/// Round-2 F8 — used by the daemon's bootstrap path (see
+/// [`crate::cli::serve_banner`]) to resolve the active mode when the
+/// operator's `config.toml` does not include a `[permissions]` block
+/// or omits the `mode = ` field within one.
+#[must_use]
+pub fn default_v07_secure_mode() -> PermissionsMode {
+    PermissionsMode::Enforce
+}
+
+/// Round-2 F8 — resolve the effective mode for an upgrading deployment.
+///
+/// `configured` is `Some(mode)` when the operator has explicitly set
+/// `[permissions].mode` in `config.toml`, and `None` when the field is
+/// absent (either the block is missing or only contains other fields).
+///
+/// Returns `(effective_mode, optional_migration_warning)`:
+/// - `effective_mode` is the configured value if present, otherwise the
+///   v0.7.0 secure default ([`PermissionsMode::Enforce`]).
+/// - `optional_migration_warning` is `Some(text)` when the operator's
+///   config did NOT explicitly set `mode` AND the resolved default is
+///   stricter than the v0.6.x posture (i.e., we flipped them from
+///   advisory to enforce). The warning is surfaced once at daemon
+///   startup so an upgrader notices the behaviour change and can opt
+///   back into advisory if their workflow depends on it.
+#[must_use]
+pub fn resolve_v07_default_mode(
+    configured: Option<PermissionsMode>,
+) -> (PermissionsMode, Option<String>) {
+    if let Some(mode) = configured {
+        return (mode, None);
+    }
+    let warning = "v0.7.0 default changed to enforce; set permissions.mode=advisory in config to \
+                   opt out — see release notes."
+        .to_string();
+    (default_v07_secure_mode(), Some(warning))
+}
+
+/// Round-2 F8 — single-line startup-banner text describing the active
+/// permissions posture. Surfaced by the daemon's serve banner so an
+/// operator inspecting logs can see at a glance which mode is live.
+///
+/// Format: `"permissions: enforce"` / `"permissions: advisory"` /
+/// `"permissions: off"`.
+#[must_use]
+pub fn startup_banner_line(mode: PermissionsMode) -> String {
+    format!("permissions: {}", mode.as_str())
+}
+
+// ---------------------------------------------------------------------------
 // Process-wide rules registry
 // ---------------------------------------------------------------------------
 
@@ -771,5 +845,52 @@ mod tests {
     fn specificity_orders_long_prefix_first() {
         assert!(pattern_specificity("secrets/api/v1") > pattern_specificity("secrets/*"));
         assert!(pattern_specificity("secrets/*") > pattern_specificity("**"));
+    }
+
+    // ---- F8 secure-by-default --------------------------------------------
+
+    #[test]
+    fn default_v07_secure_mode_is_enforce() {
+        assert_eq!(default_v07_secure_mode(), PermissionsMode::Enforce);
+    }
+
+    #[test]
+    fn resolve_v07_default_mode_unconfigured_yields_enforce_with_warning() {
+        let (mode, warning) = resolve_v07_default_mode(None);
+        assert_eq!(mode, PermissionsMode::Enforce);
+        let w = warning.expect("expected migration warning when mode is unconfigured");
+        assert!(w.contains("v0.7.0 default changed to enforce"), "got: {w}");
+        assert!(w.contains("permissions.mode=advisory"), "got: {w}");
+    }
+
+    #[test]
+    fn resolve_v07_default_mode_configured_passes_through() {
+        let (mode, warning) = resolve_v07_default_mode(Some(PermissionsMode::Advisory));
+        assert_eq!(mode, PermissionsMode::Advisory);
+        assert!(warning.is_none(), "no warning when operator opted in");
+
+        let (mode, warning) = resolve_v07_default_mode(Some(PermissionsMode::Off));
+        assert_eq!(mode, PermissionsMode::Off);
+        assert!(warning.is_none());
+
+        let (mode, warning) = resolve_v07_default_mode(Some(PermissionsMode::Enforce));
+        assert_eq!(mode, PermissionsMode::Enforce);
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn startup_banner_line_includes_mode_str() {
+        assert_eq!(
+            startup_banner_line(PermissionsMode::Enforce),
+            "permissions: enforce"
+        );
+        assert_eq!(
+            startup_banner_line(PermissionsMode::Advisory),
+            "permissions: advisory"
+        );
+        assert_eq!(
+            startup_banner_line(PermissionsMode::Off),
+            "permissions: off"
+        );
     }
 }
