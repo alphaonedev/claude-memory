@@ -553,7 +553,41 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                     std::process::exit(2);
                 }
             };
-            mcp::run_mcp_server(&db_path, feature_tier, app_config, &resolved_profile)?;
+            // v0.7.0 F6 — `mcp::run_mcp_server` is a synchronous
+            // stdin-reading loop that internally calls
+            // `reqwest::blocking::Client` for every LLM-backed tool
+            // (`memory_consolidate`, `memory_expand_query`,
+            // `memory_auto_tag`, `memory_detect_contradiction`).
+            // Running that on a tokio worker thread directly does
+            // two bad things at once:
+            //   1. Pegs a worker thread on a synchronous read and
+            //      keeps the multi-threaded runtime spinning on
+            //      the remaining workers (the 99.3% CPU
+            //      `clock_gettime` / `mach_absolute_time` poll loop
+            //      observed in Round-2 sample profiling).
+            //   2. Calls `reqwest::blocking::Client::send()` from
+            //      within an active tokio runtime context, which
+            //      either panics ("Cannot start a runtime from
+            //      within a runtime") or silently fails the chat
+            //      RPC ("Failed to send chat request") — the
+            //      proximate cause of the four LLM-backed tools
+            //      returning errors while ollama itself was healthy.
+            // Routing the entire MCP loop through `spawn_blocking`
+            // gives it its own dedicated thread with no tokio
+            // runtime context, so the blocking reqwest calls inside
+            // `OllamaClient::generate` are issued cleanly.
+            let db_path_owned = db_path.clone();
+            let app_config_owned = app_config.clone();
+            tokio::task::spawn_blocking(move || {
+                mcp::run_mcp_server(
+                    &db_path_owned,
+                    feature_tier,
+                    &app_config_owned,
+                    &resolved_profile,
+                )
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("mcp join: {e}"))??;
             Ok(())
         }
         Command::Store(a) => {

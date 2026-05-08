@@ -3,12 +3,26 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 const DEFAULT_OLLAMA_URL: &str = "http://localhost:11434";
 
 const GENERATE_TIMEOUT: Duration = Duration::from_secs(30);
 const PULL_TIMEOUT: Duration = Duration::from_secs(120);
+/// v0.7.0 F6 — explicit TCP connect timeout. Prevents the daemon's MCP
+/// loop from hanging when ollama is dead and the kernel returns nothing
+/// (no connection refused, no SYN-ACK). 5s is generous for localhost.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// v0.7.0 F6 — health-probe timeout. Quick check at /api/tags.
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
+/// v0.7.0 F6 — circuit-breaker window. After [`CIRCUIT_BREAKER_THRESHOLD`]
+/// consecutive failures the client fast-fails until this window elapses.
+/// Re-establishes a probe attempt after the window.
+const CIRCUIT_BREAKER_COOLDOWN: Duration = Duration::from_secs(30);
+/// v0.7.0 F6 — failures within the same cooldown window required to trip
+/// the breaker. Single transient failure does not flip the switch.
+const CIRCUIT_BREAKER_THRESHOLD: u32 = 3;
 
 const QUERY_EXPANSION_PROMPT: &str = r"You are a search query expander. Given a search query, generate 5-8 additional search terms that are semantically related. Return ONLY the terms, one per line, no numbering or explanation.
 
@@ -28,10 +42,57 @@ const CONTRADICTION_PROMPT: &str = r#"Do these two statements contradict each ot
 Statement A: {a}
 Statement B: {b}"#;
 
+/// v0.7.0 F6 — lightweight circuit-breaker state. Tracks the last failure
+/// and a rolling consecutive-failure count. When the count crosses
+/// [`CIRCUIT_BREAKER_THRESHOLD`] within [`CIRCUIT_BREAKER_COOLDOWN`] the
+/// breaker is considered "open": [`OllamaClient::generate`] returns a
+/// fast-fail error instead of issuing the HTTP request, preventing
+/// repeated 30-second timeouts from pegging the daemon's CPU and locking
+/// up the MCP dispatch loop.
+#[derive(Debug)]
+struct BreakerState {
+    consecutive_failures: u32,
+    last_failure_at: Option<Instant>,
+}
+
+impl BreakerState {
+    const fn new() -> Self {
+        Self {
+            consecutive_failures: 0,
+            last_failure_at: None,
+        }
+    }
+
+    /// Returns true when the breaker is open (fast-fail).
+    fn is_open(&self) -> bool {
+        if self.consecutive_failures < CIRCUIT_BREAKER_THRESHOLD {
+            return false;
+        }
+        match self.last_failure_at {
+            Some(t) => t.elapsed() < CIRCUIT_BREAKER_COOLDOWN,
+            None => false,
+        }
+    }
+
+    fn record_failure(&mut self) {
+        self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+        self.last_failure_at = Some(Instant::now());
+    }
+
+    fn record_success(&mut self) {
+        self.consecutive_failures = 0;
+        self.last_failure_at = None;
+    }
+}
+
 pub struct OllamaClient {
     base_url: String,
     model: String,
     client: reqwest::blocking::Client,
+    /// v0.7.0 F6 — guards `generate` / `embed_text` from re-issuing
+    /// requests against an unreachable endpoint. Reset on the first
+    /// success after a cooldown.
+    breaker: Mutex<BreakerState>,
 }
 
 impl OllamaClient {
@@ -44,9 +105,15 @@ impl OllamaClient {
 
     /// Creates a new `OllamaClient` with a custom base URL.
     /// Checks that Ollama is reachable before returning.
+    ///
+    /// v0.7.0 F6: the underlying `reqwest` client now carries an explicit
+    /// `connect_timeout` so a dead endpoint fails in [`CONNECT_TIMEOUT`]
+    /// instead of hanging on the kernel SYN retry budget. The per-request
+    /// `timeout` is preserved at [`GENERATE_TIMEOUT`].
     pub fn new_with_url(base_url: &str, model: &str) -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
             .timeout(GENERATE_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
             .build()
             .context("Failed to build HTTP client")?;
 
@@ -54,6 +121,7 @@ impl OllamaClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             model: model.to_string(),
             client,
+            breaker: Mutex::new(BreakerState::new()),
         };
 
         if !instance.is_available() {
@@ -67,12 +135,40 @@ impl OllamaClient {
         Ok(instance)
     }
 
+    /// v0.7.0 F6 — observe the breaker's state without acquiring it for
+    /// long; if poisoned, treat as closed (fail open) so a poisoned mutex
+    /// can never wedge the LLM path entirely.
+    fn breaker_is_open(&self) -> bool {
+        self.breaker
+            .lock()
+            .map(|b| b.is_open())
+            .unwrap_or(false)
+    }
+
+    fn note_failure(&self) {
+        if let Ok(mut b) = self.breaker.lock() {
+            b.record_failure();
+        }
+    }
+
+    fn note_success(&self) {
+        if let Ok(mut b) = self.breaker.lock() {
+            b.record_success();
+        }
+    }
+
+    /// Inspect the breaker state for tests and observability.
+    #[doc(hidden)]
+    pub fn circuit_breaker_open(&self) -> bool {
+        self.breaker_is_open()
+    }
+
     /// Quick health check -- returns true if Ollama responds to GET /api/tags.
     pub fn is_available(&self) -> bool {
         let url = format!("{}/api/tags", self.base_url);
         self.client
             .get(&url)
-            .timeout(Duration::from_secs(5))
+            .timeout(HEALTH_TIMEOUT)
             .send()
             .is_ok_and(|r| r.status().is_success())
     }
@@ -138,7 +234,22 @@ impl OllamaClient {
     /// Generates a completion using the /api/chat endpoint (Ollama chat format).
     /// This is compatible with both Ollama and vMLX/OpenAI-compatible servers.
     /// Returns the response text.
+    ///
+    /// v0.7.0 F6 — the call is guarded by a circuit breaker. After
+    /// [`CIRCUIT_BREAKER_THRESHOLD`] consecutive failures the call
+    /// fast-fails for [`CIRCUIT_BREAKER_COOLDOWN`] instead of waiting
+    /// the full HTTP timeout each time. This is the key defence
+    /// against the Round-2 F6 deadlock where a dead ollama caused
+    /// every chat-backed MCP tool to hang the daemon for 30s+.
     pub fn generate(&self, prompt: &str, system: Option<&str>) -> Result<String> {
+        if self.breaker_is_open() {
+            return Err(anyhow!(
+                "Failed to send chat request: circuit breaker open \
+                 (last failure within {}s); ollama at {} is not responding",
+                CIRCUIT_BREAKER_COOLDOWN.as_secs(),
+                self.base_url,
+            ));
+        }
         let url = format!("{}/api/chat", self.base_url);
 
         let mut messages = Vec::new();
@@ -153,21 +264,40 @@ impl OllamaClient {
             "stream": false,
         });
 
-        let resp = self
+        let resp = match self
             .client
             .post(&url)
             .timeout(GENERATE_TIMEOUT)
             .json(&payload)
             .send()
-            .context("Failed to send chat request")?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                self.note_failure();
+                return Err(anyhow::Error::new(e).context("Failed to send chat request"));
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
+            // 5xx is an upstream-failure signal that should trip the
+            // breaker (ollama is sick); 4xx is a request-shape problem
+            // and should NOT — the next call with a different prompt
+            // may well succeed.
+            if status.is_server_error() {
+                self.note_failure();
+            }
             let text = resp.text().unwrap_or_default();
             return Err(anyhow!("Chat generate failed ({status}): {text}"));
         }
 
-        let body: Value = resp.json().context("Failed to parse chat response")?;
+        let body: Value = match resp.json() {
+            Ok(b) => b,
+            Err(e) => {
+                self.note_failure();
+                return Err(anyhow::Error::new(e).context("Failed to parse chat response"));
+            }
+        };
 
         // Ollama /api/chat returns {"message": {"content": "..."}}
         let response_text = body["message"]["content"]
@@ -175,6 +305,7 @@ impl OllamaClient {
             .ok_or_else(|| anyhow!("Missing 'message.content' field in chat output"))?
             .to_string();
 
+        self.note_success();
         Ok(response_text)
     }
 
@@ -229,30 +360,59 @@ impl OllamaClient {
     /// Generate an embedding vector via Ollama's /api/embed endpoint.
     ///
     /// Used for nomic-embed-text-v1.5 on smart/autonomous tiers.
+    ///
+    /// v0.7.0 F6 — like [`OllamaClient::generate`], this call is guarded
+    /// by the same circuit breaker so a dead ollama endpoint doesn't
+    /// block every store/recall path on a per-call timeout.
     pub fn embed_text(&self, text: &str, embed_model: &str) -> Result<Vec<f32>> {
+        if self.breaker_is_open() {
+            return Err(anyhow!(
+                "Failed to send embed request to Ollama: circuit breaker open \
+                 (last failure within {}s); ollama at {} is not responding",
+                CIRCUIT_BREAKER_COOLDOWN.as_secs(),
+                self.base_url,
+            ));
+        }
         let url = format!("{}/api/embed", self.base_url);
         let payload = json!({
             "model": embed_model,
             "input": text,
         });
 
-        let resp = self
+        let resp = match self
             .client
             .post(&url)
             .timeout(GENERATE_TIMEOUT)
             .json(&payload)
             .send()
-            .context("Failed to send embed request to Ollama")?;
+        {
+            Ok(r) => r,
+            Err(e) => {
+                self.note_failure();
+                return Err(
+                    anyhow::Error::new(e).context("Failed to send embed request to Ollama"),
+                );
+            }
+        };
 
         if !resp.status().is_success() {
             let status = resp.status();
+            if status.is_server_error() {
+                self.note_failure();
+            }
             let text = resp.text().unwrap_or_default();
             return Err(anyhow!("Ollama embed failed ({status}): {text}"));
         }
 
-        let body: Value = resp
-            .json()
-            .context("Failed to parse Ollama embed response")?;
+        let body: Value = match resp.json() {
+            Ok(b) => b,
+            Err(e) => {
+                self.note_failure();
+                return Err(
+                    anyhow::Error::new(e).context("Failed to parse Ollama embed response"),
+                );
+            }
+        };
 
         // Ollama returns {"embeddings": [[...], ...]} — take the first one
         let embedding = body["embeddings"]
@@ -271,6 +431,7 @@ impl OllamaClient {
             return Err(anyhow!("Empty embedding returned from Ollama"));
         }
 
+        self.note_success();
         Ok(floats)
     }
 
