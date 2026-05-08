@@ -14,7 +14,9 @@
 //!
 //! 1. **Default-OFF** for privacy. Operators opt in via
 //!    `[audit] enabled = true` in `config.toml` (or
-//!    `AI_MEMORY_AUDIT_PATH=...` for one-off runs).
+//!    `AI_MEMORY_AUDIT_DIR=<dir>` env var for one-off runs — see
+//!    `src/log_paths.rs::AUDIT_DIR_ENV` for the canonical name; the
+//!    audit log file is written as `<dir>/audit.log`).
 //! 2. **Hash-chained, tamper-evident.** Each line carries a `prev_hash`
 //!    that matches the prior line's `self_hash`. `ai-memory audit
 //!    verify` recomputes the chain and exits non-zero on mismatch.
