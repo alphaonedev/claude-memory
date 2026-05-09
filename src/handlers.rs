@@ -4712,8 +4712,25 @@ pub async fn get_stats(State(app): State<AppState>) -> impl IntoResponse {
     }
 }
 
-pub async fn run_gc(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn run_gc(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation 3 (Phase 17) — postgres-backed daemons
+    // route through the SAL trait. Returns the same `{expired_deleted}`
+    // envelope so wire shape is backend-blind.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let archive_flag = {
+            let lock = app.db.lock().await;
+            lock.3
+        };
+        return match app.store.run_gc(archive_flag).await {
+            Ok(n) => {
+                Json(json!({"expired_deleted": n, "storage_backend": "postgres"})).into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::gc(&lock.0, lock.3) {
         Ok(n) => Json(json!({"expired_deleted": n})).into_response(),
         Err(e) => {
@@ -4727,8 +4744,32 @@ pub async fn run_gc(State(state): State<Db>) -> impl IntoResponse {
     }
 }
 
-pub async fn export_memories(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn export_memories(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation 3 (Phase 18) — postgres-backed daemons
+    // route through the SAL trait. Wire shape preserved:
+    // `{memories, links, count, exported_at}`.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let mems = match app.store.export_memories().await {
+            Ok(v) => v,
+            Err(e) => return store_err_to_response(e),
+        };
+        let links = match app.store.export_links().await {
+            Ok(v) => v,
+            Err(e) => return store_err_to_response(e),
+        };
+        let count = mems.len();
+        return Json(json!({
+            "memories": mems,
+            "links": links,
+            "count": count,
+            "exported_at": Utc::now().to_rfc3339(),
+            "storage_backend": "postgres",
+        }))
+        .into_response();
+    }
+
+    let lock = app.db.lock().await;
     match (db::export_all(&lock.0), db::export_links(&lock.0)) {
         (Ok(memories), Ok(links)) => {
             let count = memories.len();
@@ -4746,7 +4787,7 @@ pub async fn export_memories(State(state): State<Db>) -> impl IntoResponse {
 }
 
 pub async fn import_memories(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Json(body): Json<ImportBody>,
 ) -> impl IntoResponse {
     if body.memories.len() > MAX_BULK_SIZE {
@@ -4756,7 +4797,41 @@ pub async fn import_memories(
         )
             .into_response();
     }
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation 3 (Phase 18) — postgres-backed daemons
+    // route through the SAL trait. We re-use `app.store.store(...)` per
+    // memory (the upsert path that preserves agent_id immutability) and
+    // `app.store.link(...)` for each link; partial-success surfaces the
+    // same `{imported, errors}` envelope as the sqlite path.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("http-import");
+        let mut imported = 0usize;
+        let mut errors: Vec<String> = Vec::new();
+        for mem in body.memories {
+            if let Err(e) = validate::validate_memory(&mem) {
+                errors.push(format!("{}: {}", mem.id, e));
+                continue;
+            }
+            match app.store.store(&ctx, &mem).await {
+                Ok(_) => imported += 1,
+                Err(e) => errors.push(format!("{}: {}", mem.id, e)),
+            }
+        }
+        for link in body.links.unwrap_or_default() {
+            if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+                continue;
+            }
+            let _ = app.store.link(&ctx, &link).await;
+        }
+        return Json(json!({
+            "imported": imported,
+            "errors": errors,
+            "storage_backend": "postgres",
+        }))
+        .into_response();
+    }
+
+    let lock = app.db.lock().await;
     let mut imported = 0usize;
     let mut errors = Vec::new();
     for mem in body.memories {
@@ -5232,6 +5307,26 @@ pub async fn restore_archive(
         )
             .into_response();
     }
+    // v0.7.0 Wave-3 Continuation 3 (Phase 19) — postgres-backed daemons
+    // route through the SAL `archive_restore` trait method. Federation
+    // fanout for restore stays sqlite-only (the `broadcast_restore_quorum`
+    // path uses sqlite-coupled fed-tracker state); postgres-backed
+    // operators relying on multi-node consistency should poll peers.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("http");
+        return match app.store.archive_restore(&ctx, &id).await {
+            Ok(true) => Json(json!({"restored": true, "id": id, "storage_backend": "postgres"}))
+                .into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "not found in archive"})),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     let restored = {
         let lock = app.db.lock().await;
         match db::restore_archived(&lock.0, &id) {
@@ -5291,10 +5386,20 @@ pub struct PurgeQuery {
 }
 
 pub async fn purge_archive(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(q): Query<PurgeQuery>,
 ) -> impl IntoResponse {
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation 3 (Phase 19) — postgres-backed daemons
+    // route through the SAL trait. Wire shape preserved: `{purged}`.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return match app.store.archive_purge(q.older_than_days).await {
+            Ok(n) => Json(json!({"purged": n, "storage_backend": "postgres"})).into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::purge_archive(&lock.0, q.older_than_days) {
         Ok(n) => Json(json!({"purged": n})).into_response(),
         Err(e) => {
@@ -5384,6 +5489,40 @@ pub async fn archive_by_ids(
     let reason = body.reason.as_deref().unwrap_or("archive").to_string();
     let mut archived: Vec<String> = Vec::new();
     let mut missing: Vec<String> = Vec::new();
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 19) — postgres-backed daemons
+    // route through the SAL `archive_by_ids` trait method. The federation
+    // fanout stays sqlite-only; postgres operators relying on multi-node
+    // consistency should poll peers.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("http");
+        // Run per-id so we can split archived vs missing — the trait
+        // method bulk-archives but doesn't tell us which were missing,
+        // so we probe each via the count delta.
+        for id in &body.ids {
+            match app
+                .store
+                .archive_by_ids(&ctx, std::slice::from_ref(id), Some(&reason))
+                .await
+            {
+                Ok(1) => archived.push(id.clone()),
+                Ok(_) => missing.push(id.clone()),
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "archived": archived,
+                "missing": missing,
+                "count": archived.len(),
+                "reason": reason,
+                "storage_backend": "postgres",
+            })),
+        )
+            .into_response();
+    }
 
     for id in &body.ids {
         // Local archive. Hold the lock only across this one call per id so
@@ -6625,6 +6764,48 @@ pub async fn notify(
             return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response();
         }
     };
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 16) — postgres-backed daemons
+    // route through the SAL `notify` trait method. The cross-namespace
+    // subscription dispatch + federation fanout are sqlite-only (the
+    // `subscriptions` module is rusqlite-coupled); the postgres branch
+    // still returns the new memory id + namespace so callers can poll
+    // the inbox via `GET /api/v1/inbox`.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let priority_i32 = body.priority.and_then(|p| i32::try_from(p).ok());
+        let resolved_tier = match body.tier.as_deref() {
+            Some("short") => Some(Tier::Short),
+            Some("mid") => Some(Tier::Mid),
+            Some("long") => Some(Tier::Long),
+            _ => None,
+        };
+        let ctx = crate::store::CallerContext::for_agent(&sender);
+        return match app
+            .store
+            .notify(
+                &ctx,
+                &body.target_agent_id,
+                &body.title,
+                &payload,
+                priority_i32,
+                resolved_tier.as_ref(),
+            )
+            .await
+        {
+            Ok(id) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": id,
+                    "target_agent_id": body.target_agent_id,
+                    "namespace": format!("_inbox/{}", body.target_agent_id),
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
 
     let mut params = json!({
         "target_agent_id": body.target_agent_id,
@@ -10527,7 +10708,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive/purge", axum_post(purge_archive))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10555,7 +10736,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive/purge", axum_post(purge_archive))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10580,7 +10761,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive/purge", axum_post(purge_archive))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -12543,7 +12724,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive/purge", axum_post(purge_archive))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -12569,7 +12750,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/gc", axum_post(run_gc))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -12588,7 +12769,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/export", axum::routing::get(export_memories))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -12611,7 +12792,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/import", axum_post(import_memories))
-            .with_state(state);
+            .with_state(test_app_state(state));
         // MAX_BULK_SIZE+1 stub rows. We use minimal Memory payloads so
         // serialisation is cheap.
         let many: Vec<serde_json::Value> = (0..=MAX_BULK_SIZE)
@@ -12656,7 +12837,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/import", axum_post(import_memories))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let valid = serde_json::json!({
             "id": Uuid::new_v4().to_string(),
             "tier": "long",
@@ -13163,7 +13344,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::delete(purge_archive))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13197,7 +13378,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::delete(purge_archive))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13231,7 +13412,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::delete(purge_archive))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13258,7 +13439,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::delete(purge_archive))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -18183,7 +18364,7 @@ mod tests {
         let _ = insert_test_memory(&state, "ns-export", "t2").await;
         let app = Router::new()
             .route("/api/v1/export", axum_get(export_memories))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -18209,7 +18390,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/import", axum_post(import_memories))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let now = Utc::now().to_rfc3339();
         let mem = serde_json::json!({
             "id": Uuid::new_v4().to_string(),
@@ -18371,7 +18552,7 @@ mod tests {
         let _ = insert_test_memory(&state, "gc-ns", "title").await;
         let app = Router::new()
             .route("/api/v1/gc", axum_post(run_gc))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -19931,7 +20112,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::delete(purge_archive))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
