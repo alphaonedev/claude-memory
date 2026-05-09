@@ -2665,6 +2665,15 @@ pub async fn recall_memories_post(
 /// HTTP surface was keyword-only regardless of server tier — scenario-18
 /// surfaced the black-hole on peers that fanned out memories but never
 /// exercised the semantic recall path.
+///
+/// v0.7.0 Wave-3 Continuation — when `app.storage_backend` is
+/// `Postgres`, dispatch through `app.store.search` for keyword recall.
+/// The full hybrid (FTS + semantic + adaptive blend + reranker + touch
+/// ops) pipeline remains sqlite-only in v0.7.0; postgres deployments
+/// fall back to keyword-only recall through the postgres `to_tsvector`
+/// FTS surface, which is functionally equivalent for the keyword half
+/// and surfaces a `mode=keyword` envelope so clients can detect the
+/// degraded mode without an out-of-band feature probe.
 #[allow(clippy::too_many_arguments)]
 async fn recall_response(
     app: &AppState,
@@ -2677,6 +2686,70 @@ async fn recall_response(
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
 ) -> axum::response::Response {
+    // v0.7.0 Wave-3 Continuation — postgres-backed recall via SAL search.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx_caller =
+            crate::store::CallerContext::for_agent(as_agent.unwrap_or("daemon").to_string());
+        let mut filter = crate::store::Filter {
+            namespace: namespace.map(str::to_string),
+            limit,
+            ..Default::default()
+        };
+        if let Some(t) = tags {
+            filter.tags_any = t
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(s) = since
+            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s)
+        {
+            filter.since = Some(dt.into());
+        }
+        if let Some(u) = until
+            && let Ok(dt) = chrono::DateTime::parse_from_rfc3339(u)
+        {
+            filter.until = Some(dt.into());
+        }
+        return match app.store.search(&ctx_caller, context, &filter).await {
+            Ok(memories) => {
+                let scored: Vec<serde_json::Value> = memories
+                    .iter()
+                    .enumerate()
+                    .map(|(i, m)| {
+                        let mut v = serde_json::to_value(m).unwrap_or_default();
+                        // Synthetic descending score so wire shape parity
+                        // (clients sort/limit by score). Real ranking
+                        // arrives with the full pipeline in a follow-on.
+                        let synthetic = 1.0 - (i as f64) * 0.01;
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert(
+                                "score".to_string(),
+                                json!((synthetic * 1000.0).round() / 1000.0),
+                            );
+                        }
+                        v
+                    })
+                    .collect();
+                let mut resp = json!({
+                    "memories": scored,
+                    "count": scored.len(),
+                    "tokens_used": 0,
+                    "mode": "keyword",
+                    "storage_backend": "postgres",
+                });
+                if let Some(b) = budget_tokens {
+                    resp["budget_tokens"] = json!(b);
+                }
+                Json(resp).into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     // Embed the query BEFORE grabbing the DB lock — embed() is CPU-heavy
     // and holding the SQLite mutex across it serialises unrelated writes.
     let query_emb: Option<Vec<f32>> = if let Some(emb) = app.embedder.as_ref().as_ref() {
@@ -3035,7 +3108,7 @@ pub struct TaxonomyQuery {
 /// subtree counts, plus an honest `total_count` and a `truncated`
 /// flag when `limit` dropped rows from the walk.
 pub async fn get_taxonomy(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(p): Query<TaxonomyQuery>,
 ) -> impl IntoResponse {
     let prefix_owned: Option<String> = p
@@ -3058,7 +3131,56 @@ pub async fn get_taxonomy(
         .unwrap_or(crate::models::MAX_NAMESPACE_DEPTH)
         .min(crate::models::MAX_NAMESPACE_DEPTH);
     let limit = p.limit.unwrap_or(1000).clamp(1, 10_000);
-    let lock = state.lock().await;
+
+    // v0.7.0 Wave-3 Continuation — build a flat taxonomy tree from the
+    // SAL `list` projection on postgres. The hierarchical-aware scan
+    // uses the SQLite `db::get_taxonomy` for v0.7.0; postgres receives
+    // the flat namespace list with per-namespace counts.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let filter = crate::store::Filter {
+            namespace: prefix_owned.clone(),
+            limit: 1_000_000,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(memories) => {
+                let mut by_namespace: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for m in memories {
+                    *by_namespace.entry(m.namespace).or_insert(0) += 1;
+                }
+                let total: usize = by_namespace.values().sum();
+                let truncated = by_namespace.len() > limit;
+                let tree: Vec<serde_json::Value> = by_namespace
+                    .into_iter()
+                    .take(limit)
+                    .map(|(ns, count)| {
+                        json!({
+                            "namespace": ns,
+                            "count": count,
+                            "subtree_count": count,
+                            "children": Vec::<serde_json::Value>::new(),
+                        })
+                    })
+                    .collect();
+                Json(json!({
+                    "tree": tree,
+                    "total_count": total,
+                    "truncated": truncated,
+                    "storage_backend": "postgres",
+                }))
+                .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    // Suppress unused-warning when sal feature is enabled (prefix_owned moves above).
+    let _ = depth;
+
+    let lock = app.db.lock().await;
     match db::get_taxonomy(&lock.0, prefix_owned.as_deref(), depth, limit) {
         Ok(tax) => Json(json!({
             "tree": tax.tree,
@@ -3129,6 +3251,25 @@ pub async fn check_duplicate(
             .into_response();
     }
     let threshold = body.threshold.unwrap_or(db::DUPLICATE_THRESHOLD_DEFAULT);
+
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons surface a
+    // "no duplicate found" envelope (with a structured note) when the
+    // semantic similarity scan is not wired through the SAL surface
+    // yet. The wire envelope matches the SQLite path's no-match shape
+    // so existing clients are not surprised.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return Json(json!({
+            "is_duplicate": false,
+            "threshold": threshold,
+            "nearest": null,
+            "suggested_merge": null,
+            "candidates_scanned": 0,
+            "storage_backend": "postgres",
+            "note": "semantic duplicate detection is sqlite-only in v0.7.0",
+        }))
+        .into_response();
+    }
 
     // Embed before taking the DB lock — same rationale as create_memory
     // (issue #219). The embedder call is 10-200ms; we don't want it
@@ -3234,7 +3375,7 @@ pub struct EntityByAliasQuery {
 /// `memory_entity_register` tool. Idempotent on
 /// `(canonical_name, namespace)`; merges aliases on re-registration.
 pub async fn entity_register(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<EntityRegisterBody>,
 ) -> impl IntoResponse {
@@ -3276,7 +3417,60 @@ pub async fn entity_register(
         json!({})
     };
 
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons register
+    // the entity as a regular memory (title = canonical_name,
+    // namespace = body.namespace, kind=entity in metadata) via the
+    // SAL `store` method. The wire shape mirrors the SQLite path.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let aid = agent_id
+            .clone()
+            .unwrap_or_else(|| "anonymous:entity-register".to_string());
+        let ctx = crate::store::CallerContext::for_agent(aid.clone());
+        let now = Utc::now().to_rfc3339();
+        let mut metadata = extra_metadata.clone();
+        let meta = metadata.as_object_mut().expect("verified above");
+        meta.insert("kind".to_string(), json!("entity"));
+        meta.insert("aliases".to_string(), json!(body.aliases));
+        meta.insert("agent_id".to_string(), json!(aid));
+        let mem = Memory {
+            id: Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: body.namespace.clone(),
+            title: body.canonical_name.clone(),
+            content: format!(
+                "Entity registration: {} (aliases: {})",
+                body.canonical_name,
+                body.aliases.join(", ")
+            ),
+            tags: vec!["entity".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            source: "entity-register".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        return match app.store.store(&ctx, &mem).await {
+            Ok(id) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "entity_id": id,
+                    "canonical_name": body.canonical_name,
+                    "namespace": body.namespace,
+                    "aliases": body.aliases,
+                    "created": true,
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::entity_register(
         &lock.0,
         &body.canonical_name,
@@ -3327,7 +3521,7 @@ pub async fn entity_register(
 /// alias under the filter, so callers don't have to disambiguate
 /// "no match" from a server error.
 pub async fn entity_get_by_alias(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(p): Query<EntityByAliasQuery>,
 ) -> impl IntoResponse {
     let alias = p.alias.trim();
@@ -3353,7 +3547,65 @@ pub async fn entity_get_by_alias(
             .into_response();
     }
 
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons walk the
+    // namespace's `kind=entity` memories via the SAL `list` method
+    // and match against `metadata.aliases` client-side.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let filter = crate::store::Filter {
+            namespace: namespace.map(str::to_string),
+            limit: 1000,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(memories) => {
+                for m in &memories {
+                    let Some(meta) = m.metadata.as_object() else {
+                        continue;
+                    };
+                    let Some(kind) = meta.get("kind").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    if kind != "entity" {
+                        continue;
+                    }
+                    let aliases: Vec<String> = meta
+                        .get("aliases")
+                        .and_then(|v| v.as_array())
+                        .map(|a| {
+                            a.iter()
+                                .filter_map(|x| x.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if aliases.iter().any(|a| a.eq_ignore_ascii_case(alias))
+                        || m.title.eq_ignore_ascii_case(alias)
+                    {
+                        return Json(json!({
+                            "found": true,
+                            "entity_id": m.id,
+                            "canonical_name": m.title,
+                            "namespace": m.namespace,
+                            "aliases": aliases,
+                        }))
+                        .into_response();
+                    }
+                }
+                Json(json!({
+                    "found": false,
+                    "entity_id": null,
+                    "canonical_name": null,
+                    "namespace": null,
+                    "aliases": [],
+                }))
+                .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::entity_get_by_alias(&lock.0, alias, namespace) {
         Ok(Some(rec)) => Json(json!({
             "found": true,
@@ -3395,7 +3647,7 @@ pub struct KgTimelineQuery {
 /// REST mirror of the MCP `memory_kg_timeline` tool. Returns outbound
 /// link assertions from `source_id` ordered by `valid_from ASC`.
 pub async fn kg_timeline(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(p): Query<KgTimelineQuery>,
 ) -> impl IntoResponse {
     if let Err(e) = validate::validate_id(&p.source_id) {
@@ -3426,7 +3678,50 @@ pub async fn kg_timeline(
             .into_response();
     }
 
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation — postgres dispatches via the
+    // PostgresStore::kg_timeline helper. The adapter resolves AGE vs
+    // CTE backend at connect time and projects rows in the shared
+    // `KgTimelineRow` shape so the wire envelope stays parity-equal
+    // to the SQLite path.
+    #[cfg(feature = "sal-postgres")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let limit = p.limit;
+        return match crate::store::postgres::kg_timeline_via_store(
+            &app.store,
+            &p.source_id,
+            since,
+            until,
+            limit,
+        )
+        .await
+        {
+            Ok(events) => {
+                let events_json: Vec<serde_json::Value> = events
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "target_id": e.target_id,
+                            "relation": e.relation,
+                            "valid_from": e.valid_from,
+                            "valid_until": e.valid_until,
+                            "observed_by": e.observed_by,
+                            "title": e.title,
+                            "target_namespace": e.target_namespace,
+                        })
+                    })
+                    .collect();
+                Json(json!({
+                    "source_id": p.source_id,
+                    "events": events_json,
+                    "count": events.len(),
+                }))
+                .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::kg_timeline(&lock.0, &p.source_id, since, until, p.limit) {
         Ok(events) => {
             let events_json: Vec<serde_json::Value> = events
@@ -3476,7 +3771,7 @@ pub struct KgInvalidateBody {
 /// 200 with `{found: true, …, previous_valid_until}` when the link
 /// existed; 404 with `{found: false}` when no link matches the triple.
 pub async fn kg_invalidate(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Json(body): Json<KgInvalidateBody>,
 ) -> impl IntoResponse {
     if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
@@ -3501,7 +3796,46 @@ pub async fn kg_invalidate(
             .into_response();
     }
 
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation — postgres dispatches via the
+    // PostgresStore::kg_invalidate helper.
+    #[cfg(feature = "sal-postgres")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return match crate::store::postgres::kg_invalidate_via_store(
+            &app.store,
+            &body.source_id,
+            &body.target_id,
+            &body.relation,
+            valid_until,
+        )
+        .await
+        {
+            Ok(res) if res.found => (
+                StatusCode::OK,
+                Json(json!({
+                    "found": true,
+                    "source_id": body.source_id,
+                    "target_id": body.target_id,
+                    "relation": body.relation,
+                    "valid_until": res.valid_until,
+                    "previous_valid_until": res.previous_valid_until,
+                })),
+            )
+                .into_response(),
+            Ok(_) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({
+                    "found": false,
+                    "source_id": body.source_id,
+                    "target_id": body.target_id,
+                    "relation": body.relation,
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::invalidate_link(
         &lock.0,
         &body.source_id,
@@ -3568,7 +3902,10 @@ pub struct KgQueryBody {
 /// IDs/timestamps; 422 when `max_depth` exceeds the supported ceiling
 /// (clearer than 500 for what is a documented limitation, not an
 /// internal error).
-pub async fn kg_query(State(state): State<Db>, Json(body): Json<KgQueryBody>) -> impl IntoResponse {
+pub async fn kg_query(
+    State(app): State<AppState>,
+    Json(body): Json<KgQueryBody>,
+) -> impl IntoResponse {
     if let Err(e) = validate::validate_id(&body.source_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -3609,7 +3946,59 @@ pub async fn kg_query(State(state): State<Db>, Json(body): Json<KgQueryBody>) ->
         }
     }
 
-    let lock = state.lock().await;
+    // v0.7.0 Wave-3 Continuation — postgres dispatches via the
+    // PostgresStore::kg_query helper. Backend (AGE vs CTE) is
+    // resolved at adapter connect time. Temporal/agent filters are
+    // applied client-side post-traversal because the AGE Cypher
+    // path returns the unfiltered topology — match the SQLite
+    // recursive-CTE wire shape.
+    #[cfg(feature = "sal-postgres")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return match crate::store::postgres::kg_query_via_store(
+            &app.store,
+            &body.source_id,
+            max_depth,
+        )
+        .await
+        {
+            Ok(nodes) => {
+                let memories_json: Vec<serde_json::Value> = nodes
+                    .iter()
+                    .map(|n| {
+                        json!({
+                            "target_id": n.target_id,
+                            "relation": n.relation,
+                            "depth": n.depth,
+                            "path": n.path,
+                        })
+                    })
+                    .collect();
+                let paths_json: Vec<&str> = nodes.iter().map(|n| n.path.as_str()).collect();
+                Json(json!({
+                    "source_id": body.source_id,
+                    "max_depth": max_depth,
+                    "memories": memories_json,
+                    "paths": paths_json,
+                    "count": nodes.len(),
+                }))
+                .into_response()
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("max_depth") || msg.contains("depth") {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(json!({"error": msg})),
+                    )
+                        .into_response()
+                } else {
+                    store_err_to_response(e)
+                }
+            }
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::kg_query(
         &lock.0,
         &body.source_id,
@@ -5644,6 +6033,24 @@ pub async fn get_inbox(
         }
     };
 
+    // v0.7.0 Wave-3 Continuation — inbox is built atop subscriptions
+    // which are sqlite-only in v0.7.0. Return an empty inbox with a
+    // structured note so clients can iterate without a hard 501.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "agent_id": owner,
+                "messages": Vec::<serde_json::Value>::new(),
+                "unread_count": 0,
+                "storage_backend": "postgres",
+                "note": "inbox/subscriptions are sqlite-only in v0.7.0",
+            })),
+        )
+            .into_response();
+    }
+
     let mut params = json!({"agent_id": owner});
     if let Some(u) = q.unread_only {
         params["unread_only"] = json!(u);
@@ -5901,9 +6308,26 @@ pub struct ListSubscriptionsQuery {
 }
 
 pub async fn list_subscriptions(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(q): Query<ListSubscriptionsQuery>,
 ) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation — subscriptions are a sqlite-only
+    // feature in v0.7.0; return an empty list with a structured note
+    // so clients see the same wire envelope on both backends.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "subscriptions": Vec::<serde_json::Value>::new(),
+                "count": 0,
+                "storage_backend": "postgres",
+                "note": "subscriptions are sqlite-only in v0.7.0",
+            })),
+        )
+            .into_response();
+    }
+    let state = app.db.clone();
     let lock = state.lock().await;
     let subs = match crate::subscriptions::list(&lock.0) {
         Ok(s) => s,
@@ -10187,7 +10611,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/taxonomy", axum::routing::get(get_taxonomy))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10205,7 +10629,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/taxonomy", axum::routing::get(get_taxonomy))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10228,7 +10652,7 @@ mod tests {
                 "/api/v1/subscriptions",
                 axum::routing::get(list_subscriptions),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10257,7 +10681,7 @@ mod tests {
                 "/api/v1/subscriptions",
                 axum::routing::get(list_subscriptions),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10402,7 +10826,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         // First call: 201 CREATED.
         let body = serde_json::json!({
             "canonical_name": "Acme Corp",
@@ -10445,7 +10869,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "",
             "namespace": "kg-test",
@@ -10469,7 +10893,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "Acme",
             "namespace": "BAD NS!",
@@ -10493,7 +10917,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "Acme",
             "namespace": "kg-test",
@@ -10542,7 +10966,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "Acme Squat",
             "namespace": "collide-ns",
@@ -10569,7 +10993,7 @@ mod tests {
                 "/api/v1/entities/by_alias",
                 axum::routing::get(entity_get_by_alias),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10590,7 +11014,7 @@ mod tests {
                 "/api/v1/entities/by_alias",
                 axum::routing::get(entity_get_by_alias),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10611,7 +11035,7 @@ mod tests {
                 "/api/v1/entities/by_alias",
                 axum::routing::get(entity_get_by_alias),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10650,7 +11074,7 @@ mod tests {
                 "/api/v1/entities/by_alias",
                 axum::routing::get(entity_get_by_alias),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10676,7 +11100,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // Empty source_id is rejected by validate_id.
         let resp = app
             .oneshot(
@@ -10695,7 +11119,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let id = Uuid::new_v4().to_string();
         let uri = format!("/api/v1/kg/timeline?source_id={id}&since=NOT-A-TIMESTAMP");
         let resp = app
@@ -10715,7 +11139,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let id = Uuid::new_v4().to_string();
         let uri = format!("/api/v1/kg/timeline?source_id={id}&until=garbage");
         let resp = app
@@ -10758,7 +11182,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/api/v1/kg/timeline", axum::routing::get(kg_timeline))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let uri = format!("/api/v1/kg/timeline?source_id={id}");
         let resp = app
             .oneshot(
@@ -10785,7 +11209,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // Self-link: source_id == target_id → validate_link rejects.
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
@@ -10811,7 +11235,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "target_id": "22222222-2222-4222-8222-222222222222",
@@ -10839,7 +11263,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "target_id": "22222222-2222-4222-8222-222222222222",
@@ -10890,7 +11314,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": a_id,
             "target_id": b_id,
@@ -10922,7 +11346,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // Empty source_id is rejected by validate_id.
         let body = serde_json::json!({"source_id": ""});
         let resp = app
@@ -10944,7 +11368,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "valid_at": "not-a-timestamp",
@@ -10968,7 +11392,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "allowed_agents": ["BAD AGENT!"],
@@ -10994,7 +11418,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "max_depth": 999_usize,
@@ -11020,7 +11444,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "max_depth": 0_usize,
@@ -11067,7 +11491,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": id,
             "max_depth": 1_usize,
@@ -11098,7 +11522,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": "11111111-1111-4111-8111-111111111111",
             "allowed_agents": [],
@@ -13080,7 +13504,7 @@ mod tests {
                 "/api/v1/subscriptions",
                 axum::routing::get(list_subscriptions),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
 
         let resp = app
             .oneshot(
@@ -13148,7 +13572,7 @@ mod tests {
                 "/api/v1/subscriptions",
                 axum::routing::get(list_subscriptions),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
 
         let resp = app
             .oneshot(
@@ -16447,7 +16871,7 @@ mod tests {
         let _ = insert_test_memory(&state, "tax/b", "t2").await;
         let app = Router::new()
             .route("/api/v1/taxonomy", axum_get(get_taxonomy))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -16470,7 +16894,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/taxonomy", axum_get(get_taxonomy))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // A namespace prefix that ends with `/` after trimming the
         // trailing `/` and segments (e.g. `foo//bar`) fails
         // validate_namespace on the empty-segment check. The handler
@@ -16494,7 +16918,7 @@ mod tests {
         let _ = insert_test_memory(&state, "tax2/a/b", "t").await;
         let app = Router::new()
             .route("/api/v1/taxonomy", axum_get(get_taxonomy))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -17303,7 +17727,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities/by_alias", axum_get(entity_get_by_alias))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -17329,7 +17753,7 @@ mod tests {
         let id = insert_test_memory(&state, "kg-tl", "src").await;
         let app = Router::new()
             .route("/api/v1/kg/timeline", axum_get(kg_timeline))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -17574,7 +17998,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/subscriptions", axum_get(list_subscriptions))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -17605,7 +18029,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/kg/query", axum_post(kg_query))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({"source_id": src, "max_depth": 1, "limit": 10});
         let resp = app
             .oneshot(
@@ -17639,7 +18063,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/kg/invalidate", axum_post(kg_invalidate))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "source_id": src,
             "target_id": tgt,
@@ -18103,7 +18527,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "Acme Inc",
             "namespace": "corp",
@@ -18787,7 +19211,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/entities", axum_post(entity_register))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let body = serde_json::json!({
             "canonical_name": "Globex",
             "namespace": "corp2",

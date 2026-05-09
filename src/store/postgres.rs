@@ -3204,6 +3204,61 @@ pub async fn list_archived_via_store(
     pg.list_archived(namespace, limit, offset).await
 }
 
+/// Outbound multi-hop knowledge-graph traversal for postgres-backed
+/// daemons. Dispatches to [`PostgresStore::kg_query`] which itself
+/// resolves Apache AGE vs the CTE fallback at adapter connect time.
+///
+/// # Errors
+///
+/// See [`PostgresStore::kg_query`].
+pub async fn kg_query_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+    source_id: &str,
+    max_depth: usize,
+) -> StoreResult<Vec<crate::store::KgQueryRow>> {
+    let pg = downcast_postgres(store)?;
+    pg.kg_query(source_id, max_depth).await
+}
+
+/// Knowledge-graph timeline scan for postgres-backed daemons.
+/// Mirrors the SQLite `db::kg_timeline` wire envelope so the HTTP
+/// handler can stay backend-blind. `since` / `until` / `limit` are
+/// passed through.
+///
+/// # Errors
+///
+/// See [`PostgresStore::kg_timeline`].
+pub async fn kg_timeline_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+    source_id: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    limit: Option<usize>,
+) -> StoreResult<Vec<crate::store::KgTimelineRow>> {
+    let pg = downcast_postgres(store)?;
+    pg.kg_timeline(source_id, since, until, limit).await
+}
+
+/// Knowledge-graph link supersession for postgres-backed daemons.
+/// Mirrors the SQLite `db::invalidate_link` contract — returns a
+/// [`KgInvalidateRow`] whose `found` flag distinguishes "matched and
+/// updated" from "no triple matched the predicate".
+///
+/// # Errors
+///
+/// See [`PostgresStore::kg_invalidate`].
+pub async fn kg_invalidate_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+    valid_until: Option<&str>,
+) -> StoreResult<crate::store::KgInvalidateRow> {
+    let pg = downcast_postgres(store)?;
+    pg.kg_invalidate(source_id, target_id, relation, valid_until)
+        .await
+}
+
 /// Project the Postgres `archived_memories` aggregate stats into the
 /// same JSON wire shape produced by SQLite's `db::archive_stats`.
 ///
