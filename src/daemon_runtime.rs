@@ -257,6 +257,17 @@ pub enum Command {
     /// and both adapters upsert on id.
     #[cfg(feature = "sal")]
     Migrate(MigrateArgs),
+    /// v0.7.0 Wave-1 Fix 3: bootstrap a SAL backend's schema by URL.
+    /// Opens the target store via the same factory as `migrate` (which
+    /// triggers `INIT_SCHEMA` as a side effect) then enumerates the
+    /// resulting catalog (tables, views, functions, indices,
+    /// extensions, schema_version). On Postgres with Apache AGE
+    /// installed it also bootstraps the `memory_graph` projection via
+    /// `SELECT create_graph('memory_graph')`. Idempotent — safe to
+    /// re-run against an already-initialized store. Gated behind
+    /// `--features sal`.
+    #[cfg(feature = "sal")]
+    SchemaInit(crate::cli::schema_init::SchemaInitArgs),
     /// v0.6.3.1 (P7 / R7): operator-visible health dashboard. Reads
     /// Capabilities v2 (P1) + data integrity surfaces (P2) + recall
     /// observability (P3). With `--remote <url>` becomes a fleet doctor
@@ -843,6 +854,15 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
         Command::Bench(a) => cmd_bench(&a),
         #[cfg(feature = "sal")]
         Command::Migrate(a) => cmd_migrate(&a).await,
+        #[cfg(feature = "sal")]
+        Command::SchemaInit(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::schema_init::run(&a, &mut out).await
+        }
         Command::Doctor(a) => {
             // P7 / R7. The doctor is read-only; it never sets
             // `needs_checkpoint`. We compute the exit code from the

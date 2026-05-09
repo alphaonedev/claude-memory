@@ -37,6 +37,8 @@ pub mod link;
 pub mod logs;
 pub mod promote;
 pub mod recall;
+#[cfg(feature = "sal")]
+pub mod schema_init;
 pub mod search;
 pub mod serve_banner;
 pub mod shell;
