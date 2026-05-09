@@ -411,8 +411,41 @@ pub fn postgres_endpoint_supported(method: &axum::http::Method, path: &str) -> b
         // Wave-3 continuation — list_subscriptions, inbox.
         ("GET", "/api/v1/subscriptions") => true,
         ("GET", "/api/v1/inbox") => true,
+        // Wave-3 Continuation 2 — federation push/pull (Phase 8).
+        ("POST", "/api/v1/sync/push") => true,
+        ("GET", "/api/v1/sync/since") => true,
+        // Wave-3 Continuation 2 — governance write paths (Phase 11).
+        ("POST", p) if pending_decide_path(p) => true,
+        ("POST", p) if namespace_standard_post_path(p) => true,
+        ("DELETE", p) if namespace_standard_delete_path(p) => true,
+        ("POST", "/api/v1/namespaces") => true,
+        ("DELETE", "/api/v1/namespaces") => true,
         _ => false,
     }
+}
+
+/// Path matcher for `/api/v1/pending/{id}/approve|reject`.
+#[cfg(feature = "sal")]
+fn pending_decide_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/pending/") else {
+        return false;
+    };
+    matches!(rest.split_once('/'), Some((_, "approve" | "reject")))
+}
+
+/// Path matcher for `POST /api/v1/namespaces/{ns}/standard`.
+#[cfg(feature = "sal")]
+fn namespace_standard_post_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/namespaces/") else {
+        return false;
+    };
+    rest.ends_with("/standard") && rest.split('/').count() == 2
+}
+
+/// Path matcher for `DELETE /api/v1/namespaces/{ns}/standard`.
+#[cfg(feature = "sal")]
+fn namespace_standard_delete_path(p: &str) -> bool {
+    namespace_standard_post_path(p)
 }
 
 /// Path matcher for `/api/v1/memories/{id}` (no further sub-segment).
@@ -5147,6 +5180,228 @@ pub struct SyncSinceQuery {
     pub peer: Option<String>,
 }
 
+/// v0.7.0 Wave-3 Continuation 2 — postgres-backed federation push.
+///
+/// Dispatches each `Memory` row through `app.store.apply_remote_memory`
+/// (idempotent insert-if-newer) and each link / deletion through the
+/// matching trait method. Other subcollections (pendings, archives,
+/// restores, namespace_meta, pending_decisions) are governance- /
+/// archive-state-machine concerns whose write paths live on tables
+/// not yet trait-covered; they surface as skipped with a structured
+/// `unsupported_on_postgres` count in the response envelope so a
+/// heterogeneous (sqlite ↔ postgres) federation degrades gracefully
+/// without silent drops.
+///
+/// Heterogeneous federation contract: a sqlite peer's push of N
+/// memories + M links + K deletions reaches steady-state on the
+/// postgres receiver via the trait calls. Audit emission for every
+/// accepted federation push fires through `audit::emit` regardless
+/// of backend (Phase 9).
+#[cfg(feature = "sal")]
+#[allow(clippy::too_many_lines)]
+async fn sync_push_via_store(app: AppState, _headers: HeaderMap, body: SyncPushBody) -> Response {
+    if let Err(e) = validate::validate_agent_id(&body.sender_agent_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": format!("invalid sender_agent_id: {e}")})),
+        )
+            .into_response();
+    }
+    if body.memories.len() > MAX_BULK_SIZE
+        || body.deletions.len() > MAX_BULK_SIZE
+        || body.archives.len() > MAX_BULK_SIZE
+        || body.restores.len() > MAX_BULK_SIZE
+        || body.pendings.len() > MAX_BULK_SIZE
+        || body.pending_decisions.len() > MAX_BULK_SIZE
+        || body.namespace_meta.len() > MAX_BULK_SIZE
+        || body.namespace_meta_clears.len() > MAX_BULK_SIZE
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": format!("sync_push limited to {} entries per subcollection", MAX_BULK_SIZE)
+            })),
+        )
+            .into_response();
+    }
+
+    let ctx = crate::store::CallerContext::for_agent(body.sender_agent_id.clone());
+    let mut applied = 0usize;
+    let mut noop = 0usize;
+    let mut skipped = 0usize;
+    let mut deleted = 0usize;
+    let mut links_applied = 0usize;
+    let mut latest_seen: Option<String> = None;
+    let mut unsupported_on_postgres = 0usize;
+
+    // ---- memories ----------------------------------------------------
+    for mem in &body.memories {
+        if let Err(e) = validate::validate_memory(mem) {
+            tracing::warn!("sync_push: skipping memory {} ({}): {e}", mem.id, mem.title);
+            skipped += 1;
+            continue;
+        }
+        if latest_seen
+            .as_deref()
+            .is_none_or(|current| mem.updated_at.as_str() > current)
+        {
+            latest_seen = Some(mem.updated_at.clone());
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match app.store.apply_remote_memory(&ctx, mem).await {
+            Ok(_id) => {
+                applied += 1;
+                // F2 audit-chain emit: every accepted federation push
+                // chains through the same audit log as a local Store.
+                // Phase-9 wiring — file-based audit module is backend-
+                // blind so this works for postgres-backed daemons.
+                if crate::audit::is_enabled() {
+                    let owner = mem
+                        .metadata
+                        .get("agent_id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(&body.sender_agent_id);
+                    crate::audit::emit(
+                        crate::audit::EventBuilder::new(
+                            crate::audit::AuditAction::Store,
+                            crate::audit::actor(owner, "federation_push", None),
+                            crate::audit::target_memory(
+                                mem.id.clone(),
+                                mem.namespace.clone(),
+                                Some(mem.title.clone()),
+                                Some(mem.tier.as_str().to_string()),
+                                None,
+                            ),
+                        )
+                        .outcome(crate::audit::AuditOutcome::Allow),
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!("sync_push: apply_remote_memory failed for {}: {e}", mem.id);
+                skipped += 1;
+            }
+        }
+    }
+
+    // ---- deletions ---------------------------------------------------
+    for del_id in &body.deletions {
+        if validate::validate_id(del_id).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        match app.store.apply_remote_deletion(&ctx, del_id).await {
+            Ok(true) => deleted += 1,
+            Ok(false) => noop += 1,
+            Err(e) => {
+                tracing::warn!("sync_push: apply_remote_deletion failed for {del_id}: {e}");
+                skipped += 1;
+            }
+        }
+    }
+
+    // ---- links -------------------------------------------------------
+    //
+    // H3 verify path: when a link arrives with a signature + observed_by,
+    // verify against the locally enrolled public key. Tampered = skip.
+    // Unknown observed_by = accept-and-flag as unsigned. Successful =
+    // peer_attested. Mirrors the sqlite-backed handler's H3 contract.
+    for link in &body.links {
+        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+            skipped += 1;
+            continue;
+        }
+        if body.dry_run {
+            noop += 1;
+            continue;
+        }
+        let attest_level = match (link.signature.as_deref(), link.observed_by.as_deref()) {
+            (Some(sig_bytes), Some(observed_by)) => {
+                match crate::identity::verify::lookup_peer_public_key(observed_by) {
+                    Some(pubkey) => {
+                        let signable = crate::identity::sign::SignableLink {
+                            src_id: &link.source_id,
+                            dst_id: &link.target_id,
+                            relation: &link.relation,
+                            observed_by: Some(observed_by),
+                            valid_from: link.valid_from.as_deref(),
+                            valid_until: link.valid_until.as_deref(),
+                        };
+                        match crate::identity::verify::verify(&pubkey, &signable, sig_bytes) {
+                            Ok(()) => "peer_attested",
+                            Err(e) => {
+                                tracing::warn!(
+                                    "sync_push: signature rejected for link \
+                                     ({} -> {} / {}) from observed_by={}: {e}",
+                                    link.source_id,
+                                    link.target_id,
+                                    link.relation,
+                                    observed_by
+                                );
+                                skipped += 1;
+                                continue;
+                            }
+                        }
+                    }
+                    None => "unsigned",
+                }
+            }
+            _ => "unsigned",
+        };
+        match app.store.apply_remote_link(&ctx, link, attest_level).await {
+            Ok(()) => links_applied += 1,
+            Err(e) => {
+                tracing::warn!(
+                    "sync_push: apply_remote_link failed ({} -> {} / {}): {e}",
+                    link.source_id,
+                    link.target_id,
+                    link.relation
+                );
+                skipped += 1;
+            }
+        }
+    }
+
+    // ---- archives / restores / pendings / pending_decisions /
+    //      namespace_meta / namespace_meta_clears -----------------------
+    //
+    // These subcollections write into tables (archived_memories,
+    // pending_actions, namespace_meta) not yet trait-covered. Surface
+    // them with the same noop posture sqlite uses on missing rows so
+    // a heterogeneous federation reports an honest count.
+    unsupported_on_postgres += body.archives.len()
+        + body.restores.len()
+        + body.pendings.len()
+        + body.pending_decisions.len()
+        + body.namespace_meta.len()
+        + body.namespace_meta_clears.len();
+
+    (
+        StatusCode::OK,
+        Json(json!({
+            "applied": applied,
+            "deleted": deleted,
+            "links_applied": links_applied,
+            "noop": noop,
+            "skipped": skipped,
+            "unsupported_on_postgres": unsupported_on_postgres,
+            "dry_run": body.dry_run,
+            "receiver_agent_id": body.sender_agent_id,
+            "storage_backend": "postgres",
+            "note": "pendings / archives / restores / namespace_meta are sqlite-only \
+                     in v0.7.0; memories / deletions / links round-trip via the SAL trait",
+        })),
+    )
+        .into_response()
+}
+
 #[allow(clippy::too_many_lines)]
 pub async fn sync_push(
     State(app): State<AppState>,
@@ -5154,6 +5409,20 @@ pub async fn sync_push(
     Json(body): Json<SyncPushBody>,
 ) -> impl IntoResponse {
     let state = app.db.clone();
+
+    // v0.7.0 Wave-3 Continuation 2 — postgres-backed federation
+    // dispatches through the SAL trait for memories / deletions /
+    // links. Pendings / archives / restores / namespace_meta /
+    // pending_decisions remain sqlite-only (governance write paths
+    // and archive-state-machine state sit on tables not yet covered
+    // by the trait surface — those subcollections, when present in a
+    // push from a sqlite peer, surface in `skipped` with a structured
+    // note in the response envelope).
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return sync_push_via_store(app, headers, body).await;
+    }
+
     if let Err(e) = validate::validate_agent_id(&body.sender_agent_id) {
         return (
             StatusCode::BAD_REQUEST,
@@ -5678,10 +5947,11 @@ pub async fn sync_push(
 }
 
 pub async fn sync_since(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     Query(q): Query<SyncSinceQuery>,
 ) -> impl IntoResponse {
+    let state = app.db.clone();
     // Validate `since` parses as RFC 3339 BEFORE hitting the DB so a
     // garbage timestamp returns a clear 400 instead of a 200 with the
     // entire database (red-team #247).
@@ -5698,6 +5968,38 @@ pub async fn sync_since(
             .into_response();
     }
     let limit = q.limit.unwrap_or(500).min(10_000);
+
+    // v0.7.0 Wave-3 Continuation 2 — dispatch through the SAL trait
+    // when postgres-backed. Heterogeneous federation (sqlite ↔ postgres)
+    // rides on this single code path so the wire shape is byte-blind
+    // to the underlying store.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let mems = match app
+            .store
+            .list_memories_updated_since(q.since.as_deref(), limit)
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => return store_err_to_response(e),
+        };
+        let earliest_updated_at = mems.first().map(|m| m.updated_at.clone());
+        let latest_updated_at = mems.last().map(|m| m.updated_at.clone());
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "count": mems.len(),
+                "limit": limit,
+                "updated_since": q.since,
+                "earliest_updated_at": earliest_updated_at,
+                "latest_updated_at": latest_updated_at,
+                "memories": mems,
+                "storage_backend": "postgres",
+            })),
+        )
+            .into_response();
+    }
+
     let lock = state.lock().await;
     let mems = match db::memories_updated_since(&lock.0, q.since.as_deref(), limit) {
         Ok(v) => v,
@@ -8414,7 +8716,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/sync/since", axum_get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
 
         let resp = app
             .oneshot(
@@ -8476,7 +8778,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/sync/since", axum_get(sync_since))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
 
         // Ask for rows strictly after 2024-01 — should return all 3.
         let since = "2024-01-01T00:00:00%2B00:00";
@@ -8504,7 +8806,7 @@ mod tests {
         // field still echoes the parsed input.
         let empty_app = Router::new()
             .route("/api/v1/sync/since", axum_get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = empty_app
             .oneshot(
                 axum::http::Request::builder()
@@ -8531,7 +8833,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/since", axum_get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
 
         let resp = app
             .oneshot(
@@ -10443,7 +10745,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/since", axum::routing::get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10468,7 +10770,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/sync/since", axum::routing::get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10495,7 +10797,7 @@ mod tests {
         let _id = insert_test_memory(&state, "sync-empty", "row").await;
         let app = Router::new()
             .route("/api/v1/sync/since", axum::routing::get(sync_since))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10516,7 +10818,7 @@ mod tests {
         let _id = insert_test_memory(&state, "sync-peer", "row").await;
         let app = Router::new()
             .route("/api/v1/sync/since", axum::routing::get(sync_since))
-            .with_state(state.clone());
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()

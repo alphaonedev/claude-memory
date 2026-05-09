@@ -459,6 +459,115 @@ pub trait MemoryStore: Send + Sync {
     fn as_any_for_postgres(&self) -> &dyn std::any::Any {
         &()
     }
+
+    // ==================================================================
+    // v0.7.0 Wave-3 Continuation 2 — federation surface (Phase 8).
+    //
+    // The two methods below underpin the peer-to-peer sync transport.
+    // `list_memories_updated_since` powers `GET /api/v1/sync/since`
+    // (peer catchup pulls); `apply_remote_memory` powers each row of
+    // `POST /api/v1/sync/push` (peer fanout pushes).
+    //
+    // Both adapters implement. Federation between two postgres-backed
+    // daemons and heterogeneous federation (sqlite ↔ postgres) ride
+    // exclusively through these trait methods so the wire shape is
+    // backend-blind.
+    // ==================================================================
+
+    /// List memories whose `updated_at` is strictly greater than the
+    /// supplied RFC-3339 timestamp, ordered ascending by `updated_at`.
+    ///
+    /// `since == None` returns the oldest `limit` memories (initial-sync
+    /// posture). Implementations MUST cap their result at the supplied
+    /// `limit` value AND apply a sane upper bound (10_000) to prevent
+    /// a misbehaving caller from page-pulling the entire database in
+    /// one shot.
+    ///
+    /// Default implementation: `UnsupportedCapability` so adapters that
+    /// don't yet wire federation degrade gracefully rather than
+    /// silently returning an empty list.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `since` does not parse as RFC-3339.
+    /// Returns `Backend` when the underlying store reports an error.
+    async fn list_memories_updated_since(
+        &self,
+        _since: Option<&str>,
+        _limit: usize,
+    ) -> StoreResult<Vec<Memory>> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "FEDERATION_LIST_SINCE".to_string(),
+        })
+    }
+
+    /// Apply a remote-origin memory through an idempotent
+    /// "insert-if-newer" path. Returns the resolved memory id (the
+    /// adapter's row id, which may differ from the supplied `memory.id`
+    /// when an upsert collapses onto an existing row by `(title,
+    /// namespace)`).
+    ///
+    /// Semantics MUST mirror the sqlite `db::insert_if_newer` contract:
+    /// 1. If no existing row matches, INSERT verbatim.
+    /// 2. If an existing row matches by id AND its `updated_at` is
+    ///    older than the incoming memory's `updated_at`, UPDATE.
+    /// 3. If an existing row matches by id AND its `updated_at` is
+    ///    newer-or-equal, NOOP (return the existing id).
+    /// 4. Tier never downgrades — incoming `mid` does not overwrite
+    ///    existing `long`.
+    /// 5. `metadata.agent_id` is preserved across upsert.
+    ///
+    /// Default implementation: `UnsupportedCapability`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidInput` when `memory` fails validation. Returns
+    /// `Backend` for storage errors.
+    async fn apply_remote_memory(
+        &self,
+        _ctx: &CallerContext,
+        _memory: &Memory,
+    ) -> StoreResult<String> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "FEDERATION_APPLY_REMOTE".to_string(),
+        })
+    }
+
+    /// Apply a remote-origin link via the same idempotent posture as
+    /// [`MemoryStore::apply_remote_memory`]. The unique
+    /// `(source_id, target_id, relation)` index makes duplicate
+    /// federation pushes a no-op.
+    ///
+    /// `attest_level` is the resolved attestation level the receiver
+    /// computed (see `handlers::sync_push` H3 verify path) — adapters
+    /// stamp this into the row so subsequent reads carry the
+    /// peer-attested / unsigned distinction.
+    ///
+    /// Default implementation: forward to [`MemoryStore::link`] which
+    /// always lands the row as `unsigned`. Postgres + SQLite override
+    /// to honor `attest_level`.
+    async fn apply_remote_link(
+        &self,
+        ctx: &CallerContext,
+        link: &MemoryLink,
+        attest_level: &str,
+    ) -> StoreResult<()> {
+        let _ = attest_level;
+        self.link(ctx, link).await
+    }
+
+    /// Hard-delete a memory by id, returning `true` when a row was
+    /// removed and `false` when no row matched (already-deleted /
+    /// never-existed). Default implementation lifts the trait `delete`
+    /// surface — which returns `NotFound` on miss — into a boolean for
+    /// federation's no-op-on-missing-row contract.
+    async fn apply_remote_deletion(&self, ctx: &CallerContext, id: &str) -> StoreResult<bool> {
+        match self.delete(ctx, id).await {
+            Ok(()) => Ok(true),
+            Err(StoreError::NotFound { .. }) => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
 }
 
 /// Partial-update payload. `None` means "leave this field alone" —

@@ -3102,6 +3102,182 @@ impl MemoryStore for PostgresStore {
         self
     }
 
+    // ----- v0.7.0 Wave-3 Continuation 2 — federation surface ---------
+    //
+    // The Postgres path mirrors the sqlite `db::memories_updated_since`
+    // + `db::insert_if_newer` contracts so the wire shape is byte-
+    // identical regardless of which backend a peer runs on. Tier never
+    // downgrades; `metadata.agent_id` is preserved across upsert.
+
+    async fn list_memories_updated_since(
+        &self,
+        since: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<Memory>> {
+        let limit_i: i64 = limit.clamp(1, 10_000).try_into().unwrap_or(500);
+        let since_dt = match since {
+            None => None,
+            Some(s) => Some(parse_rfc3339_required(s)?),
+        };
+        let rows = sqlx::query(
+            "SELECT * FROM memories \
+             WHERE ($1::timestamptz IS NULL OR updated_at > $1) \
+             ORDER BY updated_at ASC \
+             LIMIT $2",
+        )
+        .bind(since_dt)
+        .bind(limit_i)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("list memories updated since", e))?;
+
+        rows.iter().map(Self::row_to_memory).collect()
+    }
+
+    async fn apply_remote_memory(
+        &self,
+        _ctx: &CallerContext,
+        memory: &Memory,
+    ) -> StoreResult<String> {
+        // Mirrors sqlite db::insert_if_newer:
+        //   1. INSERT verbatim if no row matches.
+        //   2. On (title, namespace) collision: UPDATE only if the
+        //      incoming `updated_at` is strictly greater than the
+        //      stored `updated_at`. Tier never downgrades.
+        //      `metadata.agent_id` is preserved if the existing row had
+        //      one.
+        //   3. Else NOOP — return the existing id.
+        let created_at = parse_rfc3339_required(&memory.created_at)?;
+        let updated_at = parse_rfc3339_required(&memory.updated_at)?;
+        let last_accessed_at = parse_rfc3339_opt(memory.last_accessed_at.as_deref());
+        let expires_at = parse_rfc3339_opt(memory.expires_at.as_deref());
+        let tags_json =
+            serde_json::to_value(&memory.tags).map_err(|e| StoreError::IntegrityFailed {
+                detail: format!("serialize tags: {e}"),
+            })?;
+
+        let row = sqlx::query(
+            "INSERT INTO memories (
+                id, tier, namespace, title, content, tags, priority, confidence,
+                source, access_count, created_at, updated_at, last_accessed_at,
+                expires_at, metadata
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+            ON CONFLICT (title, namespace) DO UPDATE SET
+                content = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                        THEN EXCLUDED.content
+                    ELSE memories.content
+                END,
+                tier = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                         AND tier_rank(EXCLUDED.tier) >= tier_rank(memories.tier)
+                        THEN EXCLUDED.tier
+                    ELSE memories.tier
+                END,
+                tags = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                        THEN EXCLUDED.tags
+                    ELSE memories.tags
+                END,
+                priority = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                        THEN EXCLUDED.priority
+                    ELSE memories.priority
+                END,
+                confidence = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                        THEN EXCLUDED.confidence
+                    ELSE memories.confidence
+                END,
+                updated_at = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at
+                        THEN EXCLUDED.updated_at
+                    ELSE memories.updated_at
+                END,
+                metadata = CASE
+                    WHEN EXCLUDED.updated_at > memories.updated_at THEN
+                        CASE
+                            WHEN memories.metadata ? 'agent_id'
+                                THEN jsonb_set(
+                                    EXCLUDED.metadata,
+                                    '{agent_id}',
+                                    memories.metadata -> 'agent_id'
+                                )
+                            ELSE EXCLUDED.metadata
+                        END
+                    ELSE memories.metadata
+                END
+            RETURNING id",
+        )
+        .bind(&memory.id)
+        .bind(memory.tier.as_str())
+        .bind(&memory.namespace)
+        .bind(&memory.title)
+        .bind(&memory.content)
+        .bind(&tags_json)
+        .bind(memory.priority)
+        .bind(memory.confidence)
+        .bind(&memory.source)
+        .bind(memory.access_count)
+        .bind(created_at)
+        .bind(updated_at)
+        .bind(last_accessed_at)
+        .bind(expires_at)
+        .bind(&memory.metadata)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| to_store_err("apply_remote_memory upsert", e))?;
+
+        row.try_get::<String, _>("id")
+            .map_err(|e| to_store_err("read returned id", e))
+    }
+
+    async fn apply_remote_link(
+        &self,
+        _ctx: &CallerContext,
+        link: &MemoryLink,
+        attest_level: &str,
+    ) -> StoreResult<()> {
+        // Mirrors sqlite db::create_link_inbound. The unique
+        // (source_id, target_id, relation) index makes duplicate
+        // pushes a no-op (ON CONFLICT DO NOTHING), so retries and
+        // peer-to-peer fanouts converge cleanly.
+        let created_at = parse_rfc3339_required(&link.created_at)?;
+        let valid_from = parse_rfc3339_opt(link.valid_from.as_deref());
+        let valid_until = parse_rfc3339_opt(link.valid_until.as_deref());
+
+        sqlx::query(
+            "INSERT INTO memory_links (
+                source_id, target_id, relation, created_at,
+                valid_from, valid_until, observed_by, signature, attest_level
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            ON CONFLICT (source_id, target_id, relation) DO NOTHING",
+        )
+        .bind(&link.source_id)
+        .bind(&link.target_id)
+        .bind(&link.relation)
+        .bind(created_at)
+        .bind(valid_from)
+        .bind(valid_until)
+        .bind(link.observed_by.as_ref())
+        .bind(link.signature.as_ref())
+        .bind(attest_level)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| to_store_err("apply_remote_link", e))?;
+        Ok(())
+    }
+
+    async fn apply_remote_deletion(&self, _ctx: &CallerContext, id: &str) -> StoreResult<bool> {
+        let rows_affected = sqlx::query("DELETE FROM memories WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| to_store_err("apply_remote_deletion", e))?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
     async fn register_agent(
         &self,
         ctx: &CallerContext,

@@ -271,6 +271,42 @@ impl MemoryStore for SqliteStore {
         .map_err(box_err)
         .map(|_id| ())
     }
+
+    // ----- v0.7.0 Wave-3 Continuation 2 — federation surface ---------
+
+    async fn list_memories_updated_since(
+        &self,
+        since: Option<&str>,
+        limit: usize,
+    ) -> StoreResult<Vec<Memory>> {
+        let conn = self.state.lock().await;
+        let capped = limit.clamp(1, 10_000);
+        db::memories_updated_since(&conn, since, capped).map_err(box_err)
+    }
+
+    async fn apply_remote_memory(
+        &self,
+        _ctx: &CallerContext,
+        memory: &Memory,
+    ) -> StoreResult<String> {
+        let conn = self.state.lock().await;
+        db::insert_if_newer(&conn, memory).map_err(box_err)
+    }
+
+    async fn apply_remote_link(
+        &self,
+        _ctx: &CallerContext,
+        link: &MemoryLink,
+        attest_level: &str,
+    ) -> StoreResult<()> {
+        let conn = self.state.lock().await;
+        db::create_link_inbound(&conn, link, attest_level).map_err(box_err)
+    }
+
+    async fn apply_remote_deletion(&self, _ctx: &CallerContext, id: &str) -> StoreResult<bool> {
+        let conn = self.state.lock().await;
+        db::delete(&conn, id).map_err(box_err)
+    }
 }
 
 /// Transaction handle that no-ops commit (`SQLite` txn support is
