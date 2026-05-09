@@ -526,6 +526,71 @@ impl MemoryStore for SqliteStore {
         db::export_links(&conn).map_err(box_err)
     }
 
+    async fn build_namespace_chain(&self, namespace: &str) -> StoreResult<Vec<String>> {
+        let conn = self.state.lock().await;
+        Ok(db::build_namespace_chain(&conn, namespace))
+    }
+
+    async fn resolve_governance_policy(
+        &self,
+        namespace: &str,
+    ) -> StoreResult<Option<crate::models::GovernancePolicy>> {
+        let conn = self.state.lock().await;
+        Ok(db::resolve_governance_policy(&conn, namespace))
+    }
+
+    async fn governance_approve_with_consensus(
+        &self,
+        _ctx: &CallerContext,
+        pending_id: &str,
+        approver_agent_id: &str,
+    ) -> StoreResult<super::ApproveOutcome> {
+        let conn = self.state.lock().await;
+        let outcome = db::approve_with_approver_type(&conn, pending_id, approver_agent_id)
+            .map_err(box_err)?;
+        // Translate the db-layer ApproveOutcome → SAL ApproveOutcome.
+        let sal_outcome = match outcome {
+            db::ApproveOutcome::Approved => super::ApproveOutcome::Approved,
+            db::ApproveOutcome::Pending { votes, quorum } => {
+                super::ApproveOutcome::Pending { votes, quorum }
+            }
+            db::ApproveOutcome::Rejected(reason) => super::ApproveOutcome::Rejected(reason),
+        };
+        Ok(sal_outcome)
+    }
+
+    async fn is_registered_agent(&self, agent_id: &str) -> StoreResult<bool> {
+        let conn = self.state.lock().await;
+        Ok(db::is_registered_agent(&conn, agent_id))
+    }
+
+    async fn enforce_governance_action(
+        &self,
+        action: super::GovernedAction,
+        namespace: &str,
+        agent_id: &str,
+        memory_id: Option<&str>,
+        memory_owner: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> StoreResult<crate::models::GovernanceDecision> {
+        let db_action = match action {
+            super::GovernedAction::Store => crate::models::GovernedAction::Store,
+            super::GovernedAction::Delete => crate::models::GovernedAction::Delete,
+            super::GovernedAction::Promote => crate::models::GovernedAction::Promote,
+        };
+        let conn = self.state.lock().await;
+        db::enforce_governance(
+            &conn,
+            db_action,
+            namespace,
+            agent_id,
+            memory_id,
+            memory_owner,
+            payload,
+        )
+        .map_err(box_err)
+    }
+
     async fn notify(
         &self,
         ctx: &CallerContext,

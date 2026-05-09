@@ -5466,7 +5466,7 @@ pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<G
 }
 
 /// Return true if `agent_id` matches a registered agent in `_agents`.
-fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
+pub fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
     let title = format!("agent:{agent_id}");
     conn.query_row(
         "SELECT 1 FROM memories WHERE namespace = ?1 AND title = ?2",

@@ -943,6 +943,50 @@ pub async fn create_memory(
             metadata,
         };
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
+
+        // v0.7.0 Wave-3 Continuation 3 (Phase 20) — governance walk on
+        // writes. The postgres branch now enforces the same inheritance
+        // chain + approver_type policy as the sqlite path. When the
+        // walk lands on an `Approve`-level rule the action is queued in
+        // `pending_actions` and we return 202 Accepted with the pending
+        // id — the caller must then drive the consensus path through
+        // `POST /pending/{id}/approve`.
+        let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
+        match app
+            .store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &mem.namespace,
+                &agent_id,
+                None,
+                None,
+                &payload_for_pending,
+            )
+            .await
+        {
+            Ok(crate::models::GovernanceDecision::Allow) => {}
+            Ok(crate::models::GovernanceDecision::Deny(reason)) => {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({"error": format!("denied: {reason}")})),
+                )
+                    .into_response();
+            }
+            Ok(crate::models::GovernanceDecision::Pending(pending_id)) => {
+                return (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "status": "pending",
+                        "pending_id": pending_id,
+                        "namespace": mem.namespace,
+                        "storage_backend": "postgres",
+                    })),
+                )
+                    .into_response();
+            }
+            Err(e) => return store_err_to_response(e),
+        }
+
         return match app.store.store(&ctx, &mem).await {
             Ok(id) => {
                 // v0.7.0 Wave-3 Continuation 2 Phase 9 — audit emit on
@@ -1546,17 +1590,30 @@ pub async fn approve_pending(
         }
     };
 
-    // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed
-    // approve. The structural pending_decide trait method handles the
-    // status transition; consensus / approver_type policy walks
-    // remain sqlite-only (the inheritance-chain walk reads several
-    // tables not yet trait-covered). Operators who need the full
-    // consensus pipeline pin to the sqlite store-url.
+    // v0.7.0 Wave-3 Continuation 3 (Phase 20) — postgres-backed approve
+    // routes through the FULL governance pipeline:
+    // - inheritance-chain walk over `namespace_meta` (with explicit
+    //   parent + `/`-derived ancestors, bounded + cycle-safe)
+    // - approver_type variations: Human / Agent(required) / Consensus(N)
+    // - multi-vote consensus state machine: registered-agent gating,
+    //   case-insensitive duplicate-vote dedup, threshold transition
+    // - audit emit + structured response envelope (Approved / Pending
+    //   with vote count + quorum / Rejected with reason)
+    //
+    // Federation fanout for the decision + executed memory remains
+    // sqlite-only (the broadcast_pending_decision_quorum path uses
+    // sqlite-coupled fed-tracker state); postgres operators relying on
+    // multi-node consistency should poll peers.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
+        use crate::store::ApproveOutcome as SalOutcome;
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
-        return match app.store.pending_decide(&ctx, &id, true, &agent_id).await {
-            Ok(true) => {
+        return match app
+            .store
+            .governance_approve_with_consensus(&ctx, &id, &agent_id)
+            .await
+        {
+            Ok(SalOutcome::Approved) => {
                 if crate::audit::is_enabled() {
                     crate::audit::emit(crate::audit::EventBuilder::new(
                         crate::audit::AuditAction::Approve,
@@ -1570,14 +1627,30 @@ pub async fn approve_pending(
                     "decided_by": agent_id,
                     "executed": false,
                     "storage_backend": "postgres",
-                    "note": "consensus / approver_type walks are sqlite-only in v0.7.0; \
-                            postgres approve is a structural status transition only",
+                    "note": "execute_pending_action remains sqlite-only in v0.7.0; \
+                            postgres approve runs the full consensus + approver_type \
+                            walk and transitions status. Operators executing approved \
+                            actions on postgres should re-issue the underlying write \
+                            via the standard CRUD path.",
                 }))
                 .into_response()
             }
-            Ok(false) => (
-                StatusCode::NOT_FOUND,
-                Json(json!({"error": "pending action not found or already decided"})),
+            Ok(SalOutcome::Pending { votes, quorum }) => (
+                StatusCode::ACCEPTED,
+                Json(json!({
+                    "approved": false,
+                    "status": "pending",
+                    "id": id,
+                    "votes": votes,
+                    "quorum": quorum,
+                    "reason": "consensus threshold not yet reached",
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Ok(SalOutcome::Rejected(reason)) => (
+                StatusCode::FORBIDDEN,
+                Json(json!({"error": format!("approve rejected: {reason}")})),
             )
                 .into_response(),
             Err(e) => store_err_to_response(e),

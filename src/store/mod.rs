@@ -872,6 +872,151 @@ pub trait MemoryStore: Send + Sync {
             capability: "NOTIFY".to_string(),
         })
     }
+
+    // ==================================================================
+    // v0.7.0 Wave-3 Continuation 3 — full governance pipeline (Phase 20).
+    //
+    // Closes the parity gap on multi-vote consensus + approver_type
+    // variations + inheritance-chain walk on writes. The trait method
+    // below encapsulates the full state machine so handlers can stay
+    // backend-blind. Both adapters override.
+    // ==================================================================
+
+    /// Build the namespace inheritance chain top-down (`["*", root, ...,
+    /// leaf]`). Adapters must:
+    /// 1. Always start with the global standard `*`.
+    /// 2. Walk explicit `namespace_meta.parent_namespace` ancestors
+    ///    (bounded by 8 hops, cycle-safe).
+    /// 3. Append `/`-derived hierarchical ancestors top-down.
+    ///
+    /// Default returns `[namespace.to_string()]` so adapters that
+    /// haven't wired the namespace_meta walk degrade to a single-level
+    /// chain.
+    async fn build_namespace_chain(&self, namespace: &str) -> StoreResult<Vec<String>> {
+        Ok(vec![namespace.to_string()])
+    }
+
+    /// Resolve the governance policy that gates writes in `namespace`.
+    /// Walks the inheritance chain leaf-first; returns the most-specific
+    /// policy. When no policy is found in the chain, returns `None`.
+    ///
+    /// Default returns `None` so adapters that haven't wired the walk
+    /// surface "no governance configured" (the v0.6.x default).
+    async fn resolve_governance_policy(
+        &self,
+        _namespace: &str,
+    ) -> StoreResult<Option<crate::models::GovernancePolicy>> {
+        Ok(None)
+    }
+
+    /// Apply an approval vote against a pending action with full
+    /// approver_type semantics:
+    /// - `Human`: any caller approves; transitions to `approved`.
+    /// - `Agent(required)`: only `required` can approve.
+    /// - `Consensus(quorum)`: voter must be a registered agent; vote
+    ///   is recorded; threshold transitions to `approved`.
+    ///
+    /// Returns the resolved [`ApproveOutcome`] so the caller can
+    /// surface the appropriate wire envelope (Approved / Pending /
+    /// Rejected).
+    ///
+    /// Default returns `UnsupportedCapability` so backends that don't
+    /// yet wire the consensus state machine fail loudly rather than
+    /// silently downgrade to single-vote approval.
+    async fn governance_approve_with_consensus(
+        &self,
+        _ctx: &CallerContext,
+        _pending_id: &str,
+        _approver_agent_id: &str,
+    ) -> StoreResult<ApproveOutcome> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_CONSENSUS".to_string(),
+        })
+    }
+
+    /// True iff `agent_id` is registered in the adapter's `_agents`
+    /// namespace. Used by the consensus state machine to gate
+    /// otherwise-anonymous voters.
+    ///
+    /// Default returns `Ok(false)` so adapters that haven't wired the
+    /// agent registry default to "unregistered" (the safe-by-default
+    /// posture for the consensus path).
+    async fn is_registered_agent(&self, _agent_id: &str) -> StoreResult<bool> {
+        Ok(false)
+    }
+
+    /// Enforce governance for a write/delete/promote action against the
+    /// resolved policy. Returns the decision per the same contract as
+    /// `db::enforce_governance`:
+    /// - `Allow` — action proceeds.
+    /// - `Deny(reason)` — action blocked.
+    /// - `Pending(pending_id)` — action queued; caller must surface
+    ///   the pending id and wait for approval.
+    ///
+    /// Default returns `Allow` so adapters that haven't wired the walk
+    /// surface the v0.6.x posture (no governance) — consistent with
+    /// `resolve_governance_policy`'s default.
+    async fn enforce_governance_action(
+        &self,
+        _action: GovernedAction,
+        _namespace: &str,
+        _agent_id: &str,
+        _memory_id: Option<&str>,
+        _memory_owner: Option<&str>,
+        _payload: &serde_json::Value,
+    ) -> StoreResult<crate::models::GovernanceDecision> {
+        Ok(crate::models::GovernanceDecision::Allow)
+    }
+}
+
+/// v0.7.0 Wave-3 Continuation 3 (Phase 20) — action class threaded
+/// through the governance enforce surface. Mirrors
+/// `crate::models::GovernedAction` but lives at the SAL layer so the
+/// trait isn't forced to import the models crate's enum at every site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GovernedAction {
+    Store,
+    Delete,
+    Promote,
+}
+
+impl GovernedAction {
+    /// Stable lowercase tag for the `pending_actions.action_type`
+    /// column + log lines.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Store => "store",
+            Self::Delete => "delete",
+            Self::Promote => "promote",
+        }
+    }
+}
+
+impl From<crate::models::GovernedAction> for GovernedAction {
+    fn from(value: crate::models::GovernedAction) -> Self {
+        match value {
+            crate::models::GovernedAction::Store => Self::Store,
+            crate::models::GovernedAction::Delete => Self::Delete,
+            crate::models::GovernedAction::Promote => Self::Promote,
+        }
+    }
+}
+
+/// v0.7.0 Wave-3 Continuation 3 (Phase 20) — outcome of a single
+/// governance approval call. Mirrors the legacy
+/// `crate::db::ApproveOutcome` so the trait surface and the sqlite
+/// `db::*` free-function path can share a wire shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApproveOutcome {
+    /// The action transitioned to `approved` and is ready for the
+    /// caller to execute its payload.
+    Approved,
+    /// The action remains `pending` (Consensus quorum not yet met).
+    /// `votes` is the count of unique voters; `quorum` is the target.
+    Pending { votes: usize, quorum: u32 },
+    /// The vote was rejected. `reason` is human-readable.
+    Rejected(String),
 }
 
 /// Partial-update payload. `None` means "leave this field alone" —

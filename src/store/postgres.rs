@@ -4199,6 +4199,350 @@ impl MemoryStore for PostgresStore {
         };
         self.store(ctx, &mem).await
     }
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 20) — full governance pipeline
+    // on postgres: namespace inheritance walk, governance policy
+    // resolution, multi-vote consensus state machine.
+
+    async fn build_namespace_chain(&self, namespace: &str) -> StoreResult<Vec<String>> {
+        const MAX_EXPLICIT_DEPTH: usize = 8;
+        let mut chain: Vec<String> = Vec::new();
+
+        if namespace == "*" {
+            chain.push("*".to_string());
+            return Ok(chain);
+        }
+        chain.push("*".to_string());
+
+        // /-derived ancestors (root → leaf via namespace_ancestors which
+        // returns most-specific-first; reverse for top-down).
+        let mut hierarchy_chain: Vec<String> = crate::models::namespace_ancestors(namespace)
+            .into_iter()
+            .rev()
+            .collect();
+
+        // Walk explicit `namespace_meta.parent_namespace` chain above the
+        // root, bounded + cycle-safe.
+        if let Some(root) = hierarchy_chain.first().cloned() {
+            let mut explicit_above: Vec<String> = Vec::new();
+            let mut current = root;
+            for _ in 0..MAX_EXPLICIT_DEPTH {
+                let row: Option<(Option<String>,)> = sqlx::query_as(
+                    "SELECT parent_namespace FROM namespace_meta WHERE namespace = $1",
+                )
+                .bind(&current)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| to_store_err("build_namespace_chain parent lookup", e))?;
+                let next = row.and_then(|(p,)| p);
+                match next {
+                    Some(p)
+                        if p != "*"
+                            && !explicit_above.contains(&p)
+                            && !hierarchy_chain.contains(&p) =>
+                    {
+                        explicit_above.push(p.clone());
+                        current = p;
+                    }
+                    _ => break,
+                }
+            }
+            for p in explicit_above.into_iter().rev() {
+                if !chain.contains(&p) {
+                    chain.push(p);
+                }
+            }
+        }
+        for entry in hierarchy_chain.drain(..) {
+            if !chain.contains(&entry) {
+                chain.push(entry);
+            }
+        }
+        Ok(chain)
+    }
+
+    async fn resolve_governance_policy(
+        &self,
+        namespace: &str,
+    ) -> StoreResult<Option<crate::models::GovernancePolicy>> {
+        // Walk leaf → root and return the most-specific policy.
+        let chain = self.build_namespace_chain(namespace).await?;
+        for ns in chain.into_iter().rev() {
+            // Look up the standard memory.
+            let row: Option<(Option<String>,)> =
+                sqlx::query_as("SELECT standard_id FROM namespace_meta WHERE namespace = $1")
+                    .bind(&ns)
+                    .fetch_optional(&self.pool)
+                    .await
+                    .map_err(|e| to_store_err("resolve_governance_policy lookup", e))?;
+            let Some((Some(standard_id),)) = row else {
+                continue;
+            };
+            // Read the standard's metadata.
+            let ctx = CallerContext::for_agent("governance");
+            let mem = match self.get(&ctx, &standard_id).await {
+                Ok(m) => m,
+                Err(StoreError::NotFound { .. }) => continue,
+                Err(e) => return Err(e),
+            };
+            if let Some(Ok(p)) = crate::models::GovernancePolicy::from_metadata(&mem.metadata) {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
+    }
+
+    async fn governance_approve_with_consensus(
+        &self,
+        ctx: &CallerContext,
+        pending_id: &str,
+        approver_agent_id: &str,
+    ) -> StoreResult<super::ApproveOutcome> {
+        // Load the pending row + assert state.
+        let pa = match self.get_pending(ctx, pending_id).await? {
+            Some(p) => p,
+            None => {
+                return Ok(super::ApproveOutcome::Rejected(format!(
+                    "pending action not found: {pending_id}"
+                )));
+            }
+        };
+        if pa.status != "pending" {
+            return Ok(super::ApproveOutcome::Rejected(format!(
+                "already decided: status={}",
+                pa.status
+            )));
+        }
+
+        // Resolve namespace policy → approver type.
+        let approver = self
+            .resolve_governance_policy(&pa.namespace)
+            .await?
+            .map_or(crate::models::ApproverType::Human, |p| p.approver);
+
+        match approver {
+            crate::models::ApproverType::Human => {
+                let ok = self
+                    .pending_decide(ctx, pending_id, true, approver_agent_id)
+                    .await?;
+                if ok {
+                    Ok(super::ApproveOutcome::Approved)
+                } else {
+                    Ok(super::ApproveOutcome::Rejected(
+                        "decision write failed".to_string(),
+                    ))
+                }
+            }
+            crate::models::ApproverType::Agent(required) => {
+                if approver_agent_id != required {
+                    return Ok(super::ApproveOutcome::Rejected(format!(
+                        "designated approver is '{required}'; got '{approver_agent_id}'"
+                    )));
+                }
+                let ok = self
+                    .pending_decide(ctx, pending_id, true, approver_agent_id)
+                    .await?;
+                if ok {
+                    Ok(super::ApproveOutcome::Approved)
+                } else {
+                    Ok(super::ApproveOutcome::Rejected(
+                        "decision write failed".to_string(),
+                    ))
+                }
+            }
+            crate::models::ApproverType::Consensus(quorum) => {
+                if !self.is_registered_agent(approver_agent_id).await? {
+                    return Ok(super::ApproveOutcome::Rejected(format!(
+                        "consensus voter '{approver_agent_id}' is not a registered agent"
+                    )));
+                }
+                let canonical_id = approver_agent_id.to_ascii_lowercase();
+                let mut approvals = pa.approvals.clone();
+                if approvals
+                    .iter()
+                    .any(|a| a.agent_id.eq_ignore_ascii_case(&canonical_id))
+                {
+                    return Ok(super::ApproveOutcome::Pending {
+                        votes: approvals.len(),
+                        quorum,
+                    });
+                }
+                approvals.push(crate::models::Approval {
+                    agent_id: canonical_id.clone(),
+                    approved_at: chrono::Utc::now().to_rfc3339(),
+                });
+                let approvals_json =
+                    serde_json::to_value(&approvals).map_err(|e| StoreError::IntegrityFailed {
+                        detail: format!("serialize approvals: {e}"),
+                    })?;
+                sqlx::query(
+                    "UPDATE pending_actions SET approvals = $1 \
+                     WHERE id = $2 AND status = 'pending'",
+                )
+                .bind(&approvals_json)
+                .bind(pending_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|e| to_store_err("update consensus approvals", e))?;
+                let votes = approvals.len();
+                if u32::try_from(votes).unwrap_or(u32::MAX) >= quorum {
+                    let ok = self
+                        .pending_decide(ctx, pending_id, true, &canonical_id)
+                        .await?;
+                    if ok {
+                        return Ok(super::ApproveOutcome::Approved);
+                    }
+                    return Ok(super::ApproveOutcome::Rejected(
+                        "decision write failed at consensus threshold".to_string(),
+                    ));
+                }
+                Ok(super::ApproveOutcome::Pending { votes, quorum })
+            }
+        }
+    }
+
+    async fn is_registered_agent(&self, agent_id: &str) -> StoreResult<bool> {
+        use crate::models::AGENTS_NAMESPACE;
+        let title = format!("agent:{agent_id}");
+        let row: Option<(String,)> =
+            sqlx::query_as("SELECT id FROM memories WHERE namespace = $1 AND title = $2")
+                .bind(AGENTS_NAMESPACE)
+                .bind(&title)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| to_store_err("is_registered_agent", e))?;
+        Ok(row.is_some())
+    }
+
+    async fn enforce_governance_action(
+        &self,
+        action: super::GovernedAction,
+        namespace: &str,
+        agent_id: &str,
+        memory_id: Option<&str>,
+        memory_owner: Option<&str>,
+        payload: &serde_json::Value,
+    ) -> StoreResult<crate::models::GovernanceDecision> {
+        use crate::config::{
+            PermissionsMode, active_permissions_mode, record_permissions_decision,
+        };
+        use crate::models::{GovernanceDecision, GovernanceLevel};
+
+        let mode = active_permissions_mode();
+        record_permissions_decision(mode);
+
+        if mode == PermissionsMode::Off {
+            return Ok(GovernanceDecision::Allow);
+        }
+
+        // Resolve the policy via the leaf-first walk we just landed.
+        let Some(policy) = self.resolve_governance_policy(namespace).await? else {
+            return Ok(GovernanceDecision::Allow);
+        };
+        let level = match action {
+            super::GovernedAction::Store => &policy.write,
+            super::GovernedAction::Delete => &policy.delete,
+            super::GovernedAction::Promote => &policy.promote,
+        };
+
+        // Resolve the namespace owner for the Store path so the
+        // `Owner`-level check can compare against the standard memory's
+        // agent_id. For Delete/Promote the memory's own owner is used
+        // (the caller passes it in via `memory_owner`).
+        let ns_owner = if matches!(action, super::GovernedAction::Store) {
+            self.resolve_governance_policy(namespace).await?;
+            // Read the standard memory's agent_id directly from
+            // namespace_meta + memories.
+            let row: Option<(Option<String>,)> = sqlx::query_as(
+                "SELECT m.metadata->>'agent_id' AS agent_id \
+                 FROM namespace_meta nm \
+                 JOIN memories m ON m.id = nm.standard_id \
+                 WHERE nm.namespace = $1",
+            )
+            .bind(namespace)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| to_store_err("namespace_owner lookup", e))?;
+            row.and_then(|(o,)| o)
+        } else {
+            None
+        };
+
+        // Evaluate the level. Same rules as the sqlite path:
+        // - Any: always allow
+        // - Registered: caller must be in `_agents` namespace
+        // - Owner: caller must equal `memory_owner` (delete/promote) or
+        //   `namespace_owner` (store)
+        // - Approve: caller is non-owner ⇒ queue pending action
+        let decision = match level {
+            GovernanceLevel::Any => GovernanceDecision::Allow,
+            GovernanceLevel::Registered => {
+                if self.is_registered_agent(agent_id).await? {
+                    GovernanceDecision::Allow
+                } else {
+                    GovernanceDecision::Deny(format!(
+                        "agent '{agent_id}' is not registered for namespace '{namespace}'"
+                    ))
+                }
+            }
+            GovernanceLevel::Owner => {
+                let owner_to_compare = match action {
+                    super::GovernedAction::Store => ns_owner.as_deref(),
+                    _ => memory_owner,
+                };
+                match owner_to_compare {
+                    Some(o) if o == agent_id => GovernanceDecision::Allow,
+                    Some(o) => GovernanceDecision::Deny(format!(
+                        "owner-only namespace '{namespace}': caller '{agent_id}' is not '{o}'"
+                    )),
+                    None => GovernanceDecision::Allow,
+                }
+            }
+            GovernanceLevel::Approve => {
+                let owner_to_compare = match action {
+                    super::GovernedAction::Store => ns_owner.as_deref(),
+                    _ => memory_owner,
+                };
+                if matches!(owner_to_compare, Some(o) if o == agent_id) {
+                    GovernanceDecision::Allow
+                } else {
+                    GovernanceDecision::Pending(String::new())
+                }
+            }
+        };
+
+        if mode == PermissionsMode::Advisory {
+            return Ok(GovernanceDecision::Allow);
+        }
+
+        // Enforce mode — Pending queues a pending_actions row.
+        if let GovernanceDecision::Pending(_) = decision {
+            let pending_id = uuid::Uuid::new_v4().to_string();
+            let now = chrono::Utc::now();
+            let action_str = match action {
+                super::GovernedAction::Store => "store",
+                super::GovernedAction::Delete => "delete",
+                super::GovernedAction::Promote => "promote",
+            };
+            sqlx::query(
+                "INSERT INTO pending_actions \
+                 (id, action_type, memory_id, namespace, payload, requested_by, requested_at, status) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending')",
+            )
+            .bind(&pending_id)
+            .bind(action_str)
+            .bind(memory_id)
+            .bind(namespace)
+            .bind(payload)
+            .bind(agent_id)
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| to_store_err("queue_pending_action", e))?;
+            return Ok(GovernanceDecision::Pending(pending_id));
+        }
+        Ok(decision)
+    }
 }
 
 // ----------------------------------------------------------------------
