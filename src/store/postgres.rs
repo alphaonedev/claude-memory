@@ -3454,6 +3454,153 @@ impl MemoryStore for PostgresStore {
         Ok(results)
     }
 
+    async fn pending_decide(
+        &self,
+        _ctx: &CallerContext,
+        id: &str,
+        approve: bool,
+        decided_by: &str,
+    ) -> StoreResult<bool> {
+        let new_status = if approve { "approved" } else { "rejected" };
+        let rows_affected = sqlx::query(
+            "UPDATE pending_actions SET status = $1, decided_by = $2, decided_at = NOW()
+             WHERE id = $3 AND status = 'pending'",
+        )
+        .bind(new_status)
+        .bind(decided_by)
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| to_store_err("pending_decide", e))?
+        .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    async fn get_pending(
+        &self,
+        _ctx: &CallerContext,
+        id: &str,
+    ) -> StoreResult<Option<crate::models::PendingAction>> {
+        let row = sqlx::query(
+            "SELECT id, action_type, memory_id, namespace, payload, requested_by,
+                    requested_at, status, decided_by, decided_at, approvals
+             FROM pending_actions WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| to_store_err("get_pending", e))?;
+        let Some(r) = row else {
+            return Ok(None);
+        };
+        let requested_at: DateTime<Utc> = r
+            .try_get("requested_at")
+            .map_err(|e| to_store_err("read requested_at", e))?;
+        let decided_at: Option<DateTime<Utc>> = r
+            .try_get("decided_at")
+            .map_err(|e| to_store_err("read decided_at", e))?;
+        let approvals_v: serde_json::Value = r
+            .try_get("approvals")
+            .unwrap_or(serde_json::Value::Array(vec![]));
+        let approvals: Vec<crate::models::Approval> =
+            serde_json::from_value(approvals_v).unwrap_or_default();
+        Ok(Some(crate::models::PendingAction {
+            id: r
+                .try_get::<String, _>("id")
+                .map_err(|e| to_store_err("read id", e))?,
+            action_type: r
+                .try_get::<String, _>("action_type")
+                .map_err(|e| to_store_err("read action_type", e))?,
+            memory_id: r.try_get::<Option<String>, _>("memory_id").unwrap_or(None),
+            namespace: r
+                .try_get::<String, _>("namespace")
+                .map_err(|e| to_store_err("read namespace", e))?,
+            payload: r
+                .try_get::<serde_json::Value, _>("payload")
+                .unwrap_or(serde_json::Value::Null),
+            requested_by: r
+                .try_get::<String, _>("requested_by")
+                .map_err(|e| to_store_err("read requested_by", e))?,
+            requested_at: requested_at.to_rfc3339(),
+            status: r
+                .try_get::<String, _>("status")
+                .map_err(|e| to_store_err("read status", e))?,
+            decided_by: r.try_get::<Option<String>, _>("decided_by").unwrap_or(None),
+            decided_at: decided_at.map(|d| d.to_rfc3339()),
+            approvals,
+        }))
+    }
+
+    async fn set_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+        standard_id: &str,
+        parent: Option<&str>,
+    ) -> StoreResult<()> {
+        // Require the standard memory to exist first (parity with
+        // sqlite db::set_namespace_standard).
+        let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM memories WHERE id = $1")
+            .bind(standard_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| to_store_err("set_namespace_standard verify memory", e))?;
+        if exists.is_none() {
+            return Err(StoreError::NotFound {
+                id: standard_id.to_string(),
+            });
+        }
+        if parent.is_some_and(|p| p == namespace) {
+            return Err(StoreError::InvalidInput {
+                detail: "namespace cannot be its own parent".to_string(),
+            });
+        }
+        sqlx::query(
+            "INSERT INTO namespace_meta (namespace, standard_id, updated_at, parent_namespace)
+             VALUES ($1, $2, NOW(), $3)
+             ON CONFLICT (namespace) DO UPDATE
+                SET standard_id = EXCLUDED.standard_id,
+                    updated_at = EXCLUDED.updated_at,
+                    parent_namespace = EXCLUDED.parent_namespace",
+        )
+        .bind(namespace)
+        .bind(standard_id)
+        .bind(parent)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| to_store_err("set_namespace_standard", e))?;
+        Ok(())
+    }
+
+    async fn clear_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+    ) -> StoreResult<bool> {
+        let rows_affected = sqlx::query("DELETE FROM namespace_meta WHERE namespace = $1")
+            .bind(namespace)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| to_store_err("clear_namespace_standard", e))?
+            .rows_affected();
+        Ok(rows_affected > 0)
+    }
+
+    async fn get_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+    ) -> StoreResult<Option<(String, Option<String>)>> {
+        let row: Option<(String, Option<String>)> = sqlx::query_as(
+            "SELECT standard_id, parent_namespace FROM namespace_meta WHERE namespace = $1",
+        )
+        .bind(namespace)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| to_store_err("get_namespace_standard", e))?;
+        Ok(row)
+    }
+
     async fn touch_after_recall(&self, ids: &[String]) -> StoreResult<()> {
         if ids.is_empty() {
             return Ok(());

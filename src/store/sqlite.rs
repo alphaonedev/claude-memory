@@ -371,6 +371,71 @@ impl MemoryStore for SqliteStore {
         }
         Ok(())
     }
+
+    async fn pending_decide(
+        &self,
+        _ctx: &CallerContext,
+        id: &str,
+        approve: bool,
+        decided_by: &str,
+    ) -> StoreResult<bool> {
+        let conn = self.state.lock().await;
+        db::decide_pending_action(&conn, id, approve, decided_by).map_err(box_err)
+    }
+
+    async fn get_pending(
+        &self,
+        _ctx: &CallerContext,
+        id: &str,
+    ) -> StoreResult<Option<crate::models::PendingAction>> {
+        let conn = self.state.lock().await;
+        db::get_pending_action(&conn, id).map_err(box_err)
+    }
+
+    async fn set_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+        standard_id: &str,
+        parent: Option<&str>,
+    ) -> StoreResult<()> {
+        let conn = self.state.lock().await;
+        db::set_namespace_standard(&conn, namespace, standard_id, parent).map_err(box_err)
+    }
+
+    async fn clear_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+    ) -> StoreResult<bool> {
+        let conn = self.state.lock().await;
+        db::clear_namespace_standard(&conn, namespace).map_err(box_err)
+    }
+
+    async fn get_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        namespace: &str,
+    ) -> StoreResult<Option<(String, Option<String>)>> {
+        let conn = self.state.lock().await;
+        // db::get_namespace_standard returns the standard memory + parent
+        // — we only need the (standard_id, parent_namespace) tuple here.
+        let mut stmt = conn
+            .prepare(
+                "SELECT standard_id, parent_namespace FROM namespace_meta WHERE namespace = ?1",
+            )
+            .map_err(box_err)?;
+        let mut rows = stmt
+            .query_map(rusqlite::params![namespace], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(box_err)?;
+        match rows.next() {
+            Some(Ok(tuple)) => Ok(Some(tuple)),
+            Some(Err(e)) => Err(box_err(e)),
+            None => Ok(None),
+        }
+    }
 }
 
 /// Transaction handle that no-ops commit (`SQLite` txn support is

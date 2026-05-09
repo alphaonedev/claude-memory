@@ -634,6 +634,95 @@ pub trait MemoryStore: Send + Sync {
     async fn touch_after_recall(&self, _ids: &[String]) -> StoreResult<()> {
         Ok(())
     }
+
+    // ==================================================================
+    // v0.7.0 Wave-3 Continuation 2 — governance write paths
+    // (Phase 11).
+    //
+    // These trait methods cover the simple, structural operations on
+    // the governance surface — pending decision (approve/reject) +
+    // namespace standard (set/clear/get). The full governance walk
+    // (namespace inheritance chain, approver_type policy, consensus
+    // tracking) remains where it lives: SQLite-backed daemons get the
+    // full pipeline through `db::*` free functions; postgres-backed
+    // daemons get the structural surface here. Operators who need the
+    // full consensus + approver_type pipeline on postgres pin to the
+    // `--store-url sqlite://` form for v0.7.0 — a follow-on track will
+    // port the governance walk to the trait surface.
+    // ==================================================================
+
+    /// Decide a pending action (approve when `approve == true`, reject
+    /// otherwise). Returns `true` when the row transitioned from
+    /// `pending` to a decided state, `false` when no row matched or
+    /// the row was already decided. Adapters MUST stamp `decided_by`
+    /// and `decided_at`.
+    ///
+    /// Default returns `UnsupportedCapability`.
+    async fn pending_decide(
+        &self,
+        _ctx: &CallerContext,
+        _id: &str,
+        _approve: bool,
+        _decided_by: &str,
+    ) -> StoreResult<bool> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_PENDING_DECIDE".to_string(),
+        })
+    }
+
+    /// Read a pending action by id. Returns `None` when no row matches.
+    /// Default returns `UnsupportedCapability`.
+    async fn get_pending(
+        &self,
+        _ctx: &CallerContext,
+        _id: &str,
+    ) -> StoreResult<Option<crate::models::PendingAction>> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_GET_PENDING".to_string(),
+        })
+    }
+
+    /// Set the namespace standard memory id, optionally with an
+    /// explicit parent namespace for the inheritance chain. Adapters
+    /// validate that `standard_id` references an existing memory.
+    ///
+    /// Default returns `UnsupportedCapability`.
+    async fn set_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        _namespace: &str,
+        _standard_id: &str,
+        _parent: Option<&str>,
+    ) -> StoreResult<()> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_SET_STANDARD".to_string(),
+        })
+    }
+
+    /// Clear the namespace standard. Returns `true` when a row was
+    /// removed, `false` when no namespace_meta row matched. Default
+    /// returns `UnsupportedCapability`.
+    async fn clear_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        _namespace: &str,
+    ) -> StoreResult<bool> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_CLEAR_STANDARD".to_string(),
+        })
+    }
+
+    /// Read the namespace standard tuple `(standard_id, parent_namespace)`.
+    /// Default returns `UnsupportedCapability`.
+    async fn get_namespace_standard(
+        &self,
+        _ctx: &CallerContext,
+        _namespace: &str,
+    ) -> StoreResult<Option<(String, Option<String>)>> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_GET_STANDARD".to_string(),
+        })
+    }
 }
 
 /// Partial-update payload. `None` means "leave this field alone" —

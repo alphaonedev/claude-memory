@@ -1524,6 +1524,45 @@ pub async fn approve_pending(
                 .into_response();
         }
     };
+
+    // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed
+    // approve. The structural pending_decide trait method handles the
+    // status transition; consensus / approver_type policy walks
+    // remain sqlite-only (the inheritance-chain walk reads several
+    // tables not yet trait-covered). Operators who need the full
+    // consensus pipeline pin to the sqlite store-url.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
+        return match app.store.pending_decide(&ctx, &id, true, &agent_id).await {
+            Ok(true) => {
+                if crate::audit::is_enabled() {
+                    crate::audit::emit(crate::audit::EventBuilder::new(
+                        crate::audit::AuditAction::Approve,
+                        crate::audit::actor(agent_id.clone(), "http_header", None),
+                        crate::audit::target_memory(id.clone(), String::new(), None, None, None),
+                    ));
+                }
+                Json(json!({
+                    "approved": true,
+                    "id": id,
+                    "decided_by": agent_id,
+                    "executed": false,
+                    "storage_backend": "postgres",
+                    "note": "consensus / approver_type walks are sqlite-only in v0.7.0; \
+                            postgres approve is a structural status transition only",
+                }))
+                .into_response()
+            }
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "pending action not found or already decided"})),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     let lock = state.lock().await;
     match db::approve_with_approver_type(&lock.0, &id, &agent_id) {
         Ok(ApproveOutcome::Approved) => match db::execute_pending_action(&lock.0, &id) {
@@ -1647,6 +1686,37 @@ pub async fn reject_pending(
                 .into_response();
         }
     };
+
+    // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed reject.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
+        return match app.store.pending_decide(&ctx, &id, false, &agent_id).await {
+            Ok(true) => {
+                if crate::audit::is_enabled() {
+                    crate::audit::emit(crate::audit::EventBuilder::new(
+                        crate::audit::AuditAction::Reject,
+                        crate::audit::actor(agent_id.clone(), "http_header", None),
+                        crate::audit::target_memory(id.clone(), String::new(), None, None, None),
+                    ));
+                }
+                Json(json!({
+                    "rejected": true,
+                    "id": id,
+                    "decided_by": agent_id,
+                    "storage_backend": "postgres",
+                }))
+                .into_response()
+            }
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "pending action not found or already decided"})),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     let lock = state.lock().await;
     match db::decide_pending_action(&lock.0, &id, false, &agent_id) {
         Ok(true) => {
@@ -6848,6 +6918,86 @@ async fn set_namespace_standard_inner(
     body: NamespaceStandardBody,
 ) -> axum::response::Response {
     let body = flatten_standard_body(body);
+
+    // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed
+    // namespace standard write path. The trait method handles the
+    // structural namespace_meta upsert; governance metadata that the
+    // sqlite path layers into the standard memory's metadata is
+    // captured by storing the policy in the placeholder memory's
+    // metadata.governance JSONB field via the trait's standard
+    // store path.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("ai:http");
+        // Resolve standard_id: caller-supplied or auto-seed a placeholder.
+        let standard_id = if let Some(id) = body.id.clone() {
+            id
+        } else {
+            // Try to find an existing placeholder via list().
+            let filter = crate::store::Filter {
+                namespace: Some(ns.to_string()),
+                limit: 50,
+                ..Default::default()
+            };
+            let existing = match app.store.list(&ctx, &filter).await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .find(|m| m.tags.iter().any(|t| t == "_namespace_standard"))
+                    .map(|m| m.id),
+                Err(_) => None,
+            };
+            if let Some(id) = existing {
+                id
+            } else {
+                let now = Utc::now().to_rfc3339();
+                let mut metadata = serde_json::json!({"agent_id": "system"});
+                if let Some(g) = body.governance.clone()
+                    && let Some(obj) = metadata.as_object_mut()
+                {
+                    obj.insert("governance".to_string(), g);
+                }
+                let placeholder = Memory {
+                    id: Uuid::new_v4().to_string(),
+                    tier: Tier::Long,
+                    namespace: ns.to_string(),
+                    title: format!("_standard:{ns}"),
+                    content: format!("namespace standard for {ns}"),
+                    tags: vec!["_namespace_standard".to_string()],
+                    priority: 5,
+                    confidence: 1.0,
+                    source: "api".into(),
+                    access_count: 0,
+                    created_at: now.clone(),
+                    updated_at: now,
+                    last_accessed_at: None,
+                    expires_at: None,
+                    metadata,
+                };
+                match app.store.store(&ctx, &placeholder).await {
+                    Ok(id) => id,
+                    Err(e) => return store_err_to_response(e),
+                }
+            }
+        };
+        return match app
+            .store
+            .set_namespace_standard(&ctx, ns, &standard_id, body.parent.as_deref())
+            .await
+        {
+            Ok(()) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "namespace": ns,
+                    "standard_id": standard_id,
+                    "parent": body.parent,
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     // Auto-seed a placeholder standard memory when the caller didn't supply
     // an `id`. S34's body is `{governance: …}` with no id — we create a
     // minimal standard memory so the governance policy has a home.
@@ -7070,6 +7220,28 @@ pub async fn clear_namespace_standard_qs(
 /// contract fails — matching the pattern established by
 /// `set_namespace_standard_inner`.
 async fn clear_namespace_standard_inner(app: &AppState, ns: &str) -> axum::response::Response {
+    // v0.7.0 Wave-3 Continuation 2 (Phase 11) — postgres-backed clear.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("ai:http");
+        return match app.store.clear_namespace_standard(&ctx, ns).await {
+            Ok(true) => (
+                StatusCode::OK,
+                Json(json!({
+                    "cleared": true,
+                    "namespace": ns,
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Ok(false) => (
+                StatusCode::NOT_FOUND,
+                Json(json!({"error": "no namespace_meta row matched"})),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
     let params = json!({"namespace": ns});
     let lock = app.db.lock().await;
     let result = crate::mcp::handle_namespace_clear_standard(&lock.0, &params);
