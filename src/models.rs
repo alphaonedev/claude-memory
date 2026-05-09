@@ -311,6 +311,11 @@ pub struct RecallQuery {
     /// wins when both are supplied.
     #[serde(default)]
     pub query: Option<String>,
+    /// `q` alias for `context`/`query` — matches the search-style API
+    /// surface (`/api/v1/memories?q=…`) so callers can use the same
+    /// query token field across both endpoints.
+    #[serde(default)]
+    pub q: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
@@ -338,13 +343,16 @@ fn default_recall_limit() -> Option<usize> {
 
 #[derive(Debug, Deserialize)]
 pub struct RecallBody {
-    /// Recall context. Accepts either `context` (canonical) or `query`
-    /// (cert harness alias used by S79). At least one must be present
-    /// and non-empty.
+    /// Recall context. Accepts either `context` (canonical), `query`
+    /// (cert harness alias used by S79), or `q` (matches the
+    /// search-style API surface). At least one must be present and
+    /// non-empty.
     #[serde(default)]
     pub context: Option<String>,
     #[serde(default)]
     pub query: Option<String>,
+    #[serde(default)]
+    pub q: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
@@ -364,14 +372,15 @@ pub struct RecallBody {
 }
 
 impl RecallBody {
-    /// Resolve the recall query string from either `context` or `query`.
-    /// Returns the trimmed value, or an empty string when both are absent
-    /// — the caller is expected to reject empty.
+    /// Resolve the recall query string from `context`, `query`, or `q`.
+    /// Returns the trimmed value, or an empty string when all three are
+    /// absent — the caller is expected to reject empty.
     #[must_use]
     pub fn resolved_query(&self) -> String {
         self.context
             .as_deref()
             .or(self.query.as_deref())
+            .or(self.q.as_deref())
             .unwrap_or("")
             .trim()
             .to_string()

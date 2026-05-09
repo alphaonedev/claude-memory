@@ -2458,6 +2458,55 @@ pub async fn promote_memory(
         )
             .into_response();
     }
+
+    // v0.7.0 Wave-3 Continuation 5 (state-flake / S16+S49) — postgres-
+    // backed daemons resolve the memory through the SAL trait so a
+    // freshly-stored row promotes correctly across daemon restart.
+    // Without this branch the handler reaches into the scratch SQLite
+    // db (`:memory:` in test, stale on droplet after disposable DB
+    // reset) and returns 404 — the documented Wave 4 R2 flake.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let header_agent_id = headers.get("x-agent-id").and_then(|v| v.to_str().ok());
+        let agent_id = match crate::identity::resolve_http_agent_id(None, header_agent_id) {
+            Ok(a) => a,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid agent_id: {e}")})),
+                )
+                    .into_response();
+            }
+        };
+        let ctx = crate::store::CallerContext::for_agent(&agent_id);
+        // The trait's `get` returns NotFound on missing — fold to 404.
+        let target = match app.store.get(&ctx, &id).await {
+            Ok(m) => m,
+            Err(crate::store::StoreError::NotFound { .. }) => {
+                return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})))
+                    .into_response();
+            }
+            Err(e) => return store_err_to_response(e),
+        };
+        let patch = crate::store::UpdatePatch {
+            tier: Some(Tier::Long),
+            ..Default::default()
+        };
+        return match app.store.update(&ctx, &target.id, patch).await {
+            Ok(()) => Json(json!({
+                "promoted": true,
+                "id": target.id,
+                "tier": "long",
+                "storage_backend": "postgres",
+            }))
+            .into_response(),
+            Err(crate::store::StoreError::NotFound { .. }) => {
+                (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
     let lock = state.lock().await;
     // Resolve prefix if exact ID not found — capture full memory for governance.
     let target = match db::resolve_id(&lock.0, &id) {
@@ -2861,12 +2910,14 @@ pub async fn recall_memories_get(
     State(app): State<AppState>,
     Query(p): Query<RecallQuery>,
 ) -> impl IntoResponse {
-    // Accept either `context` (canonical) or `query` (cert harness
-    // alias — S79 uses `?query=…`). Cert oracles continue to work.
+    // Accept `context` (canonical), `query` (cert harness alias —
+    // S79 uses `?query=…`), or `q` (search-style alias — the parity
+    // suite uses `?q=…`). Cert oracles continue to work.
     let ctx = p
         .context
         .clone()
         .or_else(|| p.query.clone())
+        .or_else(|| p.q.clone())
         .unwrap_or_default();
     if ctx.trim().is_empty() {
         return (
@@ -8081,13 +8132,69 @@ pub async fn get_namespace_standard_qs(
         return list_namespaces(State(app)).await.into_response();
     };
 
-    // v0.7.0 Wave-3 Continuation — namespace-standard governance is a
-    // sqlite-only feature in v0.7.0; postgres-backed daemons surface 501
-    // here so clients see a structured error rather than reading from
-    // the unused scratch SQLite db.
+    // v0.7.0 Wave-3 Continuation 5 (Bucket C / S35) — postgres-backed
+    // daemons resolve the namespace standard via the SAL trait. When
+    // `inherit=true` we walk the parent chain (already cached in
+    // `namespace_meta.parent_namespace`) leaf→root to find the nearest
+    // ancestor that has a standard memory. Without inherit we look up
+    // the exact namespace.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        return postgres_not_implemented("/api/v1/namespaces?namespace=...");
+        let ctx = crate::store::CallerContext::for_agent("ai:http");
+        let inherit = q.inherit.unwrap_or(true);
+        // Walk leaf→root if inherit is set; else single lookup.
+        let chain: Vec<String> = if inherit {
+            // Build the namespace chain by trimming `/segment` until
+            // empty. This avoids needing a postgres-side recursive CTE
+            // for the simple inheritance walk and matches the SQLite
+            // semantics layered by `db::resolve_namespace_standard`.
+            let mut cur = ns.clone();
+            let mut out = vec![cur.clone()];
+            while let Some(pos) = cur.rfind('/') {
+                cur.truncate(pos);
+                if cur.is_empty() {
+                    break;
+                }
+                out.push(cur.clone());
+            }
+            out
+        } else {
+            vec![ns.clone()]
+        };
+        for candidate in chain {
+            match app.store.get_namespace_standard(&ctx, &candidate).await {
+                Ok(Some((standard_id, parent))) => {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({
+                            "namespace": ns,
+                            "resolved_namespace": candidate,
+                            "standard_id": standard_id,
+                            "id": standard_id,
+                            "parent_namespace": parent,
+                            "storage_backend": "postgres",
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(None) => continue,
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+        // No standard anywhere on the chain — return 200 with null
+        // standard_id so callers can distinguish "no standard" from
+        // "lookup failed".
+        return (
+            StatusCode::OK,
+            Json(json!({
+                "namespace": ns,
+                "standard_id": serde_json::Value::Null,
+                "id": serde_json::Value::Null,
+                "parent_namespace": serde_json::Value::Null,
+                "storage_backend": "postgres",
+            })),
+        )
+            .into_response();
     }
 
     let mut params = json!({"namespace": ns});

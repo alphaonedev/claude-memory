@@ -150,7 +150,7 @@ async fn store_memory(
         "tags": [],
         "priority": 5,
         "confidence": 1.0,
-        "source": "f7-cont4-test",
+        "source": "system",
     });
     let resp = client
         .post(format!("{base}/api/v1/memories"))
@@ -462,7 +462,7 @@ async fn bucket_c_namespace_standards_enforce() {
             "tags": [],
             "priority": 5,
             "confidence": 1.0,
-            "source": "test",
+            "source": "system",
         }))
         .send()
         .await
@@ -793,7 +793,7 @@ async fn bucket_e_agent_quotas() {
                 "tags": [],
                 "priority": 5,
                 "confidence": 1.0,
-                "source": "test",
+                "source": "system",
             }))
             .send()
             .await;
@@ -930,7 +930,7 @@ async fn state_flake_memory_promote() {
         "tags": [],
         "priority": 5,
         "confidence": 1.0,
-        "source": "test",
+        "source": "system",
     });
     let v: Value = client
         .post(format!("{base}/api/v1/memories"))
