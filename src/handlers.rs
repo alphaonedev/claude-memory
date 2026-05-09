@@ -3133,7 +3133,7 @@ pub struct ContradictionsQuery {
 /// resolution when `config.tier == Smart | Autonomous`.
 #[allow(clippy::too_many_lines)]
 pub async fn detect_contradictions(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(q): Query<ContradictionsQuery>,
 ) -> impl IntoResponse {
     if q.topic.is_none() && q.namespace.is_none() {
@@ -3155,7 +3155,120 @@ pub async fn detect_contradictions(
     // v0.6.2 (S40): raise to `MAX_BULK_SIZE` so a detect-contradictions
     // sweep over a bulk-populated namespace isn't silently capped at 200.
     let limit = q.limit.unwrap_or(50).min(MAX_BULK_SIZE);
-    let lock = state.lock().await;
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 15) — postgres-backed daemons
+    // route through the SAL trait. The non-LLM (rule-based +
+    // heuristic-pairwise) contradictions detector works on both backends
+    // because it's purely metadata-driven; this branch lists candidates
+    // through `app.store.list` then runs the same pairwise heuristic.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("http");
+        let filter = crate::store::Filter {
+            namespace: q.namespace.clone(),
+            limit,
+            ..Default::default()
+        };
+        let all = match app.store.list(&ctx, &filter).await {
+            Ok(v) => v,
+            Err(e) => return store_err_to_response(e),
+        };
+        let candidates: Vec<Memory> = match q.topic.as_deref() {
+            Some(t) => all
+                .into_iter()
+                .filter(|m| {
+                    m.metadata
+                        .get("topic")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| s == t)
+                        || m.title == t
+                })
+                .collect(),
+            None => all,
+        };
+        // Existing contradicts links via SAL — list all then filter by
+        // (source ∈ candidates ∧ target ∈ candidates ∧ relation contains
+        // "contradict"). We could narrow `list_links` by namespace when
+        // q.namespace is set; for cross-namespace topic queries we need
+        // the full set anyway.
+        let candidate_ids: std::collections::HashSet<String> =
+            candidates.iter().map(|m| m.id.clone()).collect();
+        let mut existing_links: Vec<serde_json::Value> = Vec::new();
+        if let Ok(all_links) = app.store.list_links(q.namespace.as_deref()).await {
+            for link in all_links {
+                if link.relation.contains("contradict")
+                    && candidate_ids.contains(&link.source_id)
+                    && candidate_ids.contains(&link.target_id)
+                {
+                    existing_links.push(json!({
+                        "source_id": link.source_id,
+                        "target_id": link.target_id,
+                        "relation": link.relation,
+                        "synthesized": false,
+                    }));
+                }
+            }
+        }
+        existing_links.sort_by_key(|v| {
+            (
+                v.get("source_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("target_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("relation")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        });
+        existing_links.dedup_by_key(|v| {
+            (
+                v.get("source_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("target_id")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("relation")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        });
+        let mut synth_links: Vec<serde_json::Value> = Vec::new();
+        for (i, a) in candidates.iter().enumerate() {
+            for b in candidates.iter().skip(i + 1) {
+                let same_topic = match q.topic.as_deref() {
+                    Some(_) => true,
+                    None => a.title == b.title,
+                };
+                if same_topic && a.content != b.content && a.id != b.id {
+                    synth_links.push(json!({
+                        "source_id": a.id,
+                        "target_id": b.id,
+                        "relation": "contradicts",
+                        "synthesized": true,
+                    }));
+                }
+            }
+        }
+        let mut links = existing_links;
+        links.extend(synth_links);
+        return Json(json!({
+            "memories": candidates,
+            "links": links,
+            "storage_backend": "postgres",
+        }))
+        .into_response();
+    }
+
+    let lock = app.db.lock().await;
     let all = match db::list(
         &lock.0,
         q.namespace.as_deref(),
@@ -4716,9 +4829,45 @@ pub async fn consolidate_memories(
                     .into_response();
             }
         };
-    let lock = app.db.lock().await;
     let tier = body.tier.unwrap_or(Tier::Long);
     let source_ids = body.ids.clone();
+
+    // v0.7.0 Wave-3 Continuation 3 (Phase 14) — postgres-backed daemons
+    // route through the SAL trait. Returns a structured 201/error envelope
+    // that mirrors the sqlite path; the cross-namespace
+    // `memory_consolidated` event + federation fanout are both
+    // sqlite-only features (the sqlite branch below preserves them).
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent(&consolidator_agent_id);
+        return match app
+            .store
+            .consolidate(
+                &ctx,
+                &body.ids,
+                &body.title,
+                &body.summary,
+                &body.namespace,
+                &tier,
+                "consolidation",
+                &consolidator_agent_id,
+            )
+            .await
+        {
+            Ok(new_id) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": new_id,
+                    "consolidated": body.ids.len(),
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     let consolidate_result = db::consolidate(
         &lock.0,
         &body.ids,
@@ -8783,7 +8932,7 @@ mod tests {
 
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
 
         let resp = app
             .oneshot(
@@ -8823,7 +8972,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -15897,7 +16046,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -15947,7 +16096,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -16001,7 +16150,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -16028,7 +16177,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -19808,7 +19957,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/contradictions", axum_get(detect_contradictions))
-            .with_state(state);
+            .with_state(test_app_state(state));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
