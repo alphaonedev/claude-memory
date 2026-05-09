@@ -1245,23 +1245,20 @@ impl PostgresStore {
         source_id: &str,
         max_depth: usize,
     ) -> StoreResult<Vec<KgQueryRow>> {
-        match self.kg_backend {
-            KgBackend::Age => {
-                // v0.7.0 Wave-3 Continuation 5 — AGE projection is
-                // populated out-of-band (J1 schema-prep / migrate
-                // replay); when the cert harness writes only via the
-                // SAL `link` path, the AGE side stays empty and the
-                // cypher MATCH returns zero rows. Fall back to the
-                // CTE implementation so kg_query is always wired to
-                // the relational source-of-truth (`memory_links`).
-                let age_rows = self.kg_query_cypher(source_id, max_depth).await?;
-                if age_rows.is_empty() {
-                    return self.kg_query_cte(source_id, max_depth).await;
-                }
-                Ok(age_rows)
-            }
-            KgBackend::Cte => self.kg_query_cte(source_id, max_depth).await,
-        }
+        // v0.7.0 Wave-3 Continuation 5 — always dispatch through the
+        // CTE implementation regardless of `kg_backend`. The AGE
+        // projection is populated out-of-band (J1 schema-prep) and is
+        // empty under cert-harness deployments where writes flow only
+        // through the SAL `link` path. The Cypher dispatch additionally
+        // requires the `cypher()` third argument to be a Param node
+        // (postgres-AGE 1.5.0+ parser invariant) which sqlx cannot
+        // express without a custom `agtype` type registration. Until
+        // both gaps close (J6: dual-write to AGE on every link, plus
+        // a sqlx agtype type extension), the relational `memory_links`
+        // table is the single source of truth and the CTE traversal
+        // is the always-correct read path.
+        let _ = &self.kg_backend;
+        self.kg_query_cte(source_id, max_depth).await
     }
 
     /// Cypher (Apache AGE) implementation of `kg_query`.
@@ -1481,23 +1478,11 @@ impl PostgresStore {
         until: Option<&str>,
         limit: Option<usize>,
     ) -> StoreResult<Vec<KgTimelineRow>> {
-        match self.kg_backend {
-            KgBackend::Age => {
-                // v0.7.0 Wave-3 Continuation 5 — see `kg_query` for the
-                // empty-AGE fallback rationale. Mirror the same posture
-                // here so timeline reads always see the relational
-                // source-of-truth when the AGE projection is
-                // unpopulated.
-                let age_rows = self
-                    .kg_timeline_cypher(source_id, since, until, limit)
-                    .await?;
-                if age_rows.is_empty() {
-                    return self.kg_timeline_cte(source_id, since, until, limit).await;
-                }
-                Ok(age_rows)
-            }
-            KgBackend::Cte => self.kg_timeline_cte(source_id, since, until, limit).await,
-        }
+        // v0.7.0 Wave-3 Continuation 5 — same posture as `kg_query`:
+        // always use the CTE implementation against the relational
+        // source-of-truth. See `kg_query` for the AGE-vs-CTE rationale.
+        let _ = &self.kg_backend;
+        self.kg_timeline_cte(source_id, since, until, limit).await
     }
 
     /// Cypher (Apache AGE) implementation of `kg_timeline`.
@@ -1823,16 +1808,13 @@ impl PostgresStore {
         relation: &str,
         valid_until: Option<&str>,
     ) -> StoreResult<KgInvalidateRow> {
-        match self.kg_backend {
-            KgBackend::Age => {
-                self.kg_invalidate_cypher(source_id, target_id, relation, valid_until)
-                    .await
-            }
-            KgBackend::Cte => {
-                self.kg_invalidate_cte(source_id, target_id, relation, valid_until)
-                    .await
-            }
-        }
+        // v0.7.0 Wave-3 Continuation 5 — same posture as `kg_query`
+        // and `kg_timeline`: always use the CTE implementation against
+        // the relational `memory_links` source-of-truth. See `kg_query`
+        // for the AGE-vs-CTE rationale.
+        let _ = &self.kg_backend;
+        self.kg_invalidate_cte(source_id, target_id, relation, valid_until)
+            .await
     }
 
     /// Cypher (Apache AGE) implementation of `kg_invalidate`.
@@ -5196,6 +5178,28 @@ mod tests {
             clamp_timeline_limit(Some(KG_TIMELINE_MAX_LIMIT_SAL + 999)),
             KG_TIMELINE_MAX_LIMIT_SAL
         );
+    }
+
+    #[test]
+    fn age_params_literal_renders_json_dict() {
+        // v0.7.0 Wave-3 Continuation 5 — wire-shape contract for the
+        // AGE `cypher()` third-arg helper. AGE rejects `$1::agtype`
+        // (the third arg must be a bare Param, not a FuncExpr cast),
+        // so we inline the params as a SQL agtype literal. Single
+        // quotes in the JSON value must be SQL-escaped (`''`); the
+        // outer wrap is `'…'::agtype`.
+        assert_eq!(age_params_literal(&[("k", "v")]), "'{\"k\":\"v\"}'::agtype");
+        assert_eq!(
+            age_params_literal(&[("a", "1"), ("b", "two")]),
+            "'{\"a\":\"1\",\"b\":\"two\"}'::agtype"
+        );
+        // SQL-escape: a literal apostrophe in the value gets doubled.
+        assert_eq!(
+            age_params_literal(&[("name", "O'Reilly")]),
+            "'{\"name\":\"O''Reilly\"}'::agtype"
+        );
+        // Empty dict is harmless (AGE accepts an empty params object).
+        assert_eq!(age_params_literal(&[]), "'{}'::agtype");
     }
 
     #[test]
