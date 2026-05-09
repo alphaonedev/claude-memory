@@ -1679,17 +1679,28 @@ pub async fn approve_pending(
                         crate::audit::target_memory(id.clone(), String::new(), None, None, None),
                     ));
                 }
+                // v0.7.0 Wave-3 Continuation 5 (S34) — execute the
+                // approved action so the memory materialises in the
+                // namespace where the cert oracle expects it. Mirrors
+                // sqlite's `db::execute_pending_action` for the
+                // `store` / `delete` / `promote` action types.
+                let executed_id: Option<String> =
+                    match app.store.execute_pending_action(&ctx, &id).await {
+                        Ok(eid) => eid,
+                        Err(e) => {
+                            tracing::warn!(
+                                "approve_pending: execute_pending_action failed for {id}: {e}"
+                            );
+                            None
+                        }
+                    };
                 Json(json!({
                     "approved": true,
                     "id": id,
                     "decided_by": agent_id,
-                    "executed": false,
+                    "executed": executed_id.is_some(),
+                    "memory_id": executed_id,
                     "storage_backend": "postgres",
-                    "note": "execute_pending_action remains sqlite-only in v0.7.0; \
-                            postgres approve runs the full consensus + approver_type \
-                            walk and transitions status. Operators executing approved \
-                            actions on postgres should re-issue the underlying write \
-                            via the standard CRUD path.",
                 }))
                 .into_response()
             }

@@ -4548,6 +4548,74 @@ impl MemoryStore for PostgresStore {
         }
     }
 
+    async fn execute_pending_action(
+        &self,
+        ctx: &CallerContext,
+        pending_id: &str,
+    ) -> StoreResult<Option<String>> {
+        // Mirror sqlite `db::execute_pending_action`. Loads the row,
+        // asserts status='approved', and applies the action via the
+        // standard SAL surfaces (`store_with_embedding` for create-
+        // style, `delete` for delete, `update` for promote). Idempotent
+        // re-execute is the caller's responsibility.
+        let pa = match self.get_pending(ctx, pending_id).await? {
+            Some(p) => p,
+            None => {
+                return Err(StoreError::InvalidInput {
+                    detail: format!("pending action not found: {pending_id}"),
+                });
+            }
+        };
+        if pa.status != "approved" {
+            return Err(StoreError::InvalidInput {
+                detail: format!("cannot execute non-approved action (status={})", pa.status),
+            });
+        }
+        match pa.action_type.as_str() {
+            "store" => {
+                let mut mem: Memory = match serde_json::from_value(pa.payload.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        return Err(StoreError::IntegrityFailed {
+                            detail: format!("invalid store payload: {e}"),
+                        });
+                    }
+                };
+                // Stamp fresh id + timestamps for idempotent replay.
+                mem.id = uuid::Uuid::new_v4().to_string();
+                let now = Utc::now().to_rfc3339();
+                mem.created_at.clone_from(&now);
+                mem.updated_at = now;
+                mem.access_count = 0;
+                let id = self.store(ctx, &mem).await?;
+                Ok(Some(id))
+            }
+            "delete" => {
+                if let Some(mid) = pa.memory_id.clone() {
+                    self.delete(ctx, &mid).await?;
+                    Ok(Some(mid))
+                } else {
+                    Ok(None)
+                }
+            }
+            "promote" => {
+                if let Some(mid) = pa.memory_id.clone() {
+                    let patch = crate::store::UpdatePatch {
+                        tier: Some(Tier::Long),
+                        ..Default::default()
+                    };
+                    self.update(ctx, &mid, patch).await?;
+                    Ok(Some(mid))
+                } else {
+                    Ok(None)
+                }
+            }
+            other => Err(StoreError::InvalidInput {
+                detail: format!("unsupported action_type: {other}"),
+            }),
+        }
+    }
+
     async fn is_registered_agent(&self, agent_id: &str) -> StoreResult<bool> {
         use crate::models::AGENTS_NAMESPACE;
         let title = format!("agent:{agent_id}");

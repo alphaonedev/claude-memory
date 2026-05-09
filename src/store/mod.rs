@@ -376,6 +376,23 @@ pub trait MemoryStore: Send + Sync {
         Ok(())
     }
 
+    /// Execute an approved pending governance action — mirrors
+    /// `db::execute_pending_action` on the SQLite path. The pending
+    /// row's `action_type` selects the operation (`store` / `delete`
+    /// / `promote`) and the `payload` carries the materialised
+    /// memory data. Returns the resulting memory id when the action
+    /// produced one (store + promote), or `None` for a delete.
+    /// Default returns `UnsupportedCapability`.
+    async fn execute_pending_action(
+        &self,
+        _ctx: &CallerContext,
+        _pending_id: &str,
+    ) -> StoreResult<Option<String>> {
+        Err(StoreError::UnsupportedCapability {
+            capability: "GOVERNANCE_EXECUTE_PENDING".to_string(),
+        })
+    }
+
     /// Fetch a memory by id. Returns `NotFound` when the memory does
     /// not exist OR when the caller lacks read permission (the trait
     /// deliberately does not leak existence; adapters must fold
