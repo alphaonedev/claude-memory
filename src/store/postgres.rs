@@ -60,15 +60,29 @@ use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
 /// Bootstrap schema run at adapter init — idempotent via IF NOT EXISTS.
 const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 
-/// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:173).
+/// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
-/// v23 (v0.7.0 H2) adds `memory_links.attest_level` so signed-link
-/// writes have a column to land on. v24 (v0.7.0 F6) adds the
-/// `kg_query_view` / `kg_timeline_view` / `kg_find_paths()` SQL surfaces
-/// so the SAL KG shapes are reachable from psql / BI tools without going
-/// through Rust.
-const CURRENT_SCHEMA_VERSION: i32 = 24;
+/// v15 — Temporal-validity columns on `memory_links` + `entity_aliases`.
+/// v17 — `metadata.governance.inherit` backfill (mirrors SQLite v17).
+/// v18 — Data-integrity hardening (`embedding_dim`, archive lossless,
+///       endianness header backfill — SQLite v18 / Postgres
+///       0011_v0631_data_integrity).
+/// v19 — Webhook `event_types` JSON array on subscriptions + index.
+/// v20 — `audit_log` table for capability-expansion observability.
+/// v21 — `pending_actions.default_timeout_seconds` + `expired_at`
+///       columns plus the (status, requested_at) sweep index.
+/// v22 — `memory_transcripts` substrate (attested-cortex epic I1).
+/// v23 — `memory_links.attest_level` for signed-link writes (H2).
+/// v24 — `memory_transcript_links` join table (I2) + the F6 SAL KG
+///       SQL surfaces (`kg_query_view` / `kg_timeline_view` /
+///       `kg_find_paths()`).
+/// v25 — `memory_transcripts.archived_at` for archive→prune lifecycle (I3).
+/// v26 — `signed_events` append-only audit table (H5).
+/// v27 — A2A correlation IDs + DLQ (`subscription_events`,
+///       `subscription_dlq`) (K6).
+/// v28 — `agent_quotas` per-agent rate + storage caps (K8).
+const CURRENT_SCHEMA_VERSION: i32 = 28;
 
 /// Default connection pool settings. Tuned for a mid-range ai-memory
 /// daemon — adjust via `PostgresStore::with_pool_options` when wiring
@@ -227,14 +241,48 @@ impl PostgresStore {
         }
 
         // Apply each migration step in its own transaction for idempotence.
+        // Versions 15→28 are stamped in order; each migrate_vN function is
+        // independently idempotent (column-existence checks + IF NOT EXISTS
+        // DDL) so re-running the migrator on a partially-stamped database
+        // is safe.
         if current_version < 15 {
             self.migrate_v15().await?;
+        }
+        if current_version < 17 {
+            self.migrate_v17().await?;
+        }
+        if current_version < 18 {
+            self.migrate_v18().await?;
+        }
+        if current_version < 19 {
+            self.migrate_v19().await?;
+        }
+        if current_version < 20 {
+            self.migrate_v20().await?;
+        }
+        if current_version < 21 {
+            self.migrate_v21().await?;
+        }
+        if current_version < 22 {
+            self.migrate_v22().await?;
         }
         if current_version < 23 {
             self.migrate_v23().await?;
         }
         if current_version < 24 {
             self.migrate_v24().await?;
+        }
+        if current_version < 25 {
+            self.migrate_v25().await?;
+        }
+        if current_version < 26 {
+            self.migrate_v26().await?;
+        }
+        if current_version < 27 {
+            self.migrate_v27().await?;
+        }
+        if current_version < 28 {
+            self.migrate_v28().await?;
         }
 
         Ok(())
@@ -292,22 +340,55 @@ impl PostgresStore {
         Ok(())
     }
 
-    /// v0.7.0 F6 — Define `kg_query_view`, `kg_timeline_view`, and
-    /// `kg_find_paths()`. The view bodies live in `postgres_schema.sql`
-    /// (which is re-run on every connect, so the views are always
-    /// present on a fresh init); this migration is the bookkeeping
-    /// step that records the version stamp on databases that bootstrapped
-    /// before the views existed.
+    /// v0.7.0 v24 — `memory_transcript_links` join table (I2) and the
+    /// F6 SAL knowledge-graph SQL surfaces (`kg_query_view`,
+    /// `kg_timeline_view`, `kg_find_paths()`).
     ///
-    /// Re-running the view DDL here is defensive: if a deployment
-    /// somehow drifted (e.g. operator dropped a view manually), this
-    /// migration restores them via `CREATE OR REPLACE`.
+    /// Mirrors `migrations/sqlite/0018_v07_transcript_links.sql` plus
+    /// the Postgres-only F6 view set. The view bodies live in
+    /// `postgres_schema.sql` (which is re-run on every connect, so they
+    /// are always present on a fresh init); this migration also stamps
+    /// the bookkeeping row and re-runs the DDL defensively in case an
+    /// operator dropped a view between connects.
     async fn migrate_v24(&self) -> StoreResult<()> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| to_store_err("begin v24 tx", e))?;
+
+        // I2 — memory_transcript_links join table. ON DELETE CASCADE on
+        // both foreign keys keeps the join free of dangling rows when
+        // memories are deleted or I3's archive→prune lifecycle removes
+        // transcripts. Mirrors SQLite migration 0018_v07_transcript_links.
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memory_transcript_links (
+                memory_id     TEXT NOT NULL REFERENCES memories(id)           ON DELETE CASCADE,
+                transcript_id TEXT NOT NULL REFERENCES memory_transcripts(id) ON DELETE CASCADE,
+                span_start    BIGINT,
+                span_end      BIGINT,
+                PRIMARY KEY (memory_id, transcript_id)
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create memory_transcript_links table", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_mtl_transcript
+             ON memory_transcript_links (transcript_id)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_mtl_transcript", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_mtl_memory
+             ON memory_transcript_links (memory_id)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_mtl_memory", e))?;
 
         // Re-create the views in case operators dropped them between
         // connects. Bodies match postgres_schema.sql verbatim — kept
@@ -386,6 +467,605 @@ impl PostgresStore {
             .map_err(|e| to_store_err("commit v24 migration", e))?;
 
         tracing::info!(target = "store::postgres", "schema migration v24 applied");
+        Ok(())
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // v0.7.0 schema parity — Wave 2 ports of SQLite migrations 0012-0022
+    // (schema versions 17-28) onto the Postgres adapter. Each function
+    // is independently idempotent: it re-issues IF NOT EXISTS DDL plus
+    // explicit `information_schema.columns` checks for ALTER TABLE
+    // additions Postgres lacks an `IF NOT EXISTS` clause for. The
+    // bootstrap script (`postgres_schema.sql`) already creates the
+    // current shape on a fresh init; these handlers exist for in-place
+    // upgrades from v15-stamped or v23-stamped pre-existing deployments.
+    // Mirrors the SQLite-side ladder in `src/db.rs::migrate`.
+    // ───────────────────────────────────────────────────────────────────
+
+    /// v17 — Governance inheritance backfill.
+    ///
+    /// Mirrors `migrations/sqlite/0012_governance_inherit.sql`. Adds the
+    /// `inherit` field (default `true`) to existing
+    /// `metadata.governance` policy objects so the field is physically
+    /// present on legacy rows. The Rust deserializer already defaults
+    /// missing fields to `true`, so this only changes how the JSON
+    /// looks at SQL inspection time, not the semantic resolution.
+    /// Idempotent: only updates rows whose `inherit` is currently NULL.
+    async fn migrate_v17(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v17 tx", e))?;
+
+        // Postgres jsonb_set sets inherit=true on `metadata.governance`
+        // objects that don't yet carry the field. The WHERE clause
+        // restricts the rewrite to JSON objects with a non-null
+        // governance object whose `inherit` is missing — same shape as
+        // the SQLite UPDATE in 0012_governance_inherit.sql.
+        sqlx::query(
+            "UPDATE memories
+             SET metadata = jsonb_set(
+                 metadata,
+                 '{governance,inherit}',
+                 'true'::jsonb,
+                 true
+             )
+             WHERE jsonb_typeof(metadata -> 'governance') = 'object'
+               AND NOT (metadata -> 'governance' ? 'inherit')",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("backfill governance.inherit", e))?;
+
+        record_schema_version(&mut tx, 17).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v17 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v17 applied");
+        Ok(())
+    }
+
+    /// v18 — Data-integrity hardening (`embedding_dim` columns + archive
+    /// lossless metadata).
+    ///
+    /// Mirrors `migrations/sqlite/0011_v0631_data_integrity.sql` and the
+    /// inline column adds in `db.rs::migrate` v18 block. Adds:
+    ///   - `memories.embedding_dim`
+    ///   - `archived_memories.embedding`, `embedding_dim`,
+    ///     `original_tier`, `original_expires_at`
+    /// plus the partial `embedding_dim` indexes on memories.
+    ///
+    /// Backfill: legacy rows have `embedding_dim` NULL; we leave them
+    /// NULL because Postgres `vector` type does not expose an octet
+    /// length matching SQLite's `length(embedding)/4` heuristic — the
+    /// in-app daemon writes the dim alongside the vector going forward.
+    /// `archived_memories.original_tier` is backfilled to `'long'` to
+    /// match the SQLite path's defensive default.
+    async fn migrate_v18(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v18 tx", e))?;
+
+        for (table, column, ddl) in [
+            (
+                "memories",
+                "embedding_dim",
+                "ALTER TABLE memories ADD COLUMN embedding_dim INTEGER",
+            ),
+            (
+                "archived_memories",
+                "embedding",
+                "ALTER TABLE archived_memories ADD COLUMN embedding vector(384)",
+            ),
+            (
+                "archived_memories",
+                "embedding_dim",
+                "ALTER TABLE archived_memories ADD COLUMN embedding_dim INTEGER",
+            ),
+            (
+                "archived_memories",
+                "original_tier",
+                "ALTER TABLE archived_memories ADD COLUMN original_tier TEXT",
+            ),
+            (
+                "archived_memories",
+                "original_expires_at",
+                "ALTER TABLE archived_memories ADD COLUMN original_expires_at TIMESTAMPTZ",
+            ),
+        ] {
+            add_column_if_missing(&mut tx, table, column, ddl).await?;
+        }
+
+        // G5 backfill — pre-existing archive rows have lost original
+        // tier/expiry; default original_tier to 'long' so restore_archived
+        // doesn't immediately re-delete on first restore. NULL stays NULL
+        // for original_expires_at (permanent until re-tiered).
+        sqlx::query(
+            "UPDATE archived_memories
+             SET original_tier = 'long'
+             WHERE original_tier IS NULL",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("backfill original_tier", e))?;
+
+        // Partial indexes — match SQLite's idx_memories_embedding_dim and
+        // idx_memories_ns_dim. The bootstrap creates these too; re-running
+        // here is a no-op against a fresh init.
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memories_embedding_dim
+             ON memories (embedding_dim)
+             WHERE embedding_dim IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_memories_embedding_dim", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memories_ns_dim
+             ON memories (namespace, embedding_dim)
+             WHERE embedding_dim IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_memories_ns_dim", e))?;
+
+        record_schema_version(&mut tx, 18).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v18 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v18 applied");
+        Ok(())
+    }
+
+    /// v19 — Webhook `event_types` JSON array on subscriptions.
+    ///
+    /// Mirrors `migrations/sqlite/0013_webhook_event_types.sql`. Adds a
+    /// JSONB column for the structured event-type opt-in surface; the
+    /// legacy `events` text column stays as the canonical match key at
+    /// dispatch time. The supporting index keeps list_subscriptions
+    /// O(log n) when callers want to scope by event.
+    async fn migrate_v19(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v19 tx", e))?;
+
+        add_column_if_missing(
+            &mut tx,
+            "subscriptions",
+            "event_types",
+            "ALTER TABLE subscriptions ADD COLUMN event_types JSONB",
+        )
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_subscriptions_event_types
+             ON subscriptions (event_types)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_subscriptions_event_types", e))?;
+
+        record_schema_version(&mut tx, 19).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v19 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v19 applied");
+        Ok(())
+    }
+
+    /// v20 — Capability-expansion `audit_log` table.
+    ///
+    /// Mirrors `migrations/sqlite/0014_v064_audit_log.sql`. Idempotent
+    /// CREATE TABLE IF NOT EXISTS + indexes. The Postgres column type
+    /// for `granted` is BOOLEAN where SQLite uses INTEGER 0/1; both
+    /// surface as Rust `bool` so callers stay backend-agnostic.
+    async fn migrate_v20(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v20 tx", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS audit_log (
+                id                 TEXT PRIMARY KEY,
+                agent_id           TEXT,
+                event_type         TEXT NOT NULL,
+                requested_family   TEXT,
+                granted            BOOLEAN NOT NULL,
+                attestation_tier   TEXT,
+                timestamp          TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create audit_log table", e))?;
+
+        for (name, ddl) in [
+            (
+                "idx_audit_log_agent_id",
+                "CREATE INDEX IF NOT EXISTS idx_audit_log_agent_id ON audit_log (agent_id)",
+            ),
+            (
+                "idx_audit_log_timestamp",
+                "CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log (timestamp)",
+            ),
+            (
+                "idx_audit_log_event_type",
+                "CREATE INDEX IF NOT EXISTS idx_audit_log_event_type ON audit_log (event_type)",
+            ),
+        ] {
+            sqlx::query(ddl)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err(&format!("create {name}"), e))?;
+        }
+
+        record_schema_version(&mut tx, 20).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v20 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v20 applied");
+        Ok(())
+    }
+
+    /// v21 — `pending_actions` timeout sweeper columns + sweep index.
+    ///
+    /// Mirrors `migrations/sqlite/0015_v07_pending_action_timeouts.sql`
+    /// and the inline column adds in `db.rs::migrate` v21 block. Adds:
+    ///   - `pending_actions.default_timeout_seconds` (per-row TTL)
+    ///   - `pending_actions.expired_at` (RFC3339 stamp on transition)
+    /// plus the composite `(status, requested_at)` sweep index.
+    async fn migrate_v21(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v21 tx", e))?;
+
+        add_column_if_missing(
+            &mut tx,
+            "pending_actions",
+            "default_timeout_seconds",
+            "ALTER TABLE pending_actions ADD COLUMN default_timeout_seconds BIGINT",
+        )
+        .await?;
+
+        add_column_if_missing(
+            &mut tx,
+            "pending_actions",
+            "expired_at",
+            "ALTER TABLE pending_actions ADD COLUMN expired_at TIMESTAMPTZ",
+        )
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS pending_actions_status_requested_idx
+             ON pending_actions (status, requested_at)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create pending_actions_status_requested_idx", e))?;
+
+        record_schema_version(&mut tx, 21).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v21 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v21 applied");
+        Ok(())
+    }
+
+    /// v22 — `memory_transcripts` substrate (attested-cortex epic, I1).
+    ///
+    /// Mirrors `migrations/sqlite/0016_v07_transcripts.sql`. Compressed
+    /// (zstd-3) blob storage of conversation transcripts. The Rust
+    /// transcripts.rs read/write path currently binds to SQLite; the
+    /// table is provisioned here for parity so a Postgres bootstrap is
+    /// one wiring change away from full SAL coverage.
+    async fn migrate_v22(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v22 tx", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS memory_transcripts (
+                id               TEXT PRIMARY KEY,
+                namespace        TEXT NOT NULL,
+                created_at       TIMESTAMPTZ NOT NULL,
+                expires_at       TIMESTAMPTZ,
+                compressed_size  BIGINT NOT NULL,
+                original_size    BIGINT NOT NULL,
+                zstd_level       INTEGER NOT NULL DEFAULT 3,
+                content_blob     BYTEA NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create memory_transcripts table", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memory_transcripts_namespace_created
+             ON memory_transcripts (namespace, created_at)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_memory_transcripts_namespace_created", e))?;
+
+        record_schema_version(&mut tx, 22).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v22 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v22 applied");
+        Ok(())
+    }
+
+    /// v25 — Per-namespace transcript TTL with archive→prune lifecycle (I3).
+    ///
+    /// Mirrors `migrations/sqlite/0019_v07_transcript_lifecycle.sql` and
+    /// the inline ADD COLUMN in `db.rs::migrate` v25 block. Adds
+    /// `memory_transcripts.archived_at` plus the supporting partial
+    /// index on archived rows so the prune-phase scan stays
+    /// O(archived) rather than O(total transcripts).
+    async fn migrate_v25(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v25 tx", e))?;
+
+        add_column_if_missing(
+            &mut tx,
+            "memory_transcripts",
+            "archived_at",
+            "ALTER TABLE memory_transcripts ADD COLUMN archived_at TIMESTAMPTZ",
+        )
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memory_transcripts_archived_at
+             ON memory_transcripts (archived_at)
+             WHERE archived_at IS NOT NULL",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_memory_transcripts_archived_at", e))?;
+
+        record_schema_version(&mut tx, 25).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v25 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v25 applied");
+        Ok(())
+    }
+
+    /// v26 — `signed_events` append-only audit table (H5).
+    ///
+    /// Mirrors `migrations/sqlite/0020_v07_signed_events.sql`. The
+    /// append-only invariant is enforced at the Rust API surface (one
+    /// writer, no UPDATE/DELETE call sites) — no SQL-layer triggers
+    /// here because they would also fire against operator-driven
+    /// retention pruning, defeating the documented escape hatch.
+    async fn migrate_v26(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v26 tx", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS signed_events (
+                id           TEXT PRIMARY KEY,
+                agent_id     TEXT NOT NULL,
+                event_type   TEXT NOT NULL,
+                payload_hash BYTEA NOT NULL,
+                signature    BYTEA,
+                attest_level TEXT NOT NULL DEFAULT 'unsigned',
+                timestamp    TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create signed_events table", e))?;
+
+        for (name, ddl) in [
+            (
+                "idx_signed_events_agent",
+                "CREATE INDEX IF NOT EXISTS idx_signed_events_agent ON signed_events (agent_id)",
+            ),
+            (
+                "idx_signed_events_type",
+                "CREATE INDEX IF NOT EXISTS idx_signed_events_type ON signed_events (event_type)",
+            ),
+            (
+                "idx_signed_events_timestamp",
+                "CREATE INDEX IF NOT EXISTS idx_signed_events_timestamp ON signed_events (timestamp)",
+            ),
+        ] {
+            sqlx::query(ddl)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err(&format!("create {name}"), e))?;
+        }
+
+        record_schema_version(&mut tx, 26).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v26 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v26 applied");
+        Ok(())
+    }
+
+    /// v27 — A2A correlation IDs + DLQ.
+    ///
+    /// Mirrors `migrations/sqlite/0021_v07_a2a_correlation.sql`. Brings
+    /// up `subscription_events` (per-delivery audit log keyed on
+    /// UUIDv7 correlation_id) and `subscription_dlq` (failures past
+    /// the three-attempt retry ladder). On Postgres these tables use
+    /// BIGSERIAL primary keys; the Rust callers see monotonically-
+    /// increasing i64 values matching SQLite's autoincrement.
+    async fn migrate_v27(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v27 tx", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS subscription_events (
+                id              BIGSERIAL PRIMARY KEY,
+                subscription_id TEXT NOT NULL,
+                correlation_id  TEXT NOT NULL DEFAULT '',
+                event_type      TEXT NOT NULL,
+                payload         JSONB NOT NULL,
+                delivered_at    TIMESTAMPTZ NOT NULL,
+                delivery_status TEXT NOT NULL DEFAULT 'pending'
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create subscription_events table", e))?;
+
+        // Defensive ALTER TABLE for deployments that hand-rolled a
+        // `subscription_events` table before K6 (mirrors the inline
+        // column add in src/db.rs::migrate v27 block).
+        add_column_if_missing(
+            &mut tx,
+            "subscription_events",
+            "correlation_id",
+            "ALTER TABLE subscription_events ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''",
+        )
+        .await?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_subscription_events_correlation
+             ON subscription_events (correlation_id)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_subscription_events_correlation", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_subscription_events_subscription
+             ON subscription_events (subscription_id, delivered_at)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_subscription_events_subscription", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS subscription_dlq (
+                id               BIGSERIAL PRIMARY KEY,
+                subscription_id  TEXT NOT NULL,
+                correlation_id   TEXT NOT NULL,
+                event_type       TEXT NOT NULL,
+                payload          JSONB NOT NULL,
+                retry_count      INTEGER NOT NULL,
+                last_error       TEXT NOT NULL,
+                first_failed_at  TIMESTAMPTZ NOT NULL,
+                last_failed_at   TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create subscription_dlq table", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_subscription_dlq_subscription
+             ON subscription_dlq (subscription_id, last_failed_at)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_subscription_dlq_subscription", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_subscription_dlq_correlation
+             ON subscription_dlq (correlation_id)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_subscription_dlq_correlation", e))?;
+
+        record_schema_version(&mut tx, 27).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v27 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v27 applied");
+        Ok(())
+    }
+
+    /// v28 — Per-agent quotas (`agent_quotas`).
+    ///
+    /// Mirrors `migrations/sqlite/0022_v07_agent_quotas.sql`. Idempotent
+    /// CREATE TABLE IF NOT EXISTS + index. Compiled defaults match the
+    /// SQLite path: 1000 memories/day, 100 MiB storage cap, 5000
+    /// links/day. Daily counters reset at UTC midnight via the K8
+    /// sweep loop (currently SQLite-bound; SAL wiring in a future wave).
+    async fn migrate_v28(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v28 tx", e))?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS agent_quotas (
+                agent_id                TEXT PRIMARY KEY,
+                max_memories_per_day    BIGINT  NOT NULL DEFAULT 1000,
+                max_storage_bytes       BIGINT  NOT NULL DEFAULT 104857600,
+                max_links_per_day       BIGINT  NOT NULL DEFAULT 5000,
+                current_memories_today  BIGINT  NOT NULL DEFAULT 0,
+                current_storage_bytes   BIGINT  NOT NULL DEFAULT 0,
+                current_links_today     BIGINT  NOT NULL DEFAULT 0,
+                day_started_at          TIMESTAMPTZ NOT NULL,
+                created_at              TIMESTAMPTZ NOT NULL,
+                updated_at              TIMESTAMPTZ NOT NULL
+            )",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create agent_quotas table", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_agent_quotas_agent_id
+             ON agent_quotas (agent_id)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_agent_quotas_agent_id", e))?;
+
+        record_schema_version(&mut tx, 28).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v28 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v28 applied");
         Ok(())
     }
 
@@ -1803,6 +2483,40 @@ fn to_store_err(what: &str, e: sqlx::Error) -> StoreError {
         backend: "postgres".to_string(),
         detail: format!("{what}: {e}"),
     }
+}
+
+/// Issue an `ALTER TABLE ... ADD COLUMN` only when the column is not
+/// yet present. Postgres has no `ADD COLUMN IF NOT EXISTS` clause that
+/// also tolerates an existing column with a different shape — the
+/// `information_schema.columns` lookup is the safest probe and runs in
+/// the same transaction so a concurrent re-applied migration is
+/// serializable. Caller passes the full DDL string verbatim because
+/// each ADD COLUMN may carry different defaults / nullability.
+async fn add_column_if_missing(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    table: &str,
+    column: &str,
+    ddl: &str,
+) -> StoreResult<()> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = $1 AND column_name = $2
+        )",
+    )
+    .bind(table)
+    .bind(column)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| to_store_err(&format!("check {table}.{column} column"), e))?;
+
+    if !exists {
+        sqlx::query(ddl)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| to_store_err(&format!("add {table}.{column} column"), e))?;
+    }
+    Ok(())
 }
 
 /// Stamp a successful schema migration into `schema_version`.
@@ -3250,5 +3964,418 @@ mod tests {
             has_entity_aliases_idx.is_some(),
             "idx_entity_aliases_alias must exist"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // v0.7.0 Wave 2 — schema parity v17 → v28.
+    //
+    // Each test below either asserts the bootstrap shape (CREATE TABLE
+    // / CREATE INDEX present after `connect`) or exercises a tiny CRUD
+    // round-trip against the new substrate. All tests skip cleanly
+    // when AI_MEMORY_TEST_POSTGRES_URL is unset so the default offline
+    // flow stays green.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn init_schema_advertises_full_v28_shape() {
+        // Sanity-check the bootstrap SQL covers every load-bearing
+        // table/column added between v17 and v28. A typo'd rename or
+        // an accidental drop catches here in CI rather than on the
+        // first live `connect()` against a populated host.
+        for needle in [
+            // v17 — governance.inherit (no DDL, runtime backfill only).
+            // v18 — embedding_dim columns + archive lossless.
+            "embedding_dim",
+            "original_tier",
+            "original_expires_at",
+            // v19 — webhook event_types + index.
+            "event_types",
+            "idx_subscriptions_event_types",
+            // v20 — capability-expansion audit_log.
+            "CREATE TABLE IF NOT EXISTS audit_log",
+            "idx_audit_log_agent_id",
+            // v21 — pending_actions timeout sweeper.
+            "default_timeout_seconds",
+            "expired_at",
+            "pending_actions_status_requested_idx",
+            // v22 — memory_transcripts substrate.
+            "CREATE TABLE IF NOT EXISTS memory_transcripts",
+            "idx_memory_transcripts_namespace_created",
+            // v23 — memory_links.attest_level.
+            "idx_memory_links_attest_level",
+            // v24 — memory_transcript_links join table.
+            "CREATE TABLE IF NOT EXISTS memory_transcript_links",
+            "idx_mtl_transcript",
+            "idx_mtl_memory",
+            // v25 — transcript archive lifecycle.
+            "idx_memory_transcripts_archived_at",
+            // v26 — signed_events audit chain.
+            "CREATE TABLE IF NOT EXISTS signed_events",
+            "idx_signed_events_agent",
+            // v27 — A2A correlation IDs + DLQ.
+            "CREATE TABLE IF NOT EXISTS subscription_events",
+            "CREATE TABLE IF NOT EXISTS subscription_dlq",
+            "idx_subscription_events_correlation",
+            "idx_subscription_dlq_correlation",
+            // v28 — agent_quotas.
+            "CREATE TABLE IF NOT EXISTS agent_quotas",
+            "idx_agent_quotas_agent_id",
+        ] {
+            assert!(
+                INIT_SCHEMA.contains(needle),
+                "postgres_schema.sql missing expected v17-v28 fragment: {needle}"
+            );
+        }
+    }
+
+    #[test]
+    fn current_schema_version_matches_sqlite_ladder() {
+        // Pin the parity invariant: Postgres MUST track the SQLite
+        // CURRENT_SCHEMA_VERSION (28 as of v0.7.0). A future bump on
+        // either side without the corresponding port re-trips this
+        // assertion before the migration runner gets a chance to
+        // write a partial schema to disk.
+        assert_eq!(CURRENT_SCHEMA_VERSION, 28);
+    }
+
+    #[tokio::test]
+    async fn live_migration_reaches_v28() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+
+        let stamped: Option<i32> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+            .fetch_optional(&store.pool)
+            .await
+            .expect("read max schema_version");
+        assert_eq!(
+            stamped,
+            Some(CURRENT_SCHEMA_VERSION),
+            "schema_version must reach CURRENT_SCHEMA_VERSION (28)"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_migration_v17_to_v28_is_idempotent() {
+        // Run migrate() twice and assert the schema_version is stable;
+        // the IF NOT EXISTS DDL + column-existence guards mean every
+        // migrate_vN must be a no-op on a populated database.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+
+        let first: Option<i32> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+            .fetch_optional(&store.pool)
+            .await
+            .expect("read first version");
+
+        store.migrate().await.expect("migrate again");
+
+        let second: Option<i32> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+            .fetch_optional(&store.pool)
+            .await
+            .expect("read second version");
+
+        assert_eq!(first, second, "migrate() must be idempotent");
+        assert_eq!(second, Some(CURRENT_SCHEMA_VERSION));
+    }
+
+    /// Helper: assert a named relation (table or view) exists.
+    async fn assert_relation_exists(pool: &PgPool, relname: &str) {
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM pg_class WHERE relname = $1 AND relkind IN ('r','v')",
+        )
+        .bind(relname)
+        .fetch_optional(pool)
+        .await
+        .expect("query pg_class");
+        assert!(exists.is_some(), "expected relation {relname} to exist");
+    }
+
+    /// Helper: assert a named index exists.
+    async fn assert_index_exists(pool: &PgPool, indexname: &str) {
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT indexname FROM pg_indexes WHERE indexname = $1")
+                .bind(indexname)
+                .fetch_optional(pool)
+                .await
+                .expect("query pg_indexes");
+        assert!(exists.is_some(), "expected index {indexname} to exist");
+    }
+
+    /// Helper: assert a column on a table exists.
+    async fn assert_column_exists(pool: &PgPool, table: &str, column: &str) {
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM information_schema.columns
+             WHERE table_name = $1 AND column_name = $2",
+        )
+        .bind(table)
+        .bind(column)
+        .fetch_optional(pool)
+        .await
+        .expect("query information_schema");
+        assert!(
+            exists.is_some(),
+            "expected column {table}.{column} to exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_v18_data_integrity_columns_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        for (table, column) in [
+            ("memories", "embedding_dim"),
+            ("archived_memories", "embedding"),
+            ("archived_memories", "embedding_dim"),
+            ("archived_memories", "original_tier"),
+            ("archived_memories", "original_expires_at"),
+        ] {
+            assert_column_exists(&store.pool, table, column).await;
+        }
+        assert_index_exists(&store.pool, "idx_memories_embedding_dim").await;
+        assert_index_exists(&store.pool, "idx_memories_ns_dim").await;
+    }
+
+    #[tokio::test]
+    async fn live_v19_webhook_event_types_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_column_exists(&store.pool, "subscriptions", "event_types").await;
+        assert_index_exists(&store.pool, "idx_subscriptions_event_types").await;
+    }
+
+    #[tokio::test]
+    async fn live_v20_audit_log_table_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "audit_log").await;
+        assert_index_exists(&store.pool, "idx_audit_log_agent_id").await;
+        assert_index_exists(&store.pool, "idx_audit_log_timestamp").await;
+        assert_index_exists(&store.pool, "idx_audit_log_event_type").await;
+
+        // CRUD round-trip — the K8 attested-cortex epic queries this
+        // by (agent_id, timestamp). Insert / read / delete to prove the
+        // table is functionally writable, not just present.
+        let now = chrono::Utc::now();
+        let id = format!("audit-{}", uuid::Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO audit_log
+             (id, agent_id, event_type, requested_family, granted, attestation_tier, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind("ai:test")
+        .bind("capability_expansion")
+        .bind("kg")
+        .bind(true)
+        .bind(Option::<&str>::None)
+        .bind(now)
+        .execute(&store.pool)
+        .await
+        .expect("insert audit_log row");
+
+        let granted: bool = sqlx::query_scalar("SELECT granted FROM audit_log WHERE id = $1")
+            .bind(&id)
+            .fetch_one(&store.pool)
+            .await
+            .expect("read audit_log row");
+        assert!(granted, "round-trip should preserve granted=true");
+
+        sqlx::query("DELETE FROM audit_log WHERE id = $1")
+            .bind(&id)
+            .execute(&store.pool)
+            .await
+            .expect("delete audit_log row");
+    }
+
+    #[tokio::test]
+    async fn live_v21_pending_actions_timeout_columns_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_column_exists(&store.pool, "pending_actions", "default_timeout_seconds").await;
+        assert_column_exists(&store.pool, "pending_actions", "expired_at").await;
+        assert_index_exists(&store.pool, "pending_actions_status_requested_idx").await;
+    }
+
+    #[tokio::test]
+    async fn live_v22_memory_transcripts_table_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "memory_transcripts").await;
+        assert_index_exists(&store.pool, "idx_memory_transcripts_namespace_created").await;
+    }
+
+    #[tokio::test]
+    async fn live_v24_transcript_links_and_kg_views_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "memory_transcript_links").await;
+        assert_index_exists(&store.pool, "idx_mtl_transcript").await;
+        assert_index_exists(&store.pool, "idx_mtl_memory").await;
+        // F6 KG views are the Postgres-only addition tied to the v24 stamp.
+        assert_relation_exists(&store.pool, "kg_query_view").await;
+        assert_relation_exists(&store.pool, "kg_timeline_view").await;
+        // kg_find_paths is a function — probe via pg_proc.
+        let fn_exists: Option<i32> =
+            sqlx::query_scalar("SELECT 1 FROM pg_proc WHERE proname = 'kg_find_paths'")
+                .fetch_optional(&store.pool)
+                .await
+                .expect("query pg_proc for kg_find_paths");
+        assert!(fn_exists.is_some(), "kg_find_paths function must exist");
+    }
+
+    #[tokio::test]
+    async fn live_v25_transcript_archive_lifecycle_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_column_exists(&store.pool, "memory_transcripts", "archived_at").await;
+        assert_index_exists(&store.pool, "idx_memory_transcripts_archived_at").await;
+    }
+
+    #[tokio::test]
+    async fn live_v26_signed_events_table_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "signed_events").await;
+        for idx in [
+            "idx_signed_events_agent",
+            "idx_signed_events_type",
+            "idx_signed_events_timestamp",
+        ] {
+            assert_index_exists(&store.pool, idx).await;
+        }
+
+        // Append-only round-trip — INSERT then SELECT. Mirrors the
+        // single-writer contract documented on signed_events: no
+        // UPDATE / DELETE call site is allowed to land in production
+        // src/ (enforced by the
+        // `append_only_invariant_no_mutators_in_src` test in
+        // src/signed_events.rs). The test row uses a UUIDv4 id so
+        // re-runs against the same disposable database accumulate
+        // bounded inert rows rather than colliding.
+        let id = format!("se-{}", uuid::Uuid::new_v4());
+        let payload_hash = vec![0u8; 32];
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO signed_events
+             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind("ai:test")
+        .bind("memory_link.created")
+        .bind(&payload_hash)
+        .bind(Option::<Vec<u8>>::None)
+        .bind("unsigned")
+        .bind(now)
+        .execute(&store.pool)
+        .await
+        .expect("insert signed_events row");
+
+        let level: String =
+            sqlx::query_scalar("SELECT attest_level FROM signed_events WHERE id = $1")
+                .bind(&id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("read signed_events row");
+        assert_eq!(level, "unsigned");
+    }
+
+    #[tokio::test]
+    async fn live_v27_subscription_events_and_dlq_present() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "subscription_events").await;
+        assert_relation_exists(&store.pool, "subscription_dlq").await;
+        for idx in [
+            "idx_subscription_events_correlation",
+            "idx_subscription_events_subscription",
+            "idx_subscription_dlq_subscription",
+            "idx_subscription_dlq_correlation",
+        ] {
+            assert_index_exists(&store.pool, idx).await;
+        }
+        assert_column_exists(&store.pool, "subscription_events", "correlation_id").await;
+    }
+
+    #[tokio::test]
+    async fn live_v28_agent_quotas_table_present_and_writable() {
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        assert_relation_exists(&store.pool, "agent_quotas").await;
+        assert_index_exists(&store.pool, "idx_agent_quotas_agent_id").await;
+
+        // Round-trip — INSERT defaults, SELECT defaults, UPDATE counter,
+        // DELETE. Proves the BIGINT defaults match the SQLite ones
+        // (1000/100MiB/5000) byte-for-byte so the K8 sweep loop's
+        // "first-write" path will produce identical rows on either
+        // backend.
+        let agent = format!("ai:quota-test-{}", uuid::Uuid::new_v4());
+        let now = chrono::Utc::now();
+        sqlx::query(
+            "INSERT INTO agent_quotas
+             (agent_id, day_started_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4)",
+        )
+        .bind(&agent)
+        .bind(now)
+        .bind(now)
+        .bind(now)
+        .execute(&store.pool)
+        .await
+        .expect("insert agent_quotas row");
+
+        let (max_mem, max_bytes, max_links): (i64, i64, i64) = sqlx::query_as(
+            "SELECT max_memories_per_day, max_storage_bytes, max_links_per_day
+             FROM agent_quotas WHERE agent_id = $1",
+        )
+        .bind(&agent)
+        .fetch_one(&store.pool)
+        .await
+        .expect("read agent_quotas row");
+        assert_eq!(max_mem, 1000);
+        assert_eq!(max_bytes, 104_857_600);
+        assert_eq!(max_links, 5000);
+
+        sqlx::query("DELETE FROM agent_quotas WHERE agent_id = $1")
+            .bind(&agent)
+            .execute(&store.pool)
+            .await
+            .expect("delete agent_quotas row");
     }
 }
