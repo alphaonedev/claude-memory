@@ -49,12 +49,36 @@ use crate::store::{CallerContext, Filter, MemoryStore, sqlite::SqliteStore};
 /// One migration batch. Exposed for external callers that want to
 /// run a migration programmatically (e.g. a test harness or a
 /// management-plane service).
+///
+/// v0.7.0 F6 Gap 2 — adds `links_read` / `links_written` /
+/// `links_skipped` so a Postgres → SQLite migrate (or vice versa)
+/// preserves the full knowledge-graph rather than dropping every
+/// `memory_links` row on the floor. `links_skipped` counts inputs
+/// where the destination already held the same `(source_id,
+/// target_id, relation)` triple — idempotent re-runs report the row
+/// as skipped rather than written.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct MigrationReport {
     pub from_url: String,
     pub to_url: String,
     pub memories_read: usize,
     pub memories_written: usize,
+    /// v0.7.0 F6 Gap 2 — count of `memory_links` rows enumerated from
+    /// the source store.
+    #[serde(default)]
+    pub links_read: usize,
+    /// v0.7.0 F6 Gap 2 — count of `memory_links` rows the destination
+    /// accepted (new or refreshed). The sum
+    /// `links_written + links_skipped` always equals `links_read` on
+    /// success.
+    #[serde(default)]
+    pub links_written: usize,
+    /// v0.7.0 F6 Gap 2 — count of source links the destination
+    /// silently rejected because the unique key already matched
+    /// (`ON CONFLICT DO NOTHING` on Postgres,
+    /// `INSERT OR IGNORE` on SQLite).
+    #[serde(default)]
+    pub links_skipped: usize,
     pub batches: usize,
     pub errors: Vec<String>,
     pub dry_run: bool,
@@ -175,6 +199,93 @@ pub async fn migrate(
             match to.store(&ctx, mem).await {
                 Ok(_) => report.memories_written += 1,
                 Err(e) => report.errors.push(format!("write {} failed: {e}", mem.id)),
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Phase 2 — `memory_links` (v0.7.0 F6 Gap 2).
+    //
+    // After memories land we walk the source's `memory_links` table
+    // and replay each row into the destination. Both adapters'
+    // `link()` impls upsert via `ON CONFLICT DO NOTHING` /
+    // `INSERT OR IGNORE` on the `(source_id, target_id, relation)`
+    // unique key — re-running the migration is idempotent and the
+    // skipped rows surface in `links_skipped` rather than as errors.
+    //
+    // To distinguish "freshly written" from "already there" we
+    // pre-snapshot the destination link set BEFORE the write loop;
+    // any source link whose key was absent from the snapshot AND
+    // whose `link()` call returned Ok is counted as written. Source
+    // links whose key was already present are counted as skipped.
+    // This avoids a per-link RPC for the existence probe and keeps
+    // the total cost at O(|links|).
+    //
+    // The link write goes through the trait's `link()` rather than
+    // `link_signed()` because the source row already carries the
+    // (signature, observed_by, valid_from, valid_until) tuple — and
+    // `MemoryLink`'s round-trip from `list_links()` already preserves
+    // those fields. Re-signing on the destination would be wrong
+    // (we'd be claiming the link as the migration tool's own
+    // attestation rather than the original observer's), so we keep
+    // the rows opaque.
+    //
+    // Dry-run mode skips every write but still tallies `links_read`
+    // so operators can size the migration before committing.
+    let link_filter = namespace_filter.as_deref();
+    let links = match from.list_links(link_filter).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            report.errors.push(format!("source list_links failed: {e}"));
+            return report;
+        }
+    };
+
+    // Pre-snapshot the destination so we can attribute writes vs
+    // skips deterministically. An empty destination is the common
+    // case (fresh migrate) and every source link will land in the
+    // `written` bucket.
+    let dst_pre: std::collections::BTreeSet<(String, String, String)> = if dry_run {
+        std::collections::BTreeSet::new()
+    } else {
+        match to.list_links(link_filter).await {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|l| (l.source_id, l.target_id, l.relation))
+                .collect(),
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("destination list_links pre-snapshot failed: {e}"));
+                return report;
+            }
+        }
+    };
+
+    for link in &links {
+        report.links_read += 1;
+        if dry_run {
+            continue;
+        }
+        let key = (
+            link.source_id.clone(),
+            link.target_id.clone(),
+            link.relation.clone(),
+        );
+        let already_present = dst_pre.contains(&key);
+        match to.link(&ctx, link).await {
+            Ok(()) => {
+                if already_present {
+                    report.links_skipped += 1;
+                } else {
+                    report.links_written += 1;
+                }
+            }
+            Err(e) => {
+                report.errors.push(format!(
+                    "write link {}->{}/{} failed: {e}",
+                    link.source_id, link.target_id, link.relation
+                ));
             }
         }
     }

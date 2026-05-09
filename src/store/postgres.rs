@@ -62,7 +62,13 @@ const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:173).
 /// Incremented on each migration step.
-const CURRENT_SCHEMA_VERSION: i32 = 15;
+///
+/// v23 (v0.7.0 H2) adds `memory_links.attest_level` so signed-link
+/// writes have a column to land on. v24 (v0.7.0 F6) adds the
+/// `kg_query_view` / `kg_timeline_view` / `kg_find_paths()` SQL surfaces
+/// so the SAL KG shapes are reachable from psql / BI tools without going
+/// through Rust.
+const CURRENT_SCHEMA_VERSION: i32 = 24;
 
 /// Default connection pool settings. Tuned for a mid-range ai-memory
 /// daemon — adjust via `PostgresStore::with_pool_options` when wiring
@@ -224,7 +230,162 @@ impl PostgresStore {
         if current_version < 15 {
             self.migrate_v15().await?;
         }
+        if current_version < 23 {
+            self.migrate_v23().await?;
+        }
+        if current_version < 24 {
+            self.migrate_v24().await?;
+        }
 
+        Ok(())
+    }
+
+    /// v0.7.0 H2 — Add `attest_level` TEXT column to `memory_links`.
+    /// Mirrors SQLite migration 0017_v07_link_attest_level.sql.
+    /// Idempotent: ALTER TABLE … IF NOT EXISTS guarded by an
+    /// information_schema lookup, plus an idempotent backfill.
+    async fn migrate_v23(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v23 tx", e))?;
+
+        let has_attest_level: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='memory_links' AND column_name='attest_level'
+            )",
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("check attest_level column", e))?;
+
+        if !has_attest_level {
+            sqlx::query("ALTER TABLE memory_links ADD COLUMN attest_level TEXT")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| to_store_err("add attest_level column", e))?;
+        }
+
+        // Backfill rows written before the column existed.
+        sqlx::query("UPDATE memory_links SET attest_level = 'unsigned' WHERE attest_level IS NULL")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("backfill attest_level", e))?;
+
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS idx_memory_links_attest_level
+             ON memory_links (attest_level, created_at)",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create idx_memory_links_attest_level", e))?;
+
+        record_schema_version(&mut tx, 23).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v23 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v23 applied");
+        Ok(())
+    }
+
+    /// v0.7.0 F6 — Define `kg_query_view`, `kg_timeline_view`, and
+    /// `kg_find_paths()`. The view bodies live in `postgres_schema.sql`
+    /// (which is re-run on every connect, so the views are always
+    /// present on a fresh init); this migration is the bookkeeping
+    /// step that records the version stamp on databases that bootstrapped
+    /// before the views existed.
+    ///
+    /// Re-running the view DDL here is defensive: if a deployment
+    /// somehow drifted (e.g. operator dropped a view manually), this
+    /// migration restores them via `CREATE OR REPLACE`.
+    async fn migrate_v24(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v24 tx", e))?;
+
+        // Re-create the views in case operators dropped them between
+        // connects. Bodies match postgres_schema.sql verbatim — kept
+        // here as an inline copy so the migration is self-contained.
+        sqlx::query(
+            "CREATE OR REPLACE VIEW kg_query_view AS
+             WITH RECURSIVE traversal(source_id, target_id, relation, depth, path) AS (
+                 SELECT ml.source_id, ml.target_id, ml.relation, 1,
+                        ml.source_id || '->' || ml.target_id
+                 FROM memory_links ml
+                 UNION ALL
+                 SELECT t.source_id, ml.target_id, ml.relation, t.depth + 1,
+                        t.path || '->' || ml.target_id
+                 FROM memory_links ml
+                 JOIN traversal t ON ml.source_id = t.target_id
+                 WHERE t.depth < 5
+                   AND position(('->' || ml.target_id) IN t.path) = 0
+                   AND position((ml.target_id || '->') IN t.path) = 0
+             )
+             SELECT source_id, target_id, relation, depth, path FROM traversal",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create kg_query_view", e))?;
+
+        sqlx::query(
+            "CREATE OR REPLACE VIEW kg_timeline_view AS
+             SELECT ml.source_id, ml.target_id, ml.relation,
+                    ml.valid_from, ml.valid_until, ml.observed_by,
+                    encode(ml.signature, 'hex') AS signature_hex
+             FROM memory_links ml
+             WHERE ml.valid_from IS NOT NULL
+             ORDER BY ml.valid_from DESC, ml.created_at DESC",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create kg_timeline_view", e))?;
+
+        sqlx::query(
+            "CREATE OR REPLACE FUNCTION kg_find_paths(start_id TEXT, max_depth INTEGER)
+             RETURNS TABLE (path_id INTEGER, length INTEGER, nodes TEXT[], relations TEXT[])
+             LANGUAGE SQL STABLE PARALLEL SAFE AS $$
+                 WITH RECURSIVE walk(current_id, depth, nodes, relations) AS (
+                     SELECT start_id, 0, ARRAY[start_id], ARRAY[]::TEXT[]
+                     UNION ALL
+                     SELECT edges.next_id,
+                            w.depth + 1,
+                            w.nodes || edges.next_id,
+                            w.relations || edges.relation
+                     FROM walk w
+                     JOIN (
+                         SELECT source_id AS from_id, target_id AS next_id, relation FROM memory_links
+                         UNION
+                         SELECT target_id AS from_id, source_id AS next_id, relation FROM memory_links
+                     ) edges ON edges.from_id = w.current_id
+                     WHERE w.depth < LEAST(max_depth, 7)
+                       AND NOT (edges.next_id = ANY(w.nodes))
+                 )
+                 SELECT
+                     ROW_NUMBER() OVER (ORDER BY depth ASC, nodes ASC)::INTEGER AS path_id,
+                     depth                                                      AS length,
+                     nodes,
+                     relations
+                 FROM walk
+                 WHERE depth >= 1
+             $$",
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("create kg_find_paths", e))?;
+
+        record_schema_version(&mut tx, 24).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v24 migration", e))?;
+
+        tracing::info!(target = "store::postgres", "schema migration v24 applied");
         Ok(())
     }
 
@@ -363,16 +524,7 @@ impl PostgresStore {
         .map_err(|e| to_store_err("create idx_entity_aliases_alias", e))?;
 
         // Record the migration in schema_version.
-        sqlx::query("DELETE FROM schema_version")
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| to_store_err("delete old schema_version", e))?;
-
-        sqlx::query("INSERT INTO schema_version (version) VALUES ($1)")
-            .bind(CURRENT_SCHEMA_VERSION)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| to_store_err("insert schema_version", e))?;
+        record_schema_version(&mut tx, 15).await?;
 
         tx.commit()
             .await
@@ -380,7 +532,7 @@ impl PostgresStore {
 
         tracing::info!(
             target = "store::postgres",
-            version = CURRENT_SCHEMA_VERSION,
+            version = 15,
             "schema migration v15 applied"
         );
 
@@ -1452,6 +1604,135 @@ impl PostgresStore {
             .collect()
     }
 
+    /// Common implementation for [`PostgresStore::link`] +
+    /// [`PostgresStore::link_signed`]. Mirrors SQLite's
+    /// `db::create_link_signed` byte-for-byte: when `keypair` carries a
+    /// usable private key, the canonical-CBOR-signed bytes land in
+    /// `memory_links.signature` with `attest_level = "self_signed"` and
+    /// `observed_by = kp.agent_id`; otherwise the row is unsigned.
+    ///
+    /// Idempotent on the `(source_id, target_id, relation)` unique key
+    /// — duplicate writes collapse via `ON CONFLICT … DO NOTHING` so a
+    /// migrate replay doesn't error on already-shipped links.
+    ///
+    /// Returns the resolved attestation level so the trait surfaces
+    /// (`link_signed`) can pass it back to upper layers without
+    /// re-querying.
+    async fn link_internal(
+        &self,
+        link: &MemoryLink,
+        keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    ) -> StoreResult<&'static str> {
+        // FK pre-flight — mirror SQLite's explicit existence check so
+        // the error message names the missing memory rather than
+        // surfacing a raw `pg_class` constraint violation. Both
+        // adapters now agree on the wire-shape for this failure mode.
+        let source_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
+                .bind(&link.source_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| to_store_err("check source memory", e))?;
+        if !source_exists {
+            return Err(StoreError::InvalidInput {
+                detail: format!("source memory not found: {}", link.source_id),
+            });
+        }
+        let target_exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM memories WHERE id = $1)")
+                .bind(&link.target_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(|e| to_store_err("check target memory", e))?;
+        if !target_exists {
+            return Err(StoreError::InvalidInput {
+                detail: format!("target memory not found: {}", link.target_id),
+            });
+        }
+
+        // Resolve `created_at` / `valid_from`. Mirrors SQLite — both
+        // columns get the current wall-clock when the caller did not
+        // supply explicit values on the input record. Federation
+        // replays (peer-attested links) carry their own stamps so we
+        // honour them when present so signatures still verify.
+        let now_utc = Utc::now();
+        let now_rfc = now_utc.to_rfc3339();
+
+        let created_at_dt = if link.created_at.is_empty() {
+            now_utc
+        } else {
+            parse_rfc3339_required(&link.created_at)?
+        };
+        let valid_from_dt = match link.valid_from.as_deref() {
+            Some(s) if !s.is_empty() => parse_rfc3339_required(s)?,
+            _ => now_utc,
+        };
+        let valid_until_dt = match link.valid_until.as_deref() {
+            Some(s) if !s.is_empty() => Some(parse_rfc3339_required(s)?),
+            _ => None,
+        };
+
+        // Branch on the keypair: signed vs. unsigned. The signed path
+        // computes the canonical CBOR + Ed25519 signature BEFORE the
+        // INSERT so a CBOR/sign failure surfaces as a clean error
+        // rather than a half-written row. This is the same ordering
+        // SQLite uses (see `db::create_link_signed`).
+        let valid_from_str = match link.valid_from.as_deref() {
+            Some(s) if !s.is_empty() => s.to_string(),
+            _ => now_rfc.clone(),
+        };
+        let (signature, attest_level, observed_by_col): (
+            Option<Vec<u8>>,
+            &'static str,
+            Option<String>,
+        ) = match keypair {
+            Some(kp) if kp.can_sign() => {
+                let signable = crate::identity::sign::SignableLink {
+                    src_id: &link.source_id,
+                    dst_id: &link.target_id,
+                    relation: &link.relation,
+                    observed_by: Some(kp.agent_id.as_str()),
+                    valid_from: Some(valid_from_str.as_str()),
+                    valid_until: link.valid_until.as_deref(),
+                };
+                let sig = crate::identity::sign::sign(kp, &signable).map_err(|e| {
+                    StoreError::IntegrityFailed {
+                        detail: format!("sign link: {e}"),
+                    }
+                })?;
+                (Some(sig), "self_signed", Some(kp.agent_id.clone()))
+            }
+            _ => (None, "unsigned", None),
+        };
+
+        // ON CONFLICT … DO NOTHING gives idempotent migrate replays:
+        // re-shipping a link the destination already holds collapses
+        // to a no-op. The row's existing `signature` / `attest_level`
+        // are preserved, so a self-signed write is never silently
+        // demoted to unsigned by a subsequent unsigned replay.
+        sqlx::query(
+            "INSERT INTO memory_links
+                 (source_id, target_id, relation, created_at, valid_from,
+                  valid_until, signature, attest_level, observed_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             ON CONFLICT (source_id, target_id, relation) DO NOTHING",
+        )
+        .bind(&link.source_id)
+        .bind(&link.target_id)
+        .bind(&link.relation)
+        .bind(created_at_dt)
+        .bind(valid_from_dt)
+        .bind(valid_until_dt)
+        .bind(signature)
+        .bind(attest_level)
+        .bind(observed_by_col)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| to_store_err("insert memory_link", e))?;
+
+        Ok(attest_level)
+    }
+
     fn row_to_memory(row: &sqlx::postgres::PgRow) -> StoreResult<Memory> {
         let created_at: DateTime<Utc> = row
             .try_get("created_at")
@@ -1522,6 +1803,28 @@ fn to_store_err(what: &str, e: sqlx::Error) -> StoreError {
         backend: "postgres".to_string(),
         detail: format!("{what}: {e}"),
     }
+}
+
+/// Stamp a successful schema migration into `schema_version`.
+///
+/// Each step calls this with its own version number; we use
+/// `ON CONFLICT (version) DO NOTHING` so re-running the migration over
+/// an already-stamped row is a clean no-op. The previous v15 path
+/// `DELETE` + `INSERT`'d which would drop history of intermediate
+/// versions; preserving every applied version is more useful for
+/// post-mortem auditing.
+async fn record_schema_version(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    version: i32,
+) -> StoreResult<()> {
+    sqlx::query(
+        "INSERT INTO schema_version (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
+    )
+    .bind(version)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| to_store_err("insert schema_version", e))?;
+    Ok(())
 }
 
 /// Maximum traversal depth supported by [`PostgresStore::kg_query`].
@@ -1910,13 +2213,54 @@ impl MemoryStore for PostgresStore {
         //              single-element JSONB array per requested tag,
         //              OR'd together via sqlx bind array.
         // `agent_id`:  match if metadata->>'agent_id' == $agent_id.
+        //
+        // ────────────────────────────────────────────────────────────
+        // v0.7.0 F6 Gap 7 — recall scoring parity with SQLite.
+        //
+        // SQLite's `db::recall` scores each FTS hit with a 6-factor
+        // blend (src/db.rs::recall):
+        //
+        //     fts.rank        * (-1)
+        //   + priority        * 0.5
+        //   + min(access_count, 50) * 0.1
+        //   + confidence      * 2.0
+        //   + tier_bonus      (long=3.0, mid=1.0, short=0.0)
+        //   + recency_factor  (1 / (1 + age_days * 0.1))
+        //
+        // Pre-v0.7.0 the Postgres adapter shipped a 2-factor blend
+        // (`ts_rank DESC, priority DESC`) so identical FTS calls
+        // produced different orderings on the two backends. This
+        // brings them to byte-equivalent rank up to a small swap
+        // tolerance (covered in tests/recall_scoring_parity.rs).
+        //
+        // SQLite's `fts.rank` is BM25-style and negative; multiplying
+        // by `-1` makes higher-rank hits score positive. Postgres'
+        // `ts_rank` is already positive so we use it directly without
+        // sign flipping. The relative magnitudes line up well enough
+        // for top-K ordering parity in practice — see the parity test
+        // suite for tolerance bounds.
+        //
+        // The recency_factor uses `EXTRACT(EPOCH FROM (NOW() -
+        // updated_at)) / 86400.0` as the day-age, mirroring SQLite's
+        // `julianday('now') - julianday(m.updated_at)` (also days).
         let tags_first: Option<&str> = filter.tags_any.first().map(String::as_str);
         let rows = sqlx::query(
             "SELECT *,
                     ts_rank(
                         to_tsvector('english', title || ' ' || content),
                         plainto_tsquery('english', $1)
-                    ) AS rank
+                    )
+                    + (priority * 0.5)
+                    + (LEAST(access_count, 50) * 0.1)
+                    + (confidence * 2.0)
+                    + CASE tier
+                          WHEN 'long' THEN 3.0
+                          WHEN 'mid'  THEN 1.0
+                          ELSE 0.0
+                      END
+                    + (1.0 / (1.0 +
+                        EXTRACT(EPOCH FROM (NOW() - updated_at)) / 86400.0 * 0.1))
+                      AS rank
              FROM memories
              WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', $1)
                AND ($2::text IS NULL OR namespace = $2)
@@ -1963,27 +2307,155 @@ impl MemoryStore for PostgresStore {
     }
 
     async fn link(&self, _ctx: &CallerContext, link: &MemoryLink) -> StoreResult<()> {
-        // The SQL schema has no links table yet in this preview. The
-        // follow-up PR adds `memory_links` + a link() implementation.
-        // We return UnsupportedCapability rather than silently no-op.
-        let _ = link;
-        Err(StoreError::UnsupportedCapability {
-            capability: "LINKS".to_string(),
-        })
+        // F6 Gap 3 (v0.7.0) — unsigned link write. The trait method
+        // does not surface a keypair so we always land the row with
+        // `attest_level = "unsigned"`. Callers that want signing route
+        // through [`MemoryStore::link_signed`].
+        self.link_internal(link, None).await.map(|_| ())
+    }
+
+    async fn link_signed(
+        &self,
+        _ctx: &CallerContext,
+        link: &MemoryLink,
+        keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    ) -> StoreResult<&'static str> {
+        self.link_internal(link, keypair).await
+    }
+
+    async fn list_links(&self, namespace: Option<&str>) -> StoreResult<Vec<MemoryLink>> {
+        // F6 Gap 2 (v0.7.0) — surface the full link table to the
+        // migrate runner. The namespace filter matches the **source**
+        // memory's namespace (links live with their source — the same
+        // affinity SQLite's `migrate` uses for memories), so a
+        // namespace-scoped migrate captures every outbound edge.
+        //
+        // Ordering by `(source_id, target_id, relation)` is the SAL
+        // contract — deterministic across calls and matches the unique
+        // key, so a paginated migrate can resume without losing rows.
+        let rows = sqlx::query(
+            "SELECT ml.source_id, ml.target_id, ml.relation, ml.created_at,
+                    ml.valid_from, ml.valid_until, ml.observed_by, ml.signature
+             FROM memory_links ml
+             WHERE ($1::text IS NULL
+                    OR EXISTS (SELECT 1 FROM memories m
+                               WHERE m.id = ml.source_id AND m.namespace = $1))
+             ORDER BY ml.source_id, ml.target_id, ml.relation",
+        )
+        .bind(namespace)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("list_links", e))?;
+
+        rows.iter()
+            .map(|r| {
+                let created_at: DateTime<Utc> = r
+                    .try_get::<DateTime<Utc>, _>("created_at")
+                    .map_err(|e| to_store_err("read created_at", e))?;
+                let valid_from: Option<DateTime<Utc>> = r
+                    .try_get::<Option<DateTime<Utc>>, _>("valid_from")
+                    .map_err(|e| to_store_err("read valid_from", e))?;
+                let valid_until: Option<DateTime<Utc>> = r
+                    .try_get::<Option<DateTime<Utc>>, _>("valid_until")
+                    .map_err(|e| to_store_err("read valid_until", e))?;
+                let observed_by: Option<String> = r
+                    .try_get::<Option<String>, _>("observed_by")
+                    .map_err(|e| to_store_err("read observed_by", e))?;
+                let signature: Option<Vec<u8>> = r
+                    .try_get::<Option<Vec<u8>>, _>("signature")
+                    .map_err(|e| to_store_err("read signature", e))?;
+                Ok(MemoryLink {
+                    source_id: r
+                        .try_get::<String, _>("source_id")
+                        .map_err(|e| to_store_err("read source_id", e))?,
+                    target_id: r
+                        .try_get::<String, _>("target_id")
+                        .map_err(|e| to_store_err("read target_id", e))?,
+                    relation: r
+                        .try_get::<String, _>("relation")
+                        .map_err(|e| to_store_err("read relation", e))?,
+                    created_at: created_at.to_rfc3339(),
+                    signature,
+                    observed_by,
+                    valid_from: valid_from.map(|t| t.to_rfc3339()),
+                    valid_until: valid_until.map(|t| t.to_rfc3339()),
+                })
+            })
+            .collect()
     }
 
     async fn register_agent(
         &self,
-        _ctx: &CallerContext,
+        ctx: &CallerContext,
         agent: &AgentRegistration,
     ) -> StoreResult<()> {
-        // Agent registration lives in a dedicated table on the Postgres
-        // track next sprint. The Task 1.3 baseline ships on SqliteStore
-        // only for v0.7-alpha.
-        let _ = agent;
-        Err(StoreError::UnsupportedCapability {
-            capability: "AGENT_REGISTRATION".to_string(),
-        })
+        // F6 Gap 4 (v0.7.0) — agent registration parity with SQLite.
+        //
+        // SQLite's `db::register_agent` writes into the `memories`
+        // table at namespace `_agents` with `title = "agent:<id>"` and
+        // tier `Long`, preserving `registered_at` across re-registration
+        // (caller-observable provenance). We mirror that here so
+        // `list_agents` (which reads from the same `_agents` namespace)
+        // works against either backend identically.
+        //
+        // Re-registration semantics: `(title, namespace)` upsert is
+        // already wired at the schema level (`memories_title_ns_uidx`),
+        // so re-INSERTing the same `agent:<id>` row collapses to an
+        // UPDATE. We pre-read the existing `metadata.registered_at` so
+        // the upsert preserves the original stamp; without that step,
+        // every re-registration would reset it.
+        use crate::models::AGENTS_NAMESPACE;
+
+        let title = format!("agent:{}", agent.agent_id);
+        let now_rfc = Utc::now().to_rfc3339();
+
+        // Preserve the original registered_at across re-registration.
+        let existing: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT metadata FROM memories WHERE namespace = $1 AND title = $2")
+                .bind(AGENTS_NAMESPACE)
+                .bind(&title)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(|e| to_store_err("read existing agent metadata", e))?;
+
+        let registered_at = existing
+            .as_ref()
+            .and_then(|(m,)| m.get("registered_at"))
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| now_rfc.clone(), str::to_string);
+
+        let metadata = serde_json::json!({
+            "agent_id": agent.agent_id,
+            "agent_type": agent.agent_type,
+            "capabilities": agent.capabilities,
+            "registered_at": registered_at,
+            "last_seen_at": now_rfc,
+        });
+
+        let content =
+            serde_json::to_string(&metadata).map_err(|e| StoreError::IntegrityFailed {
+                detail: format!("serialize agent registration: {e}"),
+            })?;
+
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: AGENTS_NAMESPACE.to_string(),
+            title,
+            content,
+            tags: vec!["agent-registration".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            source: "system".to_string(),
+            access_count: 0,
+            created_at: now_rfc.clone(),
+            updated_at: now_rfc,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+
+        self.store(ctx, &mem).await.map(|_| ())
     }
 }
 

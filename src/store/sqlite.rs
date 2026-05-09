@@ -198,6 +198,64 @@ impl MemoryStore for SqliteStore {
         .map_err(box_err)
     }
 
+    async fn link_signed(
+        &self,
+        _ctx: &CallerContext,
+        link: &MemoryLink,
+        keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    ) -> StoreResult<&'static str> {
+        // F6 Gap 3 (v0.7.0) — route the SAL trait's signed-link surface
+        // through SQLite's existing `db::create_link_signed`. Resolves
+        // the same `attest_level` literal the Postgres adapter returns
+        // so the caller-observable wire shape is byte-identical across
+        // backends.
+        let conn = self.state.lock().await;
+        db::create_link_signed(
+            &conn,
+            &link.source_id,
+            &link.target_id,
+            link.relation.as_str(),
+            keypair,
+        )
+        .map_err(box_err)
+    }
+
+    async fn list_links(&self, namespace: Option<&str>) -> StoreResult<Vec<MemoryLink>> {
+        // F6 Gap 2 (v0.7.0) — surface `memory_links` to the migrate
+        // runner. The namespace filter, when set, matches the source
+        // memory's namespace (links live with their source — same
+        // affinity SQLite uses for memories on migrate). Ordering by
+        // `(source_id, target_id, relation)` is the SAL contract:
+        // deterministic across calls and matches the unique key.
+        let conn = self.state.lock().await;
+        let mut stmt = conn
+            .prepare(
+                "SELECT ml.source_id, ml.target_id, ml.relation, ml.created_at,
+                        ml.valid_from, ml.valid_until, ml.observed_by, ml.signature
+                 FROM memory_links ml
+                 WHERE ?1 IS NULL
+                    OR EXISTS (SELECT 1 FROM memories m
+                               WHERE m.id = ml.source_id AND m.namespace = ?1)
+                 ORDER BY ml.source_id, ml.target_id, ml.relation",
+            )
+            .map_err(box_err)?;
+        let rows = stmt
+            .query_map(rusqlite::params![namespace], |row| {
+                Ok(MemoryLink {
+                    source_id: row.get(0)?,
+                    target_id: row.get(1)?,
+                    relation: row.get(2)?,
+                    created_at: row.get(3)?,
+                    valid_from: row.get::<_, Option<String>>(4)?,
+                    valid_until: row.get::<_, Option<String>>(5)?,
+                    observed_by: row.get::<_, Option<String>>(6)?,
+                    signature: row.get::<_, Option<Vec<u8>>>(7)?,
+                })
+            })
+            .map_err(box_err)?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(box_err)
+    }
+
     async fn register_agent(
         &self,
         _ctx: &CallerContext,

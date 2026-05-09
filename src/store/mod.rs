@@ -386,7 +386,57 @@ pub trait MemoryStore: Send + Sync {
     }
 
     /// Create a typed link between two memories.
+    ///
+    /// Always writes `attest_level = "unsigned"` — callers that want a
+    /// signed write must reach for [`MemoryStore::link_signed`].
     async fn link(&self, ctx: &CallerContext, link: &MemoryLink) -> StoreResult<()>;
+
+    /// Create a typed link signed by the supplied agent keypair.
+    ///
+    /// v0.7.0 F6 Gap 3 — exposes the full signed-link contract through
+    /// the SAL so federation and self-signed writes do not have to dip
+    /// into adapter-specific helpers (`db::create_link_signed`,
+    /// `PostgresStore::link_signed`). Mirrors the H2 contract:
+    /// when `keypair` is `Some(kp)` AND `kp.can_sign()`, the six
+    /// signable fields are CBOR-canonicalised and signed; the resulting
+    /// 64-byte signature is persisted with `attest_level = "self_signed"`
+    /// and `observed_by = kp.agent_id`. Otherwise the row lands with
+    /// `attest_level = "unsigned"`, `signature = NULL`, `observed_by =
+    /// NULL` — the same fallback every backend already implements
+    /// through [`MemoryStore::link`].
+    ///
+    /// Returns the resolved attestation level so callers (HTTP / MCP
+    /// surfaces) can surface it in the wire response without re-querying.
+    ///
+    /// The default implementation forwards to [`MemoryStore::link`] and
+    /// returns `"unsigned"`, preserving wire-shape parity for adapters
+    /// that haven't wired the signing path yet.
+    async fn link_signed(
+        &self,
+        ctx: &CallerContext,
+        link: &MemoryLink,
+        keypair: Option<&crate::identity::keypair::AgentKeypair>,
+    ) -> StoreResult<&'static str> {
+        let _ = keypair;
+        self.link(ctx, link).await?;
+        Ok("unsigned")
+    }
+
+    /// Enumerate every link in the store, optionally narrowed to a
+    /// namespace.
+    ///
+    /// v0.7.0 F6 Gap 2 — required by the SAL-driven migrate so
+    /// `memory_links` rows survive a cross-backend copy. Adapters
+    /// stream through their own `memory_links` table and project into
+    /// [`MemoryLink`]; the namespace filter, when set, matches links
+    /// whose **source** memory lives in the given namespace (the same
+    /// affinity SQLite's `migrate` uses for memories — links live with
+    /// their source).
+    ///
+    /// Ordering is deterministic across calls — adapters sort by
+    /// `(source_id, target_id, relation)` so a paginated migrate can
+    /// resume mid-stream without losing rows.
+    async fn list_links(&self, namespace: Option<&str>) -> StoreResult<Vec<MemoryLink>>;
 
     /// Register an agent in the adapter's `_agents` namespace (Task
     /// 1.3).
