@@ -57,6 +57,15 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         ai_memory::config::ResolvedTtl::default(),
         true,
     )));
+    #[cfg(feature = "sal")]
+    let store: std::sync::Arc<dyn ai_memory::store::MemoryStore> = {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile for SqliteStore");
+        let p = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        std::sync::Arc::new(
+            ai_memory::store::sqlite::SqliteStore::open(&p).expect("open SqliteStore"),
+        )
+    };
     let app_state = ai_memory::handlers::AppState {
         db: db.clone(),
         embedder: std::sync::Arc::new(None),
@@ -68,6 +77,9 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         mcp_config: std::sync::Arc::new(None),
         active_keypair: std::sync::Arc::new(None),
         family_embeddings: std::sync::Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+        storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+        #[cfg(feature = "sal")]
+        store,
     };
     let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
     let router = ai_memory::build_router(api_key_state, app_state);

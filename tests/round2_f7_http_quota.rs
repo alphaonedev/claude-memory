@@ -39,6 +39,9 @@ fn build_test_router() -> (axum::Router, std::path::PathBuf, NamedTempFile) {
         ResolvedTtl::default(),
         true,
     )));
+    #[cfg(feature = "sal")]
+    let store: Arc<dyn ai_memory::store::MemoryStore> =
+        Arc::new(ai_memory::store::sqlite::SqliteStore::open(&db_path).expect("open SqliteStore"));
     let app_state = AppState {
         db,
         embedder: Arc::new(None),
@@ -50,6 +53,9 @@ fn build_test_router() -> (axum::Router, std::path::PathBuf, NamedTempFile) {
         mcp_config: Arc::new(None),
         active_keypair: Arc::new(None),
         family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+        storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+        #[cfg(feature = "sal")]
+        store,
     };
     let api_key_state = ApiKeyState { key: None };
     let router = ai_memory::build_router(api_key_state, app_state);
