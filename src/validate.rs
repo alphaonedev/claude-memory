@@ -401,9 +401,24 @@ pub fn validate_relation(relation: &str) -> Result<()> {
     if relation.len() > MAX_RELATION_LEN {
         bail!("relation exceeds max length of {MAX_RELATION_LEN} bytes");
     }
-    if !VALID_RELATIONS.contains(&relation) {
+    // v0.7.0 Wave-3 Continuation 5 — accept the canonical set above
+    // PLUS any caller-supplied lowercase identifier (a-z + 0-9 +
+    // underscore) so cert harnesses + downstream tooling can use
+    // arbitrary relation labels like `next`, `mentions`, `parent_of`.
+    // Mirrors the AGE Cypher convention where edge labels are
+    // user-defined identifiers; the same posture lights up here for
+    // wire-shape uniformity. Rejects whitespace / control chars /
+    // shell metacharacters defensively.
+    if VALID_RELATIONS.contains(&relation) {
+        return Ok(());
+    }
+    let ok = !relation.is_empty()
+        && relation
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !ok {
         bail!(
-            "invalid relation '{}' — must be one of: {}",
+            "invalid relation '{}' — must match [a-z0-9_]+ or be one of: {}",
             relation,
             VALID_RELATIONS.join(", ")
         );
