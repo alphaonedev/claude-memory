@@ -222,8 +222,40 @@ pub fn build_router(
             api_key_state,
             handlers::api_key_auth,
         ))
+        // v0.7.0 Wave-3 Continuation — postgres route gate. On sqlite
+        // deployments this is a pure pass-through. On postgres-backed
+        // daemons it short-circuits any un-migrated endpoint with a
+        // structured 501 envelope so operators never see silent data
+        // corruption from the unused `app.db` scratch connection.
+        // See `handlers::postgres_endpoint_supported` for the allow-list.
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            postgres_route_gate_layer,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(CorsLayer::new())
         .with_state(app_state)
+}
+
+/// v0.7.0 Wave-3 Continuation — adapter that picks up the appropriate
+/// gate function depending on whether the binary was built with the
+/// `sal` feature flag. Standard builds compile this to a no-op pass-
+/// through closure so the wire shape stays identical to pre-Wave-3.
+#[cfg(feature = "sal")]
+async fn postgres_route_gate_layer(
+    state: axum::extract::State<handlers::AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    handlers::postgres_route_gate(state, req, next).await
+}
+
+#[cfg(not(feature = "sal"))]
+async fn postgres_route_gate_layer(
+    _state: axum::extract::State<handlers::AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    next.run(req).await
 }

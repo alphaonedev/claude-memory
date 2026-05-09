@@ -3098,6 +3098,10 @@ impl MemoryStore for PostgresStore {
             .collect()
     }
 
+    fn as_any_for_postgres(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn register_agent(
         &self,
         ctx: &CallerContext,
@@ -3170,6 +3174,175 @@ impl MemoryStore for PostgresStore {
         };
 
         self.store(ctx, &mem).await.map(|_| ())
+    }
+}
+
+// ----------------------------------------------------------------------
+// v0.7.0 Wave-3 Continuation — postgres-only helpers used by HTTP
+// handlers when `app.storage_backend == Postgres`. These intentionally
+// do NOT live on the `MemoryStore` trait yet — the trait surface is
+// stabilising; the helpers below cover archive read paths that will
+// eventually move onto the trait once the SQLite adapter has parity.
+// ----------------------------------------------------------------------
+
+/// Project the Postgres `archived_memories` table into the JSON wire
+/// shape produced by the SQLite `db::list_archived` for HTTP parity.
+/// Takes an `Arc<dyn MemoryStore>` rather than a concrete pool so the
+/// caller can pass the daemon's `app.store` handle directly.
+///
+/// # Errors
+///
+/// Returns [`StoreError::BackendUnavailable`] when the underlying
+/// adapter is not a [`PostgresStore`] or when the SQL query fails.
+pub async fn list_archived_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+    namespace: Option<&str>,
+    limit: usize,
+    offset: usize,
+) -> StoreResult<Vec<serde_json::Value>> {
+    let pg = downcast_postgres(store)?;
+    pg.list_archived(namespace, limit, offset).await
+}
+
+/// Project the Postgres `archived_memories` aggregate stats into the
+/// same JSON wire shape produced by SQLite's `db::archive_stats`.
+///
+/// # Errors
+///
+/// Same surface as [`list_archived_via_store`].
+pub async fn archive_stats_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+) -> StoreResult<serde_json::Value> {
+    let pg = downcast_postgres(store)?;
+    pg.archive_stats().await
+}
+
+fn downcast_postgres(store: &std::sync::Arc<dyn MemoryStore>) -> StoreResult<&PostgresStore> {
+    // Trait objects don't expose downcast directly; we rely on the fact
+    // that the daemon only constructs a `PostgresStore` when the
+    // operator passes `--store-url postgres://...` so the storage_backend
+    // flag is the load-bearing discriminator. Use `Any` projection via
+    // a private hatch.
+    let any = store.as_any_for_postgres();
+    any.downcast_ref::<PostgresStore>()
+        .ok_or_else(|| StoreError::BackendUnavailable {
+            backend: "postgres".to_string(),
+            detail: "active store is not a PostgresStore".to_string(),
+        })
+}
+
+impl PostgresStore {
+    /// Project the `archived_memories` table into the same wire shape
+    /// `db::list_archived` produces for SQLite. Tags are stored as a
+    /// JSONB array; we serialize back to a string-formatted JSON to
+    /// match SQLite's `tags` text-encoded shape.
+    async fn list_archived(
+        &self,
+        namespace: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> StoreResult<Vec<serde_json::Value>> {
+        let limit_i: i64 = limit.clamp(1, 1000).try_into().unwrap_or(50);
+        let offset_i: i64 = offset.try_into().unwrap_or(0);
+        let rows = sqlx::query(
+            "SELECT id, tier, namespace, title, content, tags, priority, confidence, \
+             source, access_count, created_at, updated_at, last_accessed_at, \
+             expires_at, archived_at, archive_reason, metadata \
+             FROM archived_memories \
+             WHERE ($1::text IS NULL OR namespace = $1) \
+             ORDER BY archived_at DESC \
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(namespace)
+        .bind(limit_i)
+        .bind(offset_i)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("list archived memories", e))?;
+
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            use sqlx::Row;
+            let tags_jsonb: serde_json::Value =
+                row.try_get("tags").unwrap_or(serde_json::json!([]));
+            let tags_string =
+                serde_json::to_string(&tags_jsonb).unwrap_or_else(|_| "[]".to_string());
+            let metadata: serde_json::Value =
+                row.try_get("metadata").unwrap_or(serde_json::json!({}));
+            let last_accessed_at: Option<DateTime<Utc>> =
+                row.try_get("last_accessed_at").unwrap_or(None);
+            let expires_at: Option<DateTime<Utc>> = row.try_get("expires_at").unwrap_or(None);
+            let archived_at: DateTime<Utc> =
+                row.try_get("archived_at").unwrap_or_else(|_| Utc::now());
+            let created_at: DateTime<Utc> =
+                row.try_get("created_at").unwrap_or_else(|_| Utc::now());
+            let updated_at: DateTime<Utc> =
+                row.try_get("updated_at").unwrap_or_else(|_| Utc::now());
+            out.push(serde_json::json!({
+                "id": row.try_get::<String, _>("id").unwrap_or_default(),
+                "tier": row.try_get::<String, _>("tier").unwrap_or_default(),
+                "namespace": row.try_get::<String, _>("namespace").unwrap_or_default(),
+                "title": row.try_get::<String, _>("title").unwrap_or_default(),
+                "content": row.try_get::<String, _>("content").unwrap_or_default(),
+                "tags": tags_string,
+                "priority": row.try_get::<i32, _>("priority").unwrap_or(5),
+                "confidence": row.try_get::<f64, _>("confidence").unwrap_or(0.5),
+                "source": row.try_get::<String, _>("source").unwrap_or_default(),
+                "access_count": row.try_get::<i64, _>("access_count").unwrap_or(0),
+                "created_at": created_at.to_rfc3339(),
+                "updated_at": updated_at.to_rfc3339(),
+                "last_accessed_at": last_accessed_at.map(|d| d.to_rfc3339()),
+                "expires_at": expires_at.map(|d| d.to_rfc3339()),
+                "archived_at": archived_at.to_rfc3339(),
+                "archive_reason": row.try_get::<String, _>("archive_reason").unwrap_or_else(|_| "ttl_expired".to_string()),
+                "metadata": metadata,
+            }));
+        }
+        Ok(out)
+    }
+
+    /// Aggregate `archived_memories` rows into the same JSON shape
+    /// `db::archive_stats` returns for SQLite.
+    async fn archive_stats(&self) -> StoreResult<serde_json::Value> {
+        use sqlx::Row;
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM archived_memories")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| to_store_err("archive stats total", e))?;
+
+        let by_reason_rows = sqlx::query(
+            "SELECT archive_reason, COUNT(*) AS cnt FROM archived_memories \
+             GROUP BY archive_reason ORDER BY cnt DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("archive stats by_reason", e))?;
+        let mut by_reason: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for r in by_reason_rows {
+            let reason: String = r.try_get("archive_reason").unwrap_or_default();
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            by_reason.insert(reason, serde_json::json!(cnt));
+        }
+
+        let by_namespace_rows = sqlx::query(
+            "SELECT namespace, COUNT(*) AS cnt FROM archived_memories \
+             GROUP BY namespace ORDER BY cnt DESC LIMIT 100",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("archive stats by_namespace", e))?;
+        let mut by_namespace: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for r in by_namespace_rows {
+            let ns: String = r.try_get("namespace").unwrap_or_default();
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            by_namespace.insert(ns, serde_json::json!(cnt));
+        }
+
+        Ok(serde_json::json!({
+            "total_archived": total,
+            "by_reason": by_reason,
+            "by_namespace": by_namespace,
+        }))
     }
 }
 

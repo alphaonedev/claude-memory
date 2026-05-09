@@ -337,6 +337,160 @@ pub fn postgres_not_implemented(endpoint: &'static str) -> Response {
         .into_response()
 }
 
+/// v0.7.0 Wave-3 Continuation — postgres-supported endpoint allow-list.
+///
+/// Returns `true` if the given (method, path) tuple has a handler that
+/// has been migrated to dispatch through the [`crate::store::MemoryStore`]
+/// trait when the daemon is postgres-backed. Anything not in this list
+/// is shielded by [`postgres_route_gate`] middleware which surfaces
+/// 501 NOT IMPLEMENTED rather than letting the un-migrated handler
+/// silently fall through to the empty in-memory scratch SQLite database
+/// that `bootstrap_serve` opens for the postgres-backed `app.db` field.
+///
+/// The matching is path-pattern aware:
+/// - exact equality for fixed paths (e.g. `/api/v1/memories`)
+/// - prefix match for sub-resources (e.g. `/api/v1/memories/{id}`)
+///
+/// As handlers migrate they get added here. Pre-existing CRUD entries
+/// match what Wave-3 phase 3 already wired through `app.store`.
+#[cfg(feature = "sal")]
+#[must_use]
+pub fn postgres_endpoint_supported(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+
+    // Health and metadata always pass through — they don't touch user data.
+    if path == "/api/v1/health"
+        || path == "/api/v1/capabilities"
+        || path == "/metrics"
+        || path == "/api/v1/metrics"
+    {
+        return true;
+    }
+
+    // Approval SSE stream — read-only metadata stream, not user-data.
+    if path == "/api/v1/approvals/stream" && method == Method::GET {
+        return true;
+    }
+
+    match (method.as_str(), path) {
+        // Wave-3 phase 3 — core CRUD (commit c049500).
+        ("POST", "/api/v1/memories") | ("GET", "/api/v1/memories") => true,
+        ("GET" | "PUT" | "DELETE", p) if memory_id_path(p) => true,
+        ("GET", "/api/v1/search") => true,
+        ("POST", "/api/v1/links") => true,
+        ("GET", p) if links_id_path(p) => true,
+        // Wave-3 continuation — list_pending (read-only).
+        ("GET", "/api/v1/pending") => true,
+        // Wave-3 continuation — list_agents (read-only).
+        ("GET", "/api/v1/agents") => true,
+        // Wave-3 continuation — list_namespaces (read-only).
+        ("GET", "/api/v1/namespaces") => {
+            // GET /api/v1/namespaces with no query string lists namespaces.
+            // The same path with ?namespace=... fetches a standard which is
+            // also gated through SAL via get_namespace_standard_qs.
+            true
+        }
+        // Wave-3 continuation — KG endpoints (postgres adapter has impls).
+        ("POST", "/api/v1/kg/query")
+        | ("GET", "/api/v1/kg/timeline")
+        | ("POST", "/api/v1/kg/invalidate") => true,
+        // Wave-3 continuation — entity registry.
+        ("POST", "/api/v1/entities") | ("GET", "/api/v1/entities/by_alias") => true,
+        // Wave-3 continuation — stats (basic count).
+        ("GET", "/api/v1/stats") => true,
+        // Wave-3 continuation — bulk write.
+        ("POST", "/api/v1/memories/bulk") => true,
+        // Wave-3 continuation — recall fallback (keyword via search).
+        ("GET" | "POST", "/api/v1/recall") => true,
+        // Wave-3 continuation — archive list/stats (read-only).
+        ("GET", "/api/v1/archive") => true,
+        ("GET", "/api/v1/archive/stats") => true,
+        // Wave-3 continuation — taxonomy and check_duplicate.
+        ("GET", "/api/v1/taxonomy") => true,
+        ("POST", "/api/v1/check_duplicate") => true,
+        // Wave-3 continuation — list_subscriptions, inbox.
+        ("GET", "/api/v1/subscriptions") => true,
+        ("GET", "/api/v1/inbox") => true,
+        _ => false,
+    }
+}
+
+/// Path matcher for `/api/v1/memories/{id}` (no further sub-segment).
+#[cfg(feature = "sal")]
+fn memory_id_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/memories/") else {
+        return false;
+    };
+    // Reject the bulk path and any further sub-segments.
+    if rest == "bulk" {
+        return false;
+    }
+    !rest.contains('/')
+}
+
+/// Path matcher for `/api/v1/links/{id}`.
+#[cfg(feature = "sal")]
+fn links_id_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/links/") else {
+        return false;
+    };
+    !rest.is_empty() && !rest.contains('/')
+}
+
+/// v0.7.0 Wave-3 Continuation — middleware that gates un-migrated
+/// handlers when the daemon is postgres-backed.
+///
+/// Sits in the request pipeline after `api_key_auth` so authn still
+/// applies, then short-circuits any (method, path) tuple not in
+/// [`postgres_endpoint_supported`] with a structured 501 response.
+///
+/// On sqlite-backed daemons this is a pure pass-through — every path
+/// is supported because the legacy `db::*` free-function code path is
+/// the active path and `app.db` is the real on-disk database.
+///
+/// This is the load-bearing correctness fix for postgres-backed
+/// daemons: without it, any un-migrated handler would silently use
+/// the empty in-memory scratch SQLite database that `bootstrap_serve`
+/// opens against the `--db` path (which is unused on postgres) and
+/// either return empty results (read paths) or write to the wrong
+/// database (write paths). The gate makes that impossible.
+#[cfg(feature = "sal")]
+pub async fn postgres_route_gate(
+    State(app): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
+    if !matches!(app.storage_backend, StorageBackend::Postgres) {
+        return next.run(req).await;
+    }
+
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+
+    if postgres_endpoint_supported(&method, &path) {
+        return next.run(req).await;
+    }
+
+    tracing::debug!(
+        method = %method,
+        path = %path,
+        "postgres-backed daemon: 501 for un-migrated endpoint"
+    );
+
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(json!({
+            "error": "endpoint not yet implemented for postgres-backed daemon",
+            "endpoint": path,
+            "method": method.as_str(),
+            "storage_backend": "postgres",
+            "remediation": "use sqlite-backed daemon or wait for v0.7.x trait coverage; \
+                            see docs/postgres-age-guide.md for the supported endpoint inventory",
+        })),
+    )
+        .into_response()
+}
+
 /// v0.7.0 Wave-3 — translate a [`crate::store::StoreError`] into the
 /// daemon's standard HTTP error envelope. Centralised so every
 /// trait-routed handler reports backend errors with the same shape.
@@ -1247,11 +1401,32 @@ fn default_pending_limit() -> Option<usize> {
 }
 
 pub async fn list_pending(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(p): Query<PendingListQuery>,
 ) -> impl IntoResponse {
     let limit = p.limit.unwrap_or(100).min(1000);
-    let lock = state.lock().await;
+
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons route through
+    // the SAL `list_pending_actions` trait method. Postgres adapter
+    // returns an empty list with `UnsupportedCapability` semantics for
+    // pre-execution governance gating; the wire shape matches sqlite's
+    // empty-list response so clients see zero pending actions on a fresh
+    // postgres deployment rather than a 501.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        // No pending governance gating exists on postgres until F1
+        // governance lands on the Postgres adapter; return an empty list
+        // with the same wire shape so clients can iterate.
+        return Json(json!({
+            "count": 0,
+            "pending": Vec::<serde_json::Value>::new(),
+            "storage_backend": "postgres",
+            "note": "pending_actions governance is sqlite-only in v0.7.0",
+        }))
+        .into_response();
+    }
+
+    let lock = app.db.lock().await;
     match db::list_pending_actions(&lock.0, p.status.as_deref(), limit) {
         Ok(items) => Json(json!({"count": items.len(), "pending": items})).into_response(),
         Err(e) => {
@@ -1467,8 +1642,52 @@ pub async fn reject_pending(
     }
 }
 
-pub async fn list_agents(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn list_agents(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons project from
+    // the `_agents` namespace via the SAL `list` trait method, mirroring
+    // how sqlite's `db::list_agents` reads from the same namespace.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let filter = crate::store::Filter {
+            namespace: Some("_agents".to_string()),
+            limit: 1000,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(memories) => {
+                let agents: Vec<serde_json::Value> = memories
+                    .iter()
+                    .filter_map(|m| {
+                        let meta = m.metadata.as_object()?;
+                        let agent_id = meta.get("agent_id")?.as_str()?;
+                        let agent_type = meta
+                            .get("agent_type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown");
+                        let capabilities = meta
+                            .get("capabilities")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::json!([]));
+                        Some(json!({
+                            "agent_id": agent_id,
+                            "agent_type": agent_type,
+                            "capabilities": capabilities,
+                            "registered_at": m.created_at,
+                        }))
+                    })
+                    .collect();
+                (
+                    StatusCode::OK,
+                    Json(json!({"count": agents.len(), "agents": agents})),
+                )
+                    .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::list_agents(&lock.0) {
         Ok(agents) => (
             StatusCode::OK,
@@ -2760,8 +2979,30 @@ pub async fn detect_contradictions(
     .into_response()
 }
 
-pub async fn list_namespaces(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn list_namespaces(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons aggregate the
+    // distinct namespaces from `memories` via the SAL `list` method.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let filter = crate::store::Filter {
+            limit: 1_000_000,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(memories) => {
+                let mut ns: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+                for m in memories {
+                    ns.insert(m.namespace);
+                }
+                let v: Vec<String> = ns.into_iter().collect();
+                Json(json!({"namespaces": v})).into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::list_namespaces(&lock.0) {
         Ok(ns) => Json(json!({"namespaces": ns})).into_response(),
         Err(e) => {
@@ -3664,8 +3905,52 @@ pub async fn get_links(State(app): State<AppState>, Path(id): Path<String>) -> i
     }
 }
 
-pub async fn get_stats(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn get_stats(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons project a
+    // basic count from the SAL `list` method. Detailed per-tier
+    // breakdown + DB file size + WAL counters are sqlite-only fields
+    // and surface as `null` on postgres so clients see a consistent
+    // top-level shape.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let filter = crate::store::Filter {
+            limit: 1_000_000,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(memories) => {
+                let total = memories.len();
+                let mut short = 0usize;
+                let mut mid = 0usize;
+                let mut long = 0usize;
+                let mut by_namespace: std::collections::BTreeMap<String, usize> =
+                    std::collections::BTreeMap::new();
+                for m in &memories {
+                    match m.tier {
+                        Tier::Short => short += 1,
+                        Tier::Mid => mid += 1,
+                        Tier::Long => long += 1,
+                    }
+                    *by_namespace.entry(m.namespace.clone()).or_insert(0) += 1;
+                }
+                Json(json!({
+                    "total_memories": total,
+                    "by_tier": {
+                        "short": short,
+                        "mid": mid,
+                        "long": long,
+                    },
+                    "by_namespace": by_namespace,
+                    "storage_backend": "postgres",
+                }))
+                .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::stats(&lock.0, &lock.1) {
         Ok(s) => Json(json!(s)).into_response(),
         Err(e) => {
@@ -3891,6 +4176,52 @@ pub async fn bulk_create(
             .into_response();
     }
     let now = Utc::now();
+
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons stream each
+    // row through `app.store.store(...)`. Federation fanout below stays
+    // sqlite-only because the federation transport assumes the
+    // SQLite-on-disk model; postgres deployments use the postgres replica
+    // mechanism for cross-node visibility, not HTTP fanout. The wire
+    // shape (created+errors counts) matches the sqlite path exactly.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent("daemon");
+        let mut created: usize = 0;
+        let mut errors: Vec<String> = Vec::new();
+        for body in bodies {
+            if let Err(e) = validate::validate_create(&body) {
+                errors.push(format!("{}: {}", body.title, e));
+                continue;
+            }
+            let expires_at = body.expires_at.clone().or_else(|| {
+                body.ttl_secs
+                    .map(|s| (now + Duration::seconds(s)).to_rfc3339())
+            });
+            let mem = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: body.tier,
+                namespace: body.namespace,
+                title: body.title,
+                content: body.content,
+                tags: body.tags,
+                priority: body.priority.clamp(1, 10),
+                confidence: body.confidence.clamp(0.0, 1.0),
+                source: body.source,
+                access_count: 0,
+                created_at: now.to_rfc3339(),
+                updated_at: now.to_rfc3339(),
+                last_accessed_at: None,
+                expires_at,
+                metadata: body.metadata,
+            };
+            match app.store.store(&ctx, &mem).await {
+                Ok(_) => created += 1,
+                Err(e) => errors.push(e.to_string()),
+            }
+        }
+        return Json(json!({"created": created, "errors": errors})).into_response();
+    }
+
     // Stage 1 — validate + insert locally. Collect the successfully-inserted
     // `Memory` values so we can fanout each one after we release the DB lock
     // (peers POST to our /sync/push and we'd deadlock on the Mutex if we
@@ -4053,7 +4384,7 @@ fn default_archive_limit() -> Option<usize> {
 }
 
 pub async fn list_archive(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(q): Query<ArchiveListQuery>,
 ) -> impl IntoResponse {
     // Ultrareview #350: validate limit range. `usize` already precludes
@@ -4067,7 +4398,30 @@ pub async fn list_archive(
         )
             .into_response();
     }
-    let lock = state.lock().await;
+
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons project from
+    // the `archived_memories` table via the SAL adapter. The trait does
+    // not yet expose archive operations, so we dispatch via the typed
+    // `PostgresStore::list_archived` helper added under feature
+    // `sal-postgres`. Returns the same wire envelope as sqlite.
+    #[cfg(feature = "sal-postgres")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let limit = q.limit.unwrap_or(50).clamp(1, 1000);
+        let offset = q.offset.unwrap_or(0);
+        return match crate::store::postgres::list_archived_via_store(
+            &app.store,
+            q.namespace.as_deref(),
+            limit,
+            offset,
+        )
+        .await
+        {
+            Ok(items) => Json(json!({"archived": items, "count": items.len()})).into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     let limit = q.limit.unwrap_or(50).clamp(1, 1000);
     let offset = q.offset.unwrap_or(0);
     match db::list_archived(&lock.0, q.namespace.as_deref(), limit, offset) {
@@ -4170,8 +4524,18 @@ pub async fn purge_archive(
     }
 }
 
-pub async fn archive_stats(State(state): State<Db>) -> impl IntoResponse {
-    let lock = state.lock().await;
+pub async fn archive_stats(State(app): State<AppState>) -> impl IntoResponse {
+    // v0.7.0 Wave-3 Continuation — postgres-backed daemons aggregate
+    // counts directly from the `archived_memories` table.
+    #[cfg(feature = "sal-postgres")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return match crate::store::postgres::archive_stats_via_store(&app.store).await {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
+
+    let lock = app.db.lock().await;
     match db::archive_stats(&lock.0) {
         Ok(archive_stats) => Json(archive_stats).into_response(),
         Err(e) => {
@@ -5831,20 +6195,30 @@ pub async fn set_namespace_standard_qs(
 }
 
 pub async fn get_namespace_standard_qs(
-    State(state): State<Db>,
+    State(app): State<AppState>,
     Query(q): Query<NamespaceStandardQuery>,
 ) -> impl IntoResponse {
     // If no namespace is supplied this shares a route with the existing
     // `list_namespaces` GET; the router chains the two so a plain
     // `GET /api/v1/namespaces` still returns the list.
     let Some(ns) = q.namespace.clone() else {
-        return list_namespaces(State(state)).await.into_response();
+        return list_namespaces(State(app)).await.into_response();
     };
+
+    // v0.7.0 Wave-3 Continuation — namespace-standard governance is a
+    // sqlite-only feature in v0.7.0; postgres-backed daemons surface 501
+    // here so clients see a structured error rather than reading from
+    // the unused scratch SQLite db.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        return postgres_not_implemented("/api/v1/namespaces?namespace=...");
+    }
+
     let mut params = json!({"namespace": ns});
     if let Some(inh) = q.inherit {
         params["inherit"] = json!(inh);
     }
-    let lock = state.lock().await;
+    let lock = app.db.lock().await;
     let result = crate::mcp::handle_namespace_get_standard(&lock.0, &params);
     drop(lock);
     match result {
@@ -8802,7 +9176,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -8825,7 +9199,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -8849,7 +9223,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9047,7 +9421,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9297,7 +9671,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending", axum::routing::get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9320,7 +9694,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending", axum::routing::get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // Status=approved gets the SQL filter path. Empty result is fine.
         let resp = app
             .oneshot(
@@ -10884,7 +11258,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/namespaces", axum::routing::get(list_namespaces))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -10961,7 +11335,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11157,7 +11531,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/stats", axum::routing::get(get_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11300,7 +11674,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11332,7 +11706,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11366,7 +11740,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11398,7 +11772,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11430,7 +11804,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11784,7 +12158,7 @@ mod tests {
 
         let list_app = Router::new()
             .route("/api/v1/archive", axum::routing::get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = list_app
             .oneshot(
                 axum::http::Request::builder()
@@ -11900,7 +12274,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11929,7 +12303,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11959,7 +12333,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive/stats", axum::routing::get(archive_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13411,7 +13785,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/agents", axum_get(list_agents))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13443,7 +13817,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/agents", axum_get(list_agents))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13485,7 +13859,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/agents", axum_get(list_agents))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13730,7 +14104,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/pending", axum_get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13780,7 +14154,7 @@ mod tests {
         };
         let app = Router::new()
             .route("/api/v1/pending", axum_get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13830,7 +14204,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/pending", axum_get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13857,7 +14231,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending", axum_get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -14921,7 +15295,7 @@ mod tests {
                 "/api/v1/namespaces",
                 axum::routing::get(get_namespace_standard_qs),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = get_router
             .oneshot(
                 axum::http::Request::builder()
@@ -14951,7 +15325,7 @@ mod tests {
                 "/api/v1/namespaces",
                 axum::routing::get(get_namespace_standard_qs),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -14985,7 +15359,7 @@ mod tests {
                 "/api/v1/namespaces",
                 axum::routing::get(get_namespace_standard_qs),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -15016,7 +15390,7 @@ mod tests {
                 "/api/v1/namespaces",
                 axum::routing::get(get_namespace_standard_qs),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -15046,7 +15420,7 @@ mod tests {
                 "/api/v1/namespaces",
                 axum::routing::get(get_namespace_standard_qs),
             )
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         // Spaces decode out of `%20` and fail `validate_namespace`.
         let resp = app
             .oneshot(
@@ -16045,7 +16419,7 @@ mod tests {
         let _ = insert_test_memory(&state, "ns-bar", "t2").await;
         let app = Router::new()
             .route("/api/v1/namespaces", axum_get(list_namespaces))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -16594,7 +16968,7 @@ mod tests {
         let _ = insert_test_memory(&state, "ns-stats", "t2").await;
         let app = Router::new()
             .route("/api/v1/stats", axum_get(get_stats))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -16833,7 +17207,7 @@ mod tests {
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending", axum_get(list_pending))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -17303,7 +17677,7 @@ mod tests {
         }
         let app = Router::new()
             .route("/api/v1/archive", axum_get(list_archive))
-            .with_state(state);
+            .with_state(test_app_state(state.clone()));
         let resp = app
             .oneshot(
                 axum::http::Request::builder()

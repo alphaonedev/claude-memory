@@ -445,6 +445,20 @@ pub trait MemoryStore: Send + Sync {
         ctx: &CallerContext,
         agent: &AgentRegistration,
     ) -> StoreResult<()>;
+
+    /// v0.7.0 Wave-3 Continuation — adapter-specific downcast hatch.
+    ///
+    /// Returns the adapter as `&dyn Any` so that downstream callers
+    /// holding an `Arc<dyn MemoryStore>` can recover the concrete
+    /// adapter type when they need to call adapter-only helpers
+    /// (e.g. `PostgresStore::list_archived` which projects from a
+    /// table not yet covered by the trait surface).
+    ///
+    /// Default returns a unit reference; adapters override to return
+    /// `self`.
+    fn as_any_for_postgres(&self) -> &dyn std::any::Any {
+        &()
+    }
 }
 
 /// Partial-update payload. `None` means "leave this field alone" —
