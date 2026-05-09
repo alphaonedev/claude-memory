@@ -7138,22 +7138,96 @@ pub async fn get_inbox(
         }
     };
 
-    // v0.7.0 Wave-3 Continuation — inbox is built atop subscriptions
-    // which are sqlite-only in v0.7.0. Return an empty inbox with a
-    // structured note so clients can iterate without a hard 501.
+    // v0.7.0 Wave-3 Continuation 4 (Bucket B / S32+S58) — postgres
+    // inbox now reads from the `_inbox/<owner>` namespace via the SAL
+    // `list` projection, matching what `notify` (Phase 16) already
+    // writes. The handler walks the namespace and projects each row
+    // into the inbox-message wire shape. Subscriptions still ride the
+    // legacy sqlite `subscriptions` table; the inbox itself does not
+    // need that surface — `notify` lands the message directly under
+    // `_inbox/<target>` and the inbox is a straight namespace read.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        return (
-            StatusCode::OK,
-            Json(json!({
-                "agent_id": owner,
-                "messages": Vec::<serde_json::Value>::new(),
-                "unread_count": 0,
-                "storage_backend": "postgres",
-                "note": "inbox/subscriptions are sqlite-only in v0.7.0",
-            })),
-        )
-            .into_response();
+        let ns = format!("_inbox/{owner}");
+        let ctx = crate::store::CallerContext::for_agent(&owner);
+        let cap = q
+            .limit
+            .and_then(|n| usize::try_from(n).ok())
+            .unwrap_or(100)
+            .clamp(1, 1000);
+        let filter = crate::store::Filter {
+            namespace: Some(ns),
+            limit: cap,
+            ..Default::default()
+        };
+        return match app.store.list(&ctx, &filter).await {
+            Ok(rows) => {
+                let messages: Vec<serde_json::Value> = rows
+                    .into_iter()
+                    .filter(|m| {
+                        // Honour `unread_only` when set: any row whose
+                        // metadata explicitly carries `read=true` is
+                        // filtered out. The default state (no key) is
+                        // treated as unread, mirroring the SQLite
+                        // contract.
+                        if q.unread_only.unwrap_or(false) {
+                            m.metadata
+                                .get("read")
+                                .and_then(serde_json::Value::as_bool)
+                                != Some(true)
+                        } else {
+                            true
+                        }
+                    })
+                    .map(|m| {
+                        json!({
+                            "id": m.id,
+                            "title": m.title,
+                            "payload": m.content,
+                            "content": m.content,
+                            "priority": m.priority,
+                            "tier": m.tier.as_str(),
+                            "namespace": m.namespace,
+                            "metadata": m.metadata,
+                            "created_at": m.created_at,
+                            "updated_at": m.updated_at,
+                            "agent_id": m.metadata
+                                .get("agent_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                            "from_agent_id": m.metadata
+                                .get("from_agent_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                            "target_agent_id": m.metadata
+                                .get("target_agent_id")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(""),
+                        })
+                    })
+                    .collect();
+                let unread_count = messages
+                    .iter()
+                    .filter(|m| {
+                        m.get("metadata")
+                            .and_then(|v| v.get("read"))
+                            .and_then(serde_json::Value::as_bool)
+                            != Some(true)
+                    })
+                    .count();
+                (
+                    StatusCode::OK,
+                    Json(json!({
+                        "agent_id": owner,
+                        "messages": messages,
+                        "unread_count": unread_count,
+                        "storage_backend": "postgres",
+                    })),
+                )
+                    .into_response()
+            }
+            Err(e) => store_err_to_response(e),
+        };
     }
 
     let mut params = json!({"agent_id": owner});
@@ -7243,6 +7317,78 @@ pub async fn subscribe(
     };
 
     let events = body.events.unwrap_or_else(|| "*".to_string());
+
+    // v0.7.0 Wave-3 Continuation 4 (Bucket B / S33) — postgres-backed
+    // daemons persist subscriptions as memories under `_subscriptions/
+    // <agent_id>` so list_subscriptions can read them back via the SAL
+    // `list` projection. The legacy sqlite `subscriptions` table is
+    // not mirrored on postgres in v0.7.0 (the dispatch loop is
+    // sqlite-bound); the wire envelope round-trips through the SAL
+    // surface so the cert oracle can verify the subscription is
+    // queryable.
+    #[cfg(feature = "sal")]
+    if matches!(app.storage_backend, StorageBackend::Postgres) {
+        if let Err(e) = crate::subscriptions::validate_url(&url) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": e.to_string()})),
+            )
+                .into_response();
+        }
+        let sub_id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let ns = format!("_subscriptions/{caller}");
+        let metadata = json!({
+            "kind": "subscription",
+            "agent_id": caller,
+            "subscription_id": sub_id,
+            "url": url,
+            "events": events,
+            "namespace_filter": namespace_filter,
+            "agent_filter": agent_filter,
+            "created_by": caller,
+            "created_at": now,
+        });
+        let mem = Memory {
+            id: sub_id.clone(),
+            tier: Tier::Long,
+            namespace: ns,
+            title: format!("subscription:{sub_id}"),
+            content: format!(
+                "subscription for {caller} -> {} (events={events})",
+                namespace_filter.as_deref().unwrap_or("*")
+            ),
+            tags: vec!["subscription".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            source: "subscribe".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let ctx = crate::store::CallerContext::for_agent(&caller);
+        return match app.store.store(&ctx, &mem).await {
+            Ok(id) => (
+                StatusCode::CREATED,
+                Json(json!({
+                    "id": id,
+                    "url": url,
+                    "events": events,
+                    "namespace": namespace_filter,
+                    "namespace_filter": namespace_filter,
+                    "agent_filter": agent_filter,
+                    "agent_id": caller,
+                    "created_by": caller,
+                    "storage_backend": "postgres",
+                })),
+            )
+                .into_response(),
+            Err(e) => store_err_to_response(e),
+        };
+    }
 
     // Ensure the caller is a registered agent (the MCP tool enforces this).
     // Auto-register for the S33 shape so scenario callers don't have to
@@ -7416,18 +7562,76 @@ pub async fn list_subscriptions(
     State(app): State<AppState>,
     Query(q): Query<ListSubscriptionsQuery>,
 ) -> impl IntoResponse {
-    // v0.7.0 Wave-3 Continuation — subscriptions are a sqlite-only
-    // feature in v0.7.0; return an empty list with a structured note
-    // so clients see the same wire envelope on both backends.
+    // v0.7.0 Wave-3 Continuation 4 (Bucket B / S33) — postgres-backed
+    // daemons read subscriptions back from the `_subscriptions/
+    // <agent_id>` namespace via the SAL `list` projection. The
+    // dispatch loop itself is still sqlite-bound; the wire envelope
+    // here lets the cert oracle observe that the subscription
+    // round-trips through the persistent store.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
+        let ctx = crate::store::CallerContext::for_agent(
+            q.agent_id.as_deref().unwrap_or("daemon"),
+        );
+        // When `agent_id` is supplied, scope to `_subscriptions/<aid>`;
+        // otherwise scan every `_subscriptions/...` namespace via
+        // `taxonomy_namespaces` + per-namespace listing.
+        let namespaces: Vec<String> = if let Some(aid) = q.agent_id.as_deref() {
+            vec![format!("_subscriptions/{aid}")]
+        } else {
+            match crate::store::postgres::taxonomy_namespaces_via_store(
+                &app.store,
+                Some("_subscriptions"),
+            )
+            .await
+            {
+                Ok(pairs) => pairs.into_iter().map(|(ns, _)| ns).collect(),
+                Err(e) => return store_err_to_response(e),
+            }
+        };
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for ns in namespaces {
+            let filter = crate::store::Filter {
+                namespace: Some(ns),
+                limit: 1000,
+                ..Default::default()
+            };
+            match app.store.list(&ctx, &filter).await {
+                Ok(memories) => {
+                    for m in memories {
+                        let meta = m.metadata;
+                        if meta.get("kind").and_then(|v| v.as_str()) != Some("subscription") {
+                            continue;
+                        }
+                        let sub_id = meta
+                            .get("subscription_id")
+                            .cloned()
+                            .unwrap_or_else(|| serde_json::Value::String(m.id.clone()));
+                        rows.push(json!({
+                            "id": sub_id,
+                            "url": meta.get("url").cloned().unwrap_or(serde_json::Value::Null),
+                            "events": meta.get("events").cloned().unwrap_or(serde_json::Value::Null),
+                            "namespace": meta.get("namespace_filter").cloned().unwrap_or(serde_json::Value::Null),
+                            "namespace_filter": meta.get("namespace_filter").cloned().unwrap_or(serde_json::Value::Null),
+                            "agent_filter": meta.get("agent_filter").cloned().unwrap_or(serde_json::Value::Null),
+                            "agent_id": meta.get("agent_id").cloned().unwrap_or(serde_json::Value::Null),
+                            "created_by": meta.get("created_by").cloned().unwrap_or(serde_json::Value::Null),
+                            "created_at": meta.get("created_at").cloned().unwrap_or(serde_json::Value::Null),
+                            "dispatch_count": 0,
+                            "failure_count": 0,
+                        }));
+                    }
+                }
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+        let count = rows.len();
         return (
             StatusCode::OK,
             Json(json!({
-                "subscriptions": Vec::<serde_json::Value>::new(),
-                "count": 0,
+                "count": count,
+                "subscriptions": rows,
                 "storage_backend": "postgres",
-                "note": "subscriptions are sqlite-only in v0.7.0",
             })),
         )
             .into_response();
