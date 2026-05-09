@@ -2774,6 +2774,85 @@ fn parse_rfc3339_required(s: &str) -> StoreResult<DateTime<Utc>> {
         })
 }
 
+/// v0.7.0.1 G1 — resolve the `agent_id` to scope a quota row to.
+///
+/// Precedence mirrors the SQLite `quotas::check_and_record` shape: the
+/// claim baked into `memory.metadata.agent_id` (stamped by
+/// `handlers::create_memory` before dispatch to the SAL) wins, falling
+/// back to the SAL `CallerContext::agent_id` when metadata is missing
+/// the field. The fallback ensures we never silently drop a quota
+/// increment because metadata was elided upstream.
+fn resolve_quota_agent_id(ctx: &CallerContext, metadata: &serde_json::Value) -> String {
+    metadata
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| ctx.agent_id.clone())
+}
+
+/// v0.7.0.1 G1 — bytes counted toward a memory's storage cap. Mirrors
+/// `quotas::storage_bytes_for_memory` (title + content UTF-8 length —
+/// ignoring tags/metadata, which is the SQLite parity contract).
+fn memory_storage_bytes(memory: &Memory) -> i64 {
+    let raw = memory.title.len().saturating_add(memory.content.len());
+    i64::try_from(raw).unwrap_or(i64::MAX)
+}
+
+/// v0.7.0.1 G1 — increment `agent_quotas.current_memories_today` and
+/// `current_storage_bytes` inside an active transaction, auto-rolling
+/// the daily counters at UTC midnight. Mirrors the SQLite parity laid
+/// out in `quotas::check_and_record`'s memory-op branch.
+///
+/// Issued as a single statement so a concurrent writer cannot race the
+/// counter — the underlying `INSERT ... ON CONFLICT DO UPDATE` runs
+/// atomically against the `agent_id` PRIMARY KEY. The day-rollover
+/// detection projects the stored `day_started_at` against UTC `now` and
+/// resets `current_memories_today` / `current_links_today` in the same
+/// statement.
+async fn record_memory_quota_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    agent_id: &str,
+    bytes_added: i64,
+) -> StoreResult<()> {
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO agent_quotas (
+             agent_id, max_memories_per_day, max_storage_bytes, max_links_per_day,
+             current_memories_today, current_storage_bytes, current_links_today,
+             day_started_at, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, 1, $5, 0, $6, $6, $6)
+         ON CONFLICT (agent_id) DO UPDATE SET
+             current_memories_today = CASE
+                 WHEN date_trunc('day', agent_quotas.day_started_at) = date_trunc('day', $6)
+                     THEN agent_quotas.current_memories_today + 1
+                 ELSE 1
+             END,
+             current_links_today = CASE
+                 WHEN date_trunc('day', agent_quotas.day_started_at) = date_trunc('day', $6)
+                     THEN agent_quotas.current_links_today
+                 ELSE 0
+             END,
+             current_storage_bytes = agent_quotas.current_storage_bytes + EXCLUDED.current_storage_bytes,
+             day_started_at = CASE
+                 WHEN date_trunc('day', agent_quotas.day_started_at) = date_trunc('day', $6)
+                     THEN agent_quotas.day_started_at
+                 ELSE $6
+             END,
+             updated_at = $6",
+    )
+    .bind(agent_id)
+    .bind(DEFAULT_MAX_MEMORIES_PER_DAY)
+    .bind(DEFAULT_MAX_STORAGE_BYTES)
+    .bind(DEFAULT_MAX_LINKS_PER_DAY)
+    .bind(bytes_added)
+    .bind(now)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| to_store_err("record agent_quotas memory increment", e))?;
+    Ok(())
+}
+
 #[async_trait]
 impl MemoryStore for PostgresStore {
     fn capabilities(&self) -> Capabilities {
@@ -2785,7 +2864,7 @@ impl MemoryStore for PostgresStore {
             | Capabilities::ATOMIC_MULTI_WRITE
     }
 
-    async fn store(&self, _ctx: &CallerContext, memory: &Memory) -> StoreResult<String> {
+    async fn store(&self, ctx: &CallerContext, memory: &Memory) -> StoreResult<String> {
         let created_at = parse_rfc3339_required(&memory.created_at)?;
         let updated_at = parse_rfc3339_required(&memory.updated_at)?;
         let last_accessed_at = parse_rfc3339_opt(memory.last_accessed_at.as_deref());
@@ -2794,6 +2873,17 @@ impl MemoryStore for PostgresStore {
             serde_json::to_value(&memory.tags).map_err(|e| StoreError::IntegrityFailed {
                 detail: format!("serialize tags: {e}"),
             })?;
+
+        // v0.7.0.1 G1 — INSERT memories + record quota usage in a single
+        // transaction so the postgres path matches the SQLite parity laid
+        // out in `quotas::check_and_record`. Without this, S61's wire
+        // shape stays at `current_memories_today=0` after N successful
+        // writes (HALT R1b finding G1).
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin store tx", e))?;
 
         // Upsert contract matches SQLite: `ON CONFLICT (title, namespace)`.
         // Backed by the UNIQUE INDEX `memories_title_ns_uidx` in
@@ -2806,7 +2896,7 @@ impl MemoryStore for PostgresStore {
         //
         // Tier never downgrades (blocker #296 / SQLite parity): on
         // conflict tier takes max of existing vs new via rank mapping.
-        sqlx::query(
+        let id: String = sqlx::query(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
@@ -2849,16 +2939,28 @@ impl MemoryStore for PostgresStore {
         .bind(last_accessed_at)
         .bind(expires_at)
         .bind(&memory.metadata)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| to_store_err("insert memory", e))?
         .try_get::<String, _>("id")
-        .map_err(|e| to_store_err("read returned id", e))
+        .map_err(|e| to_store_err("read returned id", e))?;
+
+        // v0.7.0.1 G1 — record quota usage in the same tx. Best-effort
+        // resolution of agent_id; a missing claim falls back to the SAL
+        // `CallerContext::agent_id` so we never lose the count.
+        let quota_agent_id = resolve_quota_agent_id(ctx, &memory.metadata);
+        let bytes_added = memory_storage_bytes(memory);
+        record_memory_quota_in_tx(&mut tx, &quota_agent_id, bytes_added).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit store tx", e))?;
+        Ok(id)
     }
 
     async fn store_with_embedding(
         &self,
-        _ctx: &CallerContext,
+        ctx: &CallerContext,
         memory: &Memory,
         embedding: Option<&[f32]>,
     ) -> StoreResult<String> {
@@ -2877,7 +2979,15 @@ impl MemoryStore for PostgresStore {
             })?;
         let emb_pgvec = embedding.map(|v| pgvector::Vector::from(v.to_vec()));
 
-        sqlx::query(
+        // v0.7.0.1 G1 — wrap INSERT + quota record in a single tx (see
+        // store() above for context).
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin store tx", e))?;
+
+        let id: String = sqlx::query(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
@@ -2922,11 +3032,20 @@ impl MemoryStore for PostgresStore {
         .bind(expires_at)
         .bind(&memory.metadata)
         .bind(emb_pgvec)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .map_err(|e| to_store_err("insert memory_with_embedding", e))?
         .try_get::<String, _>("id")
-        .map_err(|e| to_store_err("read returned id", e))
+        .map_err(|e| to_store_err("read returned id", e))?;
+
+        let quota_agent_id = resolve_quota_agent_id(ctx, &memory.metadata);
+        let bytes_added = memory_storage_bytes(memory);
+        record_memory_quota_in_tx(&mut tx, &quota_agent_id, bytes_added).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit store tx", e))?;
+        Ok(id)
     }
 
     async fn update_embedding(
