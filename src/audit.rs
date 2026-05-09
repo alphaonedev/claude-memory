@@ -246,9 +246,17 @@ pub fn init(path: &Path, redact_content: bool, append_only_hint: bool) -> Result
 
     // Seed the chain head from the existing tail of the log so a
     // restart on an existing file continues the chain.
-    let last_hash = match read_chain_tail(path) {
-        Ok(Some(h)) => h,
-        _ => CHAIN_HEAD_PREV_HASH.to_string(),
+    //
+    // **F2 (v0.7.0 round-2-fixes):** also seed the per-process
+    // SEQUENCE counter from the trailing record's `sequence` so the
+    // next emit produces `last_sequence + 1`, monotonic across
+    // daemon restarts. Pre-fix the SEQUENCE was reset to 0 here,
+    // which made `audit verify` flag "sequence not monotonic:
+    // prior=N, this=1" on the first event after every restart —
+    // the hash chain was intact but the sequence integer reset.
+    let (last_hash, last_sequence) = match read_chain_tail(path) {
+        Ok(Some((hash, seq))) => (hash, seq),
+        _ => (CHAIN_HEAD_PREV_HASH.to_string(), 0),
     };
 
     let file = OpenOptions::new()
@@ -278,7 +286,7 @@ pub fn init(path: &Path, redact_content: bool, append_only_hint: bool) -> Result
         redact_content,
     };
 
-    SEQUENCE.store(0, Ordering::SeqCst);
+    SEQUENCE.store(last_sequence, Ordering::SeqCst);
     if let Ok(mut guard) = SINK.write() {
         *guard = Some(std::sync::Arc::new(sink));
     }
@@ -327,25 +335,30 @@ pub fn shutdown_for_test() {
     SEQUENCE.store(0, Ordering::SeqCst);
 }
 
-/// Read the last `self_hash` from an existing audit log. Returns
-/// `Ok(None)` when the file is empty or doesn't exist; returns the
-/// `self_hash` of the last well-formed line otherwise. A malformed
-/// trailing line counts as "empty" — emission seeds a fresh chain
-/// head, and `audit verify` will surface the corruption.
-fn read_chain_tail(path: &Path) -> Result<Option<String>> {
+/// Read the last `(self_hash, sequence)` pair from an existing audit
+/// log. Returns `Ok(None)` when the file is empty or doesn't exist;
+/// returns the `self_hash` and `sequence` of the last well-formed line
+/// otherwise. A malformed trailing line counts as "empty" — emission
+/// seeds a fresh chain head, and `audit verify` will surface the
+/// corruption.
+///
+/// **F2 (v0.7.0 round-2-fixes):** the return tuple is consumed by
+/// [`init`] to seed both `last_hash` (chain continuity) AND the
+/// per-process `SEQUENCE` counter (monotonicity across restarts).
+fn read_chain_tail(path: &Path) -> Result<Option<(String, u64)>> {
     if !path.exists() {
         return Ok(None);
     }
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let mut last: Option<String> = None;
+    let mut last: Option<(String, u64)> = None;
     for line in reader.lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(ev) = serde_json::from_str::<AuditEvent>(&line) {
-            last = Some(ev.self_hash);
+            last = Some((ev.self_hash, ev.sequence));
         }
     }
     Ok(last)
@@ -1198,11 +1211,12 @@ mod tests {
         // Pre-populate with a 2-event chain. We specifically test the
         // `read_chain_tail` linkage: the next emitted event's
         // `prev_hash` must match the file's last self_hash.
-        // (The per-process SEQUENCE counter is independent of the
-        // chain — `init` resets it to 0, so a re-init on an existing
-        // file legitimately starts numbering at 1 again. Sequence
-        // continuity is only required *within a single process run*,
-        // so we verify only the hash linkage here.)
+        //
+        // **F2 (v0.7.0 round-2-fixes):** `init` now seeds the
+        // SEQUENCE counter from the trailing record's sequence as
+        // well, so the next emit produces `last_sequence + 1`. The
+        // dedicated F2 test below pins that behavior; here we keep
+        // the focus on hash-chain continuity.
         let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
         let e2 = sample_event(2, &e1.self_hash);
         let mut body = String::new();
@@ -1227,6 +1241,79 @@ mod tests {
         let third_line = body.lines().nth(2).expect("3rd line");
         let parsed: AuditEvent = serde_json::from_str(third_line).unwrap();
         assert_eq!(parsed.prev_hash, e2.self_hash, "chain must continue");
+        super::shutdown_for_test();
+    }
+
+    /// F2 regression (v0.7.0 round-2-fixes): `init` must seed the
+    /// per-process SEQUENCE counter from the trailing record's
+    /// sequence so emissions across daemon restarts remain
+    /// monotonic. Pre-fix the SEQUENCE was reset to 0 every init,
+    /// so the next event emitted sequence=1 even when the file's
+    /// last record was sequence=N>1 — `audit verify` then flagged
+    /// "sequence not monotonic: prior=N, this=1" on the first
+    /// post-restart event.
+    #[test]
+    fn audit_init_seeds_sequence_from_existing_chain_tail() {
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+
+        // Phase 1: drive 5 events with sequences 1..=5 against a
+        // real file (init opens the file in append mode like the
+        // production daemon does).
+        super::init(&path, true, false).unwrap();
+        for i in 0..5 {
+            super::emit(EventBuilder::new(
+                AuditAction::Store,
+                actor("ai:writer", "explicit", None),
+                target_memory(&format!("m{i}"), "ns", Some(format!("t{i}")), None, None),
+            ));
+        }
+
+        // Verify Phase 1 sequences are 1..=5.
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 5, "phase 1 must emit 5 events");
+        for (i, line) in lines.iter().enumerate() {
+            let ev: AuditEvent = serde_json::from_str(line).unwrap();
+            #[allow(clippy::cast_possible_truncation)]
+            let expected = (i as u64) + 1;
+            assert_eq!(
+                ev.sequence, expected,
+                "phase 1 event {i} must have sequence {expected}"
+            );
+        }
+
+        // Simulate daemon restart: drop the active sink, then re-init
+        // pointing at the same physical file.
+        super::shutdown_for_test();
+        super::init(&path, true, false).unwrap();
+
+        // Phase 2: emit a single event. Pre-fix this would emit
+        // sequence=1; post-fix it must emit sequence=6.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("ai:writer", "explicit", None),
+            target_memory("m6", "ns", Some("t6".to_string()), None, None),
+        ));
+
+        let body = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = body.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 6, "phase 2 must append a 6th event");
+
+        let last: AuditEvent = serde_json::from_str(lines[5]).unwrap();
+        assert_eq!(
+            last.sequence, 6,
+            "F2: post-restart event must continue sequence from disk (got {}, expected 6)",
+            last.sequence,
+        );
+
+        // Hash-chain linkage from the prior tail must also hold.
+        let fifth: AuditEvent = serde_json::from_str(lines[4]).unwrap();
+        assert_eq!(
+            last.prev_hash, fifth.self_hash,
+            "F2 must not regress hash-chain continuity"
+        );
         super::shutdown_for_test();
     }
 

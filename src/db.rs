@@ -5522,13 +5522,41 @@ fn evaluate_level(
 
 /// Resolve the namespace-owner (`metadata.agent_id` of the namespace's
 /// standard memory) used for `Owner`-level store checks.
+///
+/// **F1 (v0.7.0 round-2-fixes):** the lookup now walks the inheritance
+/// chain leaf-first via [`build_namespace_chain`], returning the
+/// `agent_id` of the first standard memory found. This mirrors
+/// [`resolve_governance_policy`]'s semantics so that when a deep child
+/// inherits a parent's `governance.write = owner` policy, the owner
+/// check resolves to the parent's standard owner — matching operator
+/// intuition that the helper means "owner of the effective policy at
+/// this namespace".
+///
+/// Without this walk, deep children with no standard of their own
+/// triggered `governance: owner-level action has no resolvable owner`
+/// despite the parent's policy being correctly inherited.
 fn namespace_owner(conn: &Connection, namespace: &str) -> Option<String> {
-    let standard_id = get_namespace_standard(conn, namespace).ok().flatten()?;
-    let mem = get(conn, &standard_id).ok().flatten()?;
-    mem.metadata
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    // build_namespace_chain returns top-down (`["*", root, ..., leaf]`).
+    // We want leaf-first so the most-specific owner wins, matching how
+    // resolve_governance_policy picks up the most-specific policy.
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        let Some(standard_id) = get_namespace_standard(conn, &level).ok().flatten() else {
+            continue;
+        };
+        let Some(mem) = get(conn, &standard_id).ok().flatten() else {
+            continue;
+        };
+        if let Some(owner) = mem
+            .metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            return Some(owner);
+        }
+    }
+    None
 }
 
 /// Enforce governance for a `GovernedAction`. On [`GovernanceDecision::Pending`],
@@ -9149,6 +9177,213 @@ mod tests {
         let resolved = resolve_governance_policy(&conn, "ns/locked")
             .expect("policy must resolve when explicitly set");
         assert_eq!(resolved.write, crate::models::GovernanceLevel::Owner);
+    }
+
+    /// F1 regression (v0.7.0 round-2-fixes): when a parent namespace
+    /// has `governance.write = owner` with `inherit: true` and a deep
+    /// child has no standard of its own, the owner-level check must
+    /// resolve the namespace owner by walking the same chain that
+    /// `resolve_governance_policy` walks. Pre-fix the helper looked
+    /// only at the leaf's standard, returning None and producing a
+    /// "no resolvable owner" Deny even for the rightful owner.
+    #[test]
+    fn enforce_governance_inherits_owner_for_deep_child_owner_write() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::models::{
+            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
+            default_metadata,
+        };
+
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+
+        let conn = test_db();
+
+        // Seed a parent standard that enforces write=owner with inherit=true.
+        let parent_ns = "f1/parent";
+        let owner = "ai:alice";
+        let policy = GovernancePolicy {
+            write: GovernanceLevel::Owner,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(owner.to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: format!("_standards-{parent_ns}"),
+            title: "f1-standard".to_string(),
+            content: "f1 policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let standard_id = insert(&conn, &standard).unwrap();
+        set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
+
+        // Deep child has NO standard of its own; everything must
+        // resolve via the chain walk.
+        let child_ns = "f1/parent/a/b/c";
+        let payload = serde_json::json!({"title": "deep-child"});
+
+        // Owner-level write by the rightful owner: ALLOW.
+        let allow = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            child_ns,
+            owner,
+            None,
+            None,
+            &payload,
+        )
+        .expect("enforce_governance must not error on inherited owner policy");
+        assert!(
+            matches!(allow, GovernanceDecision::Allow),
+            "owner write at deep child must Allow when chain walk finds the parent's owner: got {allow:?}"
+        );
+
+        // Owner-level write by a non-owner: DENY.
+        let deny = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            child_ns,
+            "ai:eve",
+            None,
+            None,
+            &payload,
+        )
+        .expect("enforce_governance must not error");
+        match deny {
+            GovernanceDecision::Deny(reason) => {
+                assert!(
+                    reason.contains("not the owner"),
+                    "non-owner deny should cite ownership mismatch, got: {reason}"
+                );
+            }
+            other => panic!("expected Deny for non-owner, got {other:?}"),
+        }
+    }
+
+    /// F1 corollary: `inherit = false` on the parent must STOP the
+    /// chain walk at the parent. The deep child has no policy of its
+    /// own and the parent declines to share, so the action is
+    /// ungoverned (Allow).
+    ///
+    /// Note: under `resolve_governance_policy` semantics, the
+    /// `inherit` flag is documentation/contract — the leaf-first walk
+    /// stops at the most-specific policy regardless. The flag flows
+    /// through to consumers (e.g. pending_action approver resolution)
+    /// to signal "do not re-walk above me." This test pins the
+    /// observable outcome: a deep child with NO standard inherits a
+    /// parent policy regardless of the `inherit` flag value, because
+    /// the walk only stops at policies that exist. The flag's
+    /// "stop" semantics apply when an intermediate policy declines to
+    /// be inherited above itself, not below.
+    #[test]
+    fn enforce_governance_deep_child_with_inherit_false_still_resolves_via_walk() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::models::{
+            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
+            default_metadata,
+        };
+
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+
+        let conn = test_db();
+
+        // Parent has inherit=false: descendants without a policy of
+        // their own should still resolve to this policy on the
+        // leaf-first walk; inherit=false is a forward-blocker
+        // ("nothing above me applies to namespaces I govern"), not a
+        // backward-blocker ("namespaces below me cannot inherit").
+        // This matches the documented semantics in
+        // `resolve_governance_policy`'s docstring.
+        let parent_ns = "f1nb/parent";
+        let owner = "ai:alice";
+        let policy = GovernancePolicy {
+            write: GovernanceLevel::Owner,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: false,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(owner.to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: format!("_standards-{parent_ns}"),
+            title: "f1nb-standard".to_string(),
+            content: "policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let standard_id = insert(&conn, &standard).unwrap();
+        set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
+
+        // Deep child write by owner is still Allow (chain walk finds
+        // parent owner; inherit=false on the parent does not block
+        // descendants).
+        let decision = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            "f1nb/parent/x/y",
+            owner,
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert!(
+            matches!(decision, GovernanceDecision::Allow),
+            "owner write at deep child resolves via leaf-first walk: got {decision:?}"
+        );
     }
 
     #[test]
