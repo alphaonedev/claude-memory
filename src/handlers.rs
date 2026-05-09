@@ -432,8 +432,40 @@ pub fn postgres_endpoint_supported(method: &axum::http::Method, path: &str) -> b
         ("DELETE", "/api/v1/archive") => true,
         ("POST", "/api/v1/archive/purge") => true,
         ("POST", p) if archive_restore_path(p) => true,
+        // Wave-3 Continuation 3 — remaining write paths the sqlite path
+        // already wires through `app.store` in their handlers (these
+        // were soft-routed by the legacy db:: free-functions before
+        // Continuation 3, so the gate now allow-lists them so the gate
+        // doesn't 501 a working sqlite-routed handler on a postgres
+        // daemon. Each handler internally enforces postgres-vs-sqlite
+        // dispatch, so the gate's job is just to permit the request to
+        // reach the handler).
+        ("POST", "/api/v1/agents") => true,
+        ("DELETE", "/api/v1/links") => true,
+        ("POST", "/api/v1/subscriptions") | ("DELETE", "/api/v1/subscriptions") => true,
+        ("POST", "/api/v1/session/start") => true,
+        ("POST", p) if memory_promote_path(p) => true,
+        ("POST", p) if approvals_decide_path(p) => true,
         _ => false,
     }
+}
+
+/// Path matcher for `/api/v1/memories/{id}/promote`.
+#[cfg(feature = "sal")]
+fn memory_promote_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/memories/") else {
+        return false;
+    };
+    rest.ends_with("/promote") && rest.split('/').count() == 2
+}
+
+/// Path matcher for `POST /api/v1/approvals/{pending_id}` (HMAC-gated).
+#[cfg(feature = "sal")]
+fn approvals_decide_path(p: &str) -> bool {
+    let Some(rest) = p.strip_prefix("/api/v1/approvals/") else {
+        return false;
+    };
+    !rest.is_empty() && rest != "stream" && !rest.contains('/')
 }
 
 /// Path matcher for `/api/v1/archive/{id}/restore`.
