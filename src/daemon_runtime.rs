@@ -509,6 +509,30 @@ pub struct ServeArgs {
     /// node convergent within one interval after resume.
     #[arg(long, default_value_t = 30)]
     pub catchup_interval_secs: u64,
+
+    // -------- v0.7.0 Wave-3 — adapter selection --------------------
+    /// v0.7.0 Wave-3 — full SAL store URL. When set, the daemon binds
+    /// its [`MemoryStore`] handle to the URL-resolved adapter instead
+    /// of the default SQLite path derived from `--db`.
+    ///
+    /// Accepted shapes:
+    ///
+    /// - `sqlite:///absolute/path/to/file.db` — SQLite adapter (same
+    ///   semantics as `--db`).
+    /// - `postgres://user:pass@host:port/dbname` — Postgres adapter.
+    /// - `postgresql://...` — alias for the Postgres scheme.
+    ///
+    /// `--db` and `--store-url` are mutually exclusive: passing both
+    /// is rejected at startup with a clear error.
+    ///
+    /// Postgres-backed daemons require `--features sal,sal-postgres`
+    /// at build time; otherwise the URL is rejected at startup. See
+    /// `docs/postgres-age-guide.md` for the operator workflow.
+    ///
+    /// [`MemoryStore`]: crate::store::MemoryStore
+    #[cfg(feature = "sal")]
+    #[arg(long, value_name = "URL")]
+    pub store_url: Option<String>,
 }
 
 #[derive(Args)]
@@ -550,7 +574,35 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
     };
 
     let result = match cli.command {
-        Command::Serve(a) => serve(db_path, a, app_config).await,
+        Command::Serve(a) => {
+            // v0.7.0 Wave-3 — `--db` and `--store-url` are mutually
+            // exclusive when both are explicitly supplied. clap can't
+            // express this conflict cross-struct (the global `--db`
+            // lives on `Cli`, the new `--store-url` lives on
+            // `ServeArgs`), so the check happens here at runtime.
+            //
+            // `--db` carries a non-`None` `default_value`, so we can't
+            // tell from the parsed value alone whether the operator
+            // typed it on the command line. We approximate explicit
+            // intent through the `AI_MEMORY_DB` env var (which clap
+            // resolves into the same field) and a non-default path.
+            // When both signals indicate `--db` was deliberate AND
+            // `--store-url` is set, refuse to start.
+            #[cfg(feature = "sal")]
+            if let Some(ref url) = a.store_url {
+                let db_was_explicit =
+                    std::env::var("AI_MEMORY_DB").is_ok() || db_path != PathBuf::from(DEFAULT_DB);
+                if db_was_explicit {
+                    anyhow::bail!(
+                        "--db and --store-url are mutually exclusive. \
+                         Pass exactly one. Got --db={} and --store-url={}",
+                        db_path.display(),
+                        url,
+                    );
+                }
+            }
+            serve(db_path, a, app_config).await
+        }
         Command::Mcp { tier, profile } => {
             let feature_tier = app_config.effective_tier(Some(&tier));
             // v0.6.4-001 — resolve profile (CLI/env > config > default core).
@@ -1515,6 +1567,99 @@ pub struct ServeBootstrap {
     pub daemon_keypair_outcome: Option<crate::identity::keypair::EnsureOutcome>,
 }
 
+/// v0.7.0 Wave-3 — resolve a [`MemoryStore`] handle from the operator's
+/// `--store-url` (when set) or fall back to a [`SqliteStore`] wrapping
+/// the on-disk database `--db` already opened.
+///
+/// Returns the resolved [`StorageBackend`] tag plus the polymorphic
+/// `Arc<dyn MemoryStore>` so the caller can wire both fields onto
+/// `AppState` and have downstream handlers branch on the tag without
+/// dynamic-dispatch probes.
+///
+/// URL precedence:
+///
+/// - `Some("postgres://...")` or `Some("postgresql://...")` →
+///   [`PostgresStore::connect`]; resolves to
+///   [`StorageBackend::Postgres`]. Requires `--features sal-postgres`
+///   at build time; the URL is rejected at runtime under a sal-only
+///   build with a clear error.
+/// - `Some("sqlite:///path")` → [`SqliteStore::open`]; resolves to
+///   [`StorageBackend::Sqlite`]. The on-disk path may or may not be
+///   the same file `--db` already opened — both views see the same
+///   rows when they coincide; the SQLite file-locking layer arbitrates
+///   any cross-connection contention.
+/// - `None` → [`SqliteStore::open`] against `db_path`; resolves to
+///   [`StorageBackend::Sqlite`]. The default behaviour preserved
+///   for every operator who has not opted in to `--store-url`.
+///
+/// Anything else exits non-zero with the same "unrecognised store URL"
+/// diagnostic [`crate::migrate::open_store`] returns, keeping the
+/// surface area consistent across `serve`, `migrate`, and
+/// `schema-init`.
+///
+/// [`MemoryStore`]: crate::store::MemoryStore
+/// [`SqliteStore`]: crate::store::sqlite::SqliteStore
+/// [`PostgresStore::connect`]: crate::store::postgres::PostgresStore::connect
+/// [`SqliteStore::open`]: crate::store::sqlite::SqliteStore::open
+/// [`StorageBackend`]: crate::handlers::StorageBackend
+/// [`StorageBackend::Postgres`]: crate::handlers::StorageBackend::Postgres
+/// [`StorageBackend::Sqlite`]: crate::handlers::StorageBackend::Sqlite
+#[cfg(feature = "sal")]
+async fn build_store_handle(
+    store_url: Option<&str>,
+    db_path: &Path,
+) -> Result<(
+    crate::handlers::StorageBackend,
+    Arc<dyn crate::store::MemoryStore>,
+)> {
+    use crate::handlers::StorageBackend;
+
+    match store_url {
+        Some(url) => {
+            let lowered = url.to_ascii_lowercase();
+            if lowered.starts_with("postgres://") || lowered.starts_with("postgresql://") {
+                #[cfg(feature = "sal-postgres")]
+                {
+                    tracing::info!("Wave-3: opening Postgres SAL store at {url}");
+                    let store = crate::store::postgres::PostgresStore::connect(url)
+                        .await
+                        .context("connect postgres adapter")?;
+                    Ok((StorageBackend::Postgres, Arc::new(store)))
+                }
+                #[cfg(not(feature = "sal-postgres"))]
+                {
+                    let _ = url;
+                    anyhow::bail!(
+                        "--store-url postgres:// requires the binary to be built with \
+                         --features sal-postgres; this binary was built with --features sal only"
+                    );
+                }
+            } else if let Some(path) = url
+                .strip_prefix("sqlite://")
+                .or_else(|| url.strip_prefix("SQLITE://"))
+            {
+                let clean = path
+                    .strip_prefix('/')
+                    .map_or(path, |p| if p.starts_with('/') { p } else { path });
+                tracing::info!("Wave-3: opening SQLite SAL store at {clean} (--store-url)");
+                let store = crate::store::sqlite::SqliteStore::open(clean)
+                    .map_err(|e| anyhow::anyhow!("open sqlite adapter: {e}"))?;
+                Ok((StorageBackend::Sqlite, Arc::new(store)))
+            } else {
+                anyhow::bail!(
+                    "unrecognised --store-url: {url} (expected sqlite:///path or postgres://...)"
+                )
+            }
+        }
+        None => {
+            tracing::debug!("Wave-3: --store-url absent; opening SQLite SAL store at --db path");
+            let store = crate::store::sqlite::SqliteStore::open(db_path)
+                .map_err(|e| anyhow::anyhow!("open sqlite adapter: {e}"))?;
+            Ok((StorageBackend::Sqlite, Arc::new(store)))
+        }
+    }
+}
+
 /// Build all daemon state and spawn background tasks. Returns the
 /// aggregated state without binding any sockets — testable in isolation.
 pub async fn bootstrap_serve(
@@ -1674,6 +1819,33 @@ pub async fn bootstrap_serve(
         );
     }
 
+    // v0.7.0 Wave-3 — resolve the polymorphic `MemoryStore` handle from
+    // the operator's `--store-url` (when set) or build a `SqliteStore`
+    // wrapping the same on-disk database `--db` already opened. Both
+    // branches end with a populated `Arc<dyn MemoryStore>` so handlers
+    // can dispatch through the SAL unconditionally on `--features sal`
+    // builds. The `storage_backend` flag below records which adapter
+    // resolved so handlers can branch + the `/capabilities` payload can
+    // surface it for operators.
+    //
+    // Standard builds (no `--features sal`) skip the trait wiring
+    // entirely — the daemon stays a pure SQLite-on-disk deployment with
+    // zero behavioural drift versus pre-Wave-3.
+    #[cfg(feature = "sal")]
+    let (storage_backend, store_handle) = build_store_handle(args.store_url.as_deref(), db_path)
+        .await
+        .context("build SAL store handle")?;
+    #[cfg(not(feature = "sal"))]
+    let storage_backend = crate::handlers::StorageBackend::Sqlite;
+
+    if matches!(storage_backend, crate::handlers::StorageBackend::Postgres) {
+        tracing::warn!(
+            "v0.7.0 Wave-3: postgres-backed daemon — handlers that have not \
+             yet migrated to the SAL trait surface 501 Not Implemented. See \
+             docs/postgres-age-guide.md for the supported endpoint inventory."
+        );
+    }
+
     let app_state = AppState {
         db: db_state.clone(),
         embedder: embedder_arc,
@@ -1685,6 +1857,9 @@ pub async fn bootstrap_serve(
         mcp_config: Arc::new(mcp_config_for_http),
         active_keypair: Arc::new(active_keypair),
         family_embeddings,
+        storage_backend,
+        #[cfg(feature = "sal")]
+        store: store_handle,
     };
 
     // Automatic GC.
@@ -2409,6 +2584,8 @@ mod tests {
             quorum_client_key: None,
             quorum_ca_cert: None,
             catchup_interval_secs: 0,
+            #[cfg(feature = "sal")]
+            store_url: None,
         }
     }
 
@@ -2431,6 +2608,13 @@ mod tests {
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
             family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+            storage_backend: crate::handlers::StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store: {
+                let s = crate::store::sqlite::SqliteStore::open(db_path)
+                    .expect("open SqliteStore for keyword_app_state");
+                Arc::new(s)
+            },
         }
     }
 

@@ -28,6 +28,44 @@ use crate::validate;
 
 pub type Db = Arc<Mutex<(rusqlite::Connection, std::path::PathBuf, ResolvedTtl, bool)>>;
 
+/// v0.7.0 Wave-3 — declared storage backend for the daemon.
+///
+/// Surfaced through the `/capabilities` payload so operators and clients
+/// can detect whether the daemon is backed by the bundled SQLite path
+/// (the historical default) or by the SAL-routed Postgres adapter.
+///
+/// The variant resolves once at `serve()` startup from the
+/// `--store-url` flag (when set) or the `--db` path (when absent), and
+/// is stable across the process lifetime.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StorageBackend {
+    /// Bundled SQLite — the production default. Every handler operates
+    /// on the `Db` connection directly and the SAL handle in `AppState`
+    /// wraps the same connection for parity tests + the v0.7.0 Wave-3
+    /// trait-routed code paths.
+    Sqlite,
+    /// Postgres — selected when `serve --store-url postgres://...` is
+    /// passed and the binary was built with `--features sal-postgres`.
+    /// Handlers that have been migrated to dispatch through the
+    /// [`crate::store::MemoryStore`] trait operate against the
+    /// `PostgresStore` adapter; handlers that have not yet migrated
+    /// surface `501 Not Implemented` with a clear `storage_backend`
+    /// hint so operators can plan the rollout.
+    Postgres,
+}
+
+impl StorageBackend {
+    /// Stable lowercase tag for log lines, the `/capabilities`
+    /// `storage_backend` field, and the `ai-memory doctor` report.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Sqlite => "sqlite",
+            Self::Postgres => "postgres",
+        }
+    }
+}
+
 /// Composite daemon state (issue #219/v0.7 prep).
 ///
 /// Previously the Axum router held only `Db`. Closing the HTTP embedding gap
@@ -100,6 +138,31 @@ pub struct AppState {
     /// `None` and B2's smart loader degrades to its non-embedding
     /// match path.
     pub family_embeddings: Arc<RwLock<Option<Vec<(Family, Vec<f32>)>>>>,
+
+    // ----- v0.7.0 Wave-3 — adapter selection ------------------------
+    /// v0.7.0 Wave-3 — declared storage backend for this daemon.
+    ///
+    /// Resolved once from `--store-url` (or `--db` fallback) at
+    /// `serve()` startup; stable across the process lifetime.
+    /// Surfaced through `/api/v1/capabilities.storage_backend` and
+    /// consulted by trait-eligible handlers to decide whether to
+    /// dispatch through `app.store` or fall back to the legacy
+    /// `db::*` free-function code path.
+    pub storage_backend: StorageBackend,
+    /// v0.7.0 Wave-3 — polymorphic [`MemoryStore`] handle.
+    ///
+    /// Always populated. For [`StorageBackend::Sqlite`] it wraps a
+    /// `SqliteStore` opened against the same on-disk database as the
+    /// [`AppState::db`] connection (the two views see the same rows).
+    /// For [`StorageBackend::Postgres`] it wraps a `PostgresStore`
+    /// connected to the operator-supplied URL.
+    ///
+    /// Only available under `--features sal`. Standard builds keep
+    /// the legacy `db::*` free-function path verbatim.
+    ///
+    /// [`MemoryStore`]: crate::store::MemoryStore
+    #[cfg(feature = "sal")]
+    pub store: Arc<dyn crate::store::MemoryStore>,
 }
 
 /// v0.7.0 B3 — canonical 1-2 sentence English descriptors for each
@@ -6165,6 +6228,15 @@ mod tests {
     use tower::ServiceExt as _;
 
     fn test_app_state(db: Db) -> AppState {
+        // v0.7.0 Wave-3 — test helper. Test fixtures use `:memory:`
+        // SQLite for the legacy `db` field (no on-disk path) so the
+        // trait-routed `store` field is set to a separate SqliteStore
+        // opened against a fresh tempfile. Tests that exercise
+        // trait-routed code paths use the dedicated `tests/`
+        // harnesses (notably `serve_postgres_smoke.rs`); the unit
+        // tests in this module exercise the legacy direct-rusqlite
+        // path and never read `app.store`, so the disjoint backing
+        // file is harmless.
         AppState {
             db,
             embedder: Arc::new(None),
@@ -6176,7 +6248,29 @@ mod tests {
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
             family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
+            storage_backend: StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store: test_sqlite_store_handle(),
         }
+    }
+
+    /// v0.7.0 Wave-3 — test-only `Arc<dyn MemoryStore>` that wraps a
+    /// freshly-opened tempfile-backed SQLite database. The unit tests
+    /// in this module never call into `app.store`, so the disjoint
+    /// backing file is harmless — but a populated handle is required
+    /// to satisfy the `AppState` field shape.
+    #[cfg(feature = "sal")]
+    fn test_sqlite_store_handle() -> Arc<dyn crate::store::MemoryStore> {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile for test SqliteStore");
+        // Keep the tempfile alive for the lifetime of the process by
+        // leaking the path — the OS reclaims it on exit. Tests that
+        // touch the trait-routed path open their own dedicated stores.
+        let path = tmp.path().to_path_buf();
+        std::mem::forget(tmp);
+        Arc::new(
+            crate::store::sqlite::SqliteStore::open(&path)
+                .expect("open SqliteStore for test_app_state"),
+        )
     }
 
     #[tokio::test]
@@ -6674,6 +6768,9 @@ mod tests {
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
             family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
+            storage_backend: StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store: test_sqlite_store_handle(),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -14402,6 +14499,9 @@ mod tests {
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
             family_embeddings: Arc::new(RwLock::new(Some(Vec::new()))),
+            storage_backend: StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store: test_sqlite_store_handle(),
         }
     }
 
