@@ -4727,8 +4727,13 @@ pub async fn kg_query(
     // recursive-CTE wire shape.
     #[cfg(feature = "sal-postgres")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        return match crate::store::postgres::kg_query_via_store(&app.store, &source_id, max_depth)
-            .await
+        return match crate::store::postgres::kg_query_via_store(
+            &app.store,
+            &source_id,
+            max_depth,
+            body.include_invalidated,
+        )
+        .await
         {
             Ok(nodes) => {
                 // S82's wire shape — when `to` is supplied, project a
@@ -4852,7 +4857,10 @@ pub async fn create_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
+    // S82's wire shape uses `{from, to, rel_type}`; resolve canonical
+    // (source_id, target_id, relation) from either field set.
+    let (source_id, target_id, relation) = body.resolved();
+    if let Err(e) = validate::validate_link(&source_id, &target_id, &relation) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -4871,9 +4879,9 @@ pub async fn create_link(
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let now = Utc::now().to_rfc3339();
         let link = MemoryLink {
-            source_id: body.source_id.clone(),
-            target_id: body.target_id.clone(),
-            relation: body.relation.clone(),
+            source_id: source_id.clone(),
+            target_id: target_id.clone(),
+            relation: relation.clone(),
             created_at: now,
             valid_from: None,
             valid_until: None,
@@ -4892,9 +4900,9 @@ pub async fn create_link(
                         crate::audit::AuditAction::Link,
                         crate::audit::actor("ai:http", "http_body", None),
                         crate::audit::target_memory(
-                            body.source_id.clone(),
+                            source_id.clone(),
                             String::new(),
-                            Some(format!("{} -> {}", body.target_id, body.relation)),
+                            Some(format!("{target_id} -> {relation}")),
                             None,
                             None,
                         ),
@@ -4904,9 +4912,9 @@ pub async fn create_link(
                     StatusCode::CREATED,
                     Json(json!({
                         "linked": true,
-                        "source_id": body.source_id,
-                        "target_id": body.target_id,
-                        "relation": body.relation,
+                        "source_id": source_id,
+                        "target_id": target_id,
+                        "relation": relation,
                         "attest_level": attest_level,
                     })),
                 )
@@ -4924,9 +4932,9 @@ pub async fn create_link(
     // observe whether their link was signed without re-querying.
     let create_result = db::create_link_signed(
         &lock.0,
-        &body.source_id,
-        &body.target_id,
-        &body.relation,
+        &source_id,
+        &target_id,
+        &relation,
         app.active_keypair.as_ref().as_ref(),
     );
     // v0.6.4-017 — G9 HTTP webhook parity. Fire `memory_link_created`
@@ -4935,29 +4943,26 @@ pub async fn create_link(
     // for the namespace + owner agent_id so the event payload matches
     // the MCP contract.
     if create_result.is_ok() {
-        let (link_namespace, link_owner) = db::get(&lock.0, &body.source_id)
-            .ok()
-            .flatten()
-            .map_or_else(
-                || ("global".to_string(), None),
-                |m| {
-                    let owner = m
-                        .metadata
-                        .get("agent_id")
-                        .and_then(|v| v.as_str())
-                        .map(str::to_string);
-                    (m.namespace, owner)
-                },
-            );
+        let (link_namespace, link_owner) = db::get(&lock.0, &source_id).ok().flatten().map_or_else(
+            || ("global".to_string(), None),
+            |m| {
+                let owner = m
+                    .metadata
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                (m.namespace, owner)
+            },
+        );
         let details = serde_json::to_value(crate::subscriptions::LinkCreatedEventDetails {
-            target_id: body.target_id.clone(),
-            relation: body.relation.clone(),
+            target_id: target_id.clone(),
+            relation: relation.clone(),
         })
         .ok();
         crate::subscriptions::dispatch_event_with_details(
             &lock.0,
             "memory_link_created",
-            &body.source_id,
+            &source_id,
             &link_namespace,
             link_owner.as_deref(),
             &lock.1,
@@ -4972,9 +4977,9 @@ pub async fn create_link(
             // v0.6.2 (#325): propagate link to peers.
             if let Some(fed) = app.federation.as_ref() {
                 let link = crate::models::MemoryLink {
-                    source_id: body.source_id.clone(),
-                    target_id: body.target_id.clone(),
-                    relation: body.relation.clone(),
+                    source_id: source_id.clone(),
+                    target_id: target_id.clone(),
+                    relation: relation.clone(),
                     created_at: chrono::Utc::now().to_rfc3339(),
                     // H3 wire fields are populated by `export_links`
                     // on the next bulk re-sync; the immediate fanout
@@ -5034,7 +5039,8 @@ pub async fn delete_link(
     State(app): State<AppState>,
     Json(body): Json<LinkBody>,
 ) -> impl IntoResponse {
-    if let Err(e) = validate::validate_link(&body.source_id, &body.target_id, &body.relation) {
+    let (source_id, target_id, relation) = body.resolved();
+    if let Err(e) = validate::validate_link(&source_id, &target_id, &relation) {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({"error": e.to_string()})),
@@ -5042,7 +5048,7 @@ pub async fn delete_link(
             .into_response();
     }
     let lock = app.db.lock().await;
-    let delete_result = db::delete_link(&lock.0, &body.source_id, &body.target_id);
+    let delete_result = db::delete_link(&lock.0, &source_id, &target_id);
     drop(lock);
     match delete_result {
         Ok(removed) => Json(json!({"deleted": removed})).into_response(),

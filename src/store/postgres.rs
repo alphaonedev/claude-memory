@@ -1245,20 +1245,29 @@ impl PostgresStore {
         source_id: &str,
         max_depth: usize,
     ) -> StoreResult<Vec<KgQueryRow>> {
-        // v0.7.0 Wave-3 Continuation 5 — always dispatch through the
-        // CTE implementation regardless of `kg_backend`. The AGE
-        // projection is populated out-of-band (J1 schema-prep) and is
-        // empty under cert-harness deployments where writes flow only
-        // through the SAL `link` path. The Cypher dispatch additionally
-        // requires the `cypher()` third argument to be a Param node
-        // (postgres-AGE 1.5.0+ parser invariant) which sqlx cannot
-        // express without a custom `agtype` type registration. Until
-        // both gaps close (J6: dual-write to AGE on every link, plus
-        // a sqlx agtype type extension), the relational `memory_links`
-        // table is the single source of truth and the CTE traversal
-        // is the always-correct read path.
+        // v0.7.0 Wave-3 Continuation 5 — see `kg_query_with_history`
+        // for the AGE-vs-CTE rationale. This entry point hides the
+        // `include_invalidated` knob (defaults to false / "current
+        // view") for callers that don't care about the historical
+        // posture; S82 + parity tests use this wider-scoped variant.
+        self.kg_query_with_history(source_id, max_depth, false)
+            .await
+    }
+
+    /// Outbound traversal with explicit historical-view toggle.
+    /// `include_invalidated=true` lifts the
+    /// `valid_until IS NULL OR valid_until > NOW()` filter so callers
+    /// can read the full historical edge graph (S45's `as_of=past`
+    /// semantics through `memory_kg_query`).
+    pub async fn kg_query_with_history(
+        &self,
+        source_id: &str,
+        max_depth: usize,
+        include_invalidated: bool,
+    ) -> StoreResult<Vec<KgQueryRow>> {
         let _ = &self.kg_backend;
-        self.kg_query_cte(source_id, max_depth).await
+        self.kg_query_cte_filtered(source_id, max_depth, include_invalidated)
+            .await
     }
 
     /// Cypher (Apache AGE) implementation of `kg_query`.
@@ -1392,20 +1401,46 @@ impl PostgresStore {
         source_id: &str,
         max_depth: usize,
     ) -> StoreResult<Vec<KgQueryRow>> {
+        // Default current-view posture mirrors `db::kg_query` —
+        // invalidated edges hidden. Callers that need the historical
+        // view go through `kg_query_with_history` /
+        // `kg_query_cte_filtered`.
+        self.kg_query_cte_filtered(source_id, max_depth, false)
+            .await
+    }
+
+    /// Recursive-CTE traversal with explicit historical-view toggle.
+    /// `include_invalidated=true` lifts the
+    /// `valid_until IS NULL OR valid_until > NOW()` filter on both
+    /// the CTE seed AND step rows.
+    pub async fn kg_query_cte_filtered(
+        &self,
+        source_id: &str,
+        max_depth: usize,
+        include_invalidated: bool,
+    ) -> StoreResult<Vec<KgQueryRow>> {
         validate_depth(max_depth)?;
 
         let depth_cap = i32::try_from(max_depth).unwrap_or(i32::MAX);
         // v0.7.0 Wave-3 Continuation 5 — filter out invalidated edges
         // (`valid_until` set in the past) so `as_of=now` queries
-        // only see currently-valid edges. Mirrors S45's expectation:
-        // an edge with `valid_until <= NOW()` should not appear in
-        // a `now`-window kg_query.
-        let sql = "WITH RECURSIVE traversal(target_id, relation, depth, path) AS (
+        // only see currently-valid edges. The filter clause is
+        // dropped in via format! when include_invalidated is false;
+        // the historical view (`include_invalidated=true`) issues
+        // the same SQL with `TRUE` in place of the predicate so the
+        // query plan stays uniform across views.
+        let valid_filter = if include_invalidated {
+            "TRUE"
+        } else {
+            "(ml.valid_until IS NULL OR ml.valid_until > NOW())"
+        };
+        let sql = format!(
+            "WITH RECURSIVE traversal(target_id, relation, depth, path) AS (
                 SELECT ml.target_id, ml.relation, 1,
                        ml.source_id || '->' || ml.target_id
                 FROM memory_links ml
                 WHERE ml.source_id = $1
-                  AND (ml.valid_until IS NULL OR ml.valid_until > NOW())
+                  AND {valid_filter}
                 UNION ALL
                 SELECT ml.target_id, ml.relation, t.depth + 1,
                        t.path || '->' || ml.target_id
@@ -1414,13 +1449,14 @@ impl PostgresStore {
                 WHERE t.depth < $2
                   AND position(('->' || ml.target_id) IN t.path) = 0
                   AND position((ml.target_id || '->') IN t.path) = 0
-                  AND (ml.valid_until IS NULL OR ml.valid_until > NOW())
+                  AND {valid_filter}
             )
             SELECT target_id, relation, depth, path
             FROM traversal
-            ORDER BY depth ASC, target_id ASC";
+            ORDER BY depth ASC, target_id ASC"
+        );
 
-        let rows = sqlx::query(sql)
+        let rows = sqlx::query(&sql)
             .bind(source_id)
             .bind(depth_cap)
             .fetch_all(&self.pool)
@@ -4701,9 +4737,11 @@ pub async fn kg_query_via_store(
     store: &std::sync::Arc<dyn MemoryStore>,
     source_id: &str,
     max_depth: usize,
+    include_invalidated: bool,
 ) -> StoreResult<Vec<crate::store::KgQueryRow>> {
     let pg = downcast_postgres(store)?;
-    pg.kg_query(source_id, max_depth).await
+    pg.kg_query_with_history(source_id, max_depth, include_invalidated)
+        .await
 }
 
 /// Knowledge-graph timeline scan for postgres-backed daemons.
@@ -4961,7 +4999,7 @@ impl PostgresStore {
         let rows = sqlx::query(
             "SELECT id, action_type, memory_id, namespace, payload, requested_by, \
                     requested_at, status, decided_by, decided_at, approvals, \
-                    default_timeout_seconds, expired_at, decision_reason \
+                    default_timeout_seconds, expired_at \
              FROM pending_actions \
              WHERE ($1::text IS NULL OR status = $1) \
                AND ($2::text IS NULL OR namespace = $2) \
@@ -4994,7 +5032,6 @@ impl PostgresStore {
                 .unwrap_or(serde_json::Value::Array(Vec::new()));
             let default_timeout_seconds: Option<i64> = r.try_get("default_timeout_seconds").ok();
             let expired_at: Option<chrono::DateTime<chrono::Utc>> = r.try_get("expired_at").ok();
-            let decision_reason: Option<String> = r.try_get("decision_reason").ok();
             out.push(serde_json::json!({
                 "id": id,
                 "action_type": action_type,
@@ -5009,7 +5046,6 @@ impl PostgresStore {
                 "approvals": approvals,
                 "default_timeout_seconds": default_timeout_seconds,
                 "expired_at": expired_at.map(|t| t.to_rfc3339()),
-                "decision_reason": decision_reason,
             }));
         }
         Ok(out)

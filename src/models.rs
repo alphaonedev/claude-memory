@@ -389,10 +389,49 @@ impl RecallBody {
 
 #[derive(Debug, Deserialize)]
 pub struct LinkBody {
-    pub source_id: String,
-    pub target_id: String,
-    #[serde(default = "default_relation")]
-    pub relation: String,
+    /// Canonical name. Aliased by `from` (S82's wire shape).
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// `from` alias for `source_id`.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Canonical name. Aliased by `to` (S82's wire shape).
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// `to` alias for `target_id`.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Canonical name. Aliased by `rel_type` (S82's wire shape).
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// `rel_type` alias for `relation`.
+    #[serde(default)]
+    pub rel_type: Option<String>,
+}
+
+impl LinkBody {
+    /// Resolve the canonical (source_id, target_id, relation) tuple
+    /// from the canonical fields or their aliases. Defaults relation
+    /// to `related_to` when neither field is supplied.
+    #[must_use]
+    pub fn resolved(&self) -> (String, String, String) {
+        let s = self
+            .source_id
+            .clone()
+            .or_else(|| self.from.clone())
+            .unwrap_or_default();
+        let t = self
+            .target_id
+            .clone()
+            .or_else(|| self.to.clone())
+            .unwrap_or_default();
+        let r = self
+            .relation
+            .clone()
+            .or_else(|| self.rel_type.clone())
+            .unwrap_or_else(default_relation);
+        (s, t, r)
+    }
 }
 
 fn default_relation() -> String {
