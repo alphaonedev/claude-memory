@@ -156,61 +156,127 @@ CTE fallback will be used for `kg_query`/`kg_timeline`/etc.
 
 ## Daemon configuration
 
-Three ways to point the daemon at postgres, in precedence order:
+Pass the store URL as a CLI flag on `serve` (this is the supported
+shape in v0.7.0; env-var and config-file forms are tracked for a
+follow-on release):
 
-1. **CLI flag (preferred for systemd):**
-   ```bash
-   ai-memory serve --store-url postgres://aimemory:PASSWORD@HOST:5432/aimemory
-   ```
-2. **Environment variable:**
-   ```bash
-   export AI_MEMORY_STORE_URL='postgres://aimemory:PASSWORD@HOST:5432/aimemory'
-   ai-memory serve
-   ```
-3. **Config file** (`~/.config/ai-memory/config.toml`):
-   ```toml
-   [store]
-   url = "postgres://aimemory:PASSWORD@HOST:5432/aimemory"
-   ```
+```bash
+ai-memory serve --store-url postgres://aimemory:PASSWORD@HOST:5432/aimemory
+```
+
+URL shapes accepted by `--store-url`:
+
+- `postgres://user:pass@host:port/dbname`
+- `postgresql://user:pass@host:port/dbname` (alias)
+- `sqlite:///absolute/path/to/file.db` (also valid — same semantics as `--db`)
+
+`--db` and `--store-url` are **mutually exclusive**. Passing both
+when `--db` is explicit (set on the command line OR via the
+`AI_MEMORY_DB` env var) errors at startup:
+
+```
+Error: --db and --store-url are mutually exclusive. Pass exactly one.
+       Got --db=/var/lib/ai-memory/db.sqlite and
+       --store-url=postgres://aimemory:...@10.20.0.4:5432/aimemory
+```
 
 When `--store-url` is **unset**, the daemon falls back to its sqlite
-path (`AI_MEMORY_DB` or `~/.local/share/ai-memory/memory.db`). This
-preserves byte-for-byte v0.6.x behavior on the default build.
+path (`AI_MEMORY_DB` or `--db`'s default). This preserves
+byte-for-byte v0.6.x behavior on the default build.
 
-The daemon logs the resolved backend at startup:
+The daemon logs the resolved backend at startup. For postgres:
 
 ```
-INFO  ai_memory: store backend: PostgresStore
-INFO  ai_memory: postgres schema: v28 (parity with sqlite)
-INFO  ai_memory: KG backend: AGE 1.5.0 (Cypher path active)
+INFO  ai_memory::daemon_runtime: Wave-3: opening Postgres SAL store at postgres://aimemory:...
+WARN  ai_memory::daemon_runtime: v0.7.0 Wave-3: postgres-backed daemon — handlers
+       that have not yet migrated to the SAL trait surface 501 Not Implemented.
 ```
 
-If AGE is absent, the second line says `KG backend: CTE (recursive
-fallback — install Apache AGE for ≥30% kg_query speedup)`.
+A second probe of `/api/v1/capabilities` confirms it:
+
+```bash
+curl -s http://HOST:9077/api/v1/capabilities | jq .storage_backend
+# "postgres"
+```
+
+If AGE is detected, KG queries dispatch through the Cypher path; if
+not, the fallback recursive-CTE path runs against the
+`memory_links` table on postgres exactly as it does on sqlite.
 
 ## Operator surfaces that "just work" identically on both backends
 
-The whole point of the SAL trait is that no caller needs to know
-which backend is mounted. As of v0.7.0 (Wave 1+2 schema parity), the
-following all behave identically across sqlite and postgres:
+The point of the SAL trait is that no caller needs to know which
+backend is mounted. As of v0.7.0 Wave-3 the following **HTTP
+endpoints** route through the SAL trait identically on sqlite and
+postgres:
 
-- `memory_store` / `memory_recall` / `memory_search` / `memory_list` /
-  `memory_get` / `memory_delete` / `memory_promote` / `memory_link`
-- `memory_consolidate` / `memory_check_duplicate` /
-  `memory_detect_contradiction` / `memory_expand_query`
-- `memory_kg_query` / `memory_kg_timeline` / `memory_kg_invalidate`
-  / `memory_find_paths`
-- `memory_subscribe` / `memory_list_subscriptions` /
-  `memory_subscription_dlq_list` / `memory_subscription_replay`
-- `memory_agent_register` / `memory_agent_list`
-- `memory_namespace_get_standard` / `memory_namespace_set_standard`
-  / `memory_namespace_clear_standard`
-- `memory_archive_list` / `memory_archive_restore` /
-  `memory_archive_purge`
-- `memory_quota_status` / `memory_pending_list` /
-  `memory_pending_approve` / `memory_pending_reject`
-- The full audit chain (`signed_events`, `audit verify`, restart
-  continuity).
+| HTTP method | Path | Trait method |
+|---|---|---|
+| `POST` | `/api/v1/memories` | `MemoryStore::store` |
+| `GET` | `/api/v1/memories/:id` | `MemoryStore::get` + `list_links` |
+| `PUT` | `/api/v1/memories/:id` | `MemoryStore::update` |
+| `DELETE` | `/api/v1/memories/:id` | `MemoryStore::delete` |
+| `GET` | `/api/v1/memories` | `MemoryStore::list` |
+| `GET` | `/api/v1/search` | `MemoryStore::search` |
+| `POST` | `/api/v1/links` | `MemoryStore::link_signed` |
+| `GET` | `/api/v1/memories/:id/links` | `MemoryStore::list_links` |
+| `GET` | `/api/v1/capabilities` | reports `storage_backend` |
+| `GET` | `/api/v1/health` | (no storage I/O) |
+
+These ten cover the day-1 portable operator surface — store, read,
+list, update, delete, search, link, list links — and round-trip
+through `tests/serve_postgres_smoke.rs` against a live PG fixture.
+
+### What does NOT yet route through the SAL trait on postgres
+
+Wave-3 deliberately scoped the handler refactor to the trait-eligible
+subset above. The legacy SQLite path layers federation fanout, the
+embedder, governance owner-walk, the audit chain, quota wiring, and
+the multi-stage recall pipeline directly through the
+mutex-guarded rusqlite connection — those layers remain SQLite-bound
+in v0.7.0 and surface a clear `501 Not Implemented` envelope on a
+postgres-backed daemon:
+
+```json
+{
+  "error": "endpoint not yet implemented for postgres-backed daemon",
+  "endpoint": "/api/v1/recall",
+  "storage_backend": "postgres",
+  "remediation": "use sqlite-backed daemon or wait for v0.7.x trait coverage"
+}
+```
+
+Endpoints currently in this state on a postgres-backed daemon:
+
+- `POST /api/v1/recall`, `GET /api/v1/recall` — multi-stage hybrid
+  recall (FTS5 + HNSW blend + auto-promote)
+- `POST /api/v1/forget` — pattern-based delete
+- `POST /api/v1/consolidate`, `GET /api/v1/contradictions`
+- `POST /api/v1/kg/query`, `GET /api/v1/kg/timeline`,
+  `POST /api/v1/kg/invalidate` (KG path is sqlite-recursive-CTE
+  bound; AGE-Cypher routing through the trait is a follow-on wave)
+- `POST /api/v1/memories/bulk` — bulk fanout + quorum broadcast
+- `POST /api/v1/memories/{id}/promote`
+- `POST /api/v1/notify`, `GET /api/v1/inbox`
+- `GET /api/v1/stats`, `POST /api/v1/gc`
+- `POST /api/v1/sync/push`, `GET /api/v1/sync/since`
+- Subscriptions, archive, agent registry, namespace standards,
+  pending approvals, taxonomy, check_duplicate, entity registry
+
+The startup log emits a banner the moment `--store-url postgres://...`
+resolves so operators see the schism without trial-and-error:
+
+```
+WARN  ai_memory: v0.7.0 Wave-3: postgres-backed daemon — handlers
+that have not yet migrated to the SAL trait surface 501 Not
+Implemented. See docs/postgres-age-guide.md for the supported
+endpoint inventory.
+```
+
+Postgres-backed deployments that need full coverage today should run
+the sqlite-backed daemon (the historical default) — schema parity at
+v28 means a future `migrate sqlite → postgres` carries every row
+across cleanly when the remaining handlers land.
 
 The recall **score breakdown** is the same 6-factor formula on both
 backends:
@@ -326,10 +392,15 @@ parity test is the gate that prevents it.
 | Schema parity | v28 | v28 (Wave 2) |
 | `link()` | ✓ | ✓ (Wave 1 Stream A) |
 | `register_agent()` | ✓ | ✓ (Wave 1 Stream A) |
-| Recall 6-factor scoring | ✓ | ✓ (Wave 1 Stream A) |
-| `kg_query` / `kg_timeline` / `kg_invalidate` / `find_paths` | CTE | AGE Cypher (CTE fallback) |
+| Recall 6-factor scoring (SAL `search`) | ✓ | ✓ (Wave 1 Stream A) |
+| `kg_query` / `kg_timeline` / `kg_invalidate` / `find_paths` | CTE | AGE Cypher (CTE fallback) — sqlite-bound HTTP handlers in v0.7.0; trait routing in v0.7.x |
+| HTTP CRUD on SAL trait (Wave-3 subset) | ✓ | ✓ (8 endpoints — see table above) |
+| HTTP recall/KG/governance/federation handlers | ✓ | sqlite-bound, 501 on postgres (v0.7.x scope) |
 | Migration tool both directions | ✓ | ✓ |
 | `schema-init` CLI | n/a (auto-create) | ✓ (Wave 1 Stream B) |
+| `--store-url <URL>` flag on `serve` | ✓ (sqlite://) | ✓ (postgres://, postgresql://) |
+| `--db` and `--store-url` mutual exclusion | ✓ (Wave 3) | ✓ (Wave 3) |
+| `/api/v1/capabilities.storage_backend` | ✓ → `"sqlite"` | ✓ → `"postgres"` |
 | Cross-backend live replication | ✗ | ✗ (v0.7.1+) |
 
 ## References
