@@ -1034,7 +1034,10 @@ async fn cont6_quota_status_list_postgres() {
     };
     let (base, shutdown, handle) = spawn_daemon(&url).await;
     let client = reqwest::Client::new();
-    let agent = format!("cont6-quota-list-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+    let agent = format!(
+        "cont6-quota-list-{}",
+        &uuid::Uuid::new_v4().to_string()[..8]
+    );
     // Auto-insert one row first.
     client
         .post(format!("{base}/api/v1/quota/status"))
@@ -1133,7 +1136,10 @@ async fn cont6_find_paths_returns_chain() {
     );
     let v: Value = resp.json().await.expect("body");
     let paths = v["paths"].as_array().expect("paths array");
-    assert!(!paths.is_empty(), "find_paths must return at least one path");
+    assert!(
+        !paths.is_empty(),
+        "find_paths must return at least one path"
+    );
     let first = paths[0].as_array().expect("inner path array");
     let endpoints: Vec<&str> = first.iter().filter_map(|x| x.as_str()).collect();
     assert!(

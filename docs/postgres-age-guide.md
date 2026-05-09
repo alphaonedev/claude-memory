@@ -203,6 +203,178 @@ If AGE is detected, KG queries dispatch through the Cypher path; if
 not, the fallback recursive-CTE path runs against the
 `memory_links` table on postgres exactly as it does on sqlite.
 
+## HTTPS / mTLS configuration
+
+`ai-memory serve` ships with two-layer transport security:
+
+| Layer | Flag                  | Effect                                         |
+|------:|-----------------------|------------------------------------------------|
+|     1 | `--tls-cert <path>`   | Server cert (PEM, ECDSA P-256 or RSA)          |
+|     1 | `--tls-key <path>`    | Server private key (PKCS#8, RSA, or SEC1 PEM)  |
+|     2 | `--mtls-allowlist <path>` | Per-line SHA-256 fingerprint allowlist for client certs |
+
+Layer 1 alone gives you HTTPS — peers verify the server's identity
+through the supplied cert chain. Layer 2 layers mTLS on top: the
+server requires every client to present a certificate whose SHA-256
+DER fingerprint matches an entry in `--mtls-allowlist`. Combined,
+they implement the SSH `known_hosts` pin model — the cert chain is
+not the trust anchor; the fingerprint pin is.
+
+### Step 1 — generate a CA, server certs, and client certs
+
+The campaign repo ships a one-shot generator at
+[`/tmp/a2a-v07-tls/regen.sh`](https://github.com/alphaonedev/ai-memory-a2a-v0.7.0/blob/main/scripts/...);
+the underlying openssl invocations look like:
+
+```sh
+# 1. test CA (10y, ECDSA P-256). Substitute a stronger key + a real
+#    DN for production deployments.
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out ca.key
+openssl req -x509 -new -nodes -key ca.key -days 3650 \
+    -subj "/CN=my-ai-memory-fleet" -out ca.pem
+
+# 2. server cert. SANs MUST cover every IP/DNS the daemon listens on.
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out server.key
+cat > server.cnf <<EOF
+[req]
+distinguished_name = dn
+req_extensions = v3_req
+prompt = no
+[dn]
+CN = ai-memory.internal
+[v3_req]
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+[alt_names]
+DNS.1 = ai-memory.internal
+IP.1 = 10.20.0.2
+IP.2 = 127.0.0.1
+EOF
+openssl req -new -key server.key -out server.csr -config server.cnf
+openssl x509 -req -in server.csr -CA ca.pem -CAkey ca.key -CAcreateserial \
+    -out server.pem -days 3650 -extfile server.cnf -extensions v3_req
+
+# 3. client cert(s). Repeat per agent identity; the server allowlist
+#    pins each client's fingerprint.
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out client-alice.key
+# ... same shape as server.cnf with `extendedKeyUsage = clientAuth`.
+
+# 4. compute each client cert's SHA-256 DER fingerprint.
+for c in client-*.pem; do
+    fp=$(openssl x509 -in "$c" -noout -fingerprint -sha256 \
+         | sed 's/.*=//' | tr -d ':' | tr 'A-F' 'a-f')
+    echo "$fp"
+done > mtls-allowlist.txt
+```
+
+Allowlist format (`src/tls.rs::load_fingerprint_allowlist`):
+
+- one fingerprint per line, hex digits, optional `:` separators
+- `sha256:` prefix is accepted
+- `#` comments (full-line + inline) are stripped before parsing
+- empty lines are ignored
+
+### Step 2 — wire the daemon's systemd unit
+
+Edit `/etc/systemd/system/ai-memory.service` (or its drop-in equivalent)
+and append the three flags to the `ExecStart=` line:
+
+```ini
+[Service]
+ExecStart=/usr/local/bin/ai-memory serve \
+    --store-url postgres://aimemory:PWD@10.20.0.4:5432/aimemory \
+    --tls-cert /etc/ai-memory/tls/server.pem \
+    --tls-key  /etc/ai-memory/tls/server.key \
+    --mtls-allowlist /etc/ai-memory/tls/mtls-allowlist.txt
+```
+
+Reload + restart:
+
+```sh
+systemctl daemon-reload
+systemctl restart ai-memory
+```
+
+The `deploy_wave4.sh` helper in the campaign repo does this
+automatically when invoked with `DEPLOY_TLS=1` (and, for mTLS,
+`DEPLOY_MTLS=1` which is the default when DEPLOY_TLS=1):
+
+```sh
+DEPLOY_TLS=1 DEPLOY_MTLS=1 \
+TLS_LOCAL_DIR=/tmp/a2a-v07-tls \
+TLS_REMOTE_DIR=/etc/ai-memory-a2a/tls \
+scripts/deploy_wave4.sh
+```
+
+### Step 3 — verify with curl
+
+```sh
+# (from the same VPC; --resolve picks the right SAN)
+curl -sS \
+    --cacert /etc/ai-memory/tls/ca.pem \
+    --cert   /etc/ai-memory/tls/client-alice.pem \
+    --key    /etc/ai-memory/tls/client-alice.key \
+    https://ai-memory.internal:9077/api/v1/capabilities | jq .storage_backend
+# "postgres"
+```
+
+A failed handshake (wrong CA, missing client cert, fingerprint not on
+allowlist) surfaces as a curl `(35) error:0A000412:SSL routines::sslv3
+alert bad certificate` — the server log carries the structured reason.
+
+### Step 4 — wire the campaign harness
+
+The harness picks a per-agent client cert from env vars:
+
+```sh
+export TLS_MODE=mtls
+export TLS_CA_PEM=/etc/ai-memory-a2a/tls/ca.pem
+export TLS_CLIENT_CERT_ALICE=/etc/ai-memory-a2a/tls/client-alice.pem
+export TLS_CLIENT_KEY_ALICE=/etc/ai-memory-a2a/tls/client-alice.key
+export TLS_CLIENT_CERT_BOB=/etc/ai-memory-a2a/tls/client-bob.pem
+export TLS_CLIENT_KEY_BOB=/etc/ai-memory-a2a/tls/client-bob.key
+# ... per-agent pairs for every identity the campaign uses.
+# Optional process-wide default (used when no per-agent var matches):
+export TLS_DEFAULT_CLIENT_CERT=/etc/ai-memory-a2a/tls/client-default.pem
+export TLS_DEFAULT_CLIENT_KEY=/etc/ai-memory-a2a/tls/client-default.key
+```
+
+The agent suffix is the upper-cased `agent_id` with non-alphanumerics
+collapsed to `_` (so `ai:alice@nyc3-droplet-1` becomes
+`AI_ALICE_NYC3_DROPLET_1`). See `Harness.client_cert_for(agent_id)` in
+`scripts/a2a_harness.py`.
+
+Each scenario report now carries a `tls_handshake` block:
+
+```json
+{
+    "scenario": "20",
+    "tls_mode": "mtls",
+    "tls_handshake": {
+        "count": 17,
+        "min_seconds": 0.013,
+        "mean_seconds": 0.022,
+        "max_seconds": 0.054,
+        "total_seconds": 0.379
+    }
+}
+```
+
+Plain-HTTP runs omit the block. The orchestrator's perf-vs-baseline
+diff (Phase 7 of the cert closure) reads `tls_handshake.total_seconds`
+to compute the per-scenario TLS overhead.
+
+### Cert closure run reference
+
+The Continuation-6 cert closure run (commit `<orchestrator-fills-in>`)
+exercises this configuration end-to-end against the wave-4 droplet
+fleet. Compare its `runs/<id>/aggregate.json` against the plain-HTTP
+baseline at
+[`runs/v0.7.0-a2a-wave4r2-r1-20260509-1858/`](https://github.com/alphaonedev/ai-memory-a2a-v0.7.0/tree/main/runs/v0.7.0-a2a-wave4r2-r1-20260509-1858)
+to read the perf overhead.
+
 ## Operator surfaces that "just work" identically on both backends
 
 The point of the SAL trait is that no caller needs to know which
@@ -285,6 +457,18 @@ envelope as a safety net for unknown / future endpoints).
 | `DELETE` | `/api/v1/archive` | `MemoryStore::archive_purge`. |
 | `POST` | `/api/v1/archive/{id}/restore` | `MemoryStore::archive_restore` — atomic move back to active; rejects (Conflict) when the id already exists in active memories. |
 | `POST` | `/api/v1/memories` (writes only) | inheritance-chain walk via `MemoryStore::enforce_governance_action` BEFORE store; Allow/Deny/Pending decisions surface as 201/403/202 respectively. |
+
+### Wave-3 Continuation 6 — F7 closure (S52, S61, S65)
+
+Three new HTTP endpoints close the Wave 4 cert-harness gaps surfaced
+post-Continuation-5. Each routes through the SAL trait so postgres-backed
+and sqlite-backed daemons project byte-identical wire shapes.
+
+| HTTP method | Path | SAL dispatch |
+|---|---|---|
+| `POST` | `/api/v1/quota/status` | `MemoryStore::quota_status(agent_id)` (single-agent) or `MemoryStore::quota_status_list()` (operator-facing list). Postgres reads from the `agent_quotas` table directly — no fallthrough to the empty scratch sqlite. Auto-inserts the default row on first call. Body `{agent_id?, namespace?}`; returns the canonical `QuotaStatus` projection (`max_memories_per_day`, `max_storage_bytes`, `max_links_per_day`, `current_*`, `day_started_at`, ...). |
+| `POST` | `/api/v1/kg/find_paths` | `MemoryStore::find_paths(source, target, max_depth?, max_results?)`. SQLite uses the recursive CTE in `db::find_paths`; Postgres dispatches AGE Cypher when the extension is installed and falls back to a SQL recursive CTE otherwise. Body `{source_id, target_id, max_depth?, max_results?}`; returns `{paths: [[id, ...], ...], count, source_id, target_id}`. 422 when `max_depth` exceeds the supported ceiling. |
+| `POST` | `/api/v1/links/verify` | `MemoryStore::verify_link(VerifyFilter)`. Resolves the `(source, target?, relation?)` triple from the body and re-verifies the canonical-CBOR signature against the enrolled peer key when one is present. Body `{source_id?, target_id?, link_id?}` — at least one of `source_id` or `link_id` is required (`link_id` format is `source_id|target_id|relation`). Returns `{verified, attest_level, signature_present, observed_by, source_id, target_id, relation, findings}`. |
 
 #### Phase 20 — full governance pipeline
 

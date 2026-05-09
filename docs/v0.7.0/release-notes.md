@@ -62,6 +62,40 @@ deny-first semantics, A2A maturity).
 - **Documentation** — operator how-to ([`docs/postgres-age-guide.md`](../postgres-age-guide.md))
   and migration runbook ([`docs/migration-v0.7.0-postgres.md`](../migration-v0.7.0-postgres.md)).
 
+### Wave-3 Continuation 6 — F7 closure + mTLS-validated cert posture
+
+- **Three new HTTP endpoints** close the Wave-4 cert-harness F7 gaps:
+  - `POST /api/v1/quota/status` — `MemoryStore::quota_status` reads
+    the `agent_quotas` table directly on postgres (no fallthrough to
+    the empty scratch sqlite). Auto-inserts a default row on first
+    call. Closes S61.
+  - `POST /api/v1/kg/find_paths` — `MemoryStore::find_paths` lifts
+    the SQLite recursive-CTE / Postgres AGE-Cypher-or-CTE path
+    enumeration to the trait surface. Closes S65.
+  - `POST /api/v1/links/verify` — `MemoryStore::verify_link` resolves
+    the `(source, target?, relation?)` triple and re-verifies the
+    canonical-CBOR signature against the enrolled peer key. Closes
+    S52. Wire shape: `{verified, attest_level, signature_present,
+    observed_by, source_id, target_id, relation, findings}`.
+- **HTTPS / mTLS validated end-to-end.** The cert-closure run wires
+  `--tls-cert`, `--tls-key`, and `--mtls-allowlist` flags into the
+  daemon's systemd unit and exercises the full campaign from the
+  cert harness with `TLS_MODE=mtls` + per-agent client certs. The
+  `tls_handshake` block on each scenario report captures min/mean/max
+  handshake durations so operators can quantify the perf overhead of
+  switching from plain HTTP. See [`docs/postgres-age-guide.md` §
+  HTTPS / mTLS configuration](../postgres-age-guide.md#https--mtls-configuration).
+- **Test harness — per-agent client cert plumbing.**
+  `Harness.client_cert_for(agent_id)` resolves
+  `TLS_CLIENT_CERT_<stem>` / `TLS_CLIENT_KEY_<stem>` env vars per
+  agent so each scenario authenticates as its caller. Each HTTP
+  request emits curl `time_appconnect` / `time_connect` markers so
+  the JSON report carries authoritative per-handshake timings.
+- **Deploy script** (`scripts/deploy_wave4.sh`) gains an opt-in
+  `DEPLOY_TLS=1` mode that distributes certs from `/tmp/a2a-v07-tls/`
+  to each droplet's `/etc/ai-memory-a2a/tls/` and rewrites the
+  systemd `ExecStart=` line idempotently.
+
 ### Track-level rollup (the original epic, unchanged)
 
 - **Track A — Capabilities v3 response shape (5 tasks).** Adds
