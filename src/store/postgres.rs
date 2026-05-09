@@ -1246,7 +1246,20 @@ impl PostgresStore {
         max_depth: usize,
     ) -> StoreResult<Vec<KgQueryRow>> {
         match self.kg_backend {
-            KgBackend::Age => self.kg_query_cypher(source_id, max_depth).await,
+            KgBackend::Age => {
+                // v0.7.0 Wave-3 Continuation 5 — AGE projection is
+                // populated out-of-band (J1 schema-prep / migrate
+                // replay); when the cert harness writes only via the
+                // SAL `link` path, the AGE side stays empty and the
+                // cypher MATCH returns zero rows. Fall back to the
+                // CTE implementation so kg_query is always wired to
+                // the relational source-of-truth (`memory_links`).
+                let age_rows = self.kg_query_cypher(source_id, max_depth).await?;
+                if age_rows.is_empty() {
+                    return self.kg_query_cte(source_id, max_depth).await;
+                }
+                Ok(age_rows)
+            }
             KgBackend::Cte => self.kg_query_cte(source_id, max_depth).await,
         }
     }
@@ -1470,8 +1483,18 @@ impl PostgresStore {
     ) -> StoreResult<Vec<KgTimelineRow>> {
         match self.kg_backend {
             KgBackend::Age => {
-                self.kg_timeline_cypher(source_id, since, until, limit)
-                    .await
+                // v0.7.0 Wave-3 Continuation 5 — see `kg_query` for the
+                // empty-AGE fallback rationale. Mirror the same posture
+                // here so timeline reads always see the relational
+                // source-of-truth when the AGE projection is
+                // unpopulated.
+                let age_rows = self
+                    .kg_timeline_cypher(source_id, since, until, limit)
+                    .await?;
+                if age_rows.is_empty() {
+                    return self.kg_timeline_cte(source_id, since, until, limit).await;
+                }
+                Ok(age_rows)
             }
             KgBackend::Cte => self.kg_timeline_cte(source_id, since, until, limit).await,
         }
