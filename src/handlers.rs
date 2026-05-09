@@ -7411,6 +7411,10 @@ pub async fn subscribe(
     };
 
     // Rewrite S33's `{agent_id, namespace}` body into the webhook shape.
+    let mut url_was_synthesized = false;
+    // Suppress dead-code lint when sal feature is off (the variable is
+    // only consulted inside the postgres-dispatch branch below).
+    let _ = &url_was_synthesized;
     let (url, namespace_filter, agent_filter) = if let Some(u) = body.url {
         (u, body.namespace_filter, body.agent_filter)
     } else {
@@ -7421,9 +7425,13 @@ pub async fn subscribe(
             )
                 .into_response();
         };
-        // Synthetic loopback URL — passes the SSRF allowlist (localhost
-        // loopback hostnames are permitted). The synthetic host encodes
-        // (agent_id, namespace) so the GET view can round-trip them.
+        // Synthetic loopback URL — never dispatched (the postgres
+        // persistence path doesn't run the webhook loop), serves only
+        // to round-trip the (agent_id, namespace) pair through the
+        // wire shape. We mark it so the SSRF guard can skip the
+        // loopback rejection — H11's allow_loopback_webhooks knob
+        // gates real callers, not internally-synthesized stubs.
+        url_was_synthesized = true;
         let synthetic = format!("http://localhost/_ns/{caller}/{ns}");
         (
             synthetic,
@@ -7444,7 +7452,10 @@ pub async fn subscribe(
     // queryable.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        if let Err(e) = crate::subscriptions::validate_url(&url) {
+        // Skip SSRF validation for synthetic loopback stubs — they are
+        // never dispatched on the postgres path. Real caller-supplied
+        // URLs still go through the H11 SSRF guard.
+        if !url_was_synthesized && let Err(e) = crate::subscriptions::validate_url(&url) {
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": e.to_string()})),
@@ -7934,6 +7945,60 @@ async fn set_namespace_standard_inner(
                 }
             }
         };
+
+        // v0.7.0 Wave-3 Continuation 5 (Bucket C / S35+S53+S60+S80) —
+        // when the caller supplied a `governance` policy AND a pre-
+        // existing standard_id, merge the policy into the standard
+        // memory's `metadata.governance` so `resolve_governance_policy`
+        // (which reads exactly this field via `from_metadata`) finds
+        // the policy on the next write. Without this merge step the
+        // postgres adapter's chain walk lands on a memory whose
+        // metadata has no `governance` key, returns `None`, and the
+        // intruder's write is allowed through.
+        if let Some(g) = body.governance.clone() {
+            // Validate the policy before persisting (mirrors the SQLite
+            // path at mcp.rs:5183).
+            let policy: crate::models::GovernancePolicy = match serde_json::from_value(g.clone()) {
+                Ok(p) => p,
+                Err(e) => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({"error": format!("invalid governance: {e}")})),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = validate::validate_governance_policy(&policy) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": format!("invalid governance: {e}")})),
+                )
+                    .into_response();
+            }
+            // Load the standard memory, merge metadata.governance, write back.
+            let standard_mem = match app.store.get(&ctx, &standard_id).await {
+                Ok(m) => m,
+                Err(e) => return store_err_to_response(e),
+            };
+            let mut metadata = if standard_mem.metadata.is_object() {
+                standard_mem.metadata.clone()
+            } else {
+                json!({})
+            };
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "governance".to_string(),
+                    serde_json::to_value(&policy).unwrap_or(g.clone()),
+                );
+            }
+            let patch = crate::store::UpdatePatch {
+                metadata: Some(metadata),
+                ..Default::default()
+            };
+            if let Err(e) = app.store.update(&ctx, &standard_id, patch).await {
+                return store_err_to_response(e);
+            }
+        }
         return match app
             .store
             .set_namespace_standard(&ctx, ns, &standard_id, body.parent.as_deref())

@@ -1310,14 +1310,19 @@ impl PostgresStore {
                     reduce(s = a.id, n IN nodes(p)[1..] | s + '->' + n.id) AS path"
         );
 
+        // v0.7.0 Wave-3 Continuation 5 — AGE rejects `$1::agtype` (the
+        // third arg to `cypher()` must be a bare Param node, not a
+        // FuncExpr cast). Inline the params object as a literal
+        // agtype constant; `source_id` is UUID-validated upstream so
+        // this is safe. The dollar-quoted string body uses `$$`; the
+        // params literal lives outside it.
+        let params_lit = age_params_literal(&[("start_id", source_id)]);
         let sql = format!(
             "SELECT target_id, relation, depth, path FROM cypher('memory_graph', $$ {cypher} $$, \
-             $1::agtype) AS (target_id agtype, relation agtype, depth agtype, path agtype)"
+             {params_lit}) AS (target_id agtype, relation agtype, depth agtype, path agtype)"
         );
 
-        let params = serde_json::json!({ "start_id": source_id }).to_string();
         let rows = sqlx::query(&sql)
-            .bind(params)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| to_store_err("cypher kg_query", e))?;
@@ -1545,34 +1550,25 @@ impl PostgresStore {
              LIMIT {cap}"
         );
 
+        // Inline the params dict as an AGE literal — see
+        // `age_params_literal` for the rationale (AGE rejects
+        // `$1::agtype` as a FuncExpr).
+        let mut pairs: Vec<(&str, &str)> = vec![("start_id", source_id)];
+        if let Some(s) = since {
+            pairs.push(("since", s));
+        }
+        if let Some(u) = until {
+            pairs.push(("until", u));
+        }
+        let params_lit = age_params_literal(&pairs);
         let sql = format!(
             "SELECT target_id, relation, valid_from, valid_until, observed_by \
-             FROM cypher('memory_graph', $$ {cypher} $$, $1::agtype) AS \
+             FROM cypher('memory_graph', $$ {cypher} $$, {params_lit}) AS \
              (target_id agtype, relation agtype, valid_from agtype, \
               valid_until agtype, observed_by agtype)"
         );
 
-        let mut params = serde_json::Map::new();
-        params.insert(
-            "start_id".to_string(),
-            serde_json::Value::String(source_id.to_string()),
-        );
-        if let Some(s) = since {
-            params.insert(
-                "since".to_string(),
-                serde_json::Value::String(s.to_string()),
-            );
-        }
-        if let Some(u) = until {
-            params.insert(
-                "until".to_string(),
-                serde_json::Value::String(u.to_string()),
-            );
-        }
-        let params_json = serde_json::Value::Object(params).to_string();
-
         let rows = sqlx::query(&sql)
-            .bind(params_json)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| to_store_err("cypher kg_timeline", e))?;
@@ -1878,18 +1874,14 @@ impl PostgresStore {
         let read_cypher = "MATCH (a)-[r:related_to]->(b) \
              WHERE a.id = $src AND b.id = $dst AND r.relation = $rel \
              RETURN r.valid_until AS prior";
+        // Inline the params dict — see `age_params_literal`.
+        let read_params_lit =
+            age_params_literal(&[("src", source_id), ("dst", target_id), ("rel", relation)]);
         let read_sql = format!(
-            "SELECT prior FROM cypher('memory_graph', $$ {read_cypher} $$, $1::agtype) AS \
+            "SELECT prior FROM cypher('memory_graph', $$ {read_cypher} $$, {read_params_lit}) AS \
              (prior agtype)"
         );
-        let read_params = serde_json::json!({
-            "src": source_id,
-            "dst": target_id,
-            "rel": relation,
-        })
-        .to_string();
         let prior_rows = sqlx::query(&read_sql)
-            .bind(&read_params)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| to_store_err("cypher kg_invalidate read", e))?;
@@ -1926,19 +1918,17 @@ impl PostgresStore {
              WHERE a.id = $src AND b.id = $dst AND r.relation = $rel \
              SET r.valid_until = $now \
              RETURN count(r) AS affected";
+        let write_params_lit = age_params_literal(&[
+            ("src", source_id),
+            ("dst", target_id),
+            ("rel", relation),
+            ("now", &stamp),
+        ]);
         let write_sql = format!(
-            "SELECT affected FROM cypher('memory_graph', $$ {write_cypher} $$, $1::agtype) AS \
+            "SELECT affected FROM cypher('memory_graph', $$ {write_cypher} $$, {write_params_lit}) AS \
              (affected agtype)"
         );
-        let write_params = serde_json::json!({
-            "src": source_id,
-            "dst": target_id,
-            "rel": relation,
-            "now": stamp,
-        })
-        .to_string();
         let _ = sqlx::query(&write_sql)
-            .bind(&write_params)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| to_store_err("cypher kg_invalidate set", e))?;
@@ -2245,19 +2235,14 @@ impl PostgresStore {
              LIMIT {cap}"
         );
 
+        // Inline the params dict — see `age_params_literal`.
+        let params_lit = age_params_literal(&[("start_id", source_id), ("target_id", target_id)]);
         let sql = format!(
-            "SELECT path FROM cypher('memory_graph', $$ {cypher} $$, $1::agtype) AS \
+            "SELECT path FROM cypher('memory_graph', $$ {cypher} $$, {params_lit}) AS \
              (path agtype)"
         );
 
-        let params = serde_json::json!({
-            "start_id": source_id,
-            "target_id": target_id,
-        })
-        .to_string();
-
         let rows = sqlx::query(&sql)
-            .bind(params)
             .fetch_all(&mut *tx)
             .await
             .map_err(|e| to_store_err("cypher find_paths", e))?;
@@ -2642,6 +2627,31 @@ fn clamp_timeline_limit(limit: Option<usize>) -> usize {
 /// AGE's `cypher()` SRF returns each column as `agtype`. Casting to
 /// `text` produces `"value"` for strings and the literal token `null`
 /// for missing data. The CTE branch returns `Option<String>` directly
+/// v0.7.0 Wave-3 Continuation 5 — render an AGE `cypher()` parameters
+/// dictionary as a SQL literal. AGE rejects `$1::agtype` (the third
+/// argument must be a bare Param node, not a FuncExpr cast); the
+/// workaround is to inline the params as `'<json>'::agtype`. Caller
+/// sites must pass UUID-validated / RFC3339-validated values so the
+/// inline literal is injection-safe.
+///
+/// The rendered form is `'{"k":"v",...}'::agtype`. Single quotes inside
+/// the JSON are escaped as `''` (SQL standard); the agtype JSON dialect
+/// uses `"` for string delimiters and `\"` for embedded double quotes,
+/// so the only character that needs SQL-side escaping here is `'`.
+fn age_params_literal(pairs: &[(&str, &str)]) -> String {
+    let mut map = serde_json::Map::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        map.insert(
+            (*k).to_string(),
+            serde_json::Value::String((*v).to_string()),
+        );
+    }
+    let json = serde_json::Value::Object(map).to_string();
+    // SQL-escape single quotes by doubling them.
+    let escaped = json.replace('\'', "''");
+    format!("'{escaped}'::agtype")
+}
+
 /// from sqlx; the AGE branch needs this helper to mirror the same
 /// shape so the upper-layer handler stays backend-blind.
 fn agtype_optional_string(s: &str) -> Option<String> {

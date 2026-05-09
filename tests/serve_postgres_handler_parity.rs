@@ -266,11 +266,15 @@ async fn bucket_a_find_paths_depth_10() {
     }
 
     // Try the `kg/query` surface to enumerate reachable nodes from A.
+    // `max_depth=5` is the documented ceiling on both the sqlite + the
+    // postgres adapters (KG_QUERY_MAX_SUPPORTED_DEPTH); higher values
+    // surface a 422 from `validate_depth`. The chain A→B→C→D→E is
+    // exactly 4 hops so depth=5 covers it.
     let resp = client
         .post(format!("{base}/api/v1/kg/query"))
         .json(&json!({
             "source_id": ids[0],
-            "max_depth": 10,
+            "max_depth": 5,
         }))
         .send()
         .await
