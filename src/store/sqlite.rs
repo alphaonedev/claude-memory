@@ -307,6 +307,70 @@ impl MemoryStore for SqliteStore {
         let conn = self.state.lock().await;
         db::delete(&conn, id).map_err(box_err)
     }
+
+    async fn recall_hybrid(
+        &self,
+        ctx: &CallerContext,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        filter: &Filter,
+    ) -> StoreResult<Vec<(Memory, f64)>> {
+        let conn = self.state.lock().await;
+        let tags_first = filter.tags_any.first().map(String::as_str);
+        let since = filter.since.map(|d| d.to_rfc3339());
+        let until = filter.until.map(|d| d.to_rfc3339());
+        let limit = if filter.limit == 0 { 10 } else { filter.limit };
+        let scoring = crate::config::ResolvedScoring::default();
+        if let Some(qe) = query_embedding {
+            let (results, _outcome) = db::recall_hybrid(
+                &conn,
+                query,
+                qe,
+                filter.namespace.as_deref(),
+                limit,
+                tags_first,
+                since.as_deref(),
+                until.as_deref(),
+                None, // vector_index threaded by the caller from AppState
+                3600,
+                86_400,
+                ctx.as_agent.as_deref(),
+                None,
+                &scoring,
+            )
+            .map_err(box_err)?;
+            Ok(results)
+        } else {
+            let (results, _outcome) = db::recall(
+                &conn,
+                query,
+                filter.namespace.as_deref(),
+                limit,
+                tags_first,
+                since.as_deref(),
+                until.as_deref(),
+                3600,
+                86_400,
+                ctx.as_agent.as_deref(),
+                None,
+            )
+            .map_err(box_err)?;
+            Ok(results)
+        }
+    }
+
+    async fn touch_after_recall(&self, ids: &[String]) -> StoreResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let conn = self.state.lock().await;
+        for id in ids {
+            if let Err(e) = db::touch(&conn, id, 3600, 86_400) {
+                tracing::warn!("touch failed for memory {id}: {e}");
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Transaction handle that no-ops commit (`SQLite` txn support is

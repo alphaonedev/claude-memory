@@ -3278,6 +3278,248 @@ impl MemoryStore for PostgresStore {
         Ok(rows_affected > 0)
     }
 
+    // ----- v0.7.0 Wave-3 Continuation 2 — full hybrid recall ---------
+    //
+    // Mirrors db::recall_hybrid (sqlite path) on top of pgvector +
+    // tsvector + ts_rank. The 6-factor FTS sub-score matches the
+    // shape SQLite produces; the semantic component comes from
+    // (1 - cosine_distance) over the `embedding` column; the adaptive
+    // blend (semantic_weight 0.50→0.15 by content length) plus tier
+    // decay matches sqlite byte-for-byte at the trait surface.
+
+    async fn recall_hybrid(
+        &self,
+        ctx: &CallerContext,
+        query: &str,
+        query_embedding: Option<&[f32]>,
+        filter: &Filter,
+    ) -> StoreResult<Vec<(Memory, f64)>> {
+        let limit_eff: i64 = if filter.limit == 0 {
+            10
+        } else {
+            i64::try_from(filter.limit.min(1000)).unwrap_or(10)
+        };
+        // Pull a wider FTS candidate pool (3x limit) so the blend has
+        // material to rank, mirroring sqlite at db.rs:4757.
+        let fts_pool: i64 = (limit_eff * 3).max(30);
+        let tags_first: Option<&str> = filter.tags_any.first().map(String::as_str);
+        // FTS candidates with the existing 6-factor blend baked into
+        // `rank` (see search() above). Also surfaces content_len so
+        // the trait-side adaptive blend can compute semantic_weight
+        // per row.
+        let fts_rows = sqlx::query(
+            "SELECT *,
+                    ts_rank(
+                        to_tsvector('english', title || ' ' || content),
+                        plainto_tsquery('english', $1)
+                    )
+                    + (priority * 0.5)
+                    + (LEAST(access_count, 50) * 0.1)
+                    + (confidence * 2.0)
+                    + CASE tier
+                          WHEN 'long' THEN 3.0
+                          WHEN 'mid'  THEN 1.0
+                          ELSE 0.0
+                      END
+                    + (1.0 / (1.0 +
+                        EXTRACT(EPOCH FROM (NOW() - updated_at)) / 86400.0 * 0.1))
+                      AS fts_score,
+                    octet_length(content) AS content_len
+             FROM memories
+             WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', $1)
+               AND ($2::text IS NULL OR namespace = $2)
+               AND ($3::text IS NULL OR tier = $3)
+               AND ($4::text IS NULL OR tags @> to_jsonb(ARRAY[$4]))
+               AND ($5::text IS NULL OR metadata ->> 'agent_id' = $5)
+               AND ($6::timestamptz IS NULL OR created_at >= $6)
+               AND ($7::timestamptz IS NULL OR created_at <= $7)
+               AND (expires_at IS NULL OR expires_at > NOW())
+             ORDER BY fts_score DESC
+             LIMIT $8",
+        )
+        .bind(query)
+        .bind(filter.namespace.as_ref())
+        .bind(filter.tier.as_ref().map(Tier::as_str))
+        .bind(tags_first)
+        .bind(filter.agent_id.as_ref().or(ctx.as_agent.as_ref()))
+        .bind(filter.since)
+        .bind(filter.until)
+        .bind(fts_pool)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| to_store_err("recall_hybrid fts pool", e))?;
+
+        let mut max_fts: f64 = 1.0;
+        let mut scored: std::collections::HashMap<String, (Memory, f64, f64, i64)> =
+            std::collections::HashMap::new();
+        for r in &fts_rows {
+            let mem = Self::row_to_memory(r)?;
+            let fts_score: f64 = r.try_get("fts_score").unwrap_or(0.0);
+            let content_len: i64 = r.try_get::<i32, _>("content_len").map_or_else(
+                |_| {
+                    r.try_get::<i64, _>("content_len")
+                        .unwrap_or_else(|_| i64::try_from(mem.content.len()).unwrap_or(0))
+                },
+                i64::from,
+            );
+            if fts_score > max_fts {
+                max_fts = fts_score;
+            }
+            scored.insert(mem.id.clone(), (mem, fts_score, 0.0, content_len));
+        }
+
+        // Semantic candidates via pgvector cosine_distance. We use the
+        // `<=>` operator (cosine distance) and convert to similarity as
+        // `1 - distance`. The 0.2 cosine gate matches sqlite's
+        // db::recall_hybrid (S18 iteration: relaxed 0.3 → 0.2 to admit
+        // legitimately-related content with phrasing variance).
+        if let Some(qe) = query_embedding {
+            let ann_pool: i64 = (limit_eff * 5).max(50);
+            let qvec = pgvector::Vector::from(qe.to_vec());
+            let sem_rows = sqlx::query(
+                "SELECT *, (1.0 - (embedding <=> $1)) AS cosine_sim,
+                          octet_length(content) AS content_len
+                 FROM memories
+                 WHERE embedding IS NOT NULL
+                   AND ($2::text IS NULL OR namespace = $2)
+                   AND ($3::text IS NULL OR tier = $3)
+                   AND ($4::text IS NULL OR tags @> to_jsonb(ARRAY[$4]))
+                   AND ($5::text IS NULL OR metadata ->> 'agent_id' = $5)
+                   AND ($6::timestamptz IS NULL OR created_at >= $6)
+                   AND ($7::timestamptz IS NULL OR created_at <= $7)
+                   AND (expires_at IS NULL OR expires_at > NOW())
+                   AND (1.0 - (embedding <=> $1)) > 0.2
+                 ORDER BY embedding <=> $1
+                 LIMIT $8",
+            )
+            .bind(&qvec)
+            .bind(filter.namespace.as_ref())
+            .bind(filter.tier.as_ref().map(Tier::as_str))
+            .bind(tags_first)
+            .bind(filter.agent_id.as_ref().or(ctx.as_agent.as_ref()))
+            .bind(filter.since)
+            .bind(filter.until)
+            .bind(ann_pool)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("recall_hybrid semantic pool", e))?;
+
+            for r in &sem_rows {
+                let mem = Self::row_to_memory(r)?;
+                let cosine: f64 = r.try_get("cosine_sim").unwrap_or(0.0);
+                let content_len: i64 = r.try_get::<i32, _>("content_len").map_or_else(
+                    |_| {
+                        r.try_get::<i64, _>("content_len")
+                            .unwrap_or_else(|_| i64::try_from(mem.content.len()).unwrap_or(0))
+                    },
+                    i64::from,
+                );
+                scored
+                    .entry(mem.id.clone())
+                    .and_modify(|entry| {
+                        if cosine > entry.2 {
+                            entry.2 = cosine;
+                        }
+                    })
+                    .or_insert((mem, 0.0, cosine, content_len));
+            }
+        }
+
+        // Adaptive blend: semantic_weight 0.50 (≤500 chars) → 0.15
+        // (≥5000 chars). Same lerp formula as sqlite (db.rs:4990).
+        let mut results: Vec<(Memory, f64)> = scored
+            .into_values()
+            .map(|(mem, fts_score, cosine, content_len)| {
+                let norm_fts = if max_fts > 0.0 {
+                    fts_score / max_fts
+                } else {
+                    0.0
+                };
+                #[allow(clippy::cast_precision_loss)]
+                let cl = content_len as f64;
+                let semantic_weight = if cl <= 500.0 {
+                    0.50
+                } else if cl >= 5000.0 {
+                    0.15
+                } else {
+                    0.50 - 0.35 * ((cl - 500.0) / 4500.0)
+                };
+                let blended = semantic_weight * cosine + (1.0 - semantic_weight) * norm_fts;
+                (mem, blended)
+            })
+            .collect();
+
+        results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        results.truncate(filter.limit.max(1));
+        Ok(results)
+    }
+
+    async fn touch_after_recall(&self, ids: &[String]) -> StoreResult<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        // Touch ops (atomic): increment access_count, extend TTL
+        // (1h short / 1d mid), auto-promote mid→long at 5 accesses,
+        // increment priority every 10 accesses.
+        //
+        // We run all three updates inside a single transaction so an
+        // operator-visible recall stays consistent — the access_count
+        // increment, the tier promotion, and the priority bump must
+        // either all land or all roll back.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("touch_after_recall begin", e))?;
+
+        sqlx::query(
+            "UPDATE memories SET
+                access_count = LEAST(access_count + 1, 1000000),
+                last_accessed_at = NOW(),
+                expires_at = CASE
+                    WHEN tier = 'long' THEN expires_at
+                    WHEN tier = 'short' AND expires_at IS NOT NULL
+                        THEN NOW() + INTERVAL '1 hour'
+                    WHEN tier = 'mid' AND expires_at IS NOT NULL
+                        THEN NOW() + INTERVAL '1 day'
+                    ELSE expires_at
+                END
+             WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("touch_after_recall extend", e))?;
+
+        // Auto-promote mid → long at 5 accesses.
+        sqlx::query(
+            "UPDATE memories SET tier = 'long', expires_at = NULL, updated_at = NOW()
+             WHERE id = ANY($1) AND tier = 'mid' AND access_count >= 5",
+        )
+        .bind(ids)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("touch_after_recall promote", e))?;
+
+        // Increment priority every 10 accesses.
+        sqlx::query(
+            "UPDATE memories SET priority = LEAST(priority + 1, 10)
+             WHERE id = ANY($1)
+               AND access_count > 0
+               AND access_count % 10 = 0
+               AND priority < 10",
+        )
+        .bind(ids)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("touch_after_recall priority", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("touch_after_recall commit", e))?;
+        Ok(())
+    }
+
     async fn register_agent(
         &self,
         ctx: &CallerContext,

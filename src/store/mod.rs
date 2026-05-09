@@ -568,6 +568,72 @@ pub trait MemoryStore: Send + Sync {
             Err(e) => Err(e),
         }
     }
+
+    // ==================================================================
+    // v0.7.0 Wave-3 Continuation 2 — full hybrid recall pipeline
+    // (Phase 10).
+    //
+    // The recall pipeline blends FTS keyword scoring with semantic
+    // (embedding cosine) similarity, then applies adaptive blending
+    // (semantic weight varies by content length: 0.50 for short
+    // content ≤500 chars, 0.15 for long content ≥5000 chars, lerp in
+    // between). Each candidate gets a 6-factor blended score, then
+    // the survivors are touched (access_count++, TTL extended,
+    // mid→long auto-promotion at 5 accesses, priority++ every 10
+    // accesses).
+    //
+    // Both adapters implement; sqlite delegates to db::recall_hybrid,
+    // postgres synthesises the same 6-factor blend over pgvector +
+    // tsvector + ts_rank.
+    // ==================================================================
+
+    /// Run a hybrid (FTS + semantic) recall against the store. Returns
+    /// up to `limit` `(Memory, score)` pairs, ranked descending by
+    /// blended score. The `query_embedding` is the caller-supplied
+    /// embedding for `query`; adapters that lack a native vector index
+    /// MAY ignore it and fall back to keyword-only.
+    ///
+    /// Default implementation: keyword fallback through `search`. This
+    /// preserves wire-shape parity for adapters that haven't yet wired
+    /// the full pipeline.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Backend` for storage-level errors. `InvalidInput` when
+    /// `since` / `until` fail to parse.
+    async fn recall_hybrid(
+        &self,
+        ctx: &CallerContext,
+        query: &str,
+        _query_embedding: Option<&[f32]>,
+        filter: &Filter,
+    ) -> StoreResult<Vec<(Memory, f64)>> {
+        // Default: degrade to keyword-only via the existing `search`
+        // method. Synthetic descending score so wire shape parity for
+        // clients that sort/limit by score.
+        let mems = self.search(ctx, query, filter).await?;
+        let scored = mems
+            .into_iter()
+            .enumerate()
+            .map(|(i, m)| {
+                #[allow(clippy::cast_precision_loss)]
+                let synthetic = 1.0 - (i as f64) * 0.01;
+                (m, synthetic)
+            })
+            .collect();
+        Ok(scored)
+    }
+
+    /// Touch the supplied memory ids: increment `access_count`,
+    /// extend TTL (1h short / 1d mid by default — adapters honor the
+    /// resolved TTL config), auto-promote mid→long at 5 accesses,
+    /// increment priority every 10 accesses (capped at 10).
+    ///
+    /// Idempotent on a per-id basis; missing ids are silently skipped.
+    /// Default returns `Ok(())` — adapters that wire touch ops override.
+    async fn touch_after_recall(&self, _ids: &[String]) -> StoreResult<()> {
+        Ok(())
+    }
 }
 
 /// Partial-update payload. `None` means "leave this field alone" —

@@ -2768,9 +2768,36 @@ async fn recall_response(
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
 ) -> axum::response::Response {
-    // v0.7.0 Wave-3 Continuation — postgres-backed recall via SAL search.
+    // v0.7.0 Wave-3 Continuation 2 (Phase 10) — postgres-backed
+    // hybrid recall via the SAL trait. Embeds the query AND dispatches
+    // through `app.store.recall_hybrid` so the postgres adapter applies
+    // the FTS + semantic + adaptive blend pipeline (mirror of
+    // db::recall_hybrid in sqlite). Touch ops fire after the response
+    // payload is assembled so access_count + TTL extension + auto-
+    // promotion + priority ladders apply on postgres exactly as on
+    // sqlite.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
+        // Embed the query before issuing the trait call. None when the
+        // embedder is unavailable; the trait's recall_hybrid degrades
+        // to the FTS-only pool with a synthetic semantic component.
+        let query_emb: Option<Vec<f32>> = if let Some(emb) = app.embedder.as_ref().as_ref() {
+            match emb.embed(context) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    tracing::warn!("recall (postgres): embed failed, keyword-only: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mode = if query_emb.is_some() {
+            "hybrid"
+        } else {
+            "keyword"
+        };
+
         let ctx_caller =
             crate::store::CallerContext::for_agent(as_agent.unwrap_or("daemon").to_string());
         let mut filter = crate::store::Filter {
@@ -2796,31 +2823,36 @@ async fn recall_response(
         {
             filter.until = Some(dt.into());
         }
-        return match app.store.search(&ctx_caller, context, &filter).await {
-            Ok(memories) => {
-                let scored: Vec<serde_json::Value> = memories
+        return match app
+            .store
+            .recall_hybrid(&ctx_caller, context, query_emb.as_deref(), &filter)
+            .await
+        {
+            Ok(scored_pairs) => {
+                let touch_ids: Vec<String> =
+                    scored_pairs.iter().map(|(m, _)| m.id.clone()).collect();
+                let scored: Vec<serde_json::Value> = scored_pairs
                     .iter()
-                    .enumerate()
-                    .map(|(i, m)| {
+                    .map(|(m, s)| {
                         let mut v = serde_json::to_value(m).unwrap_or_default();
-                        // Synthetic descending score so wire shape parity
-                        // (clients sort/limit by score). Real ranking
-                        // arrives with the full pipeline in a follow-on.
-                        let synthetic = 1.0 - (i as f64) * 0.01;
                         if let Some(obj) = v.as_object_mut() {
-                            obj.insert(
-                                "score".to_string(),
-                                json!((synthetic * 1000.0).round() / 1000.0),
-                            );
+                            obj.insert("score".to_string(), json!((*s * 1000.0).round() / 1000.0));
                         }
                         v
                     })
                     .collect();
+                // Touch ops AFTER assembling the response payload so the
+                // observable response is what the caller wanted (access_count
+                // pre-touch); the touch fires inside the trait call's own
+                // transaction.
+                if let Err(e) = app.store.touch_after_recall(&touch_ids).await {
+                    tracing::warn!("recall (postgres): touch_after_recall failed: {e}");
+                }
                 let mut resp = json!({
                     "memories": scored,
                     "count": scored.len(),
                     "tokens_used": 0,
-                    "mode": "keyword",
+                    "mode": mode,
                     "storage_backend": "postgres",
                 });
                 if let Some(b) = budget_tokens {
