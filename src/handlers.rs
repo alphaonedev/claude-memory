@@ -3544,6 +3544,11 @@ pub struct TaxonomyQuery {
     /// Restrict to memories at this namespace OR any descendant. Trailing
     /// `/` is tolerated. Omit to walk the whole tree.
     pub prefix: Option<String>,
+    /// Alias for `prefix` — the cert harness (S44) uses `?root=…`. Both
+    /// forms route to the same code path; `prefix` wins when both are
+    /// supplied.
+    #[serde(default)]
+    pub root: Option<String>,
     /// Max levels to descend below the prefix (defaults to 8 — the
     /// hierarchy hard cap).
     pub depth: Option<usize>,
@@ -3563,6 +3568,7 @@ pub async fn get_taxonomy(
     let prefix_owned: Option<String> = p
         .prefix
         .as_deref()
+        .or(p.root.as_deref())
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.trim_end_matches('/').to_string());
@@ -3581,49 +3587,139 @@ pub async fn get_taxonomy(
         .min(crate::models::MAX_NAMESPACE_DEPTH);
     let limit = p.limit.unwrap_or(1000).clamp(1, 10_000);
 
-    // v0.7.0 Wave-3 Continuation — build a flat taxonomy tree from the
-    // SAL `list` projection on postgres. The hierarchical-aware scan
-    // uses the SQLite `db::get_taxonomy` for v0.7.0; postgres receives
-    // the flat namespace list with per-namespace counts.
+    // v0.7.0 Wave-3 Continuation 4 (Bucket E / S44) — full hierarchical
+    // taxonomy walk for postgres-backed daemons. Uses
+    // `taxonomy_namespaces_via_store` to project a single `GROUP BY
+    // namespace` aggregate (so we don't pull every memory row into
+    // memory), then assembles the hierarchical tree with honest
+    // `subtree_count` so the cert oracle can detect dishonest
+    // truncation.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
-        let ctx = crate::store::CallerContext::for_agent("daemon");
-        let filter = crate::store::Filter {
-            namespace: prefix_owned.clone(),
-            limit: 1_000_000,
-            ..Default::default()
+        let pairs = match crate::store::postgres::taxonomy_namespaces_via_store(
+            &app.store,
+            prefix_owned.as_deref(),
+        )
+        .await
+        {
+            Ok(p) => p,
+            Err(e) => return store_err_to_response(e),
         };
-        return match app.store.list(&ctx, &filter).await {
-            Ok(memories) => {
-                let mut by_namespace: std::collections::BTreeMap<String, usize> =
-                    std::collections::BTreeMap::new();
-                for m in memories {
-                    *by_namespace.entry(m.namespace).or_insert(0) += 1;
-                }
-                let total: usize = by_namespace.values().sum();
-                let truncated = by_namespace.len() > limit;
-                let tree: Vec<serde_json::Value> = by_namespace
-                    .into_iter()
-                    .take(limit)
-                    .map(|(ns, count)| {
-                        json!({
-                            "namespace": ns,
-                            "count": count,
-                            "subtree_count": count,
-                            "children": Vec::<serde_json::Value>::new(),
-                        })
-                    })
-                    .collect();
-                Json(json!({
-                    "tree": tree,
-                    "total_count": total,
-                    "truncated": truncated,
-                    "storage_backend": "postgres",
-                }))
-                .into_response()
+        // Collapse the SQL-aggregated `(namespace, count)` rows into a
+        // hierarchical tree whose nodes carry both their direct
+        // `count` (memories whose namespace exactly matches this node)
+        // and the transitive `subtree_count` (sum across the node and
+        // all descendants).
+        let total_count: usize = pairs
+            .iter()
+            .map(|(_, c)| usize::try_from(*c).unwrap_or(0))
+            .sum();
+
+        // Node:
+        //   key = full namespace path
+        //   own_count = memories at this exact namespace
+        //   subtree_count = own_count + sum over descendant subtree_counts
+        // Build by ensuring every ancestor node exists (own_count = 0
+        // for synthesised intermediates), then accumulating subtree
+        // counts bottom-up via stable iteration.
+        let mut nodes: std::collections::BTreeMap<
+            String,
+            (usize /* own */, usize /* subtree */),
+        > = std::collections::BTreeMap::new();
+        for (ns, cnt) in &pairs {
+            let cnt_us = usize::try_from(*cnt).unwrap_or(0);
+            // Ensure each prefix-segment ancestor exists (above prefix_owned
+            // if any). For example, namespace `a/b/c/d` under prefix `a/b`
+            // creates nodes for `a/b/c` and `a/b/c/d`.
+            let segments: Vec<&str> = ns.split('/').collect();
+            for i in 1..=segments.len() {
+                let path = segments[..i].join("/");
+                nodes.entry(path).or_insert((0, 0));
             }
-            Err(e) => store_err_to_response(e),
-        };
+            // Stamp own_count on the leaf node.
+            nodes
+                .entry(ns.clone())
+                .and_modify(|v| v.0 = cnt_us)
+                .or_insert((cnt_us, 0));
+        }
+        // Compute subtree_count: walk paths longest-first so children
+        // are summed before their parents. Since BTreeMap orders by
+        // string, walk in reverse-sorted order.
+        // First pass: seed each node's subtree_count = own_count.
+        for (_k, v) in nodes.iter_mut() {
+            v.1 = v.0;
+        }
+        // Second pass: collect parent->child pairs, then accumulate.
+        let keys: Vec<String> = nodes.keys().cloned().collect();
+        for k in keys.iter().rev() {
+            // Find immediate parent by trimming trailing `/segment`.
+            if let Some(pos) = k.rfind('/') {
+                let parent = &k[..pos];
+                if let Some(parent_node) = nodes.get(parent).copied() {
+                    let child_subtree = nodes.get(k).map(|v| v.1).unwrap_or(0);
+                    if let Some(p) = nodes.get_mut(parent) {
+                        p.1 = parent_node.1 + child_subtree;
+                    }
+                }
+            }
+        }
+
+        // Project the prefix-rooted tree at the requested depth. When
+        // no prefix is supplied, treat the synthesized "" root as the
+        // top of the world; otherwise root the tree at prefix_owned.
+        let root_ns = prefix_owned.clone().unwrap_or_default();
+        let truncated = pairs.len() > limit;
+
+        // Recursive node builder. `current_depth` counts levels below
+        // root_ns (root_ns is depth 0). We bound the recursion by
+        // `depth` to mirror the v0.6.3 SQLite contract.
+        fn build_node(
+            node_ns: &str,
+            nodes: &std::collections::BTreeMap<String, (usize, usize)>,
+            depth_left: usize,
+        ) -> serde_json::Value {
+            let (own, subtree) = nodes.get(node_ns).copied().unwrap_or((0, 0));
+            let mut children: Vec<serde_json::Value> = Vec::new();
+            if depth_left > 0 {
+                // A child is any node whose namespace starts with
+                // `<node_ns>/` AND has exactly one extra segment.
+                let prefix_match = if node_ns.is_empty() {
+                    String::new()
+                } else {
+                    format!("{node_ns}/")
+                };
+                let parent_segs = if node_ns.is_empty() {
+                    0
+                } else {
+                    node_ns.split('/').count()
+                };
+                for k in nodes.keys() {
+                    if k == node_ns {
+                        continue;
+                    }
+                    if !node_ns.is_empty() && !k.starts_with(&prefix_match) {
+                        continue;
+                    }
+                    if k.split('/').count() == parent_segs + 1 {
+                        children.push(build_node(k, nodes, depth_left - 1));
+                    }
+                }
+            }
+            serde_json::json!({
+                "namespace": node_ns,
+                "count": own,
+                "subtree_count": subtree,
+                "children": children,
+            })
+        }
+        let root_node = build_node(&root_ns, &nodes, depth);
+        return Json(json!({
+            "tree": root_node,
+            "total_count": total_count,
+            "truncated": truncated,
+            "storage_backend": "postgres",
+        }))
+        .into_response();
     }
 
     // Suppress unused-warning when sal feature is enabled (prefix_owned moves above).
@@ -3870,17 +3966,71 @@ pub async fn entity_register(
     // the entity as a regular memory (title = canonical_name,
     // namespace = body.namespace, kind=entity in metadata) via the
     // SAL `store` method. The wire shape mirrors the SQLite path.
+    //
+    // v0.7.0 Wave-3 Continuation 4 (Bucket E / S47) — alias-union
+    // persistence on re-register. The SAL `store` method upserts on
+    // `(title, namespace)`, but a naive overwrite of `metadata.aliases`
+    // erases any aliases registered previously. To preserve the
+    // canonical SQLite contract (`db::entity_register` unions aliases
+    // across registrations), we first list any matching entity row and
+    // union its prior aliases into the incoming set before the upsert.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let aid = agent_id
             .clone()
             .unwrap_or_else(|| "anonymous:entity-register".to_string());
         let ctx = crate::store::CallerContext::for_agent(aid.clone());
+
+        // Pull the prior entity row, if any, so we can union aliases
+        // across registrations. This is a single namespace-scoped
+        // `list` plus an in-memory match by canonical_name; the data
+        // volume per namespace is small (entities rather than memories
+        // proper) so the linear scan is acceptable.
+        let prior_aliases: Vec<String> = {
+            let filter = crate::store::Filter {
+                namespace: Some(body.namespace.clone()),
+                limit: 10_000,
+                ..Default::default()
+            };
+            match app.store.list(&ctx, &filter).await {
+                Ok(rows) => rows
+                    .into_iter()
+                    .find(|m| {
+                        m.title == body.canonical_name
+                            && m.metadata
+                                .get("kind")
+                                .and_then(|v| v.as_str())
+                                == Some("entity")
+                    })
+                    .and_then(|m| {
+                        m.metadata
+                            .get("aliases")
+                            .and_then(|v| v.as_array())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(str::to_string))
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_default(),
+                Err(_) => Vec::new(),
+            }
+        };
+
+        // Union: preserve insertion order (prior first, then new),
+        // de-dup case-sensitively to match `db::entity_register`.
+        let mut union: Vec<String> = Vec::new();
+        for a in prior_aliases.iter().chain(body.aliases.iter()) {
+            if !union.iter().any(|x| x == a) {
+                union.push(a.clone());
+            }
+        }
+
         let now = Utc::now().to_rfc3339();
         let mut metadata = extra_metadata.clone();
         let meta = metadata.as_object_mut().expect("verified above");
         meta.insert("kind".to_string(), json!("entity"));
-        meta.insert("aliases".to_string(), json!(body.aliases));
+        meta.insert("aliases".to_string(), json!(union.clone()));
         meta.insert("agent_id".to_string(), json!(aid));
         let mem = Memory {
             id: Uuid::new_v4().to_string(),
@@ -3890,7 +4040,7 @@ pub async fn entity_register(
             content: format!(
                 "Entity registration: {} (aliases: {})",
                 body.canonical_name,
-                body.aliases.join(", ")
+                union.join(", ")
             ),
             tags: vec!["entity".to_string()],
             priority: 5,
@@ -3903,15 +4053,20 @@ pub async fn entity_register(
             expires_at: None,
             metadata,
         };
+        let created = prior_aliases.is_empty();
         return match app.store.store(&ctx, &mem).await {
             Ok(id) => (
-                StatusCode::CREATED,
+                if created {
+                    StatusCode::CREATED
+                } else {
+                    StatusCode::OK
+                },
                 Json(json!({
                     "entity_id": id,
                     "canonical_name": body.canonical_name,
                     "namespace": body.namespace,
-                    "aliases": body.aliases,
-                    "created": true,
+                    "aliases": union,
+                    "created": created,
                 })),
             )
                 .into_response(),

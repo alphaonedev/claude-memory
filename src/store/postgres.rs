@@ -4640,6 +4640,27 @@ pub async fn archive_stats_via_store(
     pg.archive_stats().await
 }
 
+/// v0.7.0 Wave-3 Continuation 4 (Bucket E / S44) — postgres taxonomy walk.
+///
+/// Returns `(namespace, count)` pairs (densest first) under an optional
+/// prefix subtree. The HTTP `GET /api/v1/taxonomy` handler shapes these
+/// into the hierarchical tree wire envelope (per-node `count` +
+/// transitive `subtree_count` + an honest `total_count` /
+/// `truncated` flag).
+///
+/// # Errors
+///
+/// Surfaces [`StoreError::BackendUnavailable`] when the active store is
+/// not a [`PostgresStore`]; storage errors propagate from
+/// [`PostgresStore::taxonomy_namespaces`].
+pub async fn taxonomy_namespaces_via_store(
+    store: &std::sync::Arc<dyn MemoryStore>,
+    prefix: Option<&str>,
+) -> StoreResult<Vec<(String, i64)>> {
+    let pg = downcast_postgres(store)?;
+    pg.taxonomy_namespaces(prefix).await
+}
+
 fn downcast_postgres(store: &std::sync::Arc<dyn MemoryStore>) -> StoreResult<&PostgresStore> {
     // Trait objects don't expose downcast directly; we rely on the fact
     // that the daemon only constructs a `PostgresStore` when the
@@ -4726,6 +4747,66 @@ impl PostgresStore {
 
     /// Aggregate `archived_memories` rows into the same JSON shape
     /// `db::archive_stats` returns for SQLite.
+    /// v0.7.0 Wave-3 Continuation 4 (Bucket E / S44) — list every
+    /// `(namespace, count)` pair across the live `memories` projection,
+    /// optionally filtered to a prefix subtree. Returns the densest
+    /// namespaces first; the caller is responsible for limit-trimming.
+    ///
+    /// Used by [`taxonomy_namespaces_via_store`] to power the
+    /// hierarchical `GET /api/v1/taxonomy` walk on a postgres-backed
+    /// daemon. The trait-level `list` cannot do this because it caps
+    /// at 1000 rows and only matches namespaces exactly; the taxonomy
+    /// walk needs prefix-match + dense-aggregate semantics that map
+    /// cleanly onto a single `GROUP BY namespace` SQL query.
+    pub async fn taxonomy_namespaces(
+        &self,
+        prefix: Option<&str>,
+    ) -> StoreResult<Vec<(String, i64)>> {
+        use sqlx::Row;
+        let rows = if let Some(p) = prefix {
+            // Match the subtree exactly OR any descendant via `<prefix>/...`.
+            // The `LIKE` clause uses ESCAPE '\\' so a literal `_` or `%` in
+            // the supplied prefix doesn't widen the match. Both conditions
+            // are joined under a single OR for the dense-aggregate result.
+            let escaped = p
+                .replace('\\', "\\\\")
+                .replace('%', "\\%")
+                .replace('_', "\\_");
+            let descendant = format!("{escaped}/%");
+            sqlx::query(
+                "SELECT namespace, COUNT(*) AS cnt
+                 FROM memories
+                 WHERE (expires_at IS NULL OR expires_at > NOW())
+                   AND (namespace = $1 OR namespace LIKE $2 ESCAPE '\\')
+                 GROUP BY namespace
+                 ORDER BY cnt DESC, namespace ASC",
+            )
+            .bind(p)
+            .bind(descendant)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("taxonomy_namespaces prefix", e))?
+        } else {
+            sqlx::query(
+                "SELECT namespace, COUNT(*) AS cnt
+                 FROM memories
+                 WHERE (expires_at IS NULL OR expires_at > NOW())
+                 GROUP BY namespace
+                 ORDER BY cnt DESC, namespace ASC",
+            )
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| to_store_err("taxonomy_namespaces all", e))?
+        };
+        let mut out: Vec<(String, i64)> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let ns: String = r.try_get("namespace").unwrap_or_default();
+            let cnt: i64 = r.try_get("cnt").unwrap_or(0);
+            out.push((ns, cnt));
+        }
+        Ok(out)
+    }
+
     async fn archive_stats(&self) -> StoreResult<serde_json::Value> {
         use sqlx::Row;
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM archived_memories")
