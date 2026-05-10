@@ -210,14 +210,22 @@ impl PostgresStore {
         // by error message ("graph 'memory_graph' already exists" is
         // not a fatal condition); the production J1 graph-prep
         // scripts ran the same call out-of-band before this change.
-        if matches!(kg_backend, KgBackend::Age) {
-            if let Err(e) = ensure_memory_graph(&pool).await {
-                tracing::warn!(
-                    target = "store::postgres",
-                    error = %e,
-                    "ensure memory_graph projection failed at connect; KG link projection will degrade silently"
-                );
-            }
+        //
+        // We acquire a ONE-SHOT connection from the pool, apply the
+        // bootstrap, then drop the connection so the SET search_path
+        // doesn't bleed into any future connection re-checked out
+        // from the pool. (sqlx's pool resets stale connections on
+        // checkout but the reset only fires on the NEXT use; until
+        // then the pool may hand the connection back without
+        // clearing GUC state.)
+        if matches!(kg_backend, KgBackend::Age)
+            && let Err(e) = ensure_memory_graph(&pool).await
+        {
+            tracing::warn!(
+                target = "store::postgres",
+                error = %e,
+                "ensure memory_graph projection failed at connect; KG link projection will degrade silently"
+            );
         }
 
         // Run schema migrations after bootstrap schema is loaded.
@@ -2926,20 +2934,26 @@ fn age_params_jsonb(pairs: &[(&str, &str)]) -> String {
 /// link write that follows can `MERGE` directly into the projection
 /// without racing a separate bootstrap step.
 async fn ensure_memory_graph(pool: &PgPool) -> StoreResult<()> {
-    let mut conn = pool
-        .acquire()
+    // Run inside a transaction so `SET LOCAL search_path` auto-resets
+    // on commit. A bare `SET search_path` mutates session GUC state
+    // and bleeds into the next checkout of this connection from the
+    // pool — `audit_log`, `memories`, and every other public-schema
+    // table would then resolve through `ag_catalog` first, surfacing
+    // as flaky read-after-write failures elsewhere in the adapter.
+    let mut tx = pool
+        .begin()
         .await
-        .map_err(|e| to_store_err("acquire conn for ensure_memory_graph", e))?;
+        .map_err(|e| to_store_err("begin ensure_memory_graph tx", e))?;
     sqlx::query("LOAD 'age'")
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await
         .map_err(|e| to_store_err("LOAD age (ensure_memory_graph)", e))?;
-    sqlx::query("SET search_path = ag_catalog, \"$user\", public")
-        .execute(&mut *conn)
+    sqlx::query("SET LOCAL search_path = ag_catalog, \"$user\", public")
+        .execute(&mut *tx)
         .await
         .map_err(|e| to_store_err("set search_path (ensure_memory_graph)", e))?;
     if let Err(e) = sqlx::query("SELECT create_graph('memory_graph')")
-        .execute(&mut *conn)
+        .execute(&mut *tx)
         .await
     {
         let msg = e.to_string();
@@ -2947,6 +2961,9 @@ async fn ensure_memory_graph(pool: &PgPool) -> StoreResult<()> {
             return Err(to_store_err("create_graph memory_graph", e));
         }
     }
+    tx.commit()
+        .await
+        .map_err(|e| to_store_err("commit ensure_memory_graph tx", e))?;
     Ok(())
 }
 
@@ -3006,7 +3023,12 @@ async fn project_link_into_age(
         .execute(&mut **tx)
         .await
         .map_err(|e| to_store_err("LOAD age (project_link)", e))?;
-    sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+    // `SET LOCAL` confines the search path to the open transaction
+    // (`link_internal` / `apply_remote_link`'s tx) so post-commit
+    // checkouts of the same pooled connection don't inherit the
+    // `ag_catalog` first-resolution and silently route public-schema
+    // reads through the AGE catalog.
+    sqlx::query("SET LOCAL search_path = ag_catalog, \"$user\", public")
         .execute(&mut **tx)
         .await
         .map_err(|e| to_store_err("set search_path (project_link)", e))?;
