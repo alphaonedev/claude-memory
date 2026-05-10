@@ -7474,6 +7474,29 @@ pub async fn get_capabilities(
         ),
     };
     drop(lock);
+    // v0.7.0.1 S75 — capture the live DB schema-migration version
+    // BEFORE we land in the response-shaping match so a SAL error
+    // surfaces as a logged warning + a `0` fallback rather than a
+    // 500 over the whole capabilities endpoint. Operators reading
+    // this field consult it as a live progress indicator versus the
+    // binary's expected `CURRENT_SCHEMA_VERSION` (28 at v0.7.0); a
+    // mismatch is meaningful, but a transient SAL hiccup must not
+    // hide every other capability bit.
+    #[cfg(feature = "sal")]
+    let db_schema_version: i64 = match app.store.schema_version().await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                target = "capabilities",
+                error = %e,
+                "schema_version lookup via SAL failed; reporting 0"
+            );
+            0
+        }
+    };
+    #[cfg(not(feature = "sal"))]
+    let db_schema_version: i64 = 0;
+
     match result {
         Ok(mut v) => {
             // v0.7.0 Wave-3 — surface the resolved storage backend so
@@ -7485,6 +7508,21 @@ pub async fn get_capabilities(
                 obj.insert(
                     "storage_backend".to_string(),
                     serde_json::Value::String(app.storage_backend.as_str().to_string()),
+                );
+                // v0.7.0.1 S75 — surface the live DB schema-migration
+                // version (`MAX(version)` from the `schema_version`
+                // table) so operators can confirm their deployed
+                // daemon's database is on the schema the binary
+                // expects. Distinct from the wire-format
+                // `schema_version` discriminator (which is the
+                // capabilities-document version, currently `"3"`); the
+                // new `db_schema_version` is the integer migration
+                // ladder of the underlying store. Always emitted so
+                // polling clients can branch on it without parsing
+                // magic strings.
+                obj.insert(
+                    "db_schema_version".to_string(),
+                    serde_json::Value::Number(serde_json::Number::from(db_schema_version)),
                 );
             }
             (StatusCode::OK, Json(v)).into_response()

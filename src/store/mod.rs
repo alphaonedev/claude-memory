@@ -339,6 +339,25 @@ pub trait MemoryStore: Send + Sync {
     /// process lifetime.
     fn capabilities(&self) -> Capabilities;
 
+    /// v0.7.0.1 S75 — return the highest applied DB schema-migration
+    /// version (the integer recorded in `schema_version.MAX(version)`)
+    /// from the underlying store. Surfaced through
+    /// `/api/v1/capabilities.db_schema_version` so operators can confirm
+    /// at runtime whether a deployed daemon's DB is on the schema the
+    /// binary expects (target is currently 28 — see the
+    /// `CURRENT_SCHEMA_VERSION` constant on each adapter).
+    ///
+    /// Default returns `0` so adapters that don't track a numeric
+    /// migration ladder (a future in-memory test adapter, etc.) round-
+    /// trip cleanly — clients that interpret `0` as "unknown / empty"
+    /// can branch off the typed value without parsing magic strings.
+    /// Adapters with real migration ladders (sqlite, postgres) MUST
+    /// override this method with a live lookup against their own
+    /// `schema_version` table.
+    async fn schema_version(&self) -> StoreResult<i64> {
+        Ok(0)
+    }
+
     /// Store a memory. The `ctx` supplies the calling agent; the
     /// `Memory.metadata.agent_id` field is authoritative over any
     /// client-supplied value.

@@ -3280,6 +3280,22 @@ impl MemoryStore for PostgresStore {
             | Capabilities::ATOMIC_MULTI_WRITE
     }
 
+    /// v0.7.0.1 S75 — read `MAX(version)` from the live `schema_version`
+    /// table so the `/api/v1/capabilities.db_schema_version` field
+    /// reflects the actual applied migration ladder rather than a
+    /// hard-coded constant. Returns `0` when the table is empty (a
+    /// fresh schema-init that didn't stamp any rows yet); callers
+    /// that need "unknown" semantics MUST treat `0` as such. The query
+    /// is a single scalar lookup so the lock window stays sub-
+    /// millisecond — capability polling is fine to do per-request.
+    async fn schema_version(&self) -> StoreResult<i64> {
+        let v: Option<i32> = sqlx::query_scalar("SELECT MAX(version) FROM schema_version")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| to_store_err("read schema_version max", e))?;
+        Ok(i64::from(v.unwrap_or(0)))
+    }
+
     async fn store(&self, ctx: &CallerContext, memory: &Memory) -> StoreResult<String> {
         let created_at = parse_rfc3339_required(&memory.created_at)?;
         let updated_at = parse_rfc3339_required(&memory.updated_at)?;

@@ -68,6 +68,24 @@ impl MemoryStore for SqliteStore {
         Capabilities::FULLTEXT | Capabilities::DURABLE | Capabilities::STRONG_CONSISTENCY
     }
 
+    /// v0.7.0.1 S75 — read `MAX(version)` from the live SQLite
+    /// `schema_version` table so `/api/v1/capabilities.db_schema_version`
+    /// reflects the actual applied migration ladder rather than a
+    /// hard-coded constant. Returns `0` when the table is empty (a
+    /// fresh DB that didn't run migrations yet) so the daemon never
+    /// 503s the capabilities endpoint on a cold-start race.
+    async fn schema_version(&self) -> StoreResult<i64> {
+        let conn = self.state.lock().await;
+        let v: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        Ok(v)
+    }
+
     async fn store(&self, _ctx: &CallerContext, memory: &Memory) -> StoreResult<String> {
         let conn = self.state.lock().await;
         db::insert(&conn, memory).map_err(box_err)
