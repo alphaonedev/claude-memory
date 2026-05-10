@@ -2852,6 +2852,55 @@ impl<'r> sqlx::Decode<'r, sqlx::Postgres> for Agtype {
     }
 }
 
+/// v0.7.0.1 S79 — sanitize a free-text recall query into an OR-joined
+/// `tsquery` lexeme list compatible with PostgreSQL's
+/// `to_tsquery('english', $1)`.
+///
+/// Mirrors the SQLite `sanitize_fts_query(_, true)` contract used by
+/// `db::recall_hybrid` so postgres-backed daemons return the same
+/// candidate pool the FTS5 path returns: every token is wrapped in a
+/// quoted lexeme and the lexemes are OR-joined with `|`. The previous
+/// `plainto_tsquery('english', $1)` implementation AND-joins every
+/// lemma, which surfaces as empty recall on multi-token queries
+/// whose terms never co-occur in a single row (HALT v0.7.0 R1 S79:
+/// `cat sleeping`, `rust ownership`, `compile time safety` returned
+/// zero rows even when the namespace held semantically-related
+/// content).
+///
+/// Sanitization rules:
+///   * collapse Unicode whitespace into a single ASCII space
+///   * strip every char that is NOT an ASCII alphanumeric or one of
+///     `_-` — this blocks the FTS5/tsquery operator surface
+///     (`& | ! ( ) : * ' "`) so a malicious query can't smuggle a
+///     boolean expression past the matcher
+///   * filter out tokens shorter than 2 chars after sanitization
+///     (keeps stop-word noise out of the matcher; matches the
+///     SQLite minimum-token-length convention)
+///   * cap to 16 tokens so a pathologically long query can't blow
+///     up the planner
+///   * fall back to a sentinel `'_empty_'` lexeme when every token
+///     was dropped — `to_tsquery` rejects an empty string with a
+///     parse error and we want a clean "no results" rather than a
+///     500.
+fn build_or_tsquery(query: &str) -> String {
+    const MAX_TOKENS: usize = 16;
+    let tokens: Vec<String> = query
+        .split_whitespace()
+        .map(|raw| {
+            raw.chars()
+                .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .collect::<String>()
+        })
+        .filter(|t| t.len() >= 2)
+        .take(MAX_TOKENS)
+        .map(|t| format!("'{}'", t.to_lowercase()))
+        .collect();
+    if tokens.is_empty() {
+        return "'_empty_'".to_string();
+    }
+    tokens.join(" | ")
+}
+
 /// v0.7.0.1 G2 — render an AGE params dict as a JSON string compatible
 /// with agtype's text input format. Pair-driven so callers don't drag
 /// `serde_json::Value` into the call site.
@@ -3549,11 +3598,17 @@ impl MemoryStore for PostgresStore {
         // updated_at)) / 86400.0` as the day-age, mirroring SQLite's
         // `julianday('now') - julianday(m.updated_at)` (also days).
         let tags_first: Option<&str> = filter.tags_any.first().map(String::as_str);
+        // v0.7.0.1 S79 — build the OR-joined tsquery on the rust side
+        // so multi-token queries surface every row that matches AT
+        // LEAST one token. `plainto_tsquery` is AND-joined and
+        // diverges from sqlite's FTS5 `OR` contract — see
+        // `build_or_tsquery` for the sanitization rules.
+        let or_tsquery = build_or_tsquery(query);
         let rows = sqlx::query(
             "SELECT *,
                     ts_rank(
                         to_tsvector('english', title || ' ' || content),
-                        plainto_tsquery('english', $1)
+                        to_tsquery('english', $1)
                     )
                     + (priority * 0.5)
                     + (LEAST(access_count, 50) * 0.1)
@@ -3567,7 +3622,7 @@ impl MemoryStore for PostgresStore {
                         EXTRACT(EPOCH FROM (NOW() - updated_at)) / 86400.0 * 0.1))
                       AS rank
              FROM memories
-             WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', $1)
+             WHERE to_tsvector('english', title || ' ' || content) @@ to_tsquery('english', $1)
                AND ($2::text IS NULL OR namespace = $2)
                AND ($3::text IS NULL OR tier = $3)
                AND ($4::text IS NULL OR tags @> to_jsonb(ARRAY[$4]))
@@ -3576,7 +3631,7 @@ impl MemoryStore for PostgresStore {
              ORDER BY rank DESC, priority DESC
              LIMIT $6",
         )
-        .bind(query)
+        .bind(&or_tsquery)
         .bind(filter.namespace.as_ref())
         .bind(filter.tier.as_ref().map(Tier::as_str))
         .bind(tags_first)
@@ -3913,6 +3968,13 @@ impl MemoryStore for PostgresStore {
         // material to rank, mirroring sqlite at db.rs:4757.
         let fts_pool: i64 = (limit_eff * 3).max(30);
         let tags_first: Option<&str> = filter.tags_any.first().map(String::as_str);
+        // v0.7.0.1 S79 — build the OR-joined tsquery so the postgres
+        // FTS pool mirrors sqlite's FTS5 OR contract. Pre-fix the
+        // `plainto_tsquery` AND-joined the lemmas; multi-token
+        // queries that didn't co-occur in a single row dropped to
+        // the empty bucket, pulling mean Jaccard@5 below the 0.20
+        // floor (HALT v0.7.0 R1 S79).
+        let or_tsquery = build_or_tsquery(query);
         // FTS candidates with the existing 6-factor blend baked into
         // `rank` (see search() above). Also surfaces content_len so
         // the trait-side adaptive blend can compute semantic_weight
@@ -3921,7 +3983,7 @@ impl MemoryStore for PostgresStore {
             "SELECT *,
                     ts_rank(
                         to_tsvector('english', title || ' ' || content),
-                        plainto_tsquery('english', $1)
+                        to_tsquery('english', $1)
                     )
                     + (priority * 0.5)
                     + (LEAST(access_count, 50) * 0.1)
@@ -3936,7 +3998,7 @@ impl MemoryStore for PostgresStore {
                       AS fts_score,
                     octet_length(content) AS content_len
              FROM memories
-             WHERE to_tsvector('english', title || ' ' || content) @@ plainto_tsquery('english', $1)
+             WHERE to_tsvector('english', title || ' ' || content) @@ to_tsquery('english', $1)
                AND ($2::text IS NULL OR namespace = $2)
                AND ($3::text IS NULL OR tier = $3)
                AND ($4::text IS NULL OR tags @> to_jsonb(ARRAY[$4]))
@@ -3947,7 +4009,7 @@ impl MemoryStore for PostgresStore {
              ORDER BY fts_score DESC
              LIMIT $8",
         )
-        .bind(query)
+        .bind(&or_tsquery)
         .bind(filter.namespace.as_ref())
         .bind(filter.tier.as_ref().map(Tier::as_str))
         .bind(tags_first)
@@ -6229,6 +6291,77 @@ mod tests {
         );
         // Empty dict is harmless (AGE accepts an empty params object).
         assert_eq!(age_params_literal(&[]), "'{}'::agtype");
+    }
+
+    #[test]
+    fn build_or_tsquery_or_joins_lexemes() {
+        // v0.7.0.1 S79 — wire-shape contract for the OR-joined
+        // tsquery helper. Mirrors sqlite's `sanitize_fts_query(_, true)`
+        // OR-joined output so multi-token queries surface every row
+        // matching AT LEAST one token.
+        assert_eq!(build_or_tsquery("rust ownership"), "'rust' | 'ownership'");
+        assert_eq!(build_or_tsquery("dog field"), "'dog' | 'field'");
+        // Lower-cases tokens (postgres `to_tsquery('english', _)` lemma
+        // matching is case-folded but the lexeme bytes must be the
+        // post-fold form).
+        assert_eq!(build_or_tsquery("Rust Ownership"), "'rust' | 'ownership'");
+        // Single-token queries surface the bare lexeme.
+        assert_eq!(build_or_tsquery("dog"), "'dog'");
+    }
+
+    #[test]
+    fn build_or_tsquery_strips_tsquery_operators() {
+        // S79 — tokens must not carry tsquery operators
+        // (`& | ! ( ) : * '`) into the parser, which would let a
+        // crafted query smuggle a boolean expression past the
+        // matcher. Sanitization keeps only ASCII alphanumerics
+        // plus `_-` so e.g. `cat | exec()` collapses to two harmless
+        // lexemes.
+        let got = build_or_tsquery("cat | drop ' table");
+        assert!(
+            !got.contains('&') && !got.contains('!') && !got.contains('('),
+            "build_or_tsquery must drop tsquery operators: got {got}"
+        );
+        assert!(got.contains("'cat'"), "must keep the cat lexeme: {got}");
+        assert!(got.contains("'drop'"), "must keep the drop lexeme: {got}");
+        assert!(got.contains("'table'"), "must keep the table lexeme: {got}");
+    }
+
+    #[test]
+    fn build_or_tsquery_drops_short_tokens() {
+        // S79 — single-character tokens are noise (postgres' english
+        // text-search config drops them as stop words anyway). Keep
+        // tokens >= 2 chars.
+        assert_eq!(build_or_tsquery("a brown dog"), "'brown' | 'dog'");
+        assert_eq!(build_or_tsquery("x y z"), "'_empty_'");
+    }
+
+    #[test]
+    fn build_or_tsquery_falls_back_to_sentinel_for_empty_input() {
+        // S79 — `to_tsquery('english', '')` errors with a parse
+        // failure; the helper substitutes a no-match sentinel so the
+        // recall surface returns a clean empty pool instead of a
+        // 500.
+        assert_eq!(build_or_tsquery(""), "'_empty_'");
+        assert_eq!(build_or_tsquery("    "), "'_empty_'");
+        assert_eq!(build_or_tsquery("!@# $%^"), "'_empty_'");
+    }
+
+    #[test]
+    fn build_or_tsquery_caps_token_count() {
+        // S79 — pathologically long queries get truncated to 16
+        // tokens so the planner doesn't blow up on a 10K-token
+        // adversarial input.
+        let long = (0..50)
+            .map(|i| format!("tok{i:02}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let got = build_or_tsquery(&long);
+        let lexeme_count = got.matches('|').count() + 1;
+        assert_eq!(
+            lexeme_count, 16,
+            "build_or_tsquery must cap to 16 tokens: got {lexeme_count} from {got}"
+        );
     }
 
     #[test]
