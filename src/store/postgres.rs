@@ -3033,6 +3033,30 @@ async fn project_link_into_age(
         .await
         .map_err(|e| to_store_err("set search_path (project_link)", e))?;
 
+    // v0.7.0.1 G4 follow-up — self-bootstrap the `memory_graph`
+    // projection on every link write so a daemon whose connect-time
+    // `ensure_memory_graph` warned-and-continued (e.g. transient AGE
+    // load lag, permission blip on `pg_extension`) still ends up
+    // with a populated projection on first link write rather than
+    // silently dropping every subsequent MERGE on the floor.
+    // `create_graph` is idempotent at the SQL level: AGE returns
+    // "graph 'memory_graph' already exists" (SQLSTATE 42P07) which
+    // we collapse to a clean Ok. Upgrades the live HTTP path's
+    // `POST /api/v1/links` from "depends on connect-time bootstrap
+    // succeeding" to "self-heals every write" (HALT R1 v4 S65 — the
+    // live cert droplets surfaced 22 SQL link rows alongside 0 AGE
+    // nodes, consistent with a connect-time bootstrap that didn't
+    // land).
+    if let Err(e) = sqlx::query("SELECT create_graph('memory_graph')")
+        .execute(&mut **tx)
+        .await
+    {
+        let msg = e.to_string();
+        if !msg.contains("already exists") {
+            return Err(to_store_err("create_graph memory_graph (project_link)", e));
+        }
+    }
+
     // MERGE both endpoint nodes. We emit two separate statements
     // rather than one combined cypher to keep the param-shape
     // narrow — AGE 1.5.0 occasionally trips on multi-MERGE
