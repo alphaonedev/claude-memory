@@ -2298,24 +2298,41 @@ impl PostgresStore {
             .await
             .map_err(|e| to_store_err("set search_path", e))?;
 
-        // `[*..N]` (no leading hop count) reads as "1..N" in Cypher,
-        // matching the directed-or-reverse spec. The pattern is
-        // un-arrowed (`-[r]-`), giving the symmetric closure for free
-        // — the AGE projection stores edges in declared direction but
-        // the path query treats them as undirected, the same contract
-        // as the CTE branch.
+        // v0.7.0.1 G5 — the prior shape `RETURN [n IN nodes(p) |
+        // properties(n).id] AS path` triggered AGE 1.5.0's grammar at
+        // the `|` separator with `syntax error at or near "|"`
+        // (HALT R1b S65). AGE 1.5.0's parser does support list
+        // comprehensions in isolation but `convert_cypher_to_subquery`
+        // mis-handles the form when the iteration variable is bound
+        // from a function call (`nodes(p)`) and the projection touches
+        // a property — the analyzer's `|` recovery point bubbles up as
+        // a Postgres syntax error before the Cypher body even reaches
+        // the planner. The `reduce()` form below uses the same
+        // iteration grammar (`var IN list | expr`) that already ships
+        // working in `kg_query_cypher`'s `reduce(s = a.id, n IN
+        // nodes(p)[1..] | s + '->' + n.id)` projection — `reduce` and
+        // list comprehension share an AST node in AGE 1.5 but only the
+        // former survives the analyzer pass against this fixture.
         //
-        // `properties(n).id` rather than `n.id` because AGE's
-        // `convert_cypher_to_subquery` analyzer rejects bare property
-        // accesses on list-comprehension iteration variables with
-        // `could not find properties for n`. Wrapping through
-        // `properties()` produces an agtype map and pulls the `.id`
-        // out of it — the wire shape is identical
-        // (`["id1","id2",...]`) and the rewrite is parser-only.
+        // The delimiter is `->` (an arrow) which cannot appear in a
+        // memory id (the validator constrains ids to UUIDv4 / a-z0-9_-)
+        // so server-side splitting is unambiguous. We stay away from a
+        // bare `|` literal to avoid re-triggering any analyzer recovery
+        // point on the parser side.
+        //
+        // The variable-length pattern is `*1..N` (explicit minimum)
+        // rather than `*..N`. AGE 1.5.0 accepts both at the grammar
+        // level but only the explicit form round-trips through
+        // `convert_cypher_to_subquery`'s pattern walker — same fix
+        // shape as `kg_query_cypher`. The pattern stays un-arrowed
+        // (`-[*1..N]-`) so the symmetric-closure contract from the CTE
+        // branch holds: matching either declared edge direction.
+        const PATH_DELIM: &str = "->";
         let cypher = format!(
-            "MATCH p = (a)-[*..{depth}]-(b) \
+            "MATCH p = (a)-[*1..{depth}]-(b) \
              WHERE a.id = $start_id AND b.id = $target_id \
-             RETURN [n IN nodes(p) | properties(n).id] AS path \
+             RETURN reduce(s = a.id, n IN nodes(p)[1..] | \
+                           s + '{PATH_DELIM}' + n.id) AS path \
              ORDER BY length(p) ASC \
              LIMIT {cap}"
         );
@@ -2340,21 +2357,26 @@ impl PostgresStore {
             .await
             .map_err(|e| to_store_err("commit AGE tx", e))?;
 
-        // AGE returns each `path` cell as agtype text shaped like
-        // `["id1","id2",...]`. Decode through the [`Agtype`] wrapper so
-        // sqlx's binary-protocol path strips the version byte; the
-        // resulting string is JSON and parses into `Vec<String>`
-        // directly because AGE arrays of strings are JSON-compatible.
+        // AGE returns each `path` cell as a JSON-encoded string
+        // (agtype string) of the shape `"id1->id2->…"` — `reduce`
+        // walks a `nodes(p)[1..]` slice and appends `'->' + n.id` per
+        // step starting from `a.id`. Decode through the [`Agtype`]
+        // wrapper so sqlx's binary-protocol path strips the version
+        // byte; the resulting payload is a JSON string literal that
+        // we parse and then split on `->` to recover the path.
         rows.iter()
             .map(|r| {
                 let raw: Agtype = r
                     .try_get::<Agtype, _>("path")
                     .map_err(|e| to_store_err("read path", e))?;
-                let parsed: Vec<String> =
+                // AGE serialises strings as JSON-quoted strings (e.g.
+                // `"abc"`); parse as JSON to strip the
+                // quotes and decode any escapes the encoder applied.
+                let joined: String =
                     serde_json::from_str(&raw.0).map_err(|e| StoreError::IntegrityFailed {
                         detail: format!("non-JSON AGE path: {}: {e}", raw.0),
                     })?;
-                Ok(parsed)
+                Ok(joined.split(PATH_DELIM).map(str::to_string).collect())
             })
             .collect()
     }
