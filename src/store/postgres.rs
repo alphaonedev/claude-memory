@@ -203,6 +203,23 @@ impl PostgresStore {
             }
         );
 
+        // v0.7.0.1 G4 — when AGE is the resolved KG backend, ensure
+        // the `memory_graph` projection exists at connect time so
+        // every subsequent link write can `MERGE` nodes/edges into it
+        // without racing the bootstrap. `create_graph` is idempotent
+        // by error message ("graph 'memory_graph' already exists" is
+        // not a fatal condition); the production J1 graph-prep
+        // scripts ran the same call out-of-band before this change.
+        if matches!(kg_backend, KgBackend::Age) {
+            if let Err(e) = ensure_memory_graph(&pool).await {
+                tracing::warn!(
+                    target = "store::postgres",
+                    error = %e,
+                    "ensure memory_graph projection failed at connect; KG link projection will degrade silently"
+                );
+            }
+        }
+
         // Run schema migrations after bootstrap schema is loaded.
         let store = Self { pool, kg_backend };
         store.migrate().await?;
@@ -2450,6 +2467,20 @@ impl PostgresStore {
             _ => (None, "unsigned", None),
         };
 
+        // v0.7.0.1 G4 — wrap the SQL `INSERT INTO memory_links` write
+        // and the AGE `memory_graph` projection MERGE in a single
+        // transaction so a successful link write never leaves a
+        // stale AGE projection that would surface as `paths_found=0`
+        // on `find_paths_cypher` (HALT v0.7.0 R1 S65). When the
+        // adapter resolved the CTE backend at connect time the AGE
+        // branch is a no-op — the recursive-CTE path reads from
+        // `memory_links` directly.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin link tx", e))?;
+
         // ON CONFLICT … DO NOTHING gives idempotent migrate replays:
         // re-shipping a link the destination already holds collapses
         // to a no-op. The row's existing `signature` / `attest_level`
@@ -2471,9 +2502,18 @@ impl PostgresStore {
         .bind(signature)
         .bind(attest_level)
         .bind(observed_by_col)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| to_store_err("insert memory_link", e))?;
+
+        if matches!(self.kg_backend, KgBackend::Age) {
+            project_link_into_age(&mut tx, &link.source_id, &link.target_id, &link.relation)
+                .await?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit link tx", e))?;
 
         Ok(attest_level)
     }
@@ -2824,6 +2864,139 @@ fn age_params_jsonb(pairs: &[(&str, &str)]) -> String {
         );
     }
     serde_json::Value::Object(map).to_string()
+}
+
+/// v0.7.0.1 G4 — bootstrap the `memory_graph` AGE projection.
+///
+/// Idempotent: AGE returns "graph already exists" / SQLSTATE `42P07`
+/// when the projection is present. Both shapes collapse to a clean
+/// success because the only states we care about are "graph exists"
+/// vs "graph cannot be created" (the latter being an actual operator
+/// problem worth surfacing). Called from [`PostgresStore::connect`]
+/// when the resolved [`KgBackend`] is [`KgBackend::Age`] so every
+/// link write that follows can `MERGE` directly into the projection
+/// without racing a separate bootstrap step.
+async fn ensure_memory_graph(pool: &PgPool) -> StoreResult<()> {
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| to_store_err("acquire conn for ensure_memory_graph", e))?;
+    sqlx::query("LOAD 'age'")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| to_store_err("LOAD age (ensure_memory_graph)", e))?;
+    sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+        .execute(&mut *conn)
+        .await
+        .map_err(|e| to_store_err("set search_path (ensure_memory_graph)", e))?;
+    if let Err(e) = sqlx::query("SELECT create_graph('memory_graph')")
+        .execute(&mut *conn)
+        .await
+    {
+        let msg = e.to_string();
+        if !msg.contains("already exists") {
+            return Err(to_store_err("create_graph memory_graph", e));
+        }
+    }
+    Ok(())
+}
+
+/// v0.7.0.1 G4 — project a `memory_links` row into the AGE
+/// `memory_graph` projection within an open transaction.
+///
+/// MERGEs both endpoints as `(:Memory {id})` nodes and the relation
+/// as `(a)-[:<relation> {relation}]->(b)`, using the SAL-side
+/// relation value as the AGE edge label so `kg_query_cypher`'s
+/// `[r:related_to*1..N]` matcher resolves directly. Idempotent on
+/// every input — Cypher's MERGE collapses repeat projections onto
+/// the existing nodes/edges by the `id` / type combo.
+///
+/// The relation string is interpolated into the Cypher body
+/// (Cypher does not accept parameters at the relationship-type
+/// position). Validation upstream restricts relations to
+/// `[a-z0-9_]+` plus the canonical labelset (see
+/// `validate::validate_relation`), so the inlined form is safe; the
+/// caller MUST pass a relation that already passed validation.
+///
+/// Each statement is shaped to fit AGE 1.5.0's `cypher()` analyzer:
+///   * the third argument to `cypher()` is a bare `$1` parameter
+///     bound through the [`Agtype`] sqlx wrapper (G2 fix);
+///   * the cypher body uses `$id` / `$src` / `$dst` / `$rel` against
+///     the params map rather than inlining ids as Cypher literals
+///     (so caller-supplied UUIDs go through the param surface).
+///
+/// Called from [`PostgresStore::link_internal`] and
+/// [`PostgresStore::apply_remote_link`] inside their respective
+/// transactions so the SQL row + the AGE projection commit together
+/// — a half-projection with the SQL row but no AGE node would surface
+/// as a stale gap on `find_paths` queries.
+async fn project_link_into_age(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+) -> StoreResult<()> {
+    // Defence-in-depth: confirm the relation is in the
+    // validator's accepted shape before interpolating it into the
+    // Cypher body. Upstream validators already gate this, but the
+    // SAL trait surface is reachable from federation replays + any
+    // future caller paths, so we keep the local guard cheap.
+    if relation.is_empty()
+        || !relation
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+    {
+        return Err(StoreError::InvalidInput {
+            detail: format!(
+                "invalid relation for AGE projection: {relation:?} (must be [a-z0-9_]+)"
+            ),
+        });
+    }
+
+    sqlx::query("LOAD 'age'")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| to_store_err("LOAD age (project_link)", e))?;
+    sqlx::query("SET search_path = ag_catalog, \"$user\", public")
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| to_store_err("set search_path (project_link)", e))?;
+
+    // MERGE both endpoint nodes. We emit two separate statements
+    // rather than one combined cypher to keep the param-shape
+    // narrow — AGE 1.5.0 occasionally trips on multi-MERGE
+    // statements with overlapping property names.
+    let node_sql = "SELECT n FROM cypher('memory_graph', $$ MERGE (n:Memory {id: $id}) RETURN n $$, $1) \
+         AS (n agtype)";
+    for id in [source_id, target_id] {
+        let params = age_params_jsonb(&[("id", id)]);
+        sqlx::query(node_sql)
+            .bind(Agtype(params))
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|e| to_store_err("project memory node into AGE", e))?;
+    }
+
+    // MERGE the directional edge typed by the SAL relation value so
+    // `kg_query_cypher`'s `[r:related_to*1..N]` matcher resolves
+    // directly. The relation property is also stored on the edge so
+    // typeless traversals (`find_paths_cypher`) can read it back
+    // through `last(r).relation` without a second lookup.
+    let edge_cypher = format!(
+        "MATCH (a:Memory {{id: $src}}), (b:Memory {{id: $dst}}) \
+         MERGE (a)-[r:{relation} {{relation: $rel}}]->(b) RETURN r"
+    );
+    let edge_sql =
+        format!("SELECT r FROM cypher('memory_graph', $$ {edge_cypher} $$, $1) AS (r agtype)");
+    let edge_params =
+        age_params_jsonb(&[("src", source_id), ("dst", target_id), ("rel", relation)]);
+    sqlx::query(&edge_sql)
+        .bind(Agtype(edge_params))
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|e| to_store_err("project memory edge into AGE", e))?;
+
+    Ok(())
 }
 
 /// from sqlx; the AGE branch needs this helper to mirror the same
@@ -3664,6 +3837,16 @@ impl MemoryStore for PostgresStore {
         let valid_from = parse_rfc3339_opt(link.valid_from.as_deref());
         let valid_until = parse_rfc3339_opt(link.valid_until.as_deref());
 
+        // v0.7.0.1 G4 — federation replay must keep the AGE
+        // projection in sync with the SQL `memory_links` table the
+        // same way the local-write path does. A single transaction
+        // lets the SQL row + AGE MERGE commit atomically.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin apply_remote_link tx", e))?;
+
         sqlx::query(
             "INSERT INTO memory_links (
                 source_id, target_id, relation, created_at,
@@ -3680,9 +3863,18 @@ impl MemoryStore for PostgresStore {
         .bind(link.observed_by.as_ref())
         .bind(link.signature.as_ref())
         .bind(attest_level)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|e| to_store_err("apply_remote_link", e))?;
+
+        if matches!(self.kg_backend, KgBackend::Age) {
+            project_link_into_age(&mut tx, &link.source_id, &link.target_id, &link.relation)
+                .await?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit apply_remote_link tx", e))?;
         Ok(())
     }
 
