@@ -2388,7 +2388,6 @@ impl PostgresStore {
         // replays (peer-attested links) carry their own stamps so we
         // honour them when present so signatures still verify.
         let now_utc = Utc::now();
-        let now_rfc = now_utc.to_rfc3339();
 
         let created_at_dt = if link.created_at.is_empty() {
             now_utc
@@ -2404,15 +2403,31 @@ impl PostgresStore {
             _ => None,
         };
 
+        // v0.7.0.1 G3 — normalize the temporal-validity timestamps to
+        // microsecond precision BEFORE we both sign over them and
+        // commit them to PostgreSQL. PostgreSQL's `TIMESTAMPTZ` column
+        // stores microseconds since epoch — sub-microsecond digits are
+        // silently dropped at write time. If the canonical CBOR
+        // payload commits to a nanosecond-precision RFC3339 string,
+        // the verify path's `to_rfc3339()` of the read-back
+        // `DateTime<Utc>` produces a microsecond-precision string,
+        // changing the canonical CBOR bytes and invalidating the
+        // signature (HALT R1b S52). Truncating both ends to the same
+        // precision the column round-trips makes sign/verify byte-
+        // stable across the storage layer. SQLite stores TIMESTAMPTZ
+        // as RFC3339 TEXT and round-trips losslessly so the SQLite
+        // path is unaffected — the truncation is a no-op when the
+        // input is already microsecond-aligned.
+        let valid_from_dt = truncate_to_microseconds(valid_from_dt);
+        let valid_until_dt = valid_until_dt.map(truncate_to_microseconds);
+        let valid_from_str = valid_from_dt.to_rfc3339();
+        let valid_until_str = valid_until_dt.map(|t| t.to_rfc3339());
+
         // Branch on the keypair: signed vs. unsigned. The signed path
         // computes the canonical CBOR + Ed25519 signature BEFORE the
         // INSERT so a CBOR/sign failure surfaces as a clean error
         // rather than a half-written row. This is the same ordering
         // SQLite uses (see `db::create_link_signed`).
-        let valid_from_str = match link.valid_from.as_deref() {
-            Some(s) if !s.is_empty() => s.to_string(),
-            _ => now_rfc.clone(),
-        };
         let (signature, attest_level, observed_by_col): (
             Option<Vec<u8>>,
             &'static str,
@@ -2425,7 +2440,7 @@ impl PostgresStore {
                     relation: &link.relation,
                     observed_by: Some(kp.agent_id.as_str()),
                     valid_from: Some(valid_from_str.as_str()),
-                    valid_until: link.valid_until.as_deref(),
+                    valid_until: valid_until_str.as_deref(),
                 };
                 let sig = crate::identity::sign::sign(kp, &signable).map_err(|e| {
                     StoreError::IntegrityFailed {
@@ -2883,6 +2898,32 @@ fn parse_rfc3339_required(s: &str) -> StoreResult<DateTime<Utc>> {
         .map_err(|e| StoreError::IntegrityFailed {
             detail: format!("invalid rfc3339 timestamp {s}: {e}"),
         })
+}
+
+/// v0.7.0.1 G3 — clamp a `DateTime<Utc>` to microsecond precision.
+///
+/// PostgreSQL's `TIMESTAMPTZ` column stores microseconds since epoch
+/// as int8; sub-microsecond digits are silently dropped by the type's
+/// input function. Pre-fix, the `link_internal` sign path committed to
+/// a `chrono::Utc::now()`-derived RFC3339 string with whatever
+/// sub-second precision chrono emitted (nanoseconds when non-zero on
+/// Linux), then INSERT'd that nanosecond-resolution
+/// `chrono::DateTime<Utc>` into the `valid_from` TIMESTAMPTZ column.
+/// On `verify_link`, the round-tripped value came back at microsecond
+/// precision — the canonical CBOR re-derivation produced different
+/// bytes than what was signed, and Ed25519 rejected the signature
+/// (HALT R1b finding G3 / S52).
+///
+/// Truncating to microseconds on both sign and verify paths makes the
+/// CBOR shape stable across the storage boundary. We use
+/// `with_nanosecond` rather than `Duration` arithmetic because chrono
+/// guarantees `with_nanosecond(_)` is total within `[0, 2_000_000_000)`
+/// — `(self.nanosecond() / 1000) * 1000` is always in range, so the
+/// `unwrap_or(self)` here is purely a typing convenience.
+fn truncate_to_microseconds(t: DateTime<Utc>) -> DateTime<Utc> {
+    use chrono::Timelike;
+    let micros = t.nanosecond() / 1_000;
+    t.with_nanosecond(micros * 1_000).unwrap_or(t)
 }
 
 /// v0.7.0.1 G1 — resolve the `agent_id` to scope a quota row to.
@@ -5160,8 +5201,17 @@ impl MemoryStore for PostgresStore {
         let signature_present = sig.is_some();
         let mut findings: Vec<String> = Vec::new();
 
-        let vf_str = vf.map(|t| t.to_rfc3339());
-        let vu_str = vu.map(|t| t.to_rfc3339());
+        // v0.7.0.1 G3 — re-derive the canonical RFC3339 strings from
+        // the microsecond-precision TIMESTAMPTZ round-trip. The sign
+        // path in `link_internal` truncates to microseconds before
+        // signing AND before INSERT, so the verify path's CBOR bytes
+        // must come from the same precision. `to_rfc3339()` on a value
+        // already truncated to µs is a no-op, so this is defensive
+        // belt-and-braces — if a future writer commits a higher-
+        // precision value, this normalization clamps it back to what
+        // the column actually stored.
+        let vf_str = vf.map(|t| truncate_to_microseconds(t).to_rfc3339());
+        let vu_str = vu.map(|t| truncate_to_microseconds(t).to_rfc3339());
 
         let verified = if signature_present {
             let observed = obs.as_deref().unwrap_or("");
