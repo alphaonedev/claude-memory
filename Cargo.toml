@@ -68,7 +68,7 @@ gethostname = "0.5"
 # + rustls. Accepts PEM cert + key from --tls-cert / --tls-key. No
 # OpenSSL dep; rustls matches reqwest's rustls-tls choice already in
 # use for the sync-daemon's outbound HTTPS.
-axum-server = { version = "0.7", features = ["tls-rustls"] }
+axum-server = { version = "0.8", features = ["tls-rustls"] }
 # rustls 0.23 requires an explicit CryptoProvider — `ring` matches
 # reqwest's default for the sync-daemon, keeping a single provider
 # across the process. PEM parsing is handled by
@@ -79,6 +79,13 @@ rustls = { version = "0.23", features = ["ring"] }
 # client cert DER. RustCrypto sha2 — same family as the HKDF we'll use
 # for Layer 3 E2E encryption (#228).
 sha2 = "0.10"
+# v0.7.0 M1 — constant-time byte comparison for mTLS fingerprint
+# allowlist membership. `subtle` is the RustCrypto ecosystem default
+# (already pulled in transitively via ed25519-dalek / sha2 / etc); we
+# promote it to a direct dep so `src/tls.rs` can compare a 32-byte
+# fingerprint against every entry in the allowlist without leaking
+# matching timing through the HashSet's hash-and-probe shape.
+subtle = "2"
 
 # v0.7 Track H — per-agent Ed25519 attested identity (H1). `ed25519-dalek`
 # 2.x is the RustCrypto-maintained, pure-Rust, audit-friendly Ed25519
@@ -109,7 +116,12 @@ candle-transformers = "0.10"
 hf-hub = { version = "0.5", features = ["tokio"] }
 tokenizers = { version = "0.22" }
 instant-distance = "0.6"
-reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls", "native-tls"] }
+# M5 — `native-tls` removed from reqwest features. Federation + Ollama
+# only need rustls; keeping the OpenSSL/SecureTransport-backed
+# `native-tls` provider in the binary is pure attack surface (and ships
+# the macOS keychain integration we never use). Pin rustls as the sole
+# TLS provider so a single audited stack handles all outbound HTTPS.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 toml = "0.8"
 
 # v0.6.0.0 — Prometheus metrics endpoint at GET /metrics. Pure Rust, no
@@ -291,7 +303,27 @@ bin-dir = "ai-memory"
 pkg-fmt = "tgz"
 
 [patch.crates-io]
-# paste is unmaintained (RUSTSEC-2024-0436); using alphaonedev fork for maintenance
+# C1 — `paste` 1.x is unmaintained (RUSTSEC-2024-0436). The recommended
+# migration target is `pastey`, a community-maintained drop-in fork on
+# crates.io. Cargo's `[patch.crates-io]` rejects a same-source
+# registry-to-registry rename (it requires the patch source to differ
+# from the registry), so two viable swap paths exist:
+#
+#   1. Vendor a chosen pastey release into `vendor/pastey/` and patch
+#      from a `path = "vendor/pastey"` entry. This is the audit-clean
+#      path: the third-party source lands in-tree under our review and
+#      is rebuildable offline.
+#
+#   2. Patch from a vetted git mirror under our control (e.g. fork
+#      `pastey` into `alphaonedev/pastey` then pin a tag here). Avoids
+#      vendoring but adds a second fork to maintain.
+#
+# Until either path lands, we hold on the existing alphaonedev/paste
+# fork pinned to rev `6a30252`. That fork is the maintained substitute
+# under our org's control and addresses the RUSTSEC advisory by
+# pointing cargo-audit at code we attest to. No direct caller in this
+# repo invokes `paste::paste!`; the substitution only feeds transitive
+# consumers (gemm-*, candle-*, etc.).
 paste = { git = "https://github.com/alphaonedev/paste", rev = "6a30252" }
 
 [profile.release]
