@@ -1,8 +1,10 @@
 # T0 cross-LLM orchestration (v0.7.0 task E1)
 
-> **Status:** SHIPPING with v0.7.0 — E1
+> **Status:** SHIPPING with v0.7.0 — E1 (bash, PR #621) → v0.7.0.1 — E1
+> cross-platform Rust port (closes #625)
 > **Date:** 2026-05-06
-> **Script:** [`scripts/t0-orchestrate.sh`](../../scripts/t0-orchestrate.sh)
+> **Tool:** [`tools/t0-orchestrate/`](../../tools/t0-orchestrate/) (binary
+> `t0-orchestrate`)
 > **CI counterpart:** [`tests/calibration_t0.rs`](../../tests/calibration_t0.rs)
 
 The Discovery Gate **T0 calibration cells** in
@@ -18,8 +20,13 @@ strings + the per-tool short descriptions from C2) are correctly
 understood and reproduced by every major frontier reasoning-class
 model — not just by the local fixture-driven test cells.
 
-This is a script, not a runtime change. No tools, schemas, webhooks,
+This is a tool, not a runtime change. No tools, schemas, webhooks,
 or hook events are added by E1.
+
+The original v0.7.0 implementation was a bash script
+(`scripts/t0-orchestrate.sh`); v0.7.0.1 (#625) replaced it with a
+cross-platform Rust binary so the dry-run integration test can run on
+Windows CI, not just Unix.
 
 ---
 
@@ -34,7 +41,7 @@ or hook events are added by E1.
 
 The four-vendor coverage matches the v0.6.5/v0.7.0 NHI Discovery Gate
 observation matrix. Adding a fifth vendor is a one-line append to the
-`LLMS=(…)` array in the script.
+`LLMS` table in `tools/t0-orchestrate/src/main.rs`.
 
 ---
 
@@ -45,14 +52,15 @@ export ANTHROPIC_API_KEY=sk-ant-...
 export OPENAI_API_KEY=sk-...
 export GOOGLE_API_KEY=...
 export XAI_API_KEY=xai-...
-
-# Build the local substrate so the script can pull live capabilities-v3
-# payloads to use as system context for each LLM call.
-cargo build --release
 ```
 
-Dependencies for live mode: `bash`, `curl`, `jq`. (Dry-run mode needs
-only `bash`.)
+The orchestrator is pure Rust — no runtime dependency on `bash`,
+`curl`, or `jq`. On any platform with a Rust toolchain you can build
+and run it directly:
+
+```bash
+cargo build --manifest-path tools/t0-orchestrate/Cargo.toml --release
+```
 
 ---
 
@@ -60,15 +68,21 @@ only `bash`.)
 
 ```bash
 # Live run — all four LLMs, six Discovery Gate questions each.
-scripts/t0-orchestrate.sh
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml --release --
 
 # Restrict to one provider (debugging, partial outages, key rotation).
-scripts/t0-orchestrate.sh --llm claude
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml --release -- --llm claude
 
 # Dry-run — no API calls, prints the plan + result file paths.
 # Used by tests/e1_orchestration_dry_run.rs to validate harness
 # structure without spending API tokens or requiring keys.
-scripts/t0-orchestrate.sh --dry-run
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml -- --dry-run
+
+# After install (cargo install --path tools/t0-orchestrate):
+t0-orchestrate --dry-run
+t0-orchestrate --llm claude
+t0-orchestrate --api-key-env CUSTOM_KEY_NAME --llm gpt5
+t0-orchestrate --dry-run --out plan.json   # also writes JSON envelope
 ```
 
 Skipped LLMs (env var unset) print `skip <llm> — <ENV> unset` and
@@ -107,6 +121,11 @@ The `summary-<ts>.md` file is a markdown table — one row per
 `(llm, qid)` pair — that you can paste directly into a release-notes
 appendix or a Discovery Gate observation cell.
 
+In `--dry-run --out plan.json` mode, the Rust binary additionally
+emits a JSON envelope of the orchestration plan (24 entries:
+4 LLMs × 6 questions) so downstream tooling can consume the plan
+without re-parsing the human-readable text output.
+
 ---
 
 ## How to interpret results
@@ -138,7 +157,8 @@ convergence on the canonical phrasings:
    re-confirm LLM convergence on the new numbers).
 3. A frontier model rev lands on one of the four covered providers
    (Claude N+1, GPT N+1, Gemini N+1, Grok N+1). Add the new model id
-   to the `LLMS=(…)` array and re-run.
+   to the `LLMS` table in `tools/t0-orchestrate/src/main.rs` and
+   re-run.
 4. The per-tool short descriptions ship from C2 (orchestration becomes
    the load-bearing check that LLMs render those descriptions sanely
    to end users).
@@ -159,3 +179,5 @@ API budget on a question you already know the answer to.
   CI-side T0 cells the orchestrator wraps
 - [`tests/e1_orchestration_dry_run.rs`](../../tests/e1_orchestration_dry_run.rs)
   — minimal Rust test that runs `--dry-run` and asserts harness shape
+- Issue [#625](https://github.com/alphaonedev/ai-memory-mcp/issues/625)
+  — the v0.7.0.1 cross-platform port that retired the bash version

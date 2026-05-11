@@ -1,159 +1,197 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
+//
+// v0.7.0.1 — closes #625.
+//
+// E2's `post-ship-converge` is implemented as a cross-platform Rust
+// binary at `tools/post-ship-converge/`. The bash variant landed in
+// PR #622 (shipped with v0.7.0 as a transitional runbook script) is
+// superseded by this binary — this test validates the Rust binary,
+// which builds on the fly via `cargo build --manifest-path
+// tools/post-ship-converge/Cargo.toml` behind a `OnceLock` to avoid
+// the parallel-rebuild flake handled in PR #623.
 
-// E2's post-ship-converge.sh is a bash script. Windows runners don't
-// ship bash by default, so the dry-run harness check only runs on
-// Unix. The script itself works on any platform with a bash interpreter
-// (WSL/Git-Bash); CI just doesn't validate that path.
-#![cfg(unix)]
-
-//! v0.7 Track E task E2 — post-ship convergence verification dry-run.
+//! v0.7.0.1 task E2 — minimal harness check on the
+//! `post-ship-converge` Rust binary.
 //!
-//! `scripts/post-ship-converge.sh` is the runbook script the release
-//! captain runs within 1 hour of an F5 release-tag landing. The real
-//! run installs the published `ai-memory` crate via
-//! `cargo install ai-memory --version <X.Y.Z>` and replays the 6
-//! canonical Discovery Gate questions against it.
+//! The verifier is an out-of-band tool that probes the cargo /
+//! brew / GitHub-release distribution channels for a freshly-cut
+//! release and asserts they all converge on the same version
+//! string (see `docs/v0.7/POST-SHIP-CONVERGENCE.md`). Live runs
+//! make HTTP calls; CI exercises it in `--dry-run` mode and
+//! asserts:
 //!
-//! That real run is **not** what this test exercises — we cannot
-//! reach out to crates.io from CI on every PR. Instead, this test
-//! drives the script with `--dry-run --version 0.7.0`, which skips
-//! the install + spawn steps and emits the JSON envelope with
-//! `dry_run: true`. The point is to keep the envelope **shape**
-//! under CI guard so a future refactor of the script can't silently
-//! drop the `verdict` field, the `results[]` array, or the per-question
-//! IDs the post-mortem playbook in
-//! `docs/v0.7/POST-SHIP-CONVERGENCE.md` references by name.
-//!
-//! When E1's `scripts/t0-orchestrate.sh` lands, it must reuse the
-//! same 6 question IDs (Q1..Q6 with the suffixes asserted below).
-//! Drift between the two scripts is itself a bug — both should
-//! converge on whatever calibration cells `tests/calibration_t0.rs`
-//! pins.
+//! 1. The binary builds.
+//! 2. `--dry-run` exits 0 without making any network calls.
+//! 3. The plan output names all three distribution channels
+//!    (cargo / brew / binary).
+//! 4. The dry-run advertises the result-file template path.
+//! 5. With `--out`, the JSON envelope contains the documented
+//!    plan entries with their field names.
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
-/// Resolve the absolute path to `scripts/post-ship-converge.sh`
-/// relative to the crate manifest dir, which `cargo test` always
-/// sets to the workspace root.
-fn script_path() -> PathBuf {
-    let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    p.push("scripts");
-    p.push("post-ship-converge.sh");
-    p
+fn converge_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(build_converge_once)
+}
+
+fn build_converge_once() -> PathBuf {
+    let manifest_path = std::env::current_dir()
+        .expect("cwd")
+        .join("tools/post-ship-converge/Cargo.toml");
+    assert!(
+        manifest_path.exists(),
+        "post-ship-converge manifest missing at {}",
+        manifest_path.display()
+    );
+
+    let target_dir = std::env::temp_dir().join(format!(
+        "ai-memory-post-ship-converge-target-{}",
+        std::process::id()
+    ));
+
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--quiet",
+            "--manifest-path",
+            manifest_path.to_str().expect("utf-8 manifest path"),
+            "--target-dir",
+            target_dir.to_str().expect("utf-8 target dir"),
+        ])
+        .status()
+        .expect("invoke cargo build for post-ship-converge");
+    assert!(
+        status.success(),
+        "cargo build for post-ship-converge failed"
+    );
+
+    let bin_name = if cfg!(windows) {
+        "post-ship-converge.exe"
+    } else {
+        "post-ship-converge"
+    };
+    let bin = target_dir.join("debug").join(bin_name);
+    assert!(
+        bin.exists(),
+        "post-ship-converge binary missing at {}",
+        bin.display()
+    );
+    bin
+}
+
+fn run_dry_run(version: &str) -> String {
+    let bin = converge_bin();
+    let output = Command::new(bin)
+        .arg("--dry-run")
+        .arg("--version")
+        .arg(version)
+        .output()
+        .expect("spawn post-ship-converge --dry-run");
+
+    assert!(
+        output.status.success(),
+        "E2: --dry-run exited non-zero (status={:?})\nstderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    String::from_utf8(output.stdout).expect("dry-run stdout is UTF-8")
 }
 
 #[test]
-fn e2_dry_run_emits_well_formed_envelope() {
-    let script = script_path();
-    assert!(
-        script.exists(),
-        "post-ship-converge.sh missing at {script:?} — E2 deliverable"
-    );
-
-    let out = Command::new("bash")
-        .arg(&script)
-        .arg("--dry-run")
-        .arg("--version")
-        .arg("0.7.0")
-        .output()
-        .expect("spawn post-ship-converge.sh");
-
-    assert!(
-        out.status.success(),
-        "dry-run exit non-zero: status={:?}\nstderr={}",
-        out.status,
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    let stdout = String::from_utf8(out.stdout).expect("stdout is utf-8");
-
-    // Parse as JSON — the envelope is meant to be machine-readable so
-    // the release-day automation can grep verdict/pass_count out of it.
-    let json: serde_json::Value =
-        serde_json::from_str(&stdout).expect("stdout is well-formed JSON envelope");
-
-    // ----- top-level shape -----
-    assert_eq!(json["task"], "v0.7-E2", "task tag wrong: {stdout}");
-    assert_eq!(json["version"], "0.7.0", "version echo wrong: {stdout}");
-    assert_eq!(json["dry_run"], true, "dry_run flag wrong: {stdout}");
-    assert_eq!(
-        json["verdict"], "DRY_RUN",
-        "dry-run verdict wrong: {stdout}"
-    );
-    assert_eq!(json["question_count"], 6, "question_count wrong: {stdout}");
-    assert_eq!(json["pass_count"], 0, "dry-run pass_count must be 0");
-    assert_eq!(json["fail_count"], 0, "dry-run fail_count must be 0");
-    assert_eq!(
-        json["install_method"], "cargo",
-        "default install method wrong: {stdout}"
-    );
-
-    // ----- per-question results array -----
-    let results = json["results"].as_array().expect("results is array");
-    assert_eq!(results.len(), 6, "expected 6 questions, got {results:?}");
-
-    // The runbook in docs/v0.7/POST-SHIP-CONVERGENCE.md references
-    // these IDs by name. Pin them so a script refactor that renames
-    // a cell forces a docs update at the same time.
-    let expected_ids = [
-        "Q1-T0-A2-CORE",
-        "Q2-T0-A2-GRAPH",
-        "Q3-T0-A2-FULL",
-        "Q4-T0-A1-CORE-RECOVERY-PATHS",
-        "Q5-T0-NO-JARGON-FULL",
-        "Q6-T0-CONTRACT-CORE",
-    ];
-    for (i, expected_id) in expected_ids.iter().enumerate() {
-        assert_eq!(
-            results[i]["id"], *expected_id,
-            "question {i} id drift: got={}",
-            results[i]["id"]
-        );
-        assert_eq!(
-            results[i]["status"], "SKIPPED_DRY_RUN",
-            "dry-run status must be SKIPPED_DRY_RUN for {expected_id}"
+fn e2_dry_run_exits_clean_and_names_all_three_methods() {
+    let out = run_dry_run("0.7.0");
+    for method in &["cargo", "brew", "binary"] {
+        assert!(
+            out.contains(&format!("method:   {method}")),
+            "E2: dry-run plan missing method={method}\nfull output:\n{out}"
         );
     }
 }
 
 #[test]
-fn e2_dry_run_supports_brew_install_method() {
-    // The runbook documents three install methods (cargo / brew /
-    // binary). Cover the brew path under --dry-run too so the script's
-    // arg parser doesn't regress on the non-default methods. (The real
-    // brew install path is exercised manually by the release captain.)
-    let out = Command::new("bash")
-        .arg(script_path())
-        .arg("--dry-run")
-        .arg("--version")
-        .arg("0.7.1")
-        .arg("--method")
-        .arg("brew")
-        .output()
-        .expect("spawn post-ship-converge.sh");
-
-    assert!(out.status.success(), "brew dry-run exit non-zero");
-    let json: serde_json::Value =
-        serde_json::from_slice(&out.stdout).expect("stdout JSON envelope");
-    assert_eq!(json["install_method"], "brew");
-    assert_eq!(json["version"], "0.7.1");
-    assert_eq!(json["verdict"], "DRY_RUN");
+fn e2_dry_run_advertises_results_template() {
+    let out = run_dry_run("0.7.0");
+    assert!(
+        out.contains("results_template:"),
+        "E2: dry-run missing results_template line\nfull output:\n{out}"
+    );
+    assert!(
+        out.contains("results/post-ship/"),
+        "E2: results path should sit under results/post-ship/\nfull output:\n{out}"
+    );
 }
 
 #[test]
-fn e2_missing_version_flag_is_usage_error() {
-    // Forgetting --version must be a hard usage error (exit 3), not a
-    // silent default to "latest". The release captain MUST type the
-    // version they expect to verify so they cannot accidentally
-    // verify the wrong tag.
-    let out = Command::new("bash")
-        .arg(script_path())
-        .arg("--dry-run")
-        .output()
-        .expect("spawn post-ship-converge.sh");
+fn e2_dry_run_makes_no_network_calls() {
+    let out = run_dry_run("0.7.0");
+    assert!(
+        out.contains("dry-run complete (no network calls made)"),
+        "E2: dry-run did not print completion marker\nfull output:\n{out}"
+    );
+}
 
-    let code = out.status.code().expect("exited normally");
-    assert_eq!(code, 3, "missing --version must exit 3 (usage)");
+#[test]
+fn e2_method_filter_restricts_plan_to_one_channel() {
+    let bin = converge_bin();
+    let output = Command::new(bin)
+        .arg("--dry-run")
+        .arg("--version")
+        .arg("0.7.0")
+        .arg("--method")
+        .arg("cargo")
+        .output()
+        .expect("spawn post-ship-converge --dry-run --method cargo");
+    assert!(output.status.success(), "E2: --method cargo dry-run failed");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("method:   cargo"));
+    assert!(
+        !stdout.contains("method:   brew"),
+        "E2: --method cargo should exclude brew\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("method:   binary"),
+        "E2: --method cargo should exclude binary\n{stdout}"
+    );
+}
+
+#[test]
+fn e2_dry_run_emits_json_envelope_with_plan_entries() {
+    let bin = converge_bin();
+    let out_dir = std::env::temp_dir().join(format!(
+        "ai-memory-post-ship-envelope-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&out_dir).expect("create temp dir");
+    let out_path = out_dir.join("plan.json");
+
+    let status = Command::new(bin)
+        .arg("--dry-run")
+        .arg("--version")
+        .arg("0.7.0")
+        .arg("--out")
+        .arg(&out_path)
+        .status()
+        .expect("spawn post-ship-converge --dry-run --out");
+    assert!(status.success(), "E2: --dry-run --out exited non-zero");
+
+    let body = std::fs::read_to_string(&out_path).expect("read envelope");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("envelope is valid JSON");
+
+    assert_eq!(parsed["mode"], "dry-run");
+    assert_eq!(parsed["expected_version"], "0.7.0");
+    let plan = parsed["plan"].as_array().expect("plan array");
+    assert_eq!(plan.len(), 3, "E2: expected 3 plan entries (3 channels)");
+    for entry in plan {
+        for field in &["method", "channel", "metadata_url", "expected_version"] {
+            assert!(
+                entry.get(field).is_some(),
+                "E2: plan entry missing field `{field}`: {entry}"
+            );
+        }
+    }
 }
