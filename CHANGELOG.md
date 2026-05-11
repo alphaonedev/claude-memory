@@ -850,6 +850,77 @@ certification run (v3r30 DO + local-docker r3).
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
 
+### v0.7.0 round-2-fixes folding (2026-05-11) — no v0.7.0.1, everything ships in v0.7.0
+
+Operator directive: there will be no v0.7.0.1 patch release. Items
+originally triaged for v0.7.0.1 fold into v0.7.0 directly.
+
+#### Fixed (closes via round-2-fixes)
+
+- **#318 MCP stdio writes bypass federation fanout** — new opt-in
+  `mcp_federation_forward_url` in `AppConfig`. When set, MCP
+  `memory_store` calls forward to the local HTTP daemon's
+  `POST /api/v1/memories`, which already runs
+  `broadcast_store_quorum`. Single-node MCP deployments are
+  unchanged when the config is unset. Closes the a2a-gate-r6
+  finding "30 MCP stdio writes persisted locally but zero rows
+  replicated to peers."
+- **#355 rustls-pemfile RUSTSEC-2025-0134 (unmaintained, transitive
+  via axum-server)** — bumped `axum-server 0.7 → 0.8`. The 0.8
+  release drops the rustls-pemfile dependency. `cargo audit` now
+  reports clean; `rustls-pemfile` is gone from `Cargo.lock`.
+- **#507 `config.toml` `db = "~/..."` not expanded** — `AppConfig::effective_db`
+  now expands leading `~` / `~/` to `$HOME` via a new private
+  `expand_tilde` helper. Daemon no longer reports
+  `warn db unavailable` against an existing DB at the
+  tilde-expanded location. Bare `~` resolves to `$HOME` itself;
+  `~user/` not supported.
+- **#625 E1/E2 orchestration scripts ported from bash to Rust** —
+  new standalone crates `tools/t0-orchestrate/` +
+  `tools/post-ship-converge/` producing the `ai-memory-t0` and
+  `ai-memory-post-ship-converge` binaries. The old
+  `scripts/t0-orchestrate.sh` and `scripts/post-ship-converge.sh`
+  are deleted. `tests/e1_orchestration_dry_run.rs` and
+  `tests/e2_post_ship_dry_run.rs` drop their `#![cfg(unix)]` gates
+  so Windows CI now validates the same dry-run envelope shape.
+- **L15 entrypoint wire** — `entrypoint.plan-c.sh` now writes
+  `auto_tag_model = "gemma3:4b"` to the daemon's `config.toml`
+  (env-overridable as `AI_MEMORY_AUTO_TAG_MODEL`). Closes the Plan
+  C R4 finding `H8: LLM call (auto_tag) exceeded 30s timeout`
+  caused by Gemma 4 e4b thinking-mode generating 396-564 tokens
+  for a 5-tag prompt; gemma3:4b finishes the same prompt in
+  ~0.7s.
+- **Postgres SAL `consolidate` upsert** — the prior implementation
+  was a plain `INSERT INTO memories`, which exploded with
+  `duplicate key value violates unique constraint
+  "memories_title_ns_uidx"` when an operator re-ran a consolidate
+  at the same `(title, namespace)` (common across repeat cert
+  runs against the same persistent postgres database). Rewrote as
+  `ON CONFLICT (title, namespace) DO UPDATE` matching the rest of
+  the adapter's upsert contract; `RETURNING id` returns the
+  existing id on conflict. Surfaced by Plan C R4 cert S5 failure;
+  reproduced with daemon log
+  `ERROR ai_memory::handlers: store backend error: backend
+  unavailable: postgres: consolidate insert: error returned from
+  database: duplicate key value violates unique constraint
+  "memories_title_ns_uidx"`.
+- **No-sal build break in `src/federation.rs`** — `spawn_catchup_loop`
+  unconditionally called `spawn_catchup_loop_with_store`, which is
+  `#[cfg(feature = "sal")]`-gated. Surfaced by the #625 port
+  subagent. Fix: cfg-branch the body so the sqlite-only build
+  goes through `catchup_once` directly.
+
+#### Documentation
+
+- Closed 12 v0.7.0 ship-tracker issues in one batch with a uniform
+  "Closed by v0.7.0 ship sequence" comment — #637 (Round-2 master),
+  #638 (F6 LLM-dispatch deadlock), #639 (F7 agent_quotas bypass),
+  #640 (F8/F11/F12 secure-by-default), #641 (F13-F16 capabilities
+  drift), #642 (F17/F18 find_paths surface), #646 (F6 SQL-view
+  deferral), #647 (postgres+AGE scope tracker), #649 (Wave 4 live
+  A2A re-validation), #635 (ship-readiness report), #508/#509
+  (Grok Prime-Directive assessments).
+
 ### Added — v0.7 attested-cortex (Track H, Task H1)
 
 - **Per-agent Ed25519 keypair CLI (`ai-memory identity`).** OSS substrate

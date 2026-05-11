@@ -179,6 +179,35 @@ surfaced 18 findings; all 18 are closed in the v0.7.0 ship.
 | F17 | release-notes | `find_paths` `max_depth` cap; directed vs undirected docs | Closed (commit `082c999`, `f02d092`) |
 | F18 | release-notes | `check_duplicate` similarity caps at ~0.92 for byte-identical strings | Closed (commit `082c999`, `63c46ab`) |
 
+### Round-2-fixes folding (2026-05-11) — items originally triaged for v0.7.0.1, now in v0.7.0
+
+Operator directive 2026-05-11: there will be no v0.7.0.1 patch release.
+The following items fold into v0.7.0 directly.
+
+| ID | Severity | Title | Status |
+|---|---|---|---|
+| #318 | high | MCP stdio writes bypass federation fanout | Closed in v0.7.0 — opt-in `mcp_federation_forward_url` forwards MCP `memory_store` to local HTTP daemon which runs `broadcast_store_quorum` |
+| #355 | low | rustls-pemfile RUSTSEC-2025-0134 (unmaintained, transitive via axum-server) | Closed in v0.7.0 — `axum-server 0.7 → 0.8`; `cargo audit` clean |
+| #507 | medium | `config.toml` `db = "~/..."` not expanded | Closed in v0.7.0 — `expand_tilde` helper in `AppConfig::effective_db` |
+| #625 | low | E1/E2 orchestration scripts ported from bash to Rust binaries | Closed in v0.7.0 — `tools/t0-orchestrate/` + `tools/post-ship-converge/` crates; bash deleted; `#![cfg(unix)]` gates dropped |
+
+Plus three v0.7.0 cert-driven fixes surfaced by Plan C R4:
+
+- **L15 entrypoint wire** — `entrypoint.plan-c.sh` writes
+  `auto_tag_model = "gemma3:4b"` to `config.toml` so auto_tag runs
+  fast (~0.7s) instead of Gemma 4 e4b's thinking-mode 30+s
+  timeout. Closes R4 S67 regression.
+- **Postgres SAL `consolidate` upsert** — was a plain INSERT,
+  exploded with `duplicate key value violates unique constraint
+  "memories_title_ns_uidx"` on cert re-runs against a persistent
+  postgres database. Rewrote as `ON CONFLICT (title, namespace)
+  DO UPDATE` matching the adapter's standard upsert contract.
+  Closes R4 S5 regression.
+- **No-sal `federation.rs` build break** — `spawn_catchup_loop`
+  unconditionally called `#[cfg(feature = "sal")]`-gated
+  `spawn_catchup_loop_with_store`. Cfg-branched the body so the
+  sqlite-only build compiles.
+
 ### Quality
 
 - **Hard coverage gate ≥ 93%.** CI fails any PR below the line floor.
