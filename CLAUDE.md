@@ -208,3 +208,100 @@ Tracking issue: #198.
 - Copyright header on all source files: `// Copyright 2026 AlphaOne LLC` + `// SPDX-License-Identifier: Apache-2.0`
 - PRs target `develop` branch, not `main`. `main` is production releases only.
 - Commit format: `<type>: <summary>` (feat, fix, docs, style, refactor, test, chore, perf)
+
+## Commit & push policy (project override of global default)
+
+> This policy **overrides** Claude Code's global default ("NEVER commit unless
+> the user explicitly asks"). Two days of uncommitted work is bad engineering;
+> the loss of work on a local-only edit graph is a real failure mode. The
+> override below distinguishes **committing** (local, recoverable, low blast
+> radius) from **pushing** (shared-system write, higher blast radius) so each
+> can have its own discipline.
+
+**Commit autonomously when work crosses a logical checkpoint.** No need to
+ask first. Specifically commit when ANY of these become true:
+
+- A feature lands and all four gates (`cargo fmt --check`, clippy `-D warnings
+  -D clippy::all -D clippy::pedantic`, `AI_MEMORY_NO_CONFIG=1 cargo test`,
+  `cargo audit`) are green.
+- A fix lands and the regression test that pins it passes.
+- A patch series completes (e.g., L1-L15 patch batch, a 4-lane audit fix
+  series, a multi-issue fold-in).
+- A doc-only change is self-contained and the surrounding sections are not
+  in mid-rewrite (`grep -n "TODO\|XXX\|TBD" <file>` in your scope is clean).
+- An hour of focused work has accumulated and the working tree is at a clean
+  point (gates pass).
+- The agent is about to start a substantial in-flight task that could
+  conflict with the current dirty state (commit-before-pivot).
+
+**Group commits by intent.** Don't dump the whole working tree into one
+commit. Reasonable groupings (in this repo's recent ship history):
+
+- `feat(...)` per issue or per feature
+- `fix(...)` per bug or per finding (#318 / #355 / L14 / G5 / etc.)
+- `chore(deps)` for `Cargo.toml` + `Cargo.lock` together
+- `chore(tests)` for test-scaffold updates that follow a struct-field
+  addition
+- `docs(...)` per doc surface (CHANGELOG separate from ROADMAP separate
+  from release-notes when they touch different audiences)
+- `infra(...)` for Dockerfile + entrypoint changes
+
+**Stage explicit paths**, not `git add -A` or `git add .`. Prevents accidental
+inclusion of `.env`, credentials, large binaries, or work-in-progress
+sibling files the user didn't intend to land yet. The bash command this
+file already documents (`git add <specific>` then `git commit`) holds.
+
+**Use a HEREDOC for multi-line commit messages.** Every commit ends with
+the `Co-Authored-By:` trailer naming the model (matches the discipline in
+the existing AI Developer Workflow doc).
+
+### When to ASK before committing
+
+Ask the operator first when ANY of these apply:
+
+- Mass-deletion (more than ~5 tracked files about to be `git rm`-ed) that
+  isn't the result of an explicit "delete X" instruction.
+- The diff touches a file the operator has been actively hand-editing
+  in the same session (concurrent-edit risk; check `git diff` against
+  the most recent system-reminder of the file).
+- The commit would land secrets-looking content (anything matching
+  `password|secret|key|token|cred` patterns in the diff that isn't a
+  test fixture or doc).
+- The commit would re-introduce reverted code (check `git log -p`
+  against the relevant region).
+- The cert/CI signal is currently RED and the commit doesn't itself
+  close the failure.
+
+### Pushing — separate, higher bar
+
+**Pushing requires explicit operator authorization.** Each push to a shared
+remote branch is a write to an external system that may trigger CI, sync
+to a PR diff, or notify reviewers. Different blast radius from local
+commits. Default discipline:
+
+- Local commits accumulate freely under the rules above.
+- Push to `origin/<topic-branch>` (e.g., `round-2-fixes`,
+  `feat/...`) when the operator says so, or when the operator
+  authorizes the agent to push at agent's discretion for a defined
+  scope (e.g., "push everything you commit on this branch today").
+- **Never force-push** without explicit operator authorization, ever.
+- **Never push to `main` directly**, even with authorization to push to
+  other branches. `main` is production-tag-only.
+- **Never push to `develop`** without operator authorization specific to
+  `develop`, since `develop` is the integration branch.
+
+### Rationale
+
+This policy is the project's response to two empirical failure modes:
+
+1. **The default-NEVER-commit rule** produced 80-file working trees with
+   ~7,000 lines of uncommitted code after multi-day sessions, where a
+   power loss or container crash would have lost the work. That is
+   unacceptable engineering.
+2. **A blanket "always push" policy** would be reckless — pushing kicks
+   off CI, lands diffs on open PRs, and notifies reviewers. The separation
+   above lets the agent be safe (commit often) while keeping high-blast-
+   radius actions (push, force-push, push-to-main) under operator
+   control.
+
+The default-flexible-commit / explicit-push split is the cleaner discipline.
