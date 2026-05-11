@@ -20,6 +20,25 @@ pub enum EmbeddingModel {
     NomicEmbedV15,
 }
 
+impl std::str::FromStr for EmbeddingModel {
+    type Err = String;
+
+    /// Parse the snake_case wire form used by `AppConfig.embedding_model`
+    /// (the documented top-level override). Accepts case-insensitive input
+    /// with surrounding whitespace trimmed. Keep this in sync with the
+    /// `#[serde(rename_all = "snake_case")]` variants above.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "mini_lm_l6_v2" => Ok(Self::MiniLmL6V2),
+            "nomic_embed_v15" => Ok(Self::NomicEmbedV15),
+            other => Err(format!(
+                "unknown embedding_model {other:?}: expected one of \
+                 \"mini_lm_l6_v2\", \"nomic_embed_v15\""
+            )),
+        }
+    }
+}
+
 impl EmbeddingModel {
     /// Embedding vector dimensionality.
     pub fn dim(self) -> usize {
@@ -1443,6 +1462,11 @@ pub struct AppConfig {
     pub embedding_model: Option<String>,
     /// LLM model override (Ollama tag, e.g. "gemma4:e2b")
     pub llm_model: Option<String>,
+    /// Dedicated model for auto_tag (and other short-structured LLM calls).
+    /// Defaults to `gemma3:4b` (fast, deterministic, ~0.7s p50 vs 15s for
+    /// thinking-mode Gemma 4). Falls back to `llm_model` if unset.
+    /// See L15 patch (2026-05-11) for rationale.
+    pub auto_tag_model: Option<String>,
     /// Enable cross-encoder reranking (true/false)
     pub cross_encoder: Option<bool>,
     /// Default namespace for new memories
@@ -1518,7 +1542,166 @@ pub struct AppConfig {
     /// (Postgres on 5432, the hooks daemon, etc.). Operators who need
     /// loopback for testing must set this explicitly.
     pub subscriptions: Option<SubscriptionsConfig>,
+    /// v0.7.0 H5 (round-2) — `[verify]` block. Today exposes one
+    /// knob: `require_nonce` (default `false`). When `true`, every
+    /// `POST /api/v1/links/verify` request MUST include a
+    /// `verification_nonce` (UUID v4 expected); missing or replayed
+    /// nonces are rejected with 409 Conflict. Default-OFF preserves
+    /// the v0.6.x verify-anytime semantics for unmigrated clients.
+    pub verify: Option<VerifyConfig>,
+    /// v0.7.0 M4 — connection-level `statement_timeout` (in seconds)
+    /// applied via an `after_connect` hook to every postgres
+    /// connection in the pool. Bounds runaway queries — a pathological
+    /// `pg_sleep(60)` or an unbounded scan can otherwise wedge a
+    /// connection forever. Defaults to 30s when unset; set to 0 to
+    /// disable the limit (matches the postgres `SET` semantics).
+    /// Operators only need to touch this when the workload requires
+    /// long-running maintenance queries from the daemon itself.
+    pub postgres_statement_timeout_secs: Option<u64>,
+    /// v0.7.0 H7 (round-2) — per-HTTP-request wall-clock timeout in
+    /// seconds. Applied as a middleware to every axum route in
+    /// [`crate::build_router`] so a slow-POST (slowloris-style)
+    /// attacker cannot keep a handler scope alive indefinitely.
+    /// `None` selects the compiled default of 60 seconds; operators
+    /// who need a different ceiling set
+    /// `request_timeout_secs = <secs>` in `config.toml`.
+    pub request_timeout_secs: Option<u64>,
+    /// v0.7.0 H8 (round-2) — per-LLM-call wall-clock timeout in
+    /// seconds. Wraps every `spawn_blocking` invocation of an Ollama
+    /// call (`auto_tag`, `expand_query`, `summarize_memories`, ...)
+    /// in `tokio::time::timeout`. `None` selects the compiled
+    /// default of 30 seconds; on timeout the call falls back to the
+    /// LLM-absent path (already exercised by L5/L7).
+    pub llm_call_timeout_secs: Option<u64>,
+    /// v0.7.0 (issue #318) — when set, the MCP stdio server forwards
+    /// every write tool (`memory_store`, `memory_link`, `memory_delete`)
+    /// to this HTTP endpoint (typically the local `ai-memory serve`
+    /// daemon at `http://localhost:9077`) instead of writing to SQLite
+    /// directly. The HTTP daemon then runs the existing
+    /// `broadcast_store_quorum` / `broadcast_link_quorum` / etc. fanout,
+    /// closing the gap surfaced by a2a-gate v0.6.0 r6 where MCP-stdio
+    /// writes replicated locally but never reached the federation mesh.
+    ///
+    /// Unset (the default) keeps the legacy direct-SQLite path so
+    /// single-node MCP deployments without a federation daemon behave
+    /// exactly as before. The forwarder uses `reqwest::blocking` and
+    /// surfaces HTTP errors as MCP error strings; on transport failure
+    /// the response carries the underlying error so operators can
+    /// distinguish "fanout daemon not running" from "quorum not met".
+    pub mcp_federation_forward_url: Option<String>,
+    /// v0.7.0 (issue #518) — `[agents.defaults]` block. Carries the
+    /// `recall_scope` defaults spliced into `memory_recall` /
+    /// `GET /api/v1/recall` / `ai-memory recall` requests that pass
+    /// `session_default=true` (or `--session-default` on the CLI) and
+    /// omit one or more filter fields. Closes the OpenClaw v0.6.3.1
+    /// "what were you working on?" recovery gap — agents picking up a
+    /// new session no longer need to remember to splice the canonical
+    /// namespace + recency filters on every cross-session recall.
+    ///
+    /// `None` (the default) preserves single-tenant deployments and
+    /// existing recall semantics exactly as-is. The splice happens in
+    /// the handler before the storage call; explicit args always win
+    /// over the defaults.
+    pub agents: Option<AgentsConfig>,
 }
+
+/// v0.7.0 (issue #518) — `[agents]` top-level block. Today only carries
+/// the `defaults` sub-block (`[agents.defaults.recall_scope]`); future
+/// agent-scoped knobs (per-agent quota overrides, per-agent autonomy
+/// hook policy) can stack here without bloating the top-level
+/// `AppConfig` surface.
+///
+/// Wire format:
+/// ```toml
+/// [agents.defaults.recall_scope]
+/// namespaces = ["projects/atlas"]
+/// since = "24h"
+/// tier = "long"
+/// limit = 50
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentsConfig {
+    /// `[agents.defaults]` sub-block. `None` keeps recall semantics
+    /// exactly as v0.6.x — every cross-session `memory_recall` requires
+    /// explicit filters. `Some` enables `session_default=true` callers
+    /// to splice these defaults into their request before storage
+    /// dispatch.
+    #[serde(default)]
+    pub defaults: Option<AgentDefaults>,
+}
+
+/// v0.7.0 (issue #518) — `[agents.defaults]` sub-block. Today exposes a
+/// single field: `recall_scope`. Future expansion (per-call timeouts,
+/// per-call tag filters, …) lives here.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AgentDefaults {
+    /// `[agents.defaults.recall_scope]` — default filter set spliced
+    /// into recall calls that pass `session_default=true` and omit
+    /// individual filter fields. See [`RecallScope`] for field
+    /// semantics. `None` is equivalent to "no defaults configured".
+    #[serde(default)]
+    pub recall_scope: Option<RecallScope>,
+}
+
+/// v0.7.0 (issue #518) — operator-configured recall defaults. Each
+/// field is optional; when present and the inbound recall request
+/// omits the corresponding axis AND passes `session_default=true`, the
+/// handler splices in the configured value before dispatching to the
+/// storage layer.
+///
+/// Resolution: **explicit request args > recall_scope defaults >
+/// compiled defaults**. The splice never overrides an explicit filter
+/// — operators can always narrow the result set further at call time.
+///
+/// Wire format:
+/// ```toml
+/// [agents.defaults.recall_scope]
+/// namespaces = ["projects/atlas"]   # default namespace filter
+/// since = "24h"                     # duration → since = now() - 24h
+/// tier = "long"                     # "short" / "mid" / "long"
+/// limit = 50                        # default cap
+/// ```
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecallScope {
+    /// Default namespace filter applied when the request omits its
+    /// own `namespace` field. The current recall handlers accept a
+    /// single namespace per call; when multiple namespaces are
+    /// configured we apply the first one. (The list form is future-
+    /// compatible with a planned multi-namespace recall surface.)
+    #[serde(default)]
+    pub namespaces: Option<Vec<String>>,
+    /// Default time-window applied when the request omits `since`.
+    /// Expressed as a duration string: `"24h"`, `"7d"`, `"30m"`, … See
+    /// [`parse_duration_string`] for the parser. The handler resolves
+    /// it to `now() - duration` at request time and passes the
+    /// resulting RFC3339 timestamp through the existing `since`
+    /// filter — no new SQL path.
+    #[serde(default)]
+    pub since: Option<String>,
+    /// Default tier filter applied when the request omits its own
+    /// `tier`. Accepted values: `"short"` / `"mid"` / `"long"`. The
+    /// sqlite recall handlers do not currently expose a tier
+    /// parameter, so this knob is applied on the postgres SAL path
+    /// (which carries a `Filter.tier`) and stored on the request
+    /// envelope for forward-compatibility on sqlite (no observable
+    /// behaviour change there).
+    #[serde(default)]
+    pub tier: Option<String>,
+    /// Default recall limit applied when the request omits its own
+    /// `limit`. The handler still clamps to the per-tool maximum
+    /// (50) after applying this default, so an oversized value here
+    /// degrades gracefully.
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+/// v0.7.0 H7 (round-2) — compiled default per-request HTTP timeout.
+/// Applied when `AppConfig::request_timeout_secs` is `None`.
+pub const DEFAULT_REQUEST_TIMEOUT_SECS: u64 = 60;
+
+/// v0.7.0 H8 (round-2) — compiled default per-LLM-call timeout.
+/// Applied when `AppConfig::llm_call_timeout_secs` is `None`.
+pub const DEFAULT_LLM_CALL_TIMEOUT_SECS: u64 = 30;
 
 // ---------------------------------------------------------------------------
 // Hooks / subscription HMAC (K7)
@@ -1557,6 +1740,36 @@ pub struct HooksSubscriptionConfig {
     pub hmac_secret: Option<String>,
 }
 
+/// v0.7.0 H5 (round-2) — `[verify]` config block. Operator-facing
+/// knobs for `POST /api/v1/links/verify`. Today exposes one knob:
+/// `require_nonce` (default `false`).
+///
+/// Wire format:
+/// ```toml
+/// [verify]
+/// require_nonce = true     # strict mode — every verify request
+///                          # must carry verification_nonce
+/// ```
+///
+/// When `require_nonce = false` (the default), the handler logs a
+/// deprecation WARN when a request omits `verification_nonce` but
+/// still allows it through. When `true`, missing nonces are rejected
+/// with 409 Conflict and the operator's audit trail receives every
+/// attempted reuse.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct VerifyConfig {
+    /// When `true`, `POST /api/v1/links/verify` requires every
+    /// request body to include a `verification_nonce` field. Missing
+    /// or empty nonces produce a 400 Bad Request. Already-seen
+    /// `(link_id, signature, nonce)` tuples produce a 409 Conflict
+    /// with `{"error":"verification replay detected"}`. Default `false`
+    /// preserves the v0.6.x verify-anytime semantics; operators
+    /// opting into the H5 replay-protection guarantee set this to
+    /// `true` after their clients have been updated to emit nonces.
+    #[serde(default)]
+    pub require_nonce: bool,
+}
+
 /// v0.7.0 H11 (#628 blocker) — `[subscriptions]` block. Operator
 /// knobs for the outgoing-webhook surface that are NOT specific to
 /// HMAC signing (which lives under `[hooks.subscription]`).
@@ -1591,6 +1804,20 @@ impl AppConfig {
             .as_ref()
             .and_then(|h| h.subscription.as_ref())
             .and_then(|s| s.hmac_secret.clone())
+    }
+
+    /// v0.7.0 (issue #518) — resolved `[agents.defaults.recall_scope]`
+    /// block. Returns `Some(&scope)` when configured, `None` otherwise.
+    /// Consumed by the recall handlers (sqlite + postgres SAL branches,
+    /// MCP `handle_recall`, CLI `cmd_recall`) to splice defaults into
+    /// requests that pass `session_default=true` and omit one or more
+    /// filter fields.
+    #[must_use]
+    pub fn effective_recall_scope(&self) -> Option<&RecallScope> {
+        self.agents
+            .as_ref()
+            .and_then(|a| a.defaults.as_ref())
+            .and_then(|d| d.recall_scope.as_ref())
     }
 
     /// v0.7.0 H11 (#628 blocker) — resolved loopback-webhook opt-in
@@ -2270,6 +2497,57 @@ pub struct IdentityConfig {
     pub anonymize_default: bool,
 }
 
+/// v0.7.0 (issue #518) — parse a duration string of the form
+/// `"<integer><unit>"` into a `chrono::Duration`. Supported units:
+/// `s` (seconds), `m` (minutes), `h` (hours), `d` (days), `w` (weeks).
+/// Whitespace and case are tolerated. Returns `None` on malformed
+/// input — the caller falls through to "no since filter applied".
+///
+/// Intentionally a small bespoke parser rather than a `humantime`
+/// dependency: the surface we need is tiny (4-5 units) and operators
+/// expect the same shape they already type into `--since` flags.
+#[must_use]
+pub fn parse_duration_string(s: &str) -> Option<chrono::Duration> {
+    let trimmed = s.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let (num_part, unit_part) = trimmed.split_at(
+        trimmed
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(trimmed.len()),
+    );
+    let n: i64 = num_part.parse().ok()?;
+    if n < 0 {
+        return None;
+    }
+    match unit_part.trim() {
+        "s" | "sec" | "secs" | "second" | "seconds" => Some(chrono::Duration::seconds(n)),
+        "m" | "min" | "mins" | "minute" | "minutes" => Some(chrono::Duration::minutes(n)),
+        "h" | "hr" | "hrs" | "hour" | "hours" => Some(chrono::Duration::hours(n)),
+        "d" | "day" | "days" => Some(chrono::Duration::days(n)),
+        "w" | "wk" | "wks" | "week" | "weeks" => Some(chrono::Duration::weeks(n)),
+        _ => None,
+    }
+}
+
+/// Expand a leading `~` or `~/` in a path string to `$HOME`. POSIX-style.
+/// `~user/...` is not supported (rare in our deployment surface, and supporting
+/// it requires `getpwnam` — out of scope for the #507 fix). When `$HOME` is
+/// unset (no-home environments like some CI containers), the tilde is left
+/// untouched so the existing failure mode (path not found) is preserved
+/// rather than silently rewriting to an empty prefix.
+fn expand_tilde(s: &str) -> PathBuf {
+    if s == "~" {
+        return std::env::var("HOME").map_or_else(|_| PathBuf::from(s), PathBuf::from);
+    }
+    if let Some(rest) = s.strip_prefix("~/") {
+        return std::env::var("HOME")
+            .map_or_else(|_| PathBuf::from(s), |h| PathBuf::from(h).join(rest));
+    }
+    PathBuf::from(s)
+}
+
 impl AppConfig {
     /// Returns the config file path: `~/.config/ai-memory/config.toml`
     pub fn config_path() -> Option<PathBuf> {
@@ -2292,17 +2570,98 @@ impl AppConfig {
     /// Load config from a specific path.
     pub fn load_from(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
-            Ok(contents) => match toml::from_str(&contents) {
-                Ok(cfg) => {
-                    eprintln!("ai-memory: loaded config from {}", path.display());
-                    cfg
+            Ok(contents) => {
+                // L1 fix (v0.7.0): warn on unknown top-level keys.
+                // `serde(deny_unknown_fields)` would be a breaking change for
+                // operators carrying forward-compat config snippets, so we
+                // instead parse the document twice: once as a generic
+                // `toml::Value` to enumerate every top-level key, and once
+                // into `AppConfig` as before. Any top-level key that is not
+                // part of the expected `AppConfig` field set is reported via
+                // `tracing::warn!` and otherwise silently ignored — load
+                // continues to succeed so a typo or stale Plan C section
+                // (`[memory]`, `[autonomous]`, `[governance]`, `[federation]`)
+                // can no longer silently neutralise an operator's intent.
+                Self::warn_unknown_top_level_keys(path, &contents);
+                match toml::from_str(&contents) {
+                    Ok(cfg) => {
+                        eprintln!("ai-memory: loaded config from {}", path.display());
+                        cfg
+                    }
+                    Err(e) => {
+                        eprintln!("ai-memory: config parse error ({}): {}", path.display(), e);
+                        Self::default()
+                    }
                 }
-                Err(e) => {
-                    eprintln!("ai-memory: config parse error ({}): {}", path.display(), e);
-                    Self::default()
-                }
-            },
+            }
             Err(_) => Self::default(),
+        }
+    }
+
+    /// L1 fix (v0.7.0): enumerate top-level keys in `contents` and emit a
+    /// `tracing::warn!` for every key that is not a recognised `AppConfig`
+    /// field. Malformed TOML is silently skipped here — the existing
+    /// `toml::from_str::<AppConfig>` parse in `load_from` will surface the
+    /// real parse error to the operator on the next line.
+    fn warn_unknown_top_level_keys(path: &Path, contents: &str) {
+        // Canonical list of `AppConfig` top-level fields. Keep in sync with
+        // the struct definition above; verified verbatim against the v0.7.0
+        // L1 spec.
+        const EXPECTED_KEYS: &[&str] = &[
+            "tier",
+            "db",
+            "ollama_url",
+            "embed_url",
+            "embedding_model",
+            "llm_model",
+            "auto_tag_model",
+            "cross_encoder",
+            "default_namespace",
+            "max_memory_mb",
+            "ttl",
+            "archive_on_gc",
+            "api_key",
+            "archive_max_days",
+            "identity",
+            "scoring",
+            "autonomous_hooks",
+            "logging",
+            "audit",
+            "boot",
+            "mcp",
+            "permissions",
+            "transcripts",
+            "hooks",
+            "subscriptions",
+            "postgres_statement_timeout_secs",
+            "request_timeout_secs",
+            "llm_call_timeout_secs",
+            "verify",
+            "mcp_federation_forward_url",
+            "agents",
+        ];
+
+        let value: toml::Value = match toml::from_str(contents) {
+            Ok(v) => v,
+            // Malformed TOML — defer to the strongly-typed parse in the
+            // caller, which produces the operator-facing error message.
+            Err(_) => return,
+        };
+
+        let Some(table) = value.as_table() else {
+            return;
+        };
+
+        let expected_list = EXPECTED_KEYS.join(", ");
+        for key in table.keys() {
+            if !EXPECTED_KEYS.contains(&key.as_str()) {
+                tracing::warn!(
+                    "[config] unknown key '{key}' in {path} — top-level AppConfig fields are: {expected_keys}. This key is silently ignored (no behavior change).",
+                    key = key,
+                    path = path.display(),
+                    expected_keys = expected_list,
+                );
+            }
         }
     }
 
@@ -2367,16 +2726,23 @@ impl AppConfig {
     }
 
     /// Resolve the effective database path (CLI flag overrides config).
+    ///
+    /// Expands a leading `~` / `~/` in the config-provided path to `$HOME`
+    /// before returning (issue #507). Without this, `db = "~/.claude/ai-memory.db"`
+    /// in `config.toml` would land on disk as the literal four-char dir
+    /// `~/.claude/...` relative to cwd and the daemon would report
+    /// `warn db unavailable` against the real DB that lives at the
+    /// expanded path.
     pub fn effective_db(&self, cli_db: &Path) -> PathBuf {
         // If CLI provided a non-default path, use it
         let default_db = PathBuf::from("ai-memory.db");
         if cli_db != default_db {
             return cli_db.to_path_buf();
         }
-        // Otherwise check config
+        // Otherwise check config — expanding leading `~` against $HOME.
         self.db
             .as_ref()
-            .map_or_else(|| cli_db.to_path_buf(), PathBuf::from)
+            .map_or_else(|| cli_db.to_path_buf(), |s| expand_tilde(s))
     }
 
     /// Resolve Ollama URL for LLM generation (config or default).
@@ -2400,6 +2766,24 @@ impl AppConfig {
     /// Whether to archive memories before GC deletion (default: true).
     pub fn effective_archive_on_gc(&self) -> bool {
         self.archive_on_gc.unwrap_or(true)
+    }
+
+    /// v0.7.0 H7 (round-2) — resolved per-request HTTP timeout.
+    /// Falls back to [`DEFAULT_REQUEST_TIMEOUT_SECS`] when the
+    /// `request_timeout_secs` config field is unset.
+    #[must_use]
+    pub fn effective_request_timeout_secs(&self) -> u64 {
+        self.request_timeout_secs
+            .unwrap_or(DEFAULT_REQUEST_TIMEOUT_SECS)
+    }
+
+    /// v0.7.0 H8 (round-2) — resolved per-LLM-call timeout. Falls
+    /// back to [`DEFAULT_LLM_CALL_TIMEOUT_SECS`] when the
+    /// `llm_call_timeout_secs` config field is unset.
+    #[must_use]
+    pub fn effective_llm_call_timeout_secs(&self) -> u64 {
+        self.llm_call_timeout_secs
+            .unwrap_or(DEFAULT_LLM_CALL_TIMEOUT_SECS)
     }
 
     /// v0.6.4-001 — resolve the effective MCP tool profile.
@@ -2520,6 +2904,10 @@ impl AppConfig {
 # LLM model tag for Ollama
 # llm_model = "gemma4:e2b"
 
+# Dedicated model for auto_tag (short structured output).
+# Defaults to gemma3:4b. Reasoning-heavy features still use llm_model.
+# auto_tag_model = "gemma3:4b"
+
 # Enable neural cross-encoder reranking (autonomous tier)
 # cross_encoder = true
 
@@ -2626,6 +3014,24 @@ impl AppConfig {
 mod tests {
     use super::*;
 
+    /// M9 — process-wide guard around every test that calls
+    /// `std::env::set_var` / `std::env::remove_var`. Test binaries run
+    /// in parallel by default (`cargo test --jobs N`); env mutation is
+    /// process-global so two scenarios touching the same key race
+    /// non-deterministically. Every test in this module that flips an
+    /// env var MUST hold this mutex for the duration of its body.
+    ///
+    /// Poison-OK: a panicking scenario that drops the guard mid-mutation
+    /// still hands the next caller a usable lock. Subsequent tests
+    /// re-establish the env state they need on entry.
+    fn env_var_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn tier_roundtrip() {
         for tier in [
@@ -2660,6 +3066,45 @@ mod tests {
     fn embedding_dimensions() {
         assert_eq!(EmbeddingModel::MiniLmL6V2.dim(), 384);
         assert_eq!(EmbeddingModel::NomicEmbedV15.dim(), 768);
+    }
+
+    /// L2 fix — `AppConfig.embedding_model` is an `Option<String>` we
+    /// must parse before handing it to `build_embedder`. This test
+    /// pins the wire form (snake_case, matches serde rename_all),
+    /// confirms case-insensitive + trim-tolerant parsing, and that
+    /// garbage input produces an actionable Err rather than panicking.
+    #[test]
+    fn embedding_model_from_str() {
+        use std::str::FromStr;
+        assert_eq!(
+            EmbeddingModel::from_str("mini_lm_l6_v2").unwrap(),
+            EmbeddingModel::MiniLmL6V2
+        );
+        assert_eq!(
+            EmbeddingModel::from_str("nomic_embed_v15").unwrap(),
+            EmbeddingModel::NomicEmbedV15
+        );
+        // Case-insensitive: operators copy/paste from docs in any case.
+        assert_eq!(
+            EmbeddingModel::from_str("MINI_LM_L6_V2").unwrap(),
+            EmbeddingModel::MiniLmL6V2
+        );
+        assert_eq!(
+            EmbeddingModel::from_str("Nomic_Embed_V15").unwrap(),
+            EmbeddingModel::NomicEmbedV15
+        );
+        // Trim whitespace — common TOML editing artifact.
+        assert_eq!(
+            EmbeddingModel::from_str("  mini_lm_l6_v2  ").unwrap(),
+            EmbeddingModel::MiniLmL6V2
+        );
+        // Invalid input -> Err with a useful message naming the bad value.
+        let err = EmbeddingModel::from_str("garbage").unwrap_err();
+        assert!(err.contains("garbage"), "err message lost the input: {err}");
+        assert!(
+            err.contains("mini_lm_l6_v2") && err.contains("nomic_embed_v15"),
+            "err message should list valid options: {err}"
+        );
     }
 
     #[test]
@@ -3334,6 +3779,39 @@ legacy_scoring = false
     }
 
     #[test]
+    fn effective_db_expands_tilde_against_home() {
+        // #507: `db = "~/.claude/ai-memory.db"` must resolve to $HOME-based
+        // path rather than the literal four-char prefix. Use env_var_lock
+        // because HOME mutation is process-global.
+        let _g = env_var_lock();
+        let prev_home = std::env::var("HOME").ok();
+        // SAFETY: serialized via env_var_lock; restored below.
+        unsafe { std::env::set_var("HOME", "/expanded/home") };
+        let cfg = AppConfig {
+            db: Some("~/.claude/ai-memory.db".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_db(Path::new("ai-memory.db")),
+            PathBuf::from("/expanded/home/.claude/ai-memory.db")
+        );
+        // Bare `~` resolves to $HOME itself.
+        let cfg_bare = AppConfig {
+            db: Some("~".to_string()),
+            ..AppConfig::default()
+        };
+        assert_eq!(
+            cfg_bare.effective_db(Path::new("ai-memory.db")),
+            PathBuf::from("/expanded/home")
+        );
+        // Restore.
+        match prev_home {
+            Some(h) => unsafe { std::env::set_var("HOME", h) },
+            None => unsafe { std::env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
     fn effective_ollama_url_default_when_unset() {
         let cfg = AppConfig::default();
         assert_eq!(cfg.effective_ollama_url(), "http://localhost:11434");
@@ -3392,10 +3870,9 @@ legacy_scoring = false
 
     #[test]
     fn effective_autonomous_hooks_default_is_false() {
-        // SAFETY: clear env so this test is deterministic; tests run with
-        // --test-threads=1 in CI for env-based tests, but we stay
-        // defensive and set+unset locally.
-        // SAFETY: env mutation is acceptable here because we set then unset.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
         let cfg = AppConfig::default();
         assert!(!cfg.effective_autonomous_hooks());
@@ -3403,6 +3880,9 @@ legacy_scoring = false
 
     #[test]
     fn effective_autonomous_hooks_config_value_used_when_env_unset() {
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe { std::env::remove_var("AI_MEMORY_AUTONOMOUS_HOOKS") };
         let cfg = AppConfig {
             autonomous_hooks: Some(true),
@@ -3413,6 +3893,9 @@ legacy_scoring = false
 
     #[test]
     fn effective_anonymize_default_falls_back_to_config() {
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe { std::env::remove_var("AI_MEMORY_ANONYMIZE") };
         let cfg = AppConfig::default();
         assert!(!cfg.effective_anonymize_default());
@@ -3420,9 +3903,11 @@ legacy_scoring = false
 
     #[test]
     fn write_default_if_missing_creates_file_then_noops() {
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
         // Use a temp dir as $HOME so we don't clobber a real config.
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: env mutation is contained; we restore at end.
+        // SAFETY: env mutation serialised by `_g`.
         unsafe { std::env::set_var("HOME", tmp.path()) };
         // First call writes the file.
         AppConfig::write_default_if_missing();
@@ -3439,7 +3924,9 @@ legacy_scoring = false
 
     #[test]
     fn config_path_returns_some_when_home_set() {
-        // SAFETY: env mutation contained to this test.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe { std::env::set_var("HOME", "/some/home") };
         let path = AppConfig::config_path().unwrap();
         assert!(path.starts_with("/some/home"));
@@ -3558,5 +4045,202 @@ legacy_scoring = false
             ..Default::default()
         };
         assert!(!cfg.auto_extract_for("agent/claude"));
+    }
+
+    // -----------------------------------------------------------------
+    // L1 fix (v0.7.0): unknown top-level keys WARN diagnostic
+    // -----------------------------------------------------------------
+    //
+    // The earlier Plan C bug planted `[memory]`, `[autonomous]`,
+    // `[governance]`, `[federation]` tables in the operator's
+    // config.toml — none of them are real `AppConfig` fields, so serde
+    // silently dropped them and the operator's intent never reached the
+    // daemon. The fix warns on every unknown top-level key while still
+    // loading the config gracefully.
+
+    /// Top-level key not in `AppConfig` is reported via `tracing::warn!`
+    /// AND the config still loads with recognised fields intact.
+    #[test]
+    fn load_from_warns_on_unknown_top_level_key_but_still_loads() {
+        // Construct a config that mixes a real key (`tier`) with the
+        // unknown `[memory]` table from the Plan C bug. The recognised
+        // `tier = "autonomous"` at the top level must survive (i.e. the
+        // unknown `[memory] tier = "ignored"` does NOT shadow it —
+        // top-level wins because `[memory]` is a different namespace
+        // entirely from `AppConfig.tier`).
+        let toml_src = "tier = \"autonomous\"\n\n[memory]\ntier = \"ignored\"\n";
+
+        let tmp = tempfile::NamedTempFile::new().expect("create temp file");
+        std::fs::write(tmp.path(), toml_src).expect("write temp config");
+
+        // We do NOT install a tracing subscriber here — `tracing-test`
+        // is not a dev-dep, and the spec explicitly allows skipping the
+        // "warn-was-emitted" assertion when capturing is awkward. The
+        // important contract is:
+        //   (a) load_from returns a populated AppConfig (no panic),
+        //   (b) the recognised top-level `tier` survives,
+        //   (c) the unknown `[memory]` table did NOT block the load.
+        // The warn itself is exercised at runtime — verify it fires by
+        // running `RUST_LOG=warn AI_MEMORY_NO_CONFIG=0 ai-memory ...`
+        // against a config with a stray section.
+        let cfg = AppConfig::load_from(tmp.path());
+
+        assert_eq!(
+            cfg.tier.as_deref(),
+            Some("autonomous"),
+            "top-level `tier` must survive even when an unknown `[memory]` table is present",
+        );
+    }
+
+    /// Every field in `AppConfig` is enumerated in the expected-key
+    /// set, so renaming a struct field will not silently start
+    /// emitting bogus warnings for the new name.
+    ///
+    /// Regression guard: if you add a new top-level field to
+    /// `AppConfig`, you MUST also add it to the `EXPECTED_KEYS` const
+    /// inside `AppConfig::warn_unknown_top_level_keys`. This test
+    /// enforces parity by serialising a fully-populated `AppConfig` to
+    /// TOML and asserting that every emitted top-level key is in the
+    /// expected set.
+    #[test]
+    fn warn_unknown_top_level_keys_covers_every_appconfig_field() {
+        // Build an AppConfig with every Option populated so serde emits
+        // every field. We only need the keys, not the values, so
+        // default placeholder sub-structs are fine.
+        let cfg = AppConfig {
+            tier: Some("keyword".into()),
+            db: Some(String::new()),
+            ollama_url: Some(String::new()),
+            embed_url: Some(String::new()),
+            embedding_model: Some(String::new()),
+            llm_model: Some(String::new()),
+            auto_tag_model: Some(String::new()),
+            cross_encoder: Some(false),
+            default_namespace: Some(String::new()),
+            max_memory_mb: Some(0),
+            ttl: Some(TtlConfig::default()),
+            archive_on_gc: Some(false),
+            api_key: Some(String::new()),
+            archive_max_days: Some(0),
+            identity: Some(IdentityConfig::default()),
+            scoring: Some(RecallScoringConfig::default()),
+            autonomous_hooks: Some(false),
+            logging: Some(LoggingConfig::default()),
+            audit: Some(AuditConfig::default()),
+            boot: Some(BootConfig::default()),
+            mcp: Some(McpConfig::default()),
+            permissions: Some(PermissionsConfig::default()),
+            transcripts: Some(TranscriptsConfig::default()),
+            hooks: Some(HooksConfig::default()),
+            subscriptions: Some(SubscriptionsConfig::default()),
+            postgres_statement_timeout_secs: Some(30),
+            request_timeout_secs: Some(60),
+            llm_call_timeout_secs: Some(30),
+            verify: Some(VerifyConfig::default()),
+            mcp_federation_forward_url: Some(String::new()),
+            agents: Some(AgentsConfig::default()),
+        };
+
+        let serialised = toml::to_string(&cfg).expect("serialise AppConfig to TOML");
+        let value: toml::Value =
+            toml::from_str(&serialised).expect("re-parse serialised AppConfig");
+        let table = value.as_table().expect("serialised AppConfig is a table");
+
+        // Mirror the const in `warn_unknown_top_level_keys`. Keep in
+        // sync — if this assertion fires, you forgot to update the
+        // expected-keys list when adding a new AppConfig field.
+        const EXPECTED_KEYS: &[&str] = &[
+            "tier",
+            "db",
+            "ollama_url",
+            "embed_url",
+            "embedding_model",
+            "llm_model",
+            "auto_tag_model",
+            "cross_encoder",
+            "default_namespace",
+            "max_memory_mb",
+            "ttl",
+            "archive_on_gc",
+            "api_key",
+            "archive_max_days",
+            "identity",
+            "scoring",
+            "autonomous_hooks",
+            "logging",
+            "audit",
+            "boot",
+            "mcp",
+            "permissions",
+            "transcripts",
+            "hooks",
+            "subscriptions",
+            "postgres_statement_timeout_secs",
+            "request_timeout_secs",
+            "llm_call_timeout_secs",
+            "verify",
+            "mcp_federation_forward_url",
+            "agents",
+        ];
+
+        for key in table.keys() {
+            assert!(
+                EXPECTED_KEYS.contains(&key.as_str()),
+                "AppConfig field `{key}` is not in EXPECTED_KEYS — \
+                 update `warn_unknown_top_level_keys` to keep parity",
+            );
+        }
+    }
+
+    /// v0.7.0 L15 — assert that:
+    ///  1. `AppConfig::default()` leaves `auto_tag_model` as `None` so a
+    ///     daemon with no operator override sees the absent state (which
+    ///     `maybe_auto_tag` interprets as "use the client's configured
+    ///     `llm_model`"); and
+    ///  2. the documented default config.toml template spot-checks
+    ///     `gemma3:4b` as the recommended value — closes the L14
+    ///     NHI-D-autotag-empty finding where Gemma 4 thinking-mode
+    ///     latency hit the 30s autonomy timeout.
+    #[test]
+    fn auto_tag_model_default_falls_back_to_none_and_template_documents_default_gemma3_4b() {
+        // (1) compile-time default leaves auto_tag_model = None.
+        let cfg = AppConfig::default();
+        assert!(
+            cfg.auto_tag_model.is_none(),
+            "fresh AppConfig must leave auto_tag_model = None so callers \
+             fall back to llm_model"
+        );
+
+        // (2) the default config.toml template the daemon writes to disk
+        // must document the recommended gemma3:4b value and mention
+        // auto_tag_model — operators rely on the inline template as the
+        // authoritative knob reference.
+        //
+        // We can't reach the private `default_toml` constant directly,
+        // so write it to a tempdir via `write_default_if_missing` and
+        // read it back. Mirrors the pattern used by
+        // `default_config_includes_*` tests above.
+        //
+        // M9 — HOME mutation is process-global; other tests in this
+        // module also flip HOME. Serialise via env_var_lock so parallel
+        // `cargo test --jobs N` runs cannot interleave reads of HOME
+        // mid-mutation.
+        let _g = env_var_lock();
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // SAFETY: env mutation serialised by `_g`.
+        unsafe { std::env::set_var("HOME", tmp.path()) };
+        AppConfig::write_default_if_missing();
+        let written = AppConfig::config_path().expect("config_path resolves");
+        let contents = std::fs::read_to_string(&written).expect("default toml written");
+        assert!(
+            contents.contains("auto_tag_model"),
+            "default config.toml must document the auto_tag_model knob; \
+             got:\n{contents}"
+        );
+        assert!(
+            contents.contains("gemma3:4b"),
+            "default config.toml must mention gemma3:4b as the L15 \
+             recommended default; got:\n{contents}"
+        );
     }
 }

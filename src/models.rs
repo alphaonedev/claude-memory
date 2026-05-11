@@ -215,6 +215,19 @@ pub struct CreateMemory {
     /// must opt in explicitly).
     #[serde(default)]
     pub on_conflict: Option<String>,
+    /// v0.7.0 (issue #519) — when `Some(true)`, run a proactive
+    /// `detect_contradiction` LLM probe against same-namespace memories
+    /// BEFORE returning 201, regardless of `autonomous_hooks`. When
+    /// `Some(false)`, force-disable detection even if `autonomous_hooks`
+    /// is on. When `None`, defer to `autonomous_hooks`.
+    ///
+    /// Surface: the 201 response body grows a `conflicts: [{...}]` array
+    /// listing every same-namespace candidate the LLM flags as
+    /// contradictory. Each entry carries the candidate id, title, and
+    /// (when LLM produces one) a `suggested_merge` content string the
+    /// caller can pass to a follow-up `memory_consolidate`.
+    #[serde(default)]
+    pub detect_conflicts: Option<bool>,
 }
 
 fn default_tier() -> Tier {
@@ -334,6 +347,13 @@ pub struct RecallQuery {
     /// this budget.
     #[serde(default)]
     pub budget_tokens: Option<usize>,
+    /// v0.7.0 (issue #518) — when `true`, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly set on this request. Resolution:
+    /// explicit args > recall_scope defaults > compiled defaults.
+    /// Default `false` preserves v0.6.x recall semantics exactly.
+    #[serde(default)]
+    pub session_default: Option<bool>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -369,6 +389,13 @@ pub struct RecallBody {
     /// Task 1.11 — context-budget-aware recall.
     #[serde(default)]
     pub budget_tokens: Option<usize>,
+    /// v0.7.0 (issue #518) — when `true`, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly set on this request body.
+    /// Resolution: explicit args > recall_scope defaults > compiled
+    /// defaults. Default `false` preserves v0.6.x recall semantics.
+    #[serde(default)]
+    pub session_default: Option<bool>,
 }
 
 impl RecallBody {
