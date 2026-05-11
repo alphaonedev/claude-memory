@@ -169,18 +169,21 @@ fn cap_v3_response_carries_schema_version_and_summary() {
 fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     let summary = build_capabilities_summary(&Profile::core());
 
-    // Visible = 7 core (with v0.7 B1 memory_load_family + v0.7 B2
-    // memory_smart_load) + 1 always-on (`memory_capabilities` lives in
-    // Family::Meta which the core profile doesn't load, so the
-    // bootstrap injection adds it back).
+    // Round-2 F13 — summary now reports the substantive "memory tool"
+    // count (excluding the always-on `memory_capabilities` bootstrap)
+    // so it agrees with `build_capabilities_describe_to_user`'s
+    // "{n_loaded} memory tool{s}" phrasing. Core profile loads
+    // `Family::Core` (7 tools) and does NOT load `Family::Meta`, so
+    // visible memory tools = 7 (the bootstrap is plumbing, not a
+    // memory tool). Total memory tools = 51 - 1 = 50.
     assert!(
-        summary.starts_with("8 of 51 tools"),
-        "core profile summary should open with \"8 of 51 tools\"; got: {summary}"
+        summary.starts_with("7 of 50 memory tools"),
+        "core profile summary should open with \"7 of 50 memory tools\" (Round-2 F13); got: {summary}"
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
         summary.contains("43 are listed in this manifest"),
-        "core profile must report 43 unloaded (51 - 8); got: {summary}"
+        "core profile must report 43 unloaded (50 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -209,9 +212,14 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
 fn cap_v3_summary_full_profile_reports_all_visible() {
     let summary = build_capabilities_summary(&Profile::full());
 
+    // Round-2 F13 — summary aligns with describe_to_user's "all 50
+    // memory tools" phrasing. Full profile loads every family
+    // (visible = 50 substantive memory tools; the
+    // `memory_capabilities` bootstrap is excluded from the count to
+    // match the user-facing string).
     assert!(
-        summary.starts_with("51 of 51 tools"),
-        "full profile summary should open with \"51 of 51 tools\"; got: {summary}"
+        summary.starts_with("50 of 50 memory tools"),
+        "full profile summary should open with \"50 of 50 memory tools\" (Round-2 F13); got: {summary}"
     );
     assert!(summary.contains("(full)"));
     assert!(
@@ -233,9 +241,13 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
 #[test]
 fn cap_v3_summary_graph_profile_counts() {
     let summary = build_capabilities_summary(&Profile::graph());
+    // Round-2 F13 — summary uses substantive "memory tool" count.
+    // Graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18
+    // memory tools. Total = 50 (51 - bootstrap).
     assert!(
-        summary.starts_with("19 of 51 tools"),
-        "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) + 1 always-on bootstrap = 19; got: {summary}"
+        summary.starts_with("18 of 50 memory tools"),
+        "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18 memory tools \
+         (Round-2 F13: bootstrap excluded); got: {summary}"
     );
     assert!(summary.contains("(graph)"));
     assert!(summary.contains("32 are listed in this manifest"));

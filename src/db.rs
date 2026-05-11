@@ -2,10 +2,28 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::{Context, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
 use std::path::Path;
+
+/// v0.7.0 H6 (round-2) — truncate a `DateTime<Utc>` to microsecond
+/// precision. Companion of the same-named helper in
+/// `store/postgres.rs:3539` (G3 fix); both ends of the link sign/verify
+/// roundtrip now collapse sub-microsecond digits BEFORE CBOR
+/// canonicalisation. PostgreSQL's `TIMESTAMPTZ` stores microseconds —
+/// the SQLite path was lossless, but a link created on SQLite and
+/// later re-verified on Postgres (or vice versa via federation) would
+/// see the canonical RFC3339 string change shape on the storage hop
+/// and break the Ed25519 signature. Truncating at write time makes the
+/// shape stable across adapters. See `store/postgres.rs:3520-3543` for
+/// the full design context.
+#[must_use]
+pub fn truncate_to_microseconds(t: DateTime<Utc>) -> DateTime<Utc> {
+    use chrono::Timelike;
+    let micros = t.nanosecond() / 1_000;
+    t.with_nanosecond(micros * 1_000).unwrap_or(t)
+}
 
 use crate::models::{
     AGENTS_NAMESPACE, AgentRegistration, Approval, ApproverType, DuplicateCheck, DuplicateMatch,
@@ -2103,7 +2121,20 @@ pub fn create_link_signed(
     // KG queries. Backfill on migration handled legacy rows; here we
     // populate it on the insert path so newly created links are
     // visible to `memory_kg_timeline` without a downstream backfill.
-    let now = Utc::now().to_rfc3339();
+    //
+    // v0.7.0 H6 (round-2): mirror the postgres G3 fix at
+    // `store/postgres.rs:3539` — truncate the timestamp to microsecond
+    // precision BEFORE we both sign over it and persist it. SQLite
+    // stores RFC3339 TEXT and round-trips losslessly so this is a
+    // no-op for SQLite reads, BUT a link created on the SQLite path
+    // and later re-verified on the postgres path (or vice versa)
+    // must commit to the same canonical RFC3339 string on both
+    // sides. Postgres's `TIMESTAMPTZ` quantises at microsecond
+    // resolution, so sub-microsecond digits silently disappear on
+    // round-trip and break the Ed25519 signature. Truncating here
+    // makes the sign/verify CBOR byte-stable across the storage
+    // boundary regardless of which adapter wrote the row originally.
+    let now = truncate_to_microseconds(Utc::now()).to_rfc3339();
 
     // v0.7 H2 — sign if we have a private key. We compute the signature
     // BEFORE issuing INSERT so a CBOR/sign failure surfaces as an
@@ -2899,6 +2930,140 @@ pub fn check_duplicate(
     })
 }
 
+/// Canonical hash used by [`check_duplicate_with_text`] to detect
+/// byte-identical `title + content` pairs even when the embedding
+/// pipeline (lower-casing, prefix tagging, etc.) prevents the cosine
+/// similarity from saturating at 1.0.
+///
+/// The input is the *exact* text the MCP/HTTP layer hands to the
+/// embedder — `format!("{title} {content}")` — and we hash its raw
+/// UTF-8 bytes with no normalization. Lower-casing or whitespace
+/// stripping at this layer would re-introduce the very ambiguity we
+/// are trying to short-circuit (two semantically-identical strings
+/// hashing to the same value but being substantively different in,
+/// e.g., a code snippet that differs only in whitespace).
+///
+/// SHA-256 is the same primitive the audit/subscriptions/signed-events
+/// layers already use, so callers don't have to reach for a new
+/// dependency.
+#[must_use]
+pub fn canonical_content_hash(text: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hasher.finalize().into()
+}
+
+/// v0.7.0 F18 — exact-match-aware nearest-neighbor duplicate check.
+///
+/// Wraps [`check_duplicate`] with a SHA-256 short-circuit on the raw
+/// `query_text` so byte-identical content scores `similarity = 1.0`
+/// even when the embedding pipeline (Nomic prefixes, casing, whitespace
+/// normalization) would otherwise cap cosine similarity at ~0.92 for
+/// the same string. Round-2 evidence: storing content `C` and then
+/// asking `check_duplicate` about `C` returned similarity 0.92 because
+/// the stored embedding was prefixed with `search_document:` while the
+/// query embedding got `search_query:` — mismatched prefixes prevent
+/// cosine from saturating at 1.0.
+///
+/// Algorithm:
+/// 1. Compute `H_query = SHA-256(query_text)`.
+/// 2. For each live, namespace-matching candidate, compute
+///    `H_row = SHA-256(format!("{row.title} {row.content}"))` and
+///    compare. The first match wins and is returned with
+///    `similarity = 1.0`, `is_duplicate = true`.
+/// 3. If no hash match is found, fall through to embedding-based
+///    cosine similarity (i.e. delegate to [`check_duplicate`]).
+///
+/// The hash compare is computed per call (no schema migration); it
+/// scales linearly in the candidate pool, but so does the existing
+/// embedding loop, so worst-case asymptotics are unchanged. A future
+/// `content_hash` column on `memories` would make this O(1) per
+/// candidate via an index — flagged for a separate migration PR.
+///
+/// `query_text` MUST be the exact string used to produce
+/// `query_embedding` (typically `format!("{title} {content}")`).
+/// Passing a different string is not a correctness bug — the function
+/// just falls through to the embedding-similarity path — but it
+/// defeats the point of the short-circuit.
+pub fn check_duplicate_with_text(
+    conn: &Connection,
+    query_embedding: &[f32],
+    query_text: &str,
+    namespace: Option<&str>,
+    threshold: f32,
+) -> Result<DuplicateCheck> {
+    let effective_threshold = threshold.max(DUPLICATE_THRESHOLD_MIN);
+    let now = Utc::now().to_rfc3339();
+    let query_hash = canonical_content_hash(query_text);
+
+    // Pull (id, title, namespace, content) for the live candidate pool.
+    // We keep the same gates as `check_duplicate` (live row, optional
+    // namespace) but do NOT require a non-NULL embedding here — an
+    // identical row with a missing embedding is still a valid exact-
+    // match short-circuit candidate.
+    let rows: Vec<(String, String, String, String)> = if let Some(ns) = namespace {
+        let mut stmt = conn.prepare(
+            "SELECT id, title, namespace, content FROM memories
+             WHERE (expires_at IS NULL OR expires_at > ?1)
+               AND namespace = ?2",
+        )?;
+        let mapped = stmt.query_map(params![now, ns], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT id, title, namespace, content FROM memories
+             WHERE (expires_at IS NULL OR expires_at > ?1)",
+        )?;
+        let mapped = stmt.query_map(params![now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()?
+    };
+
+    // Phase 1 — SHA-256 exact-match short-circuit. We hash the same
+    // `format!("{title} {content}")` shape the MCP/HTTP layers use to
+    // build the embedding text so an identical store-then-check sequence
+    // surfaces as similarity=1.0 even when the embedding pipeline would
+    // otherwise cap at ~0.92 due to prefix asymmetry.
+    for (id, title, ns, content) in &rows {
+        let row_text = format!("{title} {content}");
+        let row_hash = canonical_content_hash(&row_text);
+        if row_hash == query_hash {
+            return Ok(DuplicateCheck {
+                is_duplicate: true,
+                threshold: effective_threshold,
+                nearest: Some(DuplicateMatch {
+                    id: id.clone(),
+                    title: title.clone(),
+                    namespace: ns.clone(),
+                    similarity: 1.0,
+                }),
+                // We scanned every row through the hash compare to find
+                // the match — report that, not just the first one.
+                candidates_scanned: rows.len(),
+            });
+        }
+    }
+
+    // Phase 2 — no hash match; fall back to the embedding-based
+    // nearest-neighbor scan so callers still get the "closest existing
+    // memory was X at similarity Y" signal on near-but-not-exact hits.
+    check_duplicate(conn, query_embedding, namespace, threshold)
+}
+
 /// Register an entity (canonical name + aliases) under a namespace
 /// (Pillar 2 / Stream B).
 ///
@@ -3589,6 +3754,13 @@ pub const FIND_PATHS_MAX_LIMIT: usize = 50;
 /// Distinct from [`KG_QUERY_MAX_SUPPORTED_DEPTH`] because path
 /// enumeration is more expensive than reachability — we can afford a
 /// slightly deeper budget for the BFS but not by much.
+///
+/// **Cap = 7.** Asking for more is rejected with an error that names
+/// this constant explicitly so callers see exactly which knob to file
+/// against. Contact maintainers to raise this bound *after* benchmarking
+/// the new ceiling on a representative KG; the BFS is `O(d * |E|)` per
+/// hop with a `json_each` cycle check, and depth-8+ has not been load-
+/// tested as of v0.7.0.
 pub const FIND_PATHS_MAX_DEPTH: usize = 7;
 
 /// Default depth used when the caller omits `max_depth`. Mirrors the
@@ -3604,17 +3776,39 @@ pub const FIND_PATHS_DEFAULT_DEPTH: usize = 4;
 /// candidate prefix; rows that reach `target_id` are projected out as
 /// completed paths.
 ///
-/// Treated as undirected: we traverse `memory_links` in both directions
-/// at every hop. The KG corpus uses directional links to model temporal
-/// ordering of an assertion (`source → target`), but path queries are
-/// asking "are these two memories connected via *any* relation chain?",
-/// which requires the symmetric closure. The CTE achieves that by
-/// `UNION ALL` over the original edge and the reverse edge at each hop.
+/// # Directionality contract (v0.7.0)
 ///
-/// `max_depth` defaults to [`FIND_PATHS_DEFAULT_DEPTH`] and is clamped
-/// at [`FIND_PATHS_MAX_DEPTH`]; passing a larger value yields an
-/// explicit error rather than silent truncation. `max_results`
-/// defaults to [`FIND_PATHS_DEFAULT_LIMIT`] and is clamped at
+/// **`find_paths` is UNDIRECTED** (UNION of forward + reverse edges at
+/// every hop) — **`kg_query` is DIRECTED** (forward edges only, by
+/// design). The two tools answer different questions and are not
+/// interchangeable:
+///
+/// - `find_paths(a, b)` — *are these two memories connected through any
+///   relation chain?* Symmetric closure: `find_paths(a, b)` and
+///   `find_paths(b, a)` return the same path set (modulo reversal).
+/// - `kg_query(start, depth)` — *what does the directed `source →
+///   target` subgraph rooted at `start` look like at depth ≤ N?*
+///   `kg_query(b, …)` will not surface `a → b`.
+///
+/// **`include_invalidated` is honored identically** by both tools: when
+/// `false` (default), edges whose `valid_until` lies in the past are
+/// excluded from the traversal; when `true`, the full historical link
+/// graph is walked. The flag's semantics do not change with directionality.
+///
+/// The KG corpus uses directional links to model temporal ordering of an
+/// assertion (`source → target`), so path queries — which are "are these
+/// two memories connected via *any* relation chain?" — apply the
+/// symmetric closure here via `UNION ALL` over the original edge and the
+/// reverse edge at each hop.
+///
+/// # Limits
+///
+/// `max_depth` defaults to [`FIND_PATHS_DEFAULT_DEPTH`] and is hard-
+/// capped at [`FIND_PATHS_MAX_DEPTH`] (= 7); passing a larger value
+/// yields an explicit error rather than silent truncation. The error
+/// message names `FIND_PATHS_MAX_DEPTH` so operators can grep the
+/// codebase for the single tunable knob. `max_results` defaults to
+/// [`FIND_PATHS_DEFAULT_LIMIT`] and is clamped at
 /// [`FIND_PATHS_MAX_LIMIT`]; passing a larger value collapses to the
 /// ceiling without error (paths beyond the cap are dropped, the
 /// shortest paths win on the `ORDER BY`).
@@ -3637,7 +3831,9 @@ pub fn find_paths(
         anyhow::bail!("max_depth must be >= 1");
     }
     if depth > FIND_PATHS_MAX_DEPTH {
-        anyhow::bail!("max_depth={depth} exceeds supported depth={FIND_PATHS_MAX_DEPTH}");
+        anyhow::bail!(
+            "max_depth={depth} exceeds supported depth={FIND_PATHS_MAX_DEPTH} (FIND_PATHS_MAX_DEPTH); contact maintainers to raise this bound after benchmarking"
+        );
     }
     let cap = max_results
         .unwrap_or(FIND_PATHS_DEFAULT_LIMIT)
@@ -5301,7 +5497,7 @@ pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<G
 }
 
 /// Return true if `agent_id` matches a registered agent in `_agents`.
-fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
+pub fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
     let title = format!("agent:{agent_id}");
     conn.query_row(
         "SELECT 1 FROM memories WHERE namespace = ?1 AND title = ?2",
@@ -5357,13 +5553,41 @@ fn evaluate_level(
 
 /// Resolve the namespace-owner (`metadata.agent_id` of the namespace's
 /// standard memory) used for `Owner`-level store checks.
+///
+/// **F1 (v0.7.0 round-2-fixes):** the lookup now walks the inheritance
+/// chain leaf-first via [`build_namespace_chain`], returning the
+/// `agent_id` of the first standard memory found. This mirrors
+/// [`resolve_governance_policy`]'s semantics so that when a deep child
+/// inherits a parent's `governance.write = owner` policy, the owner
+/// check resolves to the parent's standard owner — matching operator
+/// intuition that the helper means "owner of the effective policy at
+/// this namespace".
+///
+/// Without this walk, deep children with no standard of their own
+/// triggered `governance: owner-level action has no resolvable owner`
+/// despite the parent's policy being correctly inherited.
 fn namespace_owner(conn: &Connection, namespace: &str) -> Option<String> {
-    let standard_id = get_namespace_standard(conn, namespace).ok().flatten()?;
-    let mem = get(conn, &standard_id).ok().flatten()?;
-    mem.metadata
-        .get("agent_id")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    // build_namespace_chain returns top-down (`["*", root, ..., leaf]`).
+    // We want leaf-first so the most-specific owner wins, matching how
+    // resolve_governance_policy picks up the most-specific policy.
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        let Some(standard_id) = get_namespace_standard(conn, &level).ok().flatten() else {
+            continue;
+        };
+        let Some(mem) = get(conn, &standard_id).ok().flatten() else {
+            continue;
+        };
+        if let Some(owner) = mem
+            .metadata
+            .get("agent_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            return Some(owner);
+        }
+    }
+    None
 }
 
 /// Enforce governance for a `GovernedAction`. On [`GovernanceDecision::Pending`],
@@ -6078,7 +6302,25 @@ pub fn doctor_oldest_pending_age_secs(conn: &Connection) -> Result<Option<i64>> 
     let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&ts) else {
         return Ok(None);
     };
-    let age = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds();
+    // M11 (v0.7.0 round-2) — clamp negative ages to 0. `requested_at`
+    // is stamped by the writer's clock; on a host with skewed time
+    // (NTP slewing back, intentional misconfiguration, or VM time
+    // travel) `now - parsed` can land negative and downstream
+    // consumers (the doctor surface treats this as "age in seconds")
+    // would surface a nonsensical figure. The WARN gives operators
+    // the signal so they can investigate the clock drift instead of
+    // chasing a phantom backlog.
+    let raw_age = (Utc::now() - parsed.with_timezone(&Utc)).num_seconds();
+    let age = if raw_age < 0 {
+        tracing::warn!(
+            requested_at = %ts,
+            raw_age_seconds = raw_age,
+            "pending_actions row has future timestamp; clamping age to 0"
+        );
+        0
+    } else {
+        raw_age
+    };
     Ok(Some(age))
 }
 
@@ -8531,6 +8773,100 @@ mod tests {
             .expect("persisted signature must verify against the writer's public key");
     }
 
+    // v0.7.0 H6 (round-2) — regression: the SQLite write path must
+    // truncate `valid_from` to microsecond precision BEFORE signing
+    // and persisting, so the row a federation peer receives serialises
+    // back to the same canonical RFC3339 string regardless of the
+    // adapter that wrote it. We assert two properties:
+    //
+    // 1. The `valid_from` column NEVER contains a 9-digit fractional
+    //    second (nanoseconds), only at most 6 digits (microseconds).
+    // 2. The persisted signature verifies against canonical CBOR
+    //    derived from the same microsecond-truncated string the row
+    //    holds — i.e. the round-trip is byte-stable.
+    #[test]
+    fn h6_create_link_signed_truncates_valid_from_to_microseconds() {
+        use crate::identity::{keypair, sign as link_sign};
+        use ed25519_dalek::Verifier;
+
+        let conn = test_db();
+        let src = make_memory("h6-src", "test", Tier::Long, 5);
+        let tgt = make_memory("h6-tgt", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let kp = keypair::generate("alice").unwrap();
+        let level = create_link_signed(&conn, &src.id, &tgt.id, "related_to", Some(&kp)).unwrap();
+        assert_eq!(level, "self_signed");
+
+        let (sig, valid_from): (Option<Vec<u8>>, Option<String>) = conn
+            .query_row(
+                "SELECT signature, valid_from FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                params![&src.id, &tgt.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let valid_from = valid_from.expect("valid_from set on signed insert path");
+
+        // RFC3339 fractional-second precision check. The string looks
+        // like `2026-05-10T12:34:56.123456+00:00` (microsecond) or
+        // `...:56.123456789+00:00` (nanosecond). After H6, the maximum
+        // length of the fractional run must be 6.
+        if let Some(dot) = valid_from.find('.') {
+            let after = &valid_from[dot + 1..];
+            let frac_len = after.chars().take_while(|c| c.is_ascii_digit()).count();
+            assert!(
+                frac_len <= 6,
+                "H6 regression: valid_from has {frac_len}-digit fractional second; expected ≤ 6 (microseconds). Value: {valid_from}"
+            );
+        }
+
+        // Round-trip the signature against canonical CBOR computed
+        // from the EXACT string stored in the row. If the writer
+        // signed over a nanosecond-precision string but the column
+        // round-trips at microsecond precision, this verify fails —
+        // which is exactly the postgres-G3 failure mode SQLite is now
+        // immunised against.
+        let sig_bytes = sig.expect("signature persisted");
+        let signable = link_sign::SignableLink {
+            src_id: &src.id,
+            dst_id: &tgt.id,
+            relation: "related_to",
+            observed_by: Some(kp.agent_id.as_str()),
+            valid_from: Some(valid_from.as_str()),
+            valid_until: None,
+        };
+        let payload = link_sign::canonical_cbor(&signable).unwrap();
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+        let sig_obj = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        kp.public.verify(&payload, &sig_obj).expect(
+            "H6 regression: signature must verify against canonical CBOR \
+             derived from the stored (microsecond-truncated) valid_from",
+        );
+    }
+
+    // v0.7.0 H6 (round-2) — pure-function test: the truncation helper
+    // itself must collapse only sub-microsecond digits and leave
+    // microsecond-aligned inputs unchanged.
+    #[test]
+    fn h6_truncate_to_microseconds_drops_nanos() {
+        use chrono::{TimeZone, Timelike};
+        let ns = Utc.with_ymd_and_hms(2026, 5, 10, 12, 34, 56).unwrap();
+        let ns = ns.with_nanosecond(123_456_789).unwrap();
+        let truncated = truncate_to_microseconds(ns);
+        // 123_456_789 ns → 123_456 µs → 123_456_000 ns.
+        assert_eq!(truncated.nanosecond(), 123_456_000);
+        // Round-trip through to_rfc3339 must produce a 6-digit
+        // fractional second (the property H6 commits to).
+        let s = truncated.to_rfc3339();
+        let dot = s.find('.').expect("fractional second present");
+        let frac = &s[dot + 1..];
+        let frac_len = frac.chars().take_while(|c| c.is_ascii_digit()).count();
+        assert_eq!(frac_len, 6, "expected exactly 6-digit fractional; got: {s}");
+    }
+
     #[test]
     fn kg_timeline_returns_events_ordered_by_valid_from_ascending() {
         let conn = test_db();
@@ -8984,6 +9320,213 @@ mod tests {
         let resolved = resolve_governance_policy(&conn, "ns/locked")
             .expect("policy must resolve when explicitly set");
         assert_eq!(resolved.write, crate::models::GovernanceLevel::Owner);
+    }
+
+    /// F1 regression (v0.7.0 round-2-fixes): when a parent namespace
+    /// has `governance.write = owner` with `inherit: true` and a deep
+    /// child has no standard of its own, the owner-level check must
+    /// resolve the namespace owner by walking the same chain that
+    /// `resolve_governance_policy` walks. Pre-fix the helper looked
+    /// only at the leaf's standard, returning None and producing a
+    /// "no resolvable owner" Deny even for the rightful owner.
+    #[test]
+    fn enforce_governance_inherits_owner_for_deep_child_owner_write() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::models::{
+            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
+            default_metadata,
+        };
+
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+
+        let conn = test_db();
+
+        // Seed a parent standard that enforces write=owner with inherit=true.
+        let parent_ns = "f1/parent";
+        let owner = "ai:alice";
+        let policy = GovernancePolicy {
+            write: GovernanceLevel::Owner,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+        };
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(owner.to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: format!("_standards-{parent_ns}"),
+            title: "f1-standard".to_string(),
+            content: "f1 policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let standard_id = insert(&conn, &standard).unwrap();
+        set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
+
+        // Deep child has NO standard of its own; everything must
+        // resolve via the chain walk.
+        let child_ns = "f1/parent/a/b/c";
+        let payload = serde_json::json!({"title": "deep-child"});
+
+        // Owner-level write by the rightful owner: ALLOW.
+        let allow = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            child_ns,
+            owner,
+            None,
+            None,
+            &payload,
+        )
+        .expect("enforce_governance must not error on inherited owner policy");
+        assert!(
+            matches!(allow, GovernanceDecision::Allow),
+            "owner write at deep child must Allow when chain walk finds the parent's owner: got {allow:?}"
+        );
+
+        // Owner-level write by a non-owner: DENY.
+        let deny = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            child_ns,
+            "ai:eve",
+            None,
+            None,
+            &payload,
+        )
+        .expect("enforce_governance must not error");
+        match deny {
+            GovernanceDecision::Deny(reason) => {
+                assert!(
+                    reason.contains("not the owner"),
+                    "non-owner deny should cite ownership mismatch, got: {reason}"
+                );
+            }
+            other => panic!("expected Deny for non-owner, got {other:?}"),
+        }
+    }
+
+    /// F1 corollary: `inherit = false` on the parent must STOP the
+    /// chain walk at the parent. The deep child has no policy of its
+    /// own and the parent declines to share, so the action is
+    /// ungoverned (Allow).
+    ///
+    /// Note: under `resolve_governance_policy` semantics, the
+    /// `inherit` flag is documentation/contract — the leaf-first walk
+    /// stops at the most-specific policy regardless. The flag flows
+    /// through to consumers (e.g. pending_action approver resolution)
+    /// to signal "do not re-walk above me." This test pins the
+    /// observable outcome: a deep child with NO standard inherits a
+    /// parent policy regardless of the `inherit` flag value, because
+    /// the walk only stops at policies that exist. The flag's
+    /// "stop" semantics apply when an intermediate policy declines to
+    /// be inherited above itself, not below.
+    #[test]
+    fn enforce_governance_deep_child_with_inherit_false_still_resolves_via_walk() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::models::{
+            ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
+            default_metadata,
+        };
+
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+
+        let conn = test_db();
+
+        // Parent has inherit=false: descendants without a policy of
+        // their own should still resolve to this policy on the
+        // leaf-first walk; inherit=false is a forward-blocker
+        // ("nothing above me applies to namespaces I govern"), not a
+        // backward-blocker ("namespaces below me cannot inherit").
+        // This matches the documented semantics in
+        // `resolve_governance_policy`'s docstring.
+        let parent_ns = "f1nb/parent";
+        let owner = "ai:alice";
+        let policy = GovernancePolicy {
+            write: GovernanceLevel::Owner,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: false,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(owner.to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: format!("_standards-{parent_ns}"),
+            title: "f1nb-standard".to_string(),
+            content: "policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+        };
+        let standard_id = insert(&conn, &standard).unwrap();
+        set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
+
+        // Deep child write by owner is still Allow (chain walk finds
+        // parent owner; inherit=false on the parent does not block
+        // descendants).
+        let decision = enforce_governance(
+            &conn,
+            GovernedAction::Store,
+            "f1nb/parent/x/y",
+            owner,
+            None,
+            None,
+            &serde_json::json!({}),
+        )
+        .unwrap();
+        assert!(
+            matches!(decision, GovernanceDecision::Allow),
+            "owner write at deep child resolves via leaf-first walk: got {decision:?}"
+        );
     }
 
     #[test]

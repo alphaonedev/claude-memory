@@ -215,6 +215,19 @@ pub struct CreateMemory {
     /// must opt in explicitly).
     #[serde(default)]
     pub on_conflict: Option<String>,
+    /// v0.7.0 (issue #519) — when `Some(true)`, run a proactive
+    /// `detect_contradiction` LLM probe against same-namespace memories
+    /// BEFORE returning 201, regardless of `autonomous_hooks`. When
+    /// `Some(false)`, force-disable detection even if `autonomous_hooks`
+    /// is on. When `None`, defer to `autonomous_hooks`.
+    ///
+    /// Surface: the 201 response body grows a `conflicts: [{...}]` array
+    /// listing every same-namespace candidate the LLM flags as
+    /// contradictory. Each entry carries the candidate id, title, and
+    /// (when LLM produces one) a `suggested_merge` content string the
+    /// caller can pass to a follow-up `memory_consolidate`.
+    #[serde(default)]
+    pub detect_conflicts: Option<bool>,
 }
 
 fn default_tier() -> Tier {
@@ -306,6 +319,16 @@ pub struct ListQuery {
 #[derive(Debug, Deserialize)]
 pub struct RecallQuery {
     pub context: Option<String>,
+    /// `query` alias for `context` — the cert harness (S79) uses
+    /// `?query=…`. Both forms route to the same code path; `context`
+    /// wins when both are supplied.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// `q` alias for `context`/`query` — matches the search-style API
+    /// surface (`/api/v1/memories?q=…`) so callers can use the same
+    /// query token field across both endpoints.
+    #[serde(default)]
+    pub q: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
@@ -324,6 +347,13 @@ pub struct RecallQuery {
     /// this budget.
     #[serde(default)]
     pub budget_tokens: Option<usize>,
+    /// v0.7.0 (issue #518) — when `true`, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly set on this request. Resolution:
+    /// explicit args > recall_scope defaults > compiled defaults.
+    /// Default `false` preserves v0.6.x recall semantics exactly.
+    #[serde(default)]
+    pub session_default: Option<bool>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -333,7 +363,16 @@ fn default_recall_limit() -> Option<usize> {
 
 #[derive(Debug, Deserialize)]
 pub struct RecallBody {
-    pub context: String,
+    /// Recall context. Accepts either `context` (canonical), `query`
+    /// (cert harness alias used by S79), or `q` (matches the
+    /// search-style API surface). At least one must be present and
+    /// non-empty.
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub q: Option<String>,
     #[serde(default)]
     pub namespace: Option<String>,
     #[serde(default = "default_recall_limit")]
@@ -350,14 +389,76 @@ pub struct RecallBody {
     /// Task 1.11 — context-budget-aware recall.
     #[serde(default)]
     pub budget_tokens: Option<usize>,
+    /// v0.7.0 (issue #518) — when `true`, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly set on this request body.
+    /// Resolution: explicit args > recall_scope defaults > compiled
+    /// defaults. Default `false` preserves v0.6.x recall semantics.
+    #[serde(default)]
+    pub session_default: Option<bool>,
+}
+
+impl RecallBody {
+    /// Resolve the recall query string from `context`, `query`, or `q`.
+    /// Returns the trimmed value, or an empty string when all three are
+    /// absent — the caller is expected to reject empty.
+    #[must_use]
+    pub fn resolved_query(&self) -> String {
+        self.context
+            .as_deref()
+            .or(self.query.as_deref())
+            .or(self.q.as_deref())
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct LinkBody {
-    pub source_id: String,
-    pub target_id: String,
-    #[serde(default = "default_relation")]
-    pub relation: String,
+    /// Canonical name. Aliased by `from` (S82's wire shape).
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// `from` alias for `source_id`.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Canonical name. Aliased by `to` (S82's wire shape).
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// `to` alias for `target_id`.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Canonical name. Aliased by `rel_type` (S82's wire shape).
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// `rel_type` alias for `relation`.
+    #[serde(default)]
+    pub rel_type: Option<String>,
+}
+
+impl LinkBody {
+    /// Resolve the canonical (source_id, target_id, relation) tuple
+    /// from the canonical fields or their aliases. Defaults relation
+    /// to `related_to` when neither field is supplied.
+    #[must_use]
+    pub fn resolved(&self) -> (String, String, String) {
+        let s = self
+            .source_id
+            .clone()
+            .or_else(|| self.from.clone())
+            .unwrap_or_default();
+        let t = self
+            .target_id
+            .clone()
+            .or_else(|| self.to.clone())
+            .unwrap_or_default();
+        let r = self
+            .relation
+            .clone()
+            .or_else(|| self.rel_type.clone())
+            .unwrap_or_else(default_relation);
+        (s, t, r)
+    }
 }
 
 fn default_relation() -> String {

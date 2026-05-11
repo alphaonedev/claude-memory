@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7.0 K8 — `memory_quota_status` MCP-tool wiring test.
 //!
 //! K8 ships the per-agent quota substrate + the operator-facing

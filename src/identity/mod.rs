@@ -53,6 +53,12 @@ pub mod sign;
 // `observed_by` claim. Consumed by federation `sync_push` link replay
 // so tampered or forged links never land in `memory_links`.
 pub mod verify;
+// H5 (v0.7.0 round-2) — Ed25519 verify-link replay protection.
+// Bounded in-memory LRU keyed on `(link_id, signature, nonce)`. Sits
+// in front of `verify_link_handler` and rejects exact-repeat requests
+// with 409 Conflict so an attacker cannot replay a captured verify
+// indefinitely. See module docs for the threat model + memory bound.
+pub mod replay;
 
 /// Environment variable override for `agent_id` (used by CLI via clap's
 /// `env = "AI_MEMORY_AGENT_ID"`; read directly for MCP fallback).
@@ -237,6 +243,19 @@ pub fn preserve_agent_id(
 mod tests {
     use super::*;
 
+    /// M9 — process-wide guard for every test below that mutates
+    /// `ENV_AGENT_ID`. `cargo test --jobs N` runs the test functions in
+    /// parallel by default, so an unguarded `remove_var` race can
+    /// surface as a flake when a sibling test reads the same var
+    /// mid-mutation. Acquire this mutex before every env-mutating step.
+    fn env_var_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     #[test]
     fn process_discriminator_is_stable() {
         let a = process_discriminator();
@@ -291,9 +310,10 @@ mod tests {
     fn resolve_empty_explicit_falls_through() {
         // Empty explicit should be treated as "not provided" and fall through
         // to the MCP client / host / anonymous branches.
-        // SAFETY: test only, no threads concurrent-modify env here.
-        // Scrub env so step 2 doesn't short-circuit.
-        // SAFETY: single-threaded test block.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`. Scrub env so step 2
+        // doesn't short-circuit.
         unsafe {
             std::env::remove_var(ENV_AGENT_ID);
         }
@@ -303,7 +323,9 @@ mod tests {
 
     #[test]
     fn resolve_mcp_client_synthesizes_ai_prefix() {
-        // SAFETY: single-threaded test block.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe {
             std::env::remove_var(ENV_AGENT_ID);
         }
@@ -314,7 +336,9 @@ mod tests {
 
     #[test]
     fn resolve_mcp_client_sanitizes_name() {
-        // SAFETY: single-threaded test block.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe {
             std::env::remove_var(ENV_AGENT_ID);
         }
@@ -324,7 +348,9 @@ mod tests {
 
     #[test]
     fn resolve_default_is_host_or_anonymous() {
-        // SAFETY: single-threaded test block.
+        // M9 — process-wide serialization via env_var_lock.
+        let _g = env_var_lock();
+        // SAFETY: env mutation serialised by `_g`.
         unsafe {
             std::env::remove_var(ENV_AGENT_ID);
         }

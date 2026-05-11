@@ -1,0 +1,49 @@
+# Copyright 2026 AlphaOne LLC
+# SPDX-License-Identifier: Apache-2.0
+#
+# v0.7.0 — Track E, task E1 (cross-platform port).
+#
+# Standalone Rust port of the historical `scripts/t0-orchestrate.sh`
+# bash script. The port is required because the bash original
+# could only be exercised under Unix (`#![cfg(unix)]` was bolted onto
+# its dry-run test in `tests/e1_orchestration_dry_run.rs` to keep
+# Windows CI green). Folding the script into a Rust binary removes
+# that gap so the dry-run harness check runs on every platform.
+#
+# Mirrors the layout of `tools/auto-link-detector/` and
+# `tools/transcript-extractor/`: standalone crate, NOT a workspace
+# member, deliberately excluded from the published `ai-memory`
+# crate via the parent `Cargo.toml`'s `include = [...]` allowlist.
+
+[package]
+name = "ai-memory-t0-orchestrate"
+version = "0.1.0"
+edition = "2024"
+authors = ["AlphaOne LLC"]
+description = "v0.7 E1 Discovery Gate T0 cross-LLM orchestration harness"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[[bin]]
+name = "ai-memory-t0"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+# `must_use_candidate` and `missing_errors_doc` fire on every
+# small helper in this single-binary crate; suppressed locally to
+# keep the reference impl readable. Production code in the main
+# crate keeps the strict pedantic profile.
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

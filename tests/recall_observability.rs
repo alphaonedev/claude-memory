@@ -99,6 +99,7 @@ fn recall_response_meta_reports_keyword_only_when_embedder_disabled() {
         false,
         &ttl,
         &scoring,
+        None, // recall_scope (#518) — defaults disabled
     )
     .expect("recall");
 
@@ -175,6 +176,7 @@ fn recall_response_meta_reports_lexical_when_neural_unavailable() {
         false,
         &ttl,
         &scoring,
+        None, // recall_scope (#518) — defaults disabled
     )
     .expect("recall");
 

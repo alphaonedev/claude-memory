@@ -448,8 +448,34 @@ pub fn handle_capabilities_family(
 /// on the default path; both are skipped on the verbose path.
 pub fn tool_definitions_for_profile(profile: &crate::profile::Profile) -> Value {
     let mut defs = tool_definitions_for_profile_verbose(profile);
-    trim_optional_params(&mut defs);
+    // Round-4 — honor `AI_MEMORY_TOOLS_VERBOSE=1` (or `=true`) as a
+    // process-level opt-out from the C4 optional-params trim. Without
+    // this escape hatch the trim was unconditional on `tools/list`
+    // (the MCP method, not the `memory_capabilities` tool), so
+    // operators who launched the daemon expecting the full schema —
+    // e.g. for IDE autocomplete or plugin generators — got the
+    // 10 766-byte trimmed payload regardless of CLI / env / profile
+    // hints. The env var matches the existing convention used by
+    // other AI_MEMORY_* tunables (`AI_MEMORY_NO_CONFIG`, `AI_MEMORY_DB`).
+    if !tools_verbose_env_enabled() {
+        trim_optional_params(&mut defs);
+    }
     defs
+}
+
+/// Round-4 — process-level escape hatch from the C4 trim used by
+/// [`tool_definitions_for_profile`]. Reads `AI_MEMORY_TOOLS_VERBOSE`
+/// once and accepts `1` or `true` (case-insensitive) as the truthy
+/// values; anything else (including absent) is false. Cached behind a
+/// `OnceLock` so the hot tools/list path doesn't re-stat the env on
+/// every call.
+fn tools_verbose_env_enabled() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("AI_MEMORY_TOOLS_VERBOSE")
+            .ok()
+            .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
 }
 
 /// v0.7 C4 — full-schema (verbose) variant of
@@ -568,7 +594,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_recall",
                 "description": "Recall memories relevant to a context (ranked).",
-                "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). Default response format is `toon_compact` (~79% smaller than JSON).",
+                "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). v0.7.0 (issue #518) — pass `session_default=true` to splice the operator-configured `[agents.defaults.recall_scope]` defaults (namespace / since / tier / limit) for any filter field not explicitly set; resolution is explicit args > recall_scope > compiled defaults. Default response format is `toon_compact` (~79% smaller than JSON).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -581,6 +607,7 @@ pub fn tool_definitions() -> Value {
                         "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5). Enables scope-based visibility filtering — results include private memories at this namespace, team/unit/org memories at ancestor subtrees, and collective memories globally."},
                         "budget_tokens": {"type": "integer", "minimum": 0, "description": "Phase P6 (R1) — context-budget-aware recall. Return the highest-ranked memories whose cumulative content tokens (deterministic cl100k_base BPE; matches Claude/GPT context accounting) fit in N. If the top-ranked memory alone exceeds the budget, it is returned anyway with meta.budget_overflow=true (R1 always-return-at-least-one guarantee). budget_tokens=0 returns zero memories with overflow=false. Response meta block: budget_tokens_used, budget_tokens_remaining, memories_dropped, budget_overflow."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "v0.6.0.0 contextual recall — recent conversation tokens used to bias the query embedding at 70/30 (primary/context). Pulls results toward memories that match both the explicit query and nearby conversation topics."},
+                        "session_default": {"type": "boolean", "default": false, "description": "When true, splice defaults from [agents.defaults.recall_scope] in config.toml for any filter field not explicitly set. Resolution: explicit args > recall_scope > compiled defaults."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]
@@ -753,7 +780,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_find_paths",
-                "description": "Enumerate up to N paths through the KG between two memories.",
+                "description": "Enumerate up to N paths through the KG between two memories. Undirected BFS with cycle detection; max_depth ceiling 7.",
                 "docs": "v0.7 J7 — enumerate up to N paths through the KG between two memories. BFS with cycle detection over `memory_links` (treated as undirected). Returns paths as id chains, source first, target last. `max_depth` ≤ 7, `max_results` ≤ 50. By default the BFS skips edges invalidated via `memory_kg_invalidate`; pass `include_invalidated=true` to traverse the full historical link graph.",
                 "inputSchema": {
                     "type": "object",
@@ -1156,7 +1183,22 @@ pub fn tool_definitions() -> Value {
                     "type": "object",
                     "properties": {
                         "agent_id": {"type": "string", "description": "Agent identifier (same validation as metadata.agent_id)"},
-                        "agent_type": {"type": "string", "enum": ["ai:claude-opus-4.6", "ai:claude-opus-4.7", "ai:codex-5.4", "ai:grok-4.2", "human", "system"]},
+                        // Round-2 F16 — agent_type is OPEN-form at
+                        // the schema layer. The daemon's
+                        // `validate::validate_agent_type` accepts
+                        // the curated short-list (human, system,
+                        // ai:claude-opus-*, ai:codex-*, ai:grok-*)
+                        // PLUS any `ai:<name>` form (alnum/_-.) up
+                        // to 64 chars, so the closed wire enum was
+                        // lagging the daemon's forward-compat
+                        // surface. Document the canonical labels
+                        // in prose so well-behaved clients pick
+                        // sensible defaults, but don't reject
+                        // `ai:<future-model>` at the schema layer.
+                        "agent_type": {
+                            "type": "string",
+                            "description": "Agent type label. Curated: human, system, ai:claude-opus-4.6, ai:claude-opus-4.7, ai:codex-5.4, ai:grok-4.2. Open-form: any `ai:<name>` (alnum/_-.) up to 64 chars — register e.g. ai:claude-opus-4.8 without a code release. Anything outside the curated list and the `ai:` namespace is rejected by the handler with a 400."
+                        },
                         "capabilities": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Optional capability tags"}
                     },
                     "required": ["agent_id", "agent_type"]
@@ -1415,6 +1457,80 @@ fn default_on_conflict_for_client(mcp_client: Option<&str>) -> OnConflict {
     OnConflict::Merge
 }
 
+/// Forward an MCP write call to a local HTTP daemon so the daemon's
+/// federation fanout coordinator (`broadcast_store_quorum` / `broadcast_link_quorum`
+/// / `broadcast_delete_quorum`) takes over replication. Closes the
+/// MCP-stdio-vs-federation gap surfaced by a2a-gate v0.6.0 r6 (#318).
+///
+/// Returns the daemon's JSON body on 2xx, or a structured error string
+/// that the MCP layer surfaces as a JSON-RPC `result.error`. On 5xx /
+/// transport failure the caller gets a clear message naming the
+/// forward URL so operators can distinguish "fanout daemon down"
+/// from "quorum not met".
+fn forward_to_http(
+    method: reqwest::Method,
+    url: &str,
+    body: Option<&Value>,
+    extra_headers: &[(&str, String)],
+) -> Result<Value, String> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("federation_forward: build client: {e}"))?;
+    let mut req = client.request(method, url);
+    for (k, v) in extra_headers {
+        req = req.header(*k, v);
+    }
+    if let Some(b) = body {
+        req = req.json(b);
+    }
+    let resp = req
+        .send()
+        .map_err(|e| format!("federation_forward: POST {url}: {e}"))?;
+    let status = resp.status();
+    let text = resp
+        .text()
+        .map_err(|e| format!("federation_forward: read body from {url}: {e}"))?;
+    if !status.is_success() {
+        return Err(format!(
+            "federation_forward: {url} returned {status}: {text}"
+        ));
+    }
+    serde_json::from_str::<Value>(&text)
+        .map_err(|e| format!("federation_forward: parse body from {url}: {e} (raw: {text})"))
+}
+
+/// MCP `memory_store` → HTTP `POST {forward_url}/api/v1/memories`.
+/// Translates the MCP params (which mirror the HTTP request body field
+/// names verbatim, with the exception of how `metadata.agent_id` is
+/// surfaced) into the HTTP daemon's `CreateMemoryRequest` shape, then
+/// reshapes the 201 response into the MCP `memory_store` envelope
+/// callers expect (`{id, tier, title, namespace, agent_id, ...}`).
+fn forward_store_to_http(
+    forward_url: &str,
+    params: &Value,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    let url = format!("{}/api/v1/memories", forward_url.trim_end_matches('/'));
+
+    // Resolve agent_id with the same precedence chain the local path
+    // uses, then surface it as an X-Agent-Id header (the HTTP handler's
+    // canonical resolution channel for daemon-mode multi-tenancy).
+    let explicit_agent_id = params["agent_id"]
+        .as_str()
+        .or_else(|| params["metadata"]["agent_id"].as_str());
+    let agent_id = crate::identity::resolve_agent_id(explicit_agent_id, mcp_client)
+        .map_err(|e| e.to_string())?;
+
+    // The HTTP request body mirrors the MCP params; pass them through
+    // and let the HTTP handler do all validation, governance, quota,
+    // dedup, embedding, audit, and federation broadcast.
+    let body = params.clone();
+    let headers: &[(&str, String)] = &[("X-Agent-Id", agent_id)];
+
+    forward_to_http(reqwest::Method::POST, &url, Some(&body), headers)
+}
+
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
 fn handle_store(
@@ -1427,7 +1543,17 @@ fn handle_store(
     resolved_ttl: &crate::config::ResolvedTtl,
     autonomous_hooks: bool,
     mcp_client: Option<&str>,
+    federation_forward_url: Option<&str>,
 ) -> Result<Value, String> {
+    // v0.7.0 (issue #318) — when operators have configured a federation
+    // forward URL, every MCP write routes through the local HTTP daemon
+    // so its `broadcast_store_quorum` fanout runs. Direct-SQLite path
+    // below is the legacy single-node behaviour, preserved as default
+    // for environments without a sibling `ai-memory serve` process.
+    if let Some(url) = federation_forward_url {
+        return forward_store_to_http(url, params, mcp_client);
+    }
+
     let title = params["title"].as_str().ok_or("title is required")?;
     let content = params["content"].as_str().ok_or("content is required")?;
     let tier_str = params["tier"].as_str().unwrap_or("mid");
@@ -1782,7 +1908,7 @@ fn handle_store(
     if hooks_skipped_reason.is_none()
         && let Some(llm_client) = llm
     {
-        match llm_client.auto_tag(&mem.title, &mem.content) {
+        match llm_client.auto_tag(&mem.title, &mem.content, None) {
             Ok(tags) => {
                 auto_tags = tags.into_iter().take(8).collect();
             }
@@ -1981,6 +2107,9 @@ pub async fn handle_recall_with_pre_recall_hook(
     resolved_scoring: &crate::config::ResolvedScoring,
     chain: &crate::hooks::HookChain,
     registry: &mut crate::hooks::ExecutorRegistry,
+    // v0.7.0 (issue #518) — recall scope defaults; forwarded
+    // unchanged to `handle_recall`.
+    recall_scope: Option<&crate::config::RecallScope>,
 ) -> Result<Value, String> {
     // Resolve the (query, namespace, k) triple once so the hook
     // sees exactly what the recall would see.
@@ -2048,6 +2177,7 @@ pub async fn handle_recall_with_pre_recall_hook(
         archive_on_gc,
         resolved_ttl,
         resolved_scoring,
+        recall_scope,
     )
 }
 
@@ -2062,6 +2192,12 @@ pub fn handle_recall(
     archive_on_gc: bool,
     resolved_ttl: &crate::config::ResolvedTtl,
     resolved_scoring: &crate::config::ResolvedScoring,
+    // v0.7.0 (issue #518) — operator-configured recall defaults.
+    // When `session_default=true` is set on the request AND a given
+    // filter axis is absent, the corresponding `recall_scope` field
+    // is spliced into the request before the storage call. `None`
+    // keeps v0.6.x recall semantics exactly.
+    recall_scope: Option<&crate::config::RecallScope>,
 ) -> Result<Value, String> {
     // Helper: serialize scored memories with score field (#95)
     fn scored_memories(results: Vec<(Memory, f64)>) -> Vec<Value> {
@@ -2082,10 +2218,43 @@ pub fn handle_recall(
 
     let _ = db::gc_if_needed(conn, archive_on_gc);
     let context = params["context"].as_str().ok_or("context is required")?;
-    let namespace = params["namespace"].as_str();
-    let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).unwrap_or(usize::MAX);
+    // v0.7.0 (issue #518) — when the caller passed
+    // `session_default=true` AND a given filter axis is absent,
+    // splice in the corresponding `[agents.defaults.recall_scope]`
+    // value. Explicit args always win. Sqlite recall does not
+    // expose a `tier` filter on the legacy `db::recall` /
+    // `db::recall_hybrid` paths, so the `tier` axis is plumbed but
+    // not consumed on this branch (the postgres SAL handler in
+    // `handlers.rs::recall_response` applies it via
+    // `Filter.tier`).
+    let session_default = params["session_default"].as_bool().unwrap_or(false);
+    let scope = if session_default { recall_scope } else { None };
+    // Compute owned defaults so they outlive the parse step.
+    let scope_namespace: Option<String> = scope
+        .and_then(|s| s.namespaces.as_ref())
+        .and_then(|v| v.first())
+        .cloned();
+    let scope_since: Option<String> = scope.and_then(|s| {
+        s.since.as_deref().and_then(|d| {
+            crate::config::parse_duration_string(d).map(|dur| {
+                let cutoff = chrono::Utc::now() - dur;
+                cutoff.to_rfc3339()
+            })
+        })
+    });
+    let explicit_namespace = params["namespace"].as_str();
+    let explicit_since = params["since"].as_str();
+    let namespace: Option<&str> = explicit_namespace.or(scope_namespace.as_deref());
+    let explicit_limit_raw = params["limit"].as_u64();
+    let limit = if let Some(v) = explicit_limit_raw {
+        usize::try_from(v).unwrap_or(usize::MAX)
+    } else if let Some(v) = scope.and_then(|s| s.limit) {
+        usize::try_from(v).unwrap_or(usize::MAX)
+    } else {
+        10
+    };
     let tags = params["tags"].as_str();
-    let since = params["since"].as_str();
+    let since: Option<&str> = explicit_since.or(scope_since.as_deref());
     let until = params["until"].as_str();
     // #151 visibility
     let as_agent = params["as_agent"].as_str();
@@ -2528,26 +2697,37 @@ pub fn format_rule_summary(namespace: &str, policy: &crate::models::GovernancePo
 pub fn build_capabilities_summary(profile: &crate::profile::Profile) -> String {
     use crate::profile::{ALWAYS_ON_TOOLS, Family};
 
-    let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
-
-    // Tools advertised in tools/list = sum of family counts the profile
-    // includes, plus any always-on bootstrap tool whose owning family is
-    // NOT included (so it isn't double-counted). In v0.6.4
-    // `memory_capabilities` lives in `Family::Meta` and is also in
-    // `ALWAYS_ON_TOOLS`; on `--profile core` the meta family isn't
-    // loaded, so the bootstrap injection adds it back here.
-    let from_families: usize = profile.expected_tool_count();
-    let always_on_extra: usize = ALWAYS_ON_TOOLS
+    // Round-2 F13 — substantive memory-tool count, EXCLUDING the
+    // always-on bootstrap (`memory_capabilities`). Reconciles with
+    // `build_capabilities_describe_to_user`'s "{n_loaded} memory
+    // tool{s}" phrasing so the summary number agrees with the
+    // user-facing sentence (e.g. both report 50 for `--profile full`,
+    // not "51 of 51 tools" in the summary alongside "50 memory
+    // tools" in the describe — which was the F13 off-by-one).
+    let total: usize = Family::all()
         .iter()
-        .filter(|name| Family::for_tool(name).is_none_or(|f| !profile.includes(f)))
+        .map(|f| f.expected_tool_count())
+        .sum::<usize>()
+        .saturating_sub(ALWAYS_ON_TOOLS.len());
+
+    // Visible memory tools = profile-loaded family tools, minus any
+    // always-on bootstrap that lives in a family the profile loads
+    // (otherwise `memory_capabilities` would be double-counted for
+    // profiles that load `Meta`). The bootstrap still appears in
+    // `tools/list` — it just isn't a "memory tool" in the user-facing
+    // sense.
+    let from_families: usize = profile.expected_tool_count();
+    let always_on_in_loaded_family: usize = ALWAYS_ON_TOOLS
+        .iter()
+        .filter(|name| Family::for_tool(name).is_some_and(|f| profile.includes(f)))
         .count();
-    let visible = from_families + always_on_extra;
+    let visible = from_families.saturating_sub(always_on_in_loaded_family);
     let unloaded = total.saturating_sub(visible);
     let label = profile_summary_label(profile);
 
     format!(
-        "{visible} of {total} tools are advertised in tools/list under the current profile \
-         ({label}). The other {unloaded} are listed in this manifest but NOT directly \
+        "{visible} of {total} memory tools are advertised in tools/list under the current \
+         profile ({label}). The other {unloaded} are listed in this manifest but NOT directly \
          callable. To use any unloaded tool, choose one of: \
          (a) restart the server with --profile <family> or --profile full, \
          (b) call memory_load_family(family=<name>) — preferred, \
@@ -2788,6 +2968,116 @@ fn profile_summary_label(profile: &crate::profile::Profile) -> String {
     }
 }
 
+/// Round-2 F13 — derive the runtime-effective tier label from the
+/// presence of the LLM, embedder, and reranker handles. Mirrors the
+/// boot banner string emitted by `serve_mcp` so the
+/// `memory_capabilities` response and the daemon log agree on what
+/// the daemon is actually doing — independent of `tier_config.tier`,
+/// which only reflects the configured (build-time) tier and can lag
+/// the runtime when an embedder/LLM fails to load.
+#[must_use]
+pub fn effective_tier_label(has_llm: bool, has_embedder: bool, has_reranker: bool) -> &'static str {
+    if has_llm && has_embedder && has_reranker {
+        "autonomous"
+    } else if has_llm && has_embedder {
+        "smart"
+    } else if has_embedder {
+        "semantic"
+    } else {
+        "keyword"
+    }
+}
+
+/// Round-2 F13 — overlay per-tool `inputSchema` and/or `docstring`
+/// onto the top-level `tools[]` array of a v2/v3 capabilities
+/// response. Called on the no-family path when `include_schema=true`
+/// and/or `verbose=true` is set on the top-level
+/// `memory_capabilities` invocation. Without an overlay, those
+/// flags were inert at the top level (only the family drilldown
+/// honoured them).
+///
+/// `include_schema=true` — inject the canonical
+/// `tool_definitions()[name].inputSchema` for every tool entry.
+/// `verbose=true` — inject `docstring` (sourced from the long-form
+/// `docs` field on `tool_definitions()`).
+///
+/// Tools that aren't currently loaded under the active profile (i.e.
+/// `loaded=false` in the v3 `tools[]`) get the same overlay so a
+/// caller can decide whether to drill in via
+/// `memory_load_family`/`memory_smart_load`.
+pub fn overlay_tool_payloads(
+    obj: &mut serde_json::Map<String, Value>,
+    _profile: &crate::profile::Profile,
+    include_schema: bool,
+    verbose: bool,
+) {
+    if !include_schema && !verbose {
+        return;
+    }
+
+    // Build a name → (docs, inputSchema) lookup from the canonical
+    // tool catalog. Done once per call; cheap (~50 entries).
+    let defs = tool_definitions();
+    let lookup: std::collections::HashMap<String, (Option<Value>, Option<Value>)> = defs
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|t| {
+                    let name = t.get("name").and_then(Value::as_str)?.to_string();
+                    let docs = t.get("docs").cloned();
+                    let schema = t.get("inputSchema").cloned();
+                    Some((name, (docs, schema)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // The v3 response carries a top-level `tools` array of
+    // `ToolEntry` objects; the v2 response does not. For v2 callers
+    // passing include_schema/verbose, synthesize a parallel
+    // `tool_payloads` array so the overlay is still discoverable
+    // without disturbing the v2 wire shape.
+    if let Some(tools) = obj.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools.iter_mut() {
+            let Some(tool_obj) = tool.as_object_mut() else {
+                continue;
+            };
+            let Some(name) = tool_obj.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some((docs, schema)) = lookup.get(name) else {
+                continue;
+            };
+            if include_schema && let Some(s) = schema {
+                tool_obj.insert("inputSchema".to_string(), s.clone());
+            }
+            if verbose && let Some(d) = docs {
+                tool_obj.insert("docstring".to_string(), d.clone());
+            }
+        }
+    } else {
+        // v2 path — no `tools` field exists. Synthesize a flat
+        // `tool_payloads` array so the overlay is still on the wire.
+        let payloads: Vec<Value> = lookup
+            .iter()
+            .map(|(name, (docs, schema))| {
+                let mut entry = serde_json::Map::new();
+                entry.insert("name".to_string(), Value::String(name.clone()));
+                if include_schema && let Some(s) = schema {
+                    entry.insert("inputSchema".to_string(), s.clone());
+                }
+                if verbose && let Some(d) = docs {
+                    entry.insert("docstring".to_string(), d.clone());
+                }
+                Value::Object(entry)
+            })
+            .collect();
+        obj.insert("tool_payloads".to_string(), Value::Array(payloads));
+    }
+}
+
 /// Compute the live `recall_mode_active` tag from the configured tier
 /// and the runtime embedder-loaded signal. P1 honesty patch.
 ///
@@ -2830,7 +3120,7 @@ fn handle_auto_tag(
         .map_err(|e| e.to_string())?
         .ok_or("memory not found")?;
     let tags = llm
-        .auto_tag(&mem.title, &mem.content)
+        .auto_tag(&mem.title, &mem.content, None)
         .map_err(|e| e.to_string())?;
     // Apply tags to the memory
     let mut all_tags = mem.tags.clone();
@@ -2977,7 +3267,11 @@ fn handle_check_duplicate(
     let text = format!("{title} {content}");
     let query_embedding = emb.embed(&text).map_err(|e| e.to_string())?;
 
-    let check = db::check_duplicate(conn, &query_embedding, namespace, threshold)
+    // Round-2 F18 — short-circuit on raw-content hash equality before
+    // falling through to embedding cosine similarity. Catches byte-
+    // identical duplicates that the embedding pipeline would otherwise
+    // cap at ~0.92 due to nomic prefix normalisation.
+    let check = db::check_duplicate_with_text(conn, &query_embedding, &text, namespace, threshold)
         .map_err(|e| e.to_string())?;
 
     // Round similarity to 3 decimals at the response edge — keeps the
@@ -3534,15 +3828,34 @@ pub fn handle_smart_load(
         return Ok(resp);
     }
 
-    // Pick the best family. Try the embedder path first when an
-    // embedder is wired through; otherwise (or on embed failure) fall
-    // back to the deterministic keyword scorer.
+    // Round-4 — keyword-veto strategy. Always run the deterministic
+    // keyword scorer first. If it produces a non-fallback signal (i.e.
+    // at least one intent token overlapped some family's descriptor
+    // or tool-name segments), let the embedder vote — but veto the
+    // embedder when it disagrees. Rationale: the embedder's cosine
+    // similarity over ~80-word descriptors is noisy for short
+    // imperative intents like "store a new memory" or "verify a
+    // memory's signature" — Round-3 measured 8/10 routing accuracy,
+    // Round-4 measured 4–5/10 with the embedder winning on common
+    // verbs but mis-routing them to `archive`. The keyword path is
+    // hand-tuned (F14) and deterministic; treat it as ground truth
+    // when it has a signal, fall back to the embedder only when it
+    // returns `"fallback"` (no token overlap anywhere).
+    let kw_pick = fallback_via_keywords(intent);
     let (family, score, source) = match embedder {
         Some(emb) => match best_family_via_embedder(emb, intent) {
-            Some((f, s)) => (f, s, "embedder"),
-            None => fallback_via_keywords(intent),
+            Some((emb_family, emb_score)) => {
+                if kw_pick.2 == "keyword" && kw_pick.0 != emb_family {
+                    // Keyword scored a non-fallback hit AND disagreed with
+                    // the embedder — trust the deterministic scorer.
+                    kw_pick
+                } else {
+                    (emb_family, emb_score, "embedder")
+                }
+            }
+            None => kw_pick,
         },
-        None => fallback_via_keywords(intent),
+        None => kw_pick,
     };
 
     forward_to_load_family(conn, family, score, source, intent, params)
@@ -3637,15 +3950,30 @@ fn best_family_via_embedder(emb: &Embedder, intent: &str) -> Option<(crate::prof
 /// available (e.g. the `keyword` feature tier) or when the embedder
 /// returns an error mid-call. Splits `intent` on ASCII non-alphanumeric
 /// boundaries, lowercases, and counts how many tokens overlap each
-/// family's descriptor token set. Returns the family with the highest
-/// overlap; ties broken by family declaration order so the routing is
-/// stable.
+/// family's combined token set (descriptor ∪ tool-name tokens).
 ///
-/// When no descriptor matches at all the routing falls back to
-/// `Family::Core` with score 0.0 and source `"fallback"`. This mirrors
-/// the spec's "embedder not yet ready" branch: callers see
-/// `chosen_family_source: "fallback"` and can decide whether to retry
-/// with a richer intent.
+/// Round-2 F14 — the family token set is the union of:
+/// 1. The family's descriptor (free-text intent vocabulary).
+/// 2. The family's tool names tokenised on underscore boundaries
+///    (`memory_notify` → `memory`, `notify`).
+/// 3. The family's tool names as full identifiers (`memory_notify`
+///    kept as a single token so an intent that names the tool
+///    verbatim still scores).
+///
+/// Tool-name overlaps are weighted 2x descriptor overlaps: a tool
+/// name is a stronger signal than a generic intent vocabulary
+/// keyword. Without this, intents like "send a notification to
+/// another agent" mis-routed to `meta` (because "agent" appears in
+/// the meta descriptor) instead of `other` (where `memory_notify`
+/// lives).
+///
+/// The universal `memory` prefix on every tool name is excluded
+/// from the tool-name overlap count so it doesn't dominate the
+/// score across all families.
+///
+/// Ties broken by family declaration order so routing is stable.
+/// When no token matches at all, routing falls back to
+/// `Family::Core` with score 0.0 and source `"fallback"`.
 fn fallback_via_keywords(intent: &str) -> (crate::profile::Family, f32, &'static str) {
     use crate::profile::Family;
 
@@ -3661,19 +3989,105 @@ fn fallback_via_keywords(intent: &str) -> (crate::profile::Family, f32, &'static
     let mut best: Option<(Family, f32)> = None;
     for family in Family::all() {
         let descriptor = family_descriptor(*family).to_ascii_lowercase();
-        let desc_tokens: Vec<&str> = descriptor
+        let desc_tokens: Vec<String> = descriptor
             .split(|c: char| !c.is_ascii_alphanumeric())
             .filter(|s| !s.is_empty())
+            .map(str::to_string)
             .collect();
-        let overlap = intent_tokens
+        // Round-2 F14 — for each tool in the family, compute the
+        // count of DISTINCT intent tokens that match the tool's
+        // segments (or its full identifier). A tool whose name
+        // encodes BOTH intent keywords (e.g. `expand_query` matches
+        // intent="expand a query" on both `expand` AND `query`)
+        // contributes a stronger signal than a tool whose name only
+        // matches one keyword (e.g. `kg_query` only matches `query`).
+        // The per-tool distinct-token count is summed across the
+        // family AND tracked as a max so a single highly-specific
+        // tool can pull a family above one that matches via several
+        // weak tools.
+        //
+        // Match relation = exact token equality OR shared 5+ char
+        // prefix when both tokens are ≥ 5 chars long. The prefix
+        // relaxation lets "notification" match `notify` segment
+        // (shared "notif" prefix), which the strict-equality form
+        // missed. Without this, intents that use a different
+        // English surface form than the tool name's stem
+        // (notify/notification, subscribe/subscription, etc.) only
+        // matched via the wider descriptor vocabulary.
+        let token_matches = |a: &str, b: &str| -> bool {
+            if a == b {
+                return true;
+            }
+            // Prefix relaxation guard: both tokens ≥ 5 chars and
+            // share a 5-char prefix. Threshold 5 keeps "store"/
+            // "stories", "task"/"taskbar" from cross-matching.
+            if a.len() >= 5 && b.len() >= 5 && a[..5] == b[..5] {
+                return true;
+            }
+            false
+        };
+
+        let mut tool_distinct_sum: usize = 0;
+        let mut tool_distinct_max: usize = 0;
+        let mut full_id_hits: usize = 0;
+        for tool_name in family.tool_names() {
+            let lower = tool_name.to_ascii_lowercase();
+            // Segments from underscore-split. Skip the universal
+            // `memory` prefix (it's noise — every tool has it).
+            let segments: Vec<&str> = lower
+                .split('_')
+                .filter(|s| !s.is_empty() && *s != "memory")
+                .collect();
+            // Distinct intent tokens that match any segment of THIS
+            // tool name (exact OR 5-char-prefix relaxed match).
+            let distinct = intent_tokens
+                .iter()
+                .filter(|t| segments.iter().any(|seg| token_matches(seg, t.as_str())))
+                .count();
+            tool_distinct_sum += distinct;
+            if distinct > tool_distinct_max {
+                tool_distinct_max = distinct;
+            }
+            // Full-identifier hit — when an intent token EQUALS the
+            // full tool name (with underscores), the caller has
+            // named the tool verbatim. Strongest signal.
+            if intent_tokens.iter().any(|t| t.as_str() == lower) {
+                full_id_hits += 1;
+            }
+        }
+
+        let desc_overlap = intent_tokens
             .iter()
-            .filter(|t| desc_tokens.iter().any(|d| d == t))
+            .filter(|t| desc_tokens.iter().any(|d| d == *t))
             .count();
-        if overlap == 0 {
+
+        if desc_overlap == 0 && tool_distinct_sum == 0 && full_id_hits == 0 {
             continue;
         }
+
+        // Round-2 F14 — composite score:
+        //   2.0 * descriptor overlap (curated intent vocabulary —
+        //         each family's descriptor is hand-tuned to capture
+        //         the family's purpose, so a hit is high-signal)
+        // + 1.0 * sum of distinct-intent-tokens-per-tool (boost
+        //         when a tool name's segments encode intent
+        //         keywords — broader, more false-positive prone
+        //         than the descriptor)
+        // + 2.0 * tool_distinct_max (strong extra boost when ONE
+        //         tool name matches MULTIPLE intent keywords —
+        //         distinguishes `expand_query` matching both
+        //         "expand" and "query" from `kg_query` matching
+        //         only "query")
+        // + 4.0 * full-identifier hits (caller named the tool
+        //         verbatim — overwhelming signal)
+        // Normalised by intent token count so single-token intents
+        // still produce a sensible score in [0, ~1+].
         #[allow(clippy::cast_precision_loss)]
-        let score = (overlap as f32) / (intent_tokens.len() as f32);
+        let score = (2.0 * desc_overlap as f32
+            + tool_distinct_sum as f32
+            + 2.0 * tool_distinct_max as f32
+            + 4.0 * full_id_hits as f32)
+            / (intent_tokens.len() as f32);
         if best.is_none_or(|(_, s)| score > s) {
             best = Some((*family, score));
         }
@@ -3725,7 +4139,17 @@ fn family_descriptor(family: crate::profile::Family) -> &'static str {
             "archive backup restore purge old historical retention cold \
              storage"
         }
-        Family::Other => "subscription notify subscribe webhook event other miscellaneous",
+        // Round-2 F14 — extended with "notification message send
+        // dm direct another recipient inbox" so an intent like "I
+        // want to send a notification to another agent" routes to
+        // `other` (where `memory_notify` lives). The tool-name boost
+        // (2x weight on `memory_notify` → `notify`) plus the wider
+        // vocabulary covers both "notify" and "notification" surface
+        // forms.
+        Family::Other => {
+            "subscription notify subscribe webhook event other miscellaneous \
+             notification message send dm direct another recipient inbox"
+        }
     }
 }
 
@@ -5737,6 +6161,17 @@ fn handle_request(
     // both signal). `None` when no `initialize` has been observed yet
     // — the field is omitted from the wire on that fall-through.
     harness: Option<&crate::harness::Harness>,
+    // v0.7.0 (#318) — when `Some`, all MCP write tools forward to the
+    // local HTTP daemon at this base URL so its federation fanout
+    // coordinator runs. `None` keeps the legacy direct-SQLite path
+    // (single-node MCP deployments without a sibling `serve` daemon).
+    federation_forward_url: Option<&str>,
+    // v0.7.0 (issue #518) — `[agents.defaults.recall_scope]`
+    // resolved from the running daemon's `AppConfig`. `Some` enables
+    // `session_default=true` callers to splice these defaults into
+    // their `memory_recall` request before the storage call. `None`
+    // (single-tenant default) preserves v0.6.x recall semantics.
+    recall_scope: Option<&crate::config::RecallScope>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -5837,6 +6272,7 @@ fn handle_request(
                     resolved_ttl,
                     autonomous_hooks,
                     mcp_client,
+                    federation_forward_url,
                 ),
                 "memory_recall" => handle_recall(
                     conn,
@@ -5847,6 +6283,7 @@ fn handle_request(
                     archive_on_gc,
                     resolved_ttl,
                     resolved_scoring,
+                    recall_scope,
                 ),
                 "memory_search" => handle_search(conn, arguments),
                 "memory_list" => handle_list(conn, arguments),
@@ -5932,6 +6369,22 @@ fn handle_request(
                             .get("accept")
                             .and_then(Value::as_str)
                             .map_or(CapabilitiesAccept::V3, CapabilitiesAccept::parse);
+                        // Round-2 F13 — top-level `verbose` and
+                        // `include_schema` were declared in the
+                        // inputSchema but inert when no family was
+                        // specified. Make them functional:
+                        // `verbose=true` overlays per-tool
+                        // `docstring`s into `tools[]`;
+                        // `include_schema=true` overlays per-tool
+                        // `inputSchema`s into `tools[]`.
+                        let top_verbose = arguments
+                            .get("verbose")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let top_include_schema = arguments
+                            .get("include_schema")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
                         // v0.6.4-006 — when no family is requested, augment
                         // the v2/v3 response with a top-level `families` field
                         // describing the family taxonomy and which families
@@ -5947,6 +6400,16 @@ fn handle_request(
                             .get("agent_id")
                             .and_then(Value::as_str)
                             .or(mcp_client);
+                        // Round-2 F13 — runtime-effective tier (matches
+                        // the `serve_mcp` boot banner). Used to
+                        // overlay the top-level `tier` field so the
+                        // capabilities response and the daemon log
+                        // converge on a single tier source-of-truth.
+                        let runtime_tier = effective_tier_label(
+                            llm.is_some(),
+                            embedder.is_some(),
+                            reranker.is_some(),
+                        );
                         let result = match accept {
                             CapabilitiesAccept::V3 => handle_capabilities_with_conn_v3(
                                 tier_config,
@@ -5975,6 +6438,51 @@ fn handle_request(
                                 if let Some(obj) = value.as_object_mut() {
                                     obj.insert("families".to_string(), families_overview(profile));
                                 }
+                            }
+                            // Round-2 F13 — keep `schema_version`
+                            // present on every accept variant. v1's
+                            // `to_v1()` drops the field at the struct
+                            // boundary because the v1 shape predates
+                            // schema_version; a v1 client still needs
+                            // the discriminator to detect that it's
+                            // looking at v1. Inject it on the wire.
+                            if matches!(accept, CapabilitiesAccept::V1)
+                                && let Some(obj) = value.as_object_mut()
+                                && !obj.contains_key("schema_version")
+                            {
+                                obj.insert(
+                                    "schema_version".to_string(),
+                                    Value::String("1".to_string()),
+                                );
+                            }
+                            // Round-2 F13 — overlay the runtime-
+                            // effective tier so the top-level `tier`
+                            // field reflects what the daemon is
+                            // actually doing, not what
+                            // `tier_config.tier.as_str()` was at
+                            // build/config time. v1, v2, v3 all carry
+                            // `tier`.
+                            if let Some(obj) = value.as_object_mut() {
+                                obj.insert(
+                                    "tier".to_string(),
+                                    Value::String(runtime_tier.to_string()),
+                                );
+                            }
+                            // Round-2 F13 — when `include_schema=true`
+                            // and/or `verbose=true` is set with no
+                            // family, overlay per-tool `inputSchema`
+                            // and/or `docstring` into the v3 `tools[]`
+                            // array. Sourced from `tool_definitions()`.
+                            if (top_include_schema || top_verbose)
+                                && matches!(accept, CapabilitiesAccept::V2 | CapabilitiesAccept::V3)
+                                && let Some(obj) = value.as_object_mut()
+                            {
+                                overlay_tool_payloads(
+                                    obj,
+                                    profile,
+                                    top_include_schema,
+                                    top_verbose,
+                                );
                             }
                             value
                         })
@@ -6399,6 +6907,7 @@ pub fn run_mcp_server(
         let resolved_scoring = app_config.effective_scoring();
         let archive_on_gc = app_config.effective_archive_on_gc();
         let autonomous_hooks = app_config.effective_autonomous_hooks();
+        let resolved_recall_scope = app_config.effective_recall_scope();
         let resp = handle_request(
             &conn,
             db_path,
@@ -6417,6 +6926,8 @@ pub fn run_mcp_server(
             app_config.mcp.as_ref(),
             active_keypair.as_ref(),
             detected_harness.as_ref(),
+            app_config.mcp_federation_forward_url.as_deref(),
+            resolved_recall_scope,
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -6905,6 +7416,31 @@ mod tests {
         assert_eq!(format_schema["default"], "toon_compact");
     }
 
+    /// v0.7.0 (issue #518) — pin the `memory_recall` tool schema for
+    /// the new `session_default` boolean. Default must be `false` so
+    /// existing callers see zero behaviour change; the description
+    /// must mention `[agents.defaults.recall_scope]` so clients
+    /// discover the splice contract through `tools/list`.
+    #[test]
+    fn tool_definitions_recall_advertises_session_default_issue_518() {
+        let defs = tool_definitions();
+        let tools = defs["tools"].as_array().unwrap();
+        let recall = tools
+            .iter()
+            .find(|t| t["name"] == "memory_recall")
+            .expect("memory_recall tool must be defined");
+        let props = &recall["inputSchema"]["properties"];
+        let session_default = &props["session_default"];
+        assert_eq!(session_default["type"], "boolean");
+        assert_eq!(session_default["default"], false);
+        assert!(
+            session_default["description"]
+                .as_str()
+                .is_some_and(|d| d.contains("agents.defaults.recall_scope")),
+            "session_default description must mention [agents.defaults.recall_scope] — got {session_default:?}"
+        );
+    }
+
     #[test]
     fn prompt_definitions_returns_2() {
         let defs = prompt_definitions();
@@ -7067,6 +7603,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None, // federation_forward_url (#318)
+                None, // recall_scope (#518)
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -7121,6 +7659,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None, // federation_forward_url (#318)
+                None, // recall_scope (#518)
             );
             // Handler errs are returned as ok_response with isError=true,
             // not RpcError, by design (the JSON-RPC layer is reserved for
@@ -7479,6 +8019,8 @@ mod tests {
                 None,
                 None,
                 None,
+                None, // federation_forward_url (#318)
+                None, // recall_scope (#518)
             );
             assert!(
                 resp.error.is_none(),
@@ -7519,6 +8061,8 @@ mod tests {
                     None,
                     None,
                     None,
+                    None, // federation_forward_url (#318)
+                    None, // recall_scope (#518)
                 );
 
                 // Missing required args should produce an error response (handler returns Err)
@@ -7576,6 +8120,8 @@ mod tests {
             None,
             None,
             None,
+            None, // federation_forward_url (#318)
+            None, // recall_scope (#518)
         )
     }
 
@@ -7932,6 +8478,8 @@ mod tests {
             None,
             Some(&kp),
             None,
+            None, // federation_forward_url (#318)
+            None, // recall_scope (#518)
         );
         assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
         let text = resp.result.unwrap()["content"][0]["text"]
@@ -8139,8 +8687,17 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
 
-        // v1 has no schema_version
-        assert!(val.get("schema_version").is_none());
+        // Round-2 F13 — v1 wire shape now carries
+        // `schema_version: "1"` so clients can negotiate wire-version.
+        // The struct itself (`CapabilitiesV1`) still doesn't have the
+        // field; the dispatcher injects it on the wire. This is the
+        // F13 fix: clients need the discriminator to detect they're
+        // looking at v1 vs an accidental v2.
+        assert_eq!(
+            val.get("schema_version").and_then(Value::as_str),
+            Some("1"),
+            "Round-2 F13 — v1 must carry schema_version on the wire"
+        );
         // v2-only blocks are absent
         assert!(val.get("permissions").is_none());
         assert!(val.get("hooks").is_none());

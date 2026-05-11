@@ -119,6 +119,85 @@ jobs:
         if: needs.classify.outputs.docs_only != 'true'
         run: cargo build --release
 
+  # M16 — Postgres-feature gate. The cross-platform `check` matrix above
+  # exercises the default build only; the `sal-postgres` adapter relies on
+  # sqlx + pgvector + AGE (Apache AGE 1.5 on Postgres 16), which is
+  # Linux-only at build-time. This job adds:
+  #   1. A service container running postgres:16 with pgvector + AGE
+  #      preinstalled (image: pgvector/pgvector:pg16, then `CREATE
+  #      EXTENSION age` inside the SAL test fixture).
+  #   2. `cargo test --features sal-postgres --lib` so the lib-level
+  #      compile + unit suite is exercised under the postgres feature
+  #      gate. Tests gated by `AI_MEMORY_TEST_POSTGRES_URL` (e.g.
+  #      g3_postgres_verify_link_signature_roundtrip) self-skip when
+  #      the URL is unset; that is the soft-skip path until the
+  #      pgvector/age service image is wired here.
+  #   3. Clippy pedantic at the same feature gate so the postgres-only
+  #      code paths inherit the same lint budget as the default build.
+  # The lint advisory job above (`lint`) only runs `cargo clippy` at
+  # default features, so a `clippy::pedantic` lint regression that only
+  # surfaces with `sal-postgres` would otherwise slip through.
+  # Skipped on docs-only PRs alongside the rest of the heavy matrix.
+  postgres-feature:
+    name: Postgres feature gate
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        # pgvector/pgvector:pg16 ships postgres 16 with pgvector already
+        # built; AGE is `CREATE EXTENSION`-installed by the
+        # `serve_postgres_smoke` fixture when AI_MEMORY_TEST_POSTGRES_URL
+        # is set. If a future AGE-as-a-service container appears, swap
+        # this image; the rest of the job stays.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: ai_memory
+          POSTGRES_PASSWORD: ai_memory_ci
+          POSTGRES_DB: ai_memory_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ai_memory -d ai_memory_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Wait for postgres readiness
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 30); do
+            if pg_isready -h localhost -p 5432 -U ai_memory -d ai_memory_ci >/dev/null 2>&1; then
+              echo "::notice::postgres is up"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::warning::postgres did not become ready within 60s — postgres-gated tests will soft-skip"
+
+      - name: Clippy (sal-postgres feature)
+        run: cargo clippy --features sal-postgres -- -D warnings -D clippy::all -D clippy::pedantic
+
+      - name: Run lib tests (sal-postgres feature)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+          # Soft-skip pattern: postgres-gated integration tests check
+          # this var and self-skip if absent. We set it so the AGE-gated
+          # tests at least attempt the connection; when AGE isn't
+          # available those tests log a skip and exit 0 (see
+          # `tests/age_cte_equivalence.rs` for the gating logic).
+          AI_MEMORY_TEST_POSTGRES_URL: postgres://ai_memory:ai_memory_ci@localhost:5432/ai_memory_ci
+        run: cargo test --features sal-postgres --lib
+
   release:
     name: Release (${{ matrix.target }})
     needs: check

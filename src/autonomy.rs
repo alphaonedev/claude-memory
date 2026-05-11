@@ -73,7 +73,10 @@ pub trait AutonomyLlm {
 
 impl AutonomyLlm for OllamaClient {
     fn auto_tag(&self, title: &str, content: &str) -> Result<Vec<String>> {
-        Self::auto_tag(self, title, content)
+        // L15: autonomy-tier trait passes None so the client uses its
+        // configured default; callers that want a dedicated tag model
+        // call `OllamaClient::auto_tag` directly with `Some(model)`.
+        Self::auto_tag(self, title, content, None)
     }
     fn detect_contradiction(&self, mem_a: &str, mem_b: &str) -> Result<bool> {
         Self::detect_contradiction(self, mem_a, mem_b)

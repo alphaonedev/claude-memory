@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7 B3-fix regression — `bootstrap_serve` must not block HTTP
 //! `/health` on the family-descriptor embedding precompute, even
 //! when the precompute is explicitly opted-in.

@@ -52,6 +52,12 @@ pub struct Metrics {
     /// attempts failed (peer likely truly down); `id_drift` = retry
     /// observed the same peer id-drift as attempt 1.
     pub federation_fanout_retry_total: IntCounterVec,
+    /// H9 (v0.7.0 round-2): count of quorum writes that the leader
+    /// returned `200` for (W met) but where at least one configured
+    /// peer did NOT ack inside the deadline. Operators alert on
+    /// non-zero rate to detect mesh-divergence drift early — before a
+    /// follow-up catchup sync surfaces the gap.
+    pub federation_partial_quorum_total: IntCounter,
 }
 
 /// Lazily-built process-global metrics handle.
@@ -195,6 +201,14 @@ impl Metrics {
         )?;
         registry.register(Box::new(federation_fanout_retry_total.clone()))?;
 
+        // H9 (v0.7.0 round-2) — partial-quorum observability.
+        let federation_partial_quorum_total = IntCounter::new(
+            "ai_memory_federation_partial_quorum_total",
+            "Quorum writes that succeeded (W met) but where at least one \
+             configured peer did not ack inside the deadline.",
+        )?;
+        registry.register(Box::new(federation_partial_quorum_total.clone()))?;
+
         Ok(Self {
             registry,
             store_total,
@@ -212,6 +226,7 @@ impl Metrics {
             curator_cycle_duration_seconds,
             federation_fanout_dropped_total,
             federation_fanout_retry_total,
+            federation_partial_quorum_total,
         })
     }
 }

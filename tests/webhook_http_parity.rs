@@ -82,6 +82,10 @@ impl HttpHarness {
             ResolvedTtl::default(),
             true,
         )));
+        #[cfg(feature = "sal")]
+        let store: Arc<dyn ai_memory::store::MemoryStore> = Arc::new(
+            ai_memory::store::sqlite::SqliteStore::open(&db_path).expect("open SqliteStore"),
+        );
         let app_state = AppState {
             db,
             embedder: Arc::new(None),
@@ -93,6 +97,17 @@ impl HttpHarness {
             mcp_config: Arc::new(None),
             active_keypair: Arc::new(None),
             family_embeddings: Arc::new(tokio::sync::RwLock::new(Some(Vec::new()))),
+            storage_backend: ai_memory::handlers::StorageBackend::Sqlite,
+            #[cfg(feature = "sal")]
+            store,
+            llm: Arc::new(None),
+            auto_tag_model: Arc::new(None),
+            llm_call_timeout: std::time::Duration::from_secs(30),
+            replay_cache: std::sync::Arc::new(ai_memory::identity::replay::ReplayCache::default()),
+
+            verify_require_nonce: false,
+            autonomous_hooks: false,
+            recall_scope: Arc::new(None),
         };
         let api_key_state = ApiKeyState { key: None };
         let router = ai_memory::build_router(api_key_state, app_state);

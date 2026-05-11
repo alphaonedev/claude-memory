@@ -1,51 +1,104 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
-// E1's t0-orchestrate.sh is a bash script. Windows runners don't ship
-// bash by default, so the dry-run harness check only runs on Unix. The
-// orchestrator itself works on any platform with a bash interpreter
-// (WSL/Git-Bash); CI just doesn't validate that path.
-#![cfg(unix)]
-
-//! v0.7.0 task E1 — minimal harness check on `scripts/t0-orchestrate.sh`.
+//! v0.7.0 task E1 — minimal harness check on the `ai-memory-t0`
+//! cross-platform orchestrator binary.
 //!
-//! The orchestrator is an out-of-band script that fans the Discovery
-//! Gate questions out to four live LLMs (see
-//! `docs/v0.7/T0-ORCHESTRATION.md`). Live runs cost API budget and
-//! require keys, so CI exercises it in `--dry-run` mode and asserts:
+//! Originally `scripts/t0-orchestrate.sh` was a bash script, so this
+//! test was gated `#![cfg(unix)]` to keep Windows CI green. The
+//! orchestrator now lives in `tools/t0-orchestrate/` as a standalone
+//! Rust crate — the Unix gate is gone and the dry-run harness check
+//! runs on every platform CI covers.
 //!
-//! 1. The script is present and executable.
-//! 2. `--dry-run` exits 0 without making API calls.
-//! 3. The plan output names all four LLMs (claude / gpt5 / gemini / grok).
-//! 4. The plan output names every Discovery Gate question id pinned
+//! The orchestrator fans the Discovery Gate questions out to four
+//! live LLMs (see `docs/v0.7/T0-ORCHESTRATION.md`). Live runs cost
+//! API budget and require keys, so CI exercises it in `--dry-run`
+//! mode and asserts:
+//!
+//! 1. `--dry-run` exits 0 without making API calls.
+//! 2. The plan output names all four LLMs (claude / gpt5 / gemini / grok).
+//! 3. The plan output names every Discovery Gate question id pinned
 //!    in `tests/calibration_t0.rs`.
-//! 5. The dry-run advertises the result-file template paths.
+//! 4. The dry-run advertises the result-file template paths.
 //!
 //! If any of these go red, the orchestration harness has drifted from
-//! the calibration cells it wraps — fix the script (or the cell ids)
+//! the calibration cells it wraps — fix the binary (or the cell ids)
 //! before merging.
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::OnceLock;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn run_dry_run() -> String {
-    let script = repo_root().join("scripts").join("t0-orchestrate.sh");
+/// Build the orchestrator binary once per `cargo test` run and
+/// return the absolute path to it.
+///
+/// Historically (when this was a bash script) each test fn invoked
+/// `bash scripts/t0-orchestrate.sh` directly. With the Rust port,
+/// `--test-threads > 1` would otherwise race parallel `cargo build`
+/// invocations against the shared `--target-dir`. A process-wide
+/// `OnceLock` lets the first thread to reach `orchestrator_bin()`
+/// build the binary; every other thread blocks, then re-uses the
+/// cached `PathBuf`. Same pattern `tests/g11_auto_link_detector.rs`
+/// and `tests/transcript_extractor.rs` use for their sibling crates.
+fn orchestrator_bin() -> &'static PathBuf {
+    static BIN: OnceLock<PathBuf> = OnceLock::new();
+    BIN.get_or_init(build_orchestrator_once)
+}
+
+fn build_orchestrator_once() -> PathBuf {
+    let manifest_path = repo_root().join("tools/t0-orchestrate/Cargo.toml");
     assert!(
-        script.exists(),
-        "E1: scripts/t0-orchestrate.sh missing at {}",
-        script.display()
+        manifest_path.exists(),
+        "E1: orchestrator manifest missing at {}",
+        manifest_path.display()
     );
 
-    let output = Command::new("bash")
-        .arg(&script)
+    // Per-test target dir scoped by PID so two concurrent `cargo
+    // test` driver processes (e.g. CI sharding) cannot stomp each
+    // other's target/.
+    let target_dir = std::env::temp_dir().join(format!(
+        "ai-memory-t0-orchestrate-target-{}",
+        std::process::id()
+    ));
+
+    let status = Command::new("cargo")
+        .args([
+            "build",
+            "--quiet",
+            "--release",
+            "--manifest-path",
+            manifest_path.to_str().expect("utf-8 manifest path"),
+            "--target-dir",
+            target_dir.to_str().expect("utf-8 target dir"),
+        ])
+        .status()
+        .expect("invoke cargo build for ai-memory-t0");
+    assert!(status.success(), "cargo build for ai-memory-t0 failed");
+
+    let bin = target_dir.join("release").join(if cfg!(windows) {
+        "ai-memory-t0.exe"
+    } else {
+        "ai-memory-t0"
+    });
+    assert!(
+        bin.exists(),
+        "E1: ai-memory-t0 binary missing at {}",
+        bin.display()
+    );
+    bin
+}
+
+fn run_dry_run() -> String {
+    let bin = orchestrator_bin();
+    let output = Command::new(bin)
         .arg("--dry-run")
         .current_dir(repo_root())
         .output()
-        .expect("spawn t0-orchestrate.sh --dry-run");
+        .expect("spawn ai-memory-t0 --dry-run");
 
     assert!(
         output.status.success(),
@@ -75,7 +128,7 @@ fn e1_dry_run_covers_every_calibration_cell_id() {
 
     // Question ids must match the calibration cells in
     // tests/calibration_t0.rs. If a new cell lands there, add the id
-    // to QUESTIONS in scripts/t0-orchestrate.sh and to this list.
+    // to QUESTIONS in tools/t0-orchestrate/src/main.rs and to this list.
     for qid in &[
         "T0-A2-CORE",
         "T0-A2-FULL",
@@ -104,7 +157,7 @@ fn e1_dry_run_advertises_result_file_template() {
         "E1: dry-run missing summary_template line\nfull output:\n{out}"
     );
     assert!(
-        out.contains("results/t0/"),
+        out.contains("results/t0/") || out.contains("results\\t0\\"),
         "E1: dry-run results path should sit under results/t0/\nfull output:\n{out}"
     );
 }

@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7.0 K8 — quota enforcement on the store + link write paths.
 //!
 //! K8 ships the per-agent quota substrate. The substrate-level checks

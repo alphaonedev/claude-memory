@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::cast_possible_wrap)]
 //! v0.7.0 #628 I1 (review blocker H7) — zstd decompression-bomb defence.
 //!
 //! `transcripts::fetch` previously called `zstd::stream::read::Decoder`

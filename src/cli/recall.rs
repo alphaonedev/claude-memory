@@ -52,6 +52,13 @@ pub struct RecallArgs {
     /// topics.
     #[arg(long, value_delimiter = ',')]
     pub context_tokens: Option<Vec<String>>,
+    /// v0.7.0 (issue #518) — when set, splice defaults from
+    /// `[agents.defaults.recall_scope]` in `config.toml` for any
+    /// filter field not explicitly passed on the command line.
+    /// Resolution: explicit args > recall_scope defaults > compiled
+    /// defaults. Default `false` preserves v0.6.x recall semantics.
+    #[arg(long)]
+    pub session_default: bool,
 }
 
 /// `recall` handler. Mirrors `cmd_recall` from the pre-W5b `main.rs`
@@ -73,6 +80,52 @@ pub fn run(
     }
     let conn = db::open(db_path)?;
     let _ = db::gc_if_needed(&conn, app_config.effective_archive_on_gc());
+
+    // v0.7.0 (issue #518) — when `--session-default` is passed AND a
+    // given filter axis is absent on the CLI, splice in the
+    // `[agents.defaults.recall_scope]` value from config.toml.
+    // Resolution: explicit args > recall_scope defaults > compiled
+    // defaults. Compute owned overrides here so the rest of the
+    // function can reach for them transparently.
+    let scope = if args.session_default {
+        app_config.effective_recall_scope()
+    } else {
+        None
+    };
+    let effective_namespace: Option<String> = args.namespace.clone().or_else(|| {
+        scope
+            .and_then(|s| s.namespaces.as_ref())
+            .and_then(|v| v.first())
+            .cloned()
+    });
+    let effective_since: Option<String> = args.since.clone().or_else(|| {
+        scope.and_then(|s| {
+            s.since.as_deref().and_then(|d| {
+                crate::config::parse_duration_string(d).map(|dur| {
+                    let cutoff = chrono::Utc::now() - dur;
+                    cutoff.to_rfc3339()
+                })
+            })
+        })
+    });
+    // If --limit was passed (clap supplies the default 10 when
+    // omitted), we cannot tell explicit-10 from default-10 — accept
+    // the field as authoritative on the CLI surface. The
+    // recall_scope.limit splice fires only when args.limit equals
+    // the documented compile-time default (10) AND a scope.limit is
+    // configured; oversized scope values still clamp to 50 below.
+    let effective_limit_usize = if args.limit == 10
+        && let Some(v) = scope.and_then(|s| s.limit)
+    {
+        usize::try_from(v).unwrap_or(usize::MAX)
+    } else {
+        args.limit
+    };
+    // tier from recall_scope is recorded but not consumed on the
+    // CLI's `db::recall` / `db::recall_hybrid` path (they do not
+    // accept a tier filter parameter on sqlite). Capture it for
+    // forward compat / log surfacing.
+    let _effective_recall_tier: Option<String> = scope.and_then(|s| s.tier.clone());
 
     // Resolve feature tier
     let feature_tier = app_config.effective_tier(args.tier.as_deref());
@@ -198,10 +251,10 @@ pub fn run(
                     &conn,
                     &args.context,
                     &query_emb,
-                    args.namespace.as_deref(),
-                    args.limit.min(50),
+                    effective_namespace.as_deref(),
+                    effective_limit_usize.min(50),
                     args.tags.as_deref(),
-                    args.since.as_deref(),
+                    effective_since.as_deref(),
                     args.until.as_deref(),
                     vector_index.as_ref(),
                     resolved_ttl.short_extend_secs,
@@ -224,10 +277,10 @@ pub fn run(
                 let (results, outcome) = db::recall(
                     &conn,
                     &args.context,
-                    args.namespace.as_deref(),
-                    args.limit,
+                    effective_namespace.as_deref(),
+                    effective_limit_usize,
                     args.tags.as_deref(),
-                    args.since.as_deref(),
+                    effective_since.as_deref(),
                     args.until.as_deref(),
                     resolved_ttl.short_extend_secs,
                     resolved_ttl.mid_extend_secs,
@@ -241,10 +294,10 @@ pub fn run(
         let (results, outcome) = db::recall(
             &conn,
             &args.context,
-            args.namespace.as_deref(),
-            args.limit,
+            effective_namespace.as_deref(),
+            effective_limit_usize,
             args.tags.as_deref(),
-            args.since.as_deref(),
+            effective_since.as_deref(),
             args.until.as_deref(),
             resolved_ttl.short_extend_secs,
             resolved_ttl.mid_extend_secs,
@@ -343,6 +396,7 @@ mod tests {
             as_agent: None,
             budget_tokens: None,
             context_tokens: None,
+            session_default: false,
         }
     }
 

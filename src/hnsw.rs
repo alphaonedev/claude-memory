@@ -52,6 +52,37 @@ pub fn index_evictions_total() -> u64 {
     INDEX_EVICTIONS_TOTAL.load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// M8 (v0.7.0 round-2) — eviction-rate observability.
+//
+// Operators who hit the 100k cap need two signals:
+//
+//   1. Per-eviction WARN — surface every eviction event so operators
+//      see drift before recall quality has noticeably degraded.
+//   2. Rolling-rate ERROR — when the trailing-hour eviction rate
+//      exceeds the M8 ceiling, escalate to ERROR so the ops dashboard
+//      raises a page. The escalation message names the operator
+//      knobs (`vector_index_capacity` / "move to dedicated vector DB")
+//      so the on-call has the remediation in the log line.
+//
+// Implementation: a small fixed-size ring buffer of UNIX-nanosecond
+// timestamps. Each eviction `push`es a stamp; the rolling-rate check
+// counts how many stamps sit inside the trailing-hour window. The
+// ring is locked behind a `Mutex` for write-coherent visibility; the
+// path runs only on the eviction edge so the lock cost is negligible.
+// ---------------------------------------------------------------------------
+
+/// M8 eviction-rate ceiling: events / hour past which the rolling
+/// observer escalates from WARN to ERROR.
+const EVICTION_RATE_CEILING_PER_HOUR: usize = 10;
+
+/// Rolling-hour ring buffer capacity. Chosen so the ring can hold the
+/// ceiling plus headroom for burstiness; older entries are
+/// transparently evicted on push.
+const EVICTION_RATE_RING_CAP: usize = 64;
+
+static EVICTION_RATE_RING: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+
 /// Whether an eviction occurred within the trailing `window_secs`.
 ///
 /// Used by capabilities (P1) to set `hnsw.evicted_recently` so operators
@@ -81,6 +112,33 @@ pub fn evicted_recently(window_secs: u64) -> bool {
 pub fn reset_eviction_counters_for_test() {
     INDEX_EVICTIONS_TOTAL.store(0, Ordering::Relaxed);
     LAST_EVICTION_AT_NANOS.store(0, Ordering::Relaxed);
+    if let Ok(mut g) = EVICTION_RATE_RING.lock() {
+        g.clear();
+    }
+}
+
+/// M8 (v0.7.0 round-2) — push the latest eviction timestamp into the
+/// rolling-hour ring and return how many stamps now sit inside the
+/// trailing hour. Producers call this once per eviction event;
+/// the caller branches on the returned count to escalate from WARN
+/// (already emitted) to ERROR.
+fn record_eviction_and_count_recent(now_nanos: u64) -> usize {
+    const ONE_HOUR_NANOS: u64 = 3_600 * 1_000_000_000;
+    let cutoff = now_nanos.saturating_sub(ONE_HOUR_NANOS);
+    let Ok(mut ring) = EVICTION_RATE_RING.lock() else {
+        // Poisoned lock — observability is best-effort, return 0 so
+        // the caller does not over-escalate.
+        return 0;
+    };
+    // Drop stale entries first so the ring stays bounded and the
+    // count reflects the trailing hour.
+    ring.retain(|t| *t >= cutoff);
+    if ring.len() >= EVICTION_RATE_RING_CAP {
+        // Cap reached — drop the oldest before appending.
+        ring.remove(0);
+    }
+    ring.push(now_nanos);
+    ring.len()
 }
 
 /// A point in the HNSW index — wraps a dense embedding vector.
@@ -171,6 +229,19 @@ impl VectorIndex {
         // Evict oldest entries if over capacity
         if state.all_entries.len() > MAX_ENTRIES {
             let excess = state.all_entries.len() - MAX_ENTRIES;
+            // M8 (v0.7.0 round-2) — emit ONE summary WARN per eviction
+            // event so the operator sees the batch drop in the daemon
+            // log without scrolling past N per-id lines first. The
+            // per-id WARNs (below) still fire for post-mortem
+            // attribution; this one is the high-level "the index
+            // dropped N oldest embeddings" signal operators alert on.
+            tracing::warn!(
+                target: "hnsw.eviction",
+                dropped = excess,
+                max_entries = MAX_ENTRIES,
+                "HNSW eviction: dropped {} oldest embeddings to make room",
+                excess,
+            );
             // v0.6.3.1 (P3, G2): emit one structured tracing event per evicted
             // id BEFORE we drop the rows so operators can post-mortem which
             // memories lost their semantic-search affordance. Bumping the
@@ -229,6 +300,22 @@ impl VectorIndex {
                 .unwrap_or(0);
             let now_nanos_u64 = u64::try_from(now_nanos).unwrap_or(u64::MAX);
             LAST_EVICTION_AT_NANOS.store(now_nanos_u64, Ordering::Relaxed);
+
+            // M8 (v0.7.0 round-2) — rolling-hour rate observer. Push
+            // a stamp on this eviction, then count stamps in the
+            // trailing hour. If the rate clears the M8 ceiling,
+            // escalate to ERROR so the dashboard pages the on-call.
+            let recent = record_eviction_and_count_recent(now_nanos_u64);
+            if recent > EVICTION_RATE_CEILING_PER_HOUR {
+                tracing::error!(
+                    target: "hnsw.eviction",
+                    rate_per_hour = recent,
+                    ceiling = EVICTION_RATE_CEILING_PER_HOUR,
+                    "HNSW eviction rate exceeded {}/hour — recall quality is degrading; \
+                     increase vector_index_capacity or move to dedicated vector DB",
+                    EVICTION_RATE_CEILING_PER_HOUR,
+                );
+            }
         }
     }
 

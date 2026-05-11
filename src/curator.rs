@@ -143,7 +143,7 @@ pub fn run_once(
         }
         report.operations_attempted += 1;
 
-        match llm_client.auto_tag(&mem.title, &mem.content) {
+        match llm_client.auto_tag(&mem.title, &mem.content, None) {
             Ok(tags) if !tags.is_empty() => {
                 let tag_list: Vec<String> = tags.into_iter().take(8).collect::<Vec<String>>();
                 if !cfg.dry_run
@@ -1053,6 +1053,26 @@ mod tests {
                 (
                     "200 OK",
                     serde_json::json!({"message": {"content": response}}).to_string(),
+                )
+            }
+        } else if method == "POST" && path == "/api/generate" {
+            // v0.7.0 L15 — `OllamaClient::auto_tag` switched to
+            // `/api/generate` (with a num_predict ceiling) so the fake
+            // server has to honour that surface too. We treat
+            // /api/generate the same way the /api/chat path treats
+            // tag-shaped prompts, since auto_tag is the only caller of
+            // /api/generate today.
+            chat_calls.fetch_add(1, StdOrdering::Relaxed);
+            if cfg.chat_returns_error {
+                (
+                    "500 Internal Server Error",
+                    "{\"error\":\"forced fault\"}".to_string(),
+                )
+            } else {
+                let response = cfg.tag_response.clone();
+                (
+                    "200 OK",
+                    serde_json::json!({"response": response}).to_string(),
                 )
             }
         } else {

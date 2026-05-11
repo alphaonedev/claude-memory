@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //! v0.7.0 #628 I4 (review blocker H6) — `memory_replay` authorisation.
 //!
 //! Before this fix `memory_replay` fetched and decompressed transcript

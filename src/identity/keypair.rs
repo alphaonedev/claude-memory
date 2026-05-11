@@ -343,6 +343,80 @@ pub fn read_raw_key_file(path: &Path) -> Result<[u8; SECRET_KEY_LEN]> {
     Ok(arr)
 }
 
+// ---------------------------------------------------------------------------
+// Round-2 F12 — auto-generation of the daemon's signing keypair
+// ---------------------------------------------------------------------------
+//
+// Round-2 evidence: link signing was disabled by default at v0.7.0
+// because no Ed25519 keypair existed on a freshly-installed deployment
+// and the operator had to manually run `ai-memory identity generate`
+// before signed links would land. Default-secure says we should
+// auto-generate one at first `serve` startup unless the operator
+// explicitly opted out. The lifecycle is idempotent (re-runs are
+// no-ops) so a daemon restart never overwrites an existing keypair.
+
+/// Outcome of a single [`ensure_keypair`] call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnsureOutcome {
+    /// Keypair already existed at the resolved path; no action taken.
+    AlreadyExists {
+        /// Path to the public-key file the existence check observed.
+        pub_path: PathBuf,
+    },
+    /// A fresh keypair was generated and persisted to `dir`.
+    Generated {
+        /// Path the public-key file was written to. The corresponding
+        /// `.priv` lives alongside.
+        pub_path: PathBuf,
+    },
+    /// Auto-generation was disabled — operator set
+    /// `[identity].disabled = true` (or equivalent) in config.
+    SkippedDisabled,
+}
+
+/// Round-2 F12 — auto-generate a signing keypair for `agent_id` under
+/// `dir` if one does not already exist.
+///
+/// `disabled` is the operator's opt-out flag (resolved from
+/// `[identity].disabled` in config). When `true` the helper returns
+/// [`EnsureOutcome::SkippedDisabled`] without touching the filesystem.
+///
+/// Idempotency: when the public-key file at
+/// `<dir>/<agent_id>.pub` already exists the helper returns
+/// [`EnsureOutcome::AlreadyExists`] without calling [`generate`] or
+/// [`save`]. This guarantees a daemon restart never overwrites a
+/// pre-existing keypair (which would silently invalidate every
+/// signed link the prior key produced).
+///
+/// On the [`EnsureOutcome::Generated`] path the helper logs at INFO
+/// level via `tracing` so the operator notices the new key in
+/// daemon logs. The same line is also surfaced by the F12 startup
+/// banner — see [`crate::cli::serve_banner`].
+pub fn ensure_keypair(agent_id: &str, dir: &Path, disabled: bool) -> Result<EnsureOutcome> {
+    if disabled {
+        tracing::info!(
+            "identity: auto-gen disabled by config; link signing will be skipped at boot"
+        );
+        return Ok(EnsureOutcome::SkippedDisabled);
+    }
+    validate::validate_agent_id(agent_id)?;
+
+    let pub_path = dir.join(format!("{agent_id}{PUB_SUFFIX}"));
+    if pub_path.exists() {
+        // Idempotent: do NOT regenerate. A daemon restart must keep
+        // the operator's existing key.
+        return Ok(EnsureOutcome::AlreadyExists { pub_path });
+    }
+
+    let kp = generate(agent_id)?;
+    save(&kp, dir)?;
+    tracing::info!(
+        "auto-generated identity keypair at {} — consider backing up",
+        pub_path.display()
+    );
+    Ok(EnsureOutcome::Generated { pub_path })
+}
+
 /// Cross-platform `fs::write` with an explicit Unix mode. On non-Unix
 /// targets `mode` is ignored and the file inherits the parent ACL.
 #[cfg(unix)]
@@ -576,9 +650,13 @@ mod tests {
 
     #[test]
     fn default_key_dir_ends_in_ai_memory_keys() {
-        // SAFETY: single-threaded test block; no concurrent env::var
-        // mutations. The H4 env-var override (`AI_MEMORY_KEY_DIR`) is
-        // scrubbed up-front so this test asserts the *fallback* path.
+        // M9 — `default_key_dir_honours_env_override` flips the same
+        // `AI_MEMORY_KEY_DIR` key. Acquire the shared lock so the two
+        // tests cannot interleave under `cargo test --jobs N`.
+        let _g = key_dir_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+        // SAFETY: env mutation serialised by `_g`. The H4 env-var
+        // override (`AI_MEMORY_KEY_DIR`) is scrubbed up-front so this
+        // test asserts the *fallback* path.
         unsafe {
             std::env::remove_var("AI_MEMORY_KEY_DIR");
         }
@@ -595,6 +673,66 @@ mod tests {
     fn key_dir_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    // ---- Round-2 F12 ensure_keypair --------------------------------------
+
+    #[test]
+    fn ensure_keypair_generates_when_missing() {
+        let dir = tmp_dir();
+        let outcome = ensure_keypair("alice", dir.path(), false).expect("ensure");
+        match outcome {
+            EnsureOutcome::Generated { pub_path } => {
+                assert!(pub_path.exists(), "pub key must be on disk");
+                let priv_path = dir.path().join("alice.priv");
+                assert!(priv_path.exists(), "priv key must be on disk");
+            }
+            other => panic!("expected Generated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ensure_keypair_idempotent_on_second_call() {
+        let dir = tmp_dir();
+        let first = ensure_keypair("alice", dir.path(), false).expect("first");
+        let pub_path = dir.path().join("alice.pub");
+        let priv_path = dir.path().join("alice.priv");
+        // Snapshot bytes to assert non-overwrite.
+        let pub_before = fs::read(&pub_path).unwrap();
+        let priv_before = fs::read(&priv_path).unwrap();
+
+        let second = ensure_keypair("alice", dir.path(), false).expect("second");
+        match second {
+            EnsureOutcome::AlreadyExists { pub_path: observed } => {
+                assert_eq!(observed, pub_path);
+            }
+            other => panic!("expected AlreadyExists on second call, got {other:?}"),
+        }
+        // Bytes must NOT have changed — overwrite would corrupt every
+        // prior signed link.
+        let pub_after = fs::read(&pub_path).unwrap();
+        let priv_after = fs::read(&priv_path).unwrap();
+        assert_eq!(pub_before, pub_after);
+        assert_eq!(priv_before, priv_after);
+        // First call's outcome must have been Generated.
+        assert!(matches!(first, EnsureOutcome::Generated { .. }));
+    }
+
+    #[test]
+    fn ensure_keypair_respects_disabled_flag() {
+        let dir = tmp_dir();
+        let outcome = ensure_keypair("alice", dir.path(), true).expect("ensure");
+        assert_eq!(outcome, EnsureOutcome::SkippedDisabled);
+        // Filesystem must be untouched.
+        assert!(!dir.path().join("alice.pub").exists());
+        assert!(!dir.path().join("alice.priv").exists());
+    }
+
+    #[test]
+    fn ensure_keypair_validates_agent_id() {
+        let dir = tmp_dir();
+        let res = ensure_keypair("has space", dir.path(), false);
+        assert!(res.is_err(), "must reject invalid agent_id");
     }
 
     #[test]

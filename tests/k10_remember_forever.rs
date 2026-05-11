@@ -1,6 +1,8 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::redundant_closure_for_method_calls)]
 //! v0.7.0 K10 — `remember=forever` writes a synthetic permission rule.
 //!
 //! The K10 contract: any of the three transports (HTTP, SSE-driven,

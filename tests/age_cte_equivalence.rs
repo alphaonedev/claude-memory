@@ -88,8 +88,8 @@ fn age_url() -> Option<String> {
 /// Probe whether the connected Postgres has Apache AGE installed.
 /// Used to gate the AGE half of each equivalence test even when the
 /// AGE URL was set — covers the case where the fixture compose file
-/// is up but the extension hasn't been CREATEd yet.
-async fn age_extension_present(store: &PostgresStore) -> bool {
+/// is up but the extension hasn't been `CREATEd` yet.
+fn age_extension_present(store: &PostgresStore) -> bool {
     matches!(store.kg_backend(), KgBackend::Age)
 }
 
@@ -147,7 +147,7 @@ fn make_memory(id: &str, namespace: &str, title: &str, content: &str) -> Memory 
 /// Returns (memory ids in graph order, namespace).
 fn fixture_graph_ids(prefix: &str) -> (Vec<String>, String) {
     let ns = format!("{prefix}-{}", uuid::Uuid::new_v4());
-    let ids: Vec<String> = (0..10).map(|i| format!("{ns}-mem-{:02}", i)).collect();
+    let ids: Vec<String> = (0..10).map(|i| format!("{ns}-mem-{i:02}")).collect();
     (ids, ns)
 }
 
@@ -211,7 +211,7 @@ async fn insert_fixture_links(url: &str, ids: &[String]) {
 
     let base = chrono::Utc::now() - chrono::Duration::seconds(1000);
     for (i, (src, dst, rel)) in fixture_edges().iter().enumerate() {
-        let valid_from = base + chrono::Duration::seconds(i as i64);
+        let valid_from = base + chrono::Duration::seconds(i64::try_from(i).unwrap_or(0));
         sqlx::query(
             "INSERT INTO memory_links (source_id, target_id, relation, valid_from, observed_by) \
              VALUES ($1, $2, $3, $4, $5) \
@@ -268,7 +268,8 @@ async fn project_fixture_into_age(
 
     let base = chrono::Utc::now() - chrono::Duration::seconds(1000);
     for (i, (src, dst, rel)) in fixture_edges().iter().enumerate() {
-        let valid_from = (base + chrono::Duration::seconds(i as i64)).to_rfc3339();
+        let valid_from =
+            (base + chrono::Duration::seconds(i64::try_from(i).unwrap_or(0))).to_rfc3339();
         let cypher = "MATCH (a {id: $src}), (b {id: $dst}) \
              MERGE (a)-[r:related_to {relation: $rel}]->(b) \
              SET r.valid_from = $vf, r.observed_by = 'ai:j5-equivalence', \
@@ -329,12 +330,9 @@ async fn kg_query_equivalence() {
     // a vanilla or AGE-enabled URL because the relational table is
     // present in both. The AGE branch additionally requires the AGE
     // URL with the extension actually installed.
-    let url = match postgres_url().or_else(age_url) {
-        Some(u) => u,
-        None => {
-            eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
-            return;
-        }
+    let Some(url) = postgres_url().or_else(age_url) else {
+        eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
+        return;
     };
 
     let store = match PostgresStore::connect(&url).await {
@@ -360,7 +358,7 @@ async fn kg_query_equivalence() {
     // AND we can project the corpus into the property graph. If either
     // step fails we report it via eprintln rather than failing the
     // suite, mirroring the J2/J3/J4 live-test skip discipline.
-    if !age_extension_present(&store).await {
+    if !age_extension_present(&store) {
         eprintln!("skip AGE half: kg_backend resolved to CTE (extension not installed)");
         return;
     }
@@ -391,12 +389,9 @@ async fn kg_query_equivalence() {
 
 #[tokio::test]
 async fn kg_timeline_equivalence() {
-    let url = match postgres_url().or_else(age_url) {
-        Some(u) => u,
-        None => {
-            eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
-            return;
-        }
+    let Some(url) = postgres_url().or_else(age_url) else {
+        eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
+        return;
     };
 
     let store = match PostgresStore::connect(&url).await {
@@ -424,7 +419,7 @@ async fn kg_timeline_equivalence() {
         "CTE timeline rows must have a valid_from anchor"
     );
 
-    if !age_extension_present(&store).await {
+    if !age_extension_present(&store) {
         eprintln!("skip AGE half: kg_backend resolved to CTE (extension not installed)");
         return;
     }
@@ -469,12 +464,9 @@ async fn kg_timeline_equivalence() {
 
 #[tokio::test]
 async fn kg_invalidate_equivalence() {
-    let url = match postgres_url().or_else(age_url) {
-        Some(u) => u,
-        None => {
-            eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
-            return;
-        }
+    let Some(url) = postgres_url().or_else(age_url) else {
+        eprintln!("skip: neither AI_MEMORY_TEST_POSTGRES_URL nor AI_MEMORY_TEST_AGE_URL set");
+        return;
     };
 
     let store = match PostgresStore::connect(&url).await {
@@ -523,7 +515,7 @@ async fn kg_invalidate_equivalence() {
         .expect("cte invalidate miss");
     assert_no_match(&cte_miss);
 
-    if !age_extension_present(&store).await {
+    if !age_extension_present(&store) {
         eprintln!("skip AGE half: kg_backend resolved to CTE (extension not installed)");
         return;
     }

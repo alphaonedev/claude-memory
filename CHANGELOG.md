@@ -59,9 +59,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `tests/webhook_http_parity.rs` pin the contract.
 
 
-## [0.7.0] — 2026-05-06 — `attested-cortex`
+## [0.7.0] — 2026-05-09 — `attested-cortex` (release pending Wave 1-4 cert)
 
-**Headline:** v0.7.0 closes the `attested-cortex` epic — **69/69 tasks across 11 tracks** (A/B/C/D/E/F/G/H/I/J/K). The substrate becomes both **more articulate** (capabilities v3 with pre-computed calibration strings, named loaders, 52% MCP-tool token reduction on the full profile) and **cryptographically trustworthy** (per-agent Ed25519 attestation with append-only `signed_events` audit chain, sidechain transcripts with `memory_replay`, programmable 20-event hook pipeline, opt-in Apache AGE acceleration, K1/G1 namespace-inheritance enforcement, real permission system with deny-first semantics, A2A maturity). Canonical scope: [`docs/v0.7/V0.7-EPIC.md`](docs/v0.7/V0.7-EPIC.md). Migration: [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md). What's new: [`docs/whats-new-v07.html`](docs/whats-new-v07.html). RFC: [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md).
+**Headline:** v0.7.0 closes the `attested-cortex` epic — **69/69 tasks across 11 tracks** (A/B/C/D/E/F/G/H/I/J/K) — and ships **postgres + Apache AGE as a first-class storage backend** including live daemon support (`ai-memory serve --store-url postgres://…`), full schema parity with sqlite (v15 → v28 port), 6-factor recall scoring parity, link migration, and a new `ai-memory schema-init` CLI verb. The substrate becomes both **more articulate** (capabilities v3 with pre-computed calibration strings, named loaders, 52% MCP-tool token reduction on the full profile) and **cryptographically trustworthy** (per-agent Ed25519 attestation with append-only `signed_events` audit chain, sidechain transcripts with `memory_replay`, programmable 20-event hook pipeline, opt-in Apache AGE acceleration, K1/G1 namespace-inheritance enforcement, real permission system with deny-first semantics, A2A maturity). Canonical scope: [`docs/v0.7/V0.7-EPIC.md`](docs/v0.7/V0.7-EPIC.md). Migration: [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md) + [`docs/migration-v0.7.0-postgres.md`](docs/migration-v0.7.0-postgres.md). Operator how-to: [`docs/postgres-age-guide.md`](docs/postgres-age-guide.md). Release notes: [`docs/v0.7.0/release-notes.md`](docs/v0.7.0/release-notes.md). What's new: [`docs/whats-new-v07.html`](docs/whats-new-v07.html). RFC: [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md).
+
+### v0.7.0 expanded scope — postgres+AGE first-class (Wave 1-4)
+
+The original `attested-cortex` epic deferred daemon-level adapter selection to v0.7.1 ([`docs/RUNBOOK-adapter-selection.md`](docs/RUNBOOK-adapter-selection.md), pre-2026-05-09 framing). Per operator directive 2026-05-09, the adapter-selection refactor and the related postgres+AGE surface gaps surfaced by the v0.7.0 A2A campaign (#646, F6) **fold into the v0.7.0 ship** rather than carving out a v0.7.0.1 / v0.7.1 micro-release. The expanded scope splits into four implementation waves:
+
+- **Wave 1 — surgical postgres+AGE fixes** (3 parallel streams, in flight). Stream A: `PostgresStore::link()` + `::register_agent()`, recall 6-factor parity, `migrate.rs` link-walk, SQL view aliases for off-process inspection. Stream B: new `ai-memory schema-init` CLI verb (idempotent bootstrap of postgres + AGE projection). Stream C: AGE 1.5 + PG 16 cypher-binding quirk fixed in `tests/age_cte_equivalence.rs` (test-side only — production code never hit it).
+- **Wave 2 — postgres schema parity v15 → v28** (13 migrations ported: governance inheritance, webhook subscriptions, audit chain, transcripts, signed events, agent quotas, link `attest_level`, A2A correlation, smart-load veto, KG temporal-index v2, tier-promotion metadata, subscription DLQ, `consolidated_from_agents` array). Pinned by `tests/postgres_schema_parity.rs` against the SQLite v28 truth fixture.
+- **Wave 3 — `ai-memory serve --store-url postgres://`** adapter-selection refactor. New `AppState.store: Arc<dyn MemoryStore>` field; handler call sites route through the SAL trait. `--features sal-postgres` opt-in; default sqlite build is byte-for-byte unchanged.
+- **Wave 4 — live A2A on postgres**. The v0.7.0 A2A campaign (`ai-memory-a2a-v0.7.0`) re-runs with both droplets pointed at a shared postgres+AGE backend. S70-S76 flip from "PASS via Path B in-tree validators" to "PASS via live daemon-on-postgres". This is the cert acceptance gate for the expanded scope.
+
+**Tag-cut criterion:** two consecutive 100% GREEN A2A rounds against the binary built from `round-2-fixes` after Wave 1-4 lands, with the Wave 4 live-on-postgres acceptance gate satisfied.
+
+### F-series fixes (NHI campaign findings)
+
+The v0.7.0 A2A campaign and the parallel post-ship NHI Round-2 sweep surfaced 18 findings; all 18 are closed in the v0.7.0 ship.
+
+- **F1** ([#644](https://github.com/alphaonedev/ai-memory-mcp/issues/644), commit `e0d2086`) — `namespace_owner` now walks the parent chain. Deep-child Owner-level writes resolve correctly through inherited governance policies; the prior "no resolvable owner" 403 is fixed.
+- **F2** ([#645](https://github.com/alphaonedev/ai-memory-mcp/issues/645), commit `e0d2086`) — `audit::init` seeds the `SEQUENCE` atomic from the trailing `audit.log` record at startup; the per-process counter no longer resets to 1 across daemon restart. `audit verify` is monotonic across restarts.
+- **F3 / F4 / F5** — campaign-side fixes: S70 import CLI flag drift (test-side), `Harness.node_db_path()` helper for multi-droplet topology, AGE perf gate documentation.
+- **F6** ([#646](https://github.com/alphaonedev/ai-memory-mcp/issues/646), Wave 1) — postgres SQL views + `migrate-links` + `schema-init` CLI surfaces. **In flight as of 2026-05-09**; Wave 1 commits will close the issue.
+- **F7** (commit `f9ef40a`) — HTTP `POST /api/v1/memories` now wires through `agent_quotas` counters; quota enforcement is no longer advisory-by-accident.
+- **F8** (commits `579afe2`, `63c46ab`) — `permissions.mode` defaults to `enforce` (was `advisory`). One-time migration banner on first start. **Breaking change** — see release notes for opt-back-in.
+- **F9** (commit `f9ef40a`) — HTTP missing-required-field returns 400 (was 422 from axum body-extractor).
+- **F10** (commit `f9ef40a`) — Embedder timeout on >64KB content surfaces an `EmbedStatus` enum on the response instead of silently producing an un-indexed row at HTTP 201.
+- **F11** (commits `579afe2`, `bd01978`) — `ai-memory forget --pattern X` and `forget --tier T` without `--namespace` require `--confirm-global`. **Breaking change** — see release notes.
+- **F12** (commits `579afe2`, `63c46ab`) — Ed25519 keypair auto-generated on `serve` startup if absent. Idempotent on rerun.
+- **F13** (commit `66f48ae`) — `memory_capabilities` schema/behavior drift fixed; `verbose` and `include_schema` flags actually do what the schema claims.
+- **F14** (commits `66f48ae`, `5b36d7c`) — Smart-load router weights underscore tokens correctly (`memory_notify` no longer collapses to `meta`; `memory_expand_query` no longer collapses to `graph`).
+- **F15** (commit `66f48ae`) — MCP `memory_store` / `memory_update` `inputSchema` now lists the `metadata` field.
+- **F16** (commit `66f48ae`) — `agent_type` MCP enum opened to match daemon's permissive accept-set.
+- **F17** (commits `082c999`, `f02d092`) — `find_paths` `max_depth` cap of 7 documented in tool description; directed-vs-undirected semantics clarified inline.
+- **F18** (commits `082c999`, `63c46ab`) — `check_duplicate` raw-content sha256 short-circuit for byte-identical strings; the embedding-similarity 0.92 ceiling no longer hides true duplicates.
+- **AGE 1.5.0 + PG 16 cypher-binding compat** (Wave 1, Stream C) — fixed in `tests/age_cte_equivalence.rs`. Production code never hit it; the harness did. Unblocks the parity test suite on AGE 1.5.0.
+
+### Track summary (11 tracks, 69 tasks)
+
+- **Track A — Capabilities v3 response shape (5 tasks).** Adds `summary`, `to_describe_to_user`, `callable_now`, `agent_permitted_families` to the `memory_capabilities` response, plus `schema_version="3"` (additive over v2). Pre-computed per-agent calibration strings let LLMs converge on accurate first-answer descriptions instead of improvising. v3 fields are additive — v2 wire shape stays supported through the v0.7.x line. Canonical phrasings pinned in [`docs/v0.7/canonical-phrasings.md`](docs/v0.7/canonical-phrasings.md).
+- **Track B — Loader tools (5 tasks).** `memory_load_family` and `memory_smart_load(intent)` are promoted to **always-on first-class tools** (no longer hidden inside an introspection tool's parameter set). Reasoning-class LLMs find them on first ask. Includes harness detection from MCP `clientInfo` (Claude Code, Codex, Grok CLI, Gemini CLI, Continue, Cursor, Cline, Aider, Goose, Claude Desktop, generic JSON-RPC) and family-descriptor embeddings powering `memory_smart_load`'s intent-to-family routing.
+- **Track C — Schema compaction (5 tasks).** **52% MCP tool-token reduction** on the full profile. Description / docs split (long form moved to per-tool docs links), optional params hidden from default schema, inline examples stripped, hard CI gate enforces ≤ 3,500 input tokens for `--profile full` `tools/list`. Combined with v0.6.4's 76.4% default-profile reduction, the cortex now ships at < 3.5K tokens even when fully loaded.
+- **Track D — Per-harness positioning + tests (4 tasks).** Cross-harness benchmark across the 11 supported harnesses; landing-page compatibility matrix at [`docs/v0.7/compatibility-matrix.html`](docs/v0.7/compatibility-matrix.html); install-time system-prompt snippet emitted by `ai-memory install`; harness integration tests in `tests/harness_*.rs` covering both 5-tool default and full-profile loading paths.
+- **Track E — Discovery Gate T0 calibration cells (3 tasks).** Discovery Gate T1-T3 loader cells; T0 orchestration script driving 4 LLMs (Claude, Grok, Gemini, GPT) for ≥ 95% convergence verification on canonical phrasings; post-ship convergence verification scheduled against the released binary. See [`docs/v0.7/T0-ORCHESTRATION.md`](docs/v0.7/T0-ORCHESTRATION.md).
+- **Track F — Docs + release (6 tasks).** [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md) v0.6.4 → v0.7.0 guide; [`docs/whats-new-v07.html`](docs/whats-new-v07.html) what's-new page; [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md) RFC; `README.md` + `docs/ADMIN_GUIDE.md` updates; top-nav badges; this release-cut PR.
+- **Track G — Hook Pipeline (11 tasks, Bucket 0).** The substrate ships: `~/.config/ai-memory/hooks.toml` config file; **20 lifecycle event types** with payloads (`pre_store`, `post_store`, `pre_recall`, `post_recall`, `pre_search`, `post_search`, `pre_delete`, `post_delete`, `pre_promote`, `post_promote`, `pre_link`, `post_link`, `pre_consolidate`, `post_consolidate`, `pre_governance_decision`, `post_governance_decision`, `on_index_eviction`, `pre_archive`, `pre_transcript_store`, `post_transcript_store`); `ExecExecutor` + `DaemonExecutor` JSON-stdio IPC; decision types (`Allow`/`Deny`/`Modify`/`Defer`); chain ordering with priority; per-event timeouts; hot reload on `hooks.toml` mtime change; `on_index_eviction` for HNSW/cache eviction observability; reranker batching for concurrent recall; `pre_recall` daemon-mode hook; **R3 auto-link reference detector** as a reference hook binary.
+- **Track H — Ed25519 Attested Identity (6 tasks, Bucket 1).** `ai-memory identity generate` CLI mints per-agent Ed25519 keypairs; outbound link signing fills the v0.6.3 `memory_links.signature` "dead column"; inbound signature verification on every link write; `attest_level` enum (`unsigned` / `signed` / `verified` / `rejected`); `memory_verify` MCP tool surfaces signature state on demand; **append-only `signed_events` audit table** with hash-chained provenance; end-to-end test pinning the full mint → sign → verify → audit cycle.
+- **Track I — Sidechain Transcripts (5 tasks, Bucket 1.7).** `memory_transcripts` schema (BLOB + zstd-3); `memory_transcript_links` join table; per-namespace TTL with exact-match → longest `prefix/*` → `*` → default-off precedence; `memory_replay` MCP tool reconstructs full conversation context from a transcript link; **R5 `pre_store` transcript-extraction reference hook** ships as a standalone Rust binary at `tools/transcript-extractor/` (kept out of the published crates.io upload via the parent `Cargo.toml`'s `include` allowlist).
+- **Track J — Apache AGE Acceleration (8 tasks, Bucket 2).** AGE detected at Postgres-SAL connect-time via `pg_extension` probe (logged-only fallback to CTE on missing extension or probe error); Cypher implementations of `kg_query`, `kg_timeline`, `kg_invalidate`, and **R2 `find_paths`**; dual-path tests gated on `AI_MEMORY_TEST_AGE_URL`; AGE / CTE per-query performance budgets with bench-time gate; `KgBackend { Cte, Age }` enum exposed via `Capabilities` (`kg_backend` field) for `ai-memory doctor` and `memory_capabilities`.
+- **Track K — A2A + Permissions + G1 cutline (11 tasks, Bucket 3).** **K1/G1 namespace-inheritance enforcement** (the mandatory cutline — `resolve_governance_policy` walks the namespace chain; first non-null policy wins); `pending_actions` timeout sweeper (closes the v0.6.3.1 `default_timeout_seconds` honesty disclosure); `permissions.mode` enforcement gate (defaults to `enforce` per F8); approval-event routing; `permissions.rule_summary` re-instated; A2A correlation IDs + ACK retries + TTL + replay protection; subscription DLQ + replay-from-cursor + HMAC; per-agent quotas with daily reset; unified permission pipeline (rules + modes + hooks → decision); approval API on **HTTP + SSE + MCP** with HMAC and `remember=forever`; `ai-memory governance migrate-to-permissions` translator CLI for upgrading v0.6.x governance configs.
+
+### Migration from v0.6.x
+
+- **From v0.6.4 (sqlite, staying on sqlite):** auto-migrates v20 → v28 on first start. See `docs/MIGRATION_v0.7.md` for the v0.6.4 → v0.7.0 surface delta.
+- **From v0.6.4 (sqlite, switching to postgres+AGE):** see `docs/migration-v0.7.0-postgres.md`. Provision postgres + AGE + pgvector → `ai-memory schema-init` → dry-run migrate → real migrate → verify → cutover.
+- **From v0.7-alpha (postgres at schema v15):** `ai-memory schema-init --upgrade` walks v15 → v28 idempotently.
+
+### Breaking changes
+
+- **F8 — `permissions.mode` defaults to `enforce`** (was `advisory`). Operators relying on default-permissive must opt back in via `[permissions] mode = "advisory"` in `config.toml`.
+- **F11 — `forget --pattern` / `forget --tier` without `--namespace`** require `--confirm-global`.
+
 
 > **Backward compatibility.** v3 capabilities are additive over v2; existing v0.6.4 SDKs continue to work against a v0.7.0 server. v0.6.4's `--profile core` 5-tool default surface is unchanged. The hook pipeline is **default off** — a v0.7.0 install with no `hooks.toml` behaves identically to v0.6.4 at the lifecycle layer. Schema migrations v20 → v22 (`audit_log` → `signed_events` → `memory_transcripts`) run automatically on first start and are idempotent.
 
@@ -790,6 +849,77 @@ Total: **214 passing scenarios** across six cells on the final
 certification run (v3r30 DO + local-docker r3).
 
 ## [Unreleased] — v0.6.1 + v0.7 tracks
+
+### v0.7.0 round-2-fixes folding (2026-05-11) — no v0.7.0.1, everything ships in v0.7.0
+
+Operator directive: there will be no v0.7.0.1 patch release. Items
+originally triaged for v0.7.0.1 fold into v0.7.0 directly.
+
+#### Fixed (closes via round-2-fixes)
+
+- **#318 MCP stdio writes bypass federation fanout** — new opt-in
+  `mcp_federation_forward_url` in `AppConfig`. When set, MCP
+  `memory_store` calls forward to the local HTTP daemon's
+  `POST /api/v1/memories`, which already runs
+  `broadcast_store_quorum`. Single-node MCP deployments are
+  unchanged when the config is unset. Closes the a2a-gate-r6
+  finding "30 MCP stdio writes persisted locally but zero rows
+  replicated to peers."
+- **#355 rustls-pemfile RUSTSEC-2025-0134 (unmaintained, transitive
+  via axum-server)** — bumped `axum-server 0.7 → 0.8`. The 0.8
+  release drops the rustls-pemfile dependency. `cargo audit` now
+  reports clean; `rustls-pemfile` is gone from `Cargo.lock`.
+- **#507 `config.toml` `db = "~/..."` not expanded** — `AppConfig::effective_db`
+  now expands leading `~` / `~/` to `$HOME` via a new private
+  `expand_tilde` helper. Daemon no longer reports
+  `warn db unavailable` against an existing DB at the
+  tilde-expanded location. Bare `~` resolves to `$HOME` itself;
+  `~user/` not supported.
+- **#625 E1/E2 orchestration scripts ported from bash to Rust** —
+  new standalone crates `tools/t0-orchestrate/` +
+  `tools/post-ship-converge/` producing the `ai-memory-t0` and
+  `ai-memory-post-ship-converge` binaries. The old
+  `scripts/t0-orchestrate.sh` and `scripts/post-ship-converge.sh`
+  are deleted. `tests/e1_orchestration_dry_run.rs` and
+  `tests/e2_post_ship_dry_run.rs` drop their `#![cfg(unix)]` gates
+  so Windows CI now validates the same dry-run envelope shape.
+- **L15 entrypoint wire** — `entrypoint.plan-c.sh` now writes
+  `auto_tag_model = "gemma3:4b"` to the daemon's `config.toml`
+  (env-overridable as `AI_MEMORY_AUTO_TAG_MODEL`). Closes the Plan
+  C R4 finding `H8: LLM call (auto_tag) exceeded 30s timeout`
+  caused by Gemma 4 e4b thinking-mode generating 396-564 tokens
+  for a 5-tag prompt; gemma3:4b finishes the same prompt in
+  ~0.7s.
+- **Postgres SAL `consolidate` upsert** — the prior implementation
+  was a plain `INSERT INTO memories`, which exploded with
+  `duplicate key value violates unique constraint
+  "memories_title_ns_uidx"` when an operator re-ran a consolidate
+  at the same `(title, namespace)` (common across repeat cert
+  runs against the same persistent postgres database). Rewrote as
+  `ON CONFLICT (title, namespace) DO UPDATE` matching the rest of
+  the adapter's upsert contract; `RETURNING id` returns the
+  existing id on conflict. Surfaced by Plan C R4 cert S5 failure;
+  reproduced with daemon log
+  `ERROR ai_memory::handlers: store backend error: backend
+  unavailable: postgres: consolidate insert: error returned from
+  database: duplicate key value violates unique constraint
+  "memories_title_ns_uidx"`.
+- **No-sal build break in `src/federation.rs`** — `spawn_catchup_loop`
+  unconditionally called `spawn_catchup_loop_with_store`, which is
+  `#[cfg(feature = "sal")]`-gated. Surfaced by the #625 port
+  subagent. Fix: cfg-branch the body so the sqlite-only build
+  goes through `catchup_once` directly.
+
+#### Documentation
+
+- Closed 12 v0.7.0 ship-tracker issues in one batch with a uniform
+  "Closed by v0.7.0 ship sequence" comment — #637 (Round-2 master),
+  #638 (F6 LLM-dispatch deadlock), #639 (F7 agent_quotas bypass),
+  #640 (F8/F11/F12 secure-by-default), #641 (F13-F16 capabilities
+  drift), #642 (F17/F18 find_paths surface), #646 (F6 SQL-view
+  deferral), #647 (postgres+AGE scope tracker), #649 (Wave 4 live
+  A2A re-validation), #635 (ship-readiness report), #508/#509
+  (Grok Prime-Directive assessments).
 
 ### Added — v0.7 attested-cortex (Track H, Task H1)
 

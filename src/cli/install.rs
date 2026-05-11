@@ -2112,6 +2112,19 @@ mod tests {
         // emit + readback this loop performs. Observed as flaky
         // assertion at `assert!(body.contains(harness))` under
         // `cargo test` default `--test-threads=N` on Linux + macOS CI.
+        //
+        // v0.7.0 pre-cert audit: confirmed each rendered snippet fits
+        // ~173–183 chars/4 tokens against the 200-token ceiling
+        // enforced by `assert_snippet_token_budget`. Headroom is
+        // intentionally tight — when adding a new shared anchor or a
+        // longer per-harness hint, recompute the worst-case render
+        // length first (the longest body is currently `claude-code`
+        // because of the ToolSearch hint). A budget overshoot here is
+        // load-bearing: the snippet ships verbatim into every
+        // downstream harness's system prompt, so a regression
+        // silently eats their context window. If you trip this
+        // assertion, trim the offending bullet — do NOT bump the
+        // budget without a spec change.
         let _g = snippet_env_lock().lock().unwrap_or_else(|e| e.into_inner());
         for target in [
             Target::ClaudeCode,

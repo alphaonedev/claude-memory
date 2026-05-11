@@ -24,6 +24,86 @@ const NOMIC_OLLAMA_MODEL: &str = "nomic-embed-text";
 #[allow(dead_code)]
 const NOMIC_DIM: usize = 768;
 
+// ---------------------------------------------------------------------------
+// v0.7.0 F6 — EmbedStatus surface
+// ---------------------------------------------------------------------------
+//
+// The store path commits the row at HTTP 201 even when the embedder
+// silently skips/fails (e.g. >64KB content per F10, or ollama dead per
+// F6). Prior to F6 this only emitted a WARN log — the caller had no
+// way to learn that the row was indexed-without-embedding. F6 introduces
+// `EmbedStatus` and `Embedder::embed_with_status` so the caller can
+// surface the outcome on the response. The HTTP wiring lives in F10
+// (Fix-Agent β); this module exposes the producer side only.
+//
+// `Skipped` and `Failed` carry a reason string so operators see the
+// actual condition (e.g. "content >65536 bytes", "ollama timeout").
+
+/// v0.7.0 F6 — outcome of a single embedding call. Returned by
+/// [`Embedder::embed_with_status`] alongside the (possibly absent)
+/// embedding vector.
+///
+/// * `Indexed` — vector produced and ready to persist.
+/// * `Skipped(reason)` — caller-policy skip (e.g. content too long for
+///   the configured embedder). The row should still be stored without
+///   an embedding; recall will fall back to keyword for that row.
+/// * `Failed(reason)` — embedder errored at runtime (ollama down, model
+///   load failure, …). Same downstream behaviour as `Skipped` —
+///   keyword-only recall — but operationally distinguishable. Callers
+///   that care about freshness can re-issue the embed later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EmbedStatus {
+    Indexed,
+    Skipped(String),
+    Failed(String),
+}
+
+impl EmbedStatus {
+    /// Static label used in API surfaces and logs.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Indexed => "indexed",
+            Self::Skipped(_) => "skipped",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    /// True when the row has no usable embedding — caller should fall
+    /// back to keyword recall for that row.
+    #[must_use]
+    pub fn is_degraded(&self) -> bool {
+        !matches!(self, Self::Indexed)
+    }
+
+    /// Human-readable reason. Empty string for `Indexed`.
+    #[must_use]
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Indexed => "",
+            Self::Skipped(r) | Self::Failed(r) => r.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for EmbedStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Indexed => write!(f, "indexed"),
+            Self::Skipped(r) => write!(f, "skipped: {r}"),
+            Self::Failed(r) => write!(f, "failed: {r}"),
+        }
+    }
+}
+
+/// v0.7.0 F6 — soft cap on the input size handed to the embedder.
+/// 64 KiB matches the F10 store-path threshold so a single content
+/// blob that the embedder can't realistically process is reported as
+/// `Skipped("content > 65536 bytes")` rather than blowing up the
+/// chat/embed RPC. Operators who want larger embeddings can grow this
+/// constant alongside the F10 HTTP threshold.
+pub const EMBED_MAX_BYTES: usize = 64 * 1024;
+
 /// Semantic embedding engine supporting multiple backends.
 ///
 /// - **Local** (candle): all-MiniLM-L6-v2, 384-dim. Used at the semantic tier.
@@ -157,6 +237,46 @@ impl Embedder {
                 Self::embed_local(&model_guard, tokenizer, device, text)
             }
             Self::Ollama { client, model_name } => client.embed_text(text, model_name),
+        }
+    }
+
+    /// v0.7.0 F6 — generate an embedding and report the outcome.
+    ///
+    /// Combines the existing [`Embedder::embed`] call with an
+    /// [`EmbedStatus`] tag so the caller (HTTP store path, MCP store
+    /// path, sync ingestion, …) can surface a structured signal on the
+    /// response when the embedder skipped or errored. Behaviour:
+    ///
+    /// * Empty input → `(None, Skipped("empty content"))`
+    /// * Input larger than [`EMBED_MAX_BYTES`] → `(None, Skipped(reason))`
+    /// * Embedder errors → `(None, Failed(reason))`
+    /// * Otherwise → `(Some(vec), Indexed)`
+    ///
+    /// Callers that don't care about the status keep using
+    /// [`Embedder::embed`]; this is the new opt-in API.
+    pub fn embed_with_status(&self, text: &str) -> (Option<Vec<f32>>, EmbedStatus) {
+        if text.is_empty() {
+            return (None, EmbedStatus::Skipped("empty content".to_string()));
+        }
+        if text.len() > EMBED_MAX_BYTES {
+            let reason = format!(
+                "content {} bytes exceeds embed cap {} bytes",
+                text.len(),
+                EMBED_MAX_BYTES
+            );
+            return (None, EmbedStatus::Skipped(reason));
+        }
+        match self.embed(text) {
+            Ok(v) if v.is_empty() => (
+                None,
+                EmbedStatus::Failed("embedder returned empty vector".to_string()),
+            ),
+            Ok(v) => (Some(v), EmbedStatus::Indexed),
+            Err(e) => {
+                let reason = format!("{e:#}");
+                tracing::warn!(target: "embeddings.degrade", reason = %reason, "embed_with_status: embedder failed");
+                (None, EmbedStatus::Failed(reason))
+            }
         }
     }
 

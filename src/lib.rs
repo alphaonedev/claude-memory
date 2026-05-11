@@ -97,11 +97,65 @@ pub fn build_router(
     api_key_state: handlers::ApiKeyState,
     app_state: handlers::AppState,
 ) -> axum::Router {
+    build_router_with_timeout(
+        api_key_state,
+        app_state,
+        std::time::Duration::from_secs(config::DEFAULT_REQUEST_TIMEOUT_SECS),
+    )
+}
+
+/// v0.7.0 H7 (round-2) — variant of [`build_router`] that takes an
+/// explicit per-request wall-clock timeout. Composes a per-request
+/// timeout middleware so a slow-POST (slowloris-style) attacker
+/// cannot keep a handler scope alive indefinitely. Requests that
+/// exceed the timeout get a `504 Gateway Timeout` response with a
+/// `{"error":"request timed out"}` body. The production daemon
+/// calls this with the value resolved from
+/// `AppConfig::effective_request_timeout_secs` (default 60 s); tests
+/// pass a short timeout to drive the timeout edge directly.
+///
+/// Implementation: a custom axum middleware wraps every request in
+/// `tokio::time::timeout`, returning the structured timeout response
+/// when the future does not resolve in time. This avoids enabling
+/// tower-http's `timeout` feature (which would require a
+/// `Cargo.toml` change). The behaviour matches what
+/// `tower::timeout::TimeoutLayer` would provide modulo the status
+/// code (we return 504 to stay distinguishable from request-shape
+/// 400s).
+pub fn build_router_with_timeout(
+    api_key_state: handlers::ApiKeyState,
+    app_state: handlers::AppState,
+    request_timeout: std::time::Duration,
+) -> axum::Router {
     use axum::{
         extract::DefaultBodyLimit,
         routing::{delete, get, post, put},
     };
     use tower_http::{cors::CorsLayer, trace::TraceLayer};
+
+    // Timeout middleware: wraps each downstream future in
+    // `tokio::time::timeout`. The closure captures the `Duration` by
+    // value so it lives for the router's lifetime.
+    let timeout = request_timeout;
+    let timeout_layer = axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| async move {
+            use axum::response::IntoResponse;
+            match tokio::time::timeout(timeout, next.run(req)).await {
+                Ok(resp) => resp,
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = timeout.as_secs(),
+                        "H7: request exceeded per-request wall-clock timeout — returning 504"
+                    );
+                    (
+                        axum::http::StatusCode::GATEWAY_TIMEOUT,
+                        axum::Json(serde_json::json!({"error": "request timed out"})),
+                    )
+                        .into_response()
+                }
+            }
+        },
+    );
 
     axum::Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -128,6 +182,26 @@ pub fn build_router(
         .route(
             "/api/v1/contradictions",
             get(handlers::detect_contradictions),
+        )
+        // v0.7.0 L6 — S51 autonomous-tier surface. `auto_tag` and
+        // `expand_query` are the two REST mirrors of the corresponding
+        // MCP tools; they were never wired before L6 (S51 expected
+        // them and got 404). Both 503 when no LLM is configured.
+        .route("/api/v1/auto_tag", post(handlers::auto_tag_handler))
+        .route("/api/v1/expand_query", post(handlers::expand_query_handler))
+        // v0.7.0 L9 — HTTP parity for the MCP `tools/list` JSON-RPC
+        // method. Surfaces the canonical tool catalog under the
+        // daemon's resolved Profile. Backend-agnostic — pure config
+        // enumeration, no DB access — so postgres and sqlite return
+        // identical bodies (NHI-D-501-postgres-traits).
+        .route("/api/v1/tools/list", get(handlers::tools_list))
+        // v0.7.0 L10 — HTTP parity for the MCP `memory_load_family`
+        // tool. Returns top-K memories tagged with the requested
+        // family on both sqlite and postgres backends
+        // (NHI-D-501-postgres-loadfamily).
+        .route(
+            "/api/v1/memory_load_family",
+            post(handlers::load_family_handler),
         )
         .route("/api/v1/links", post(handlers::create_link))
         .route("/api/v1/links", delete(handlers::delete_link))
@@ -177,6 +251,12 @@ pub fn build_router(
         .route("/api/v1/kg/invalidate", post(handlers::kg_invalidate))
         // Pillar 2 / Stream C — KG outbound traversal.
         .route("/api/v1/kg/query", post(handlers::kg_query))
+        // v0.7.0 Continuation 6 — KG path enumeration (S65).
+        .route("/api/v1/kg/find_paths", post(handlers::kg_find_paths))
+        // v0.7.0 Continuation 6 — link signature verification (S52).
+        .route("/api/v1/links/verify", post(handlers::verify_link_handler))
+        // v0.7.0 Continuation 6 — per-agent quota status (S61).
+        .route("/api/v1/quota/status", post(handlers::quota_status_handler))
         .route("/api/v1/stats", get(handlers::get_stats))
         .route("/api/v1/gc", post(handlers::run_gc))
         .route("/api/v1/export", get(handlers::export_memories))
@@ -222,8 +302,146 @@ pub fn build_router(
             api_key_state,
             handlers::api_key_auth,
         ))
+        // v0.7.0 Wave-3 Continuation — postgres route gate. On sqlite
+        // deployments this is a pure pass-through. On postgres-backed
+        // daemons it short-circuits any un-migrated endpoint with a
+        // structured 501 envelope so operators never see silent data
+        // corruption from the unused `app.db` scratch connection.
+        // See `handlers::postgres_endpoint_supported` for the allow-list.
+        .layer(axum::middleware::from_fn_with_state(
+            app_state.clone(),
+            postgres_route_gate_layer,
+        ))
         .layer(TraceLayer::new_for_http())
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(CorsLayer::new())
+        // H7 (v0.7.0 round-2) — per-request wall-clock timeout.
+        // Applied outermost (last in the layer stack) so it bounds
+        // every other middleware: the API-key auth, the postgres
+        // gate, and the body decoder all run inside the timeout
+        // window. Default 60 s; configurable via
+        // `AppConfig::request_timeout_secs`.
+        .layer(timeout_layer)
         .with_state(app_state)
+}
+
+/// v0.7.0 Wave-3 Continuation — adapter that picks up the appropriate
+/// gate function depending on whether the binary was built with the
+/// `sal` feature flag. Standard builds compile this to a no-op pass-
+/// through closure so the wire shape stays identical to pre-Wave-3.
+#[cfg(feature = "sal")]
+async fn postgres_route_gate_layer(
+    state: axum::extract::State<handlers::AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    handlers::postgres_route_gate(state, req, next).await
+}
+
+#[cfg(not(feature = "sal"))]
+async fn postgres_route_gate_layer(
+    _state: axum::extract::State<handlers::AppState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    next.run(req).await
+}
+
+// ---------------------------------------------------------------------------
+// H7 (v0.7.0 round-2) — per-request HTTP timeout tests.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod h7_timeout_tests {
+    use std::time::Duration;
+
+    use axum::{Router, body::Body, http::Request, response::IntoResponse, routing::post};
+    use tower::ServiceExt as _;
+
+    /// The timeout middleware sandwich: a thin Router with a single
+    /// slow handler that always sleeps past the configured timeout.
+    /// Exercises the same `axum::middleware::from_fn` closure shape
+    /// `build_router_with_timeout` builds, without standing up the
+    /// full AppState graph.
+    fn timeout_router(timeout: Duration, handler_sleep: Duration) -> Router {
+        async fn slow_handler(_body: axum::body::Bytes) -> impl IntoResponse {
+            // Sleep duration is captured below via a small wrapper to
+            // keep the closure shape inferrable.
+            axum::http::StatusCode::OK
+        }
+        let timeout_layer = axum::middleware::from_fn(
+            move |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                match tokio::time::timeout(timeout, next.run(req)).await {
+                    Ok(resp) => resp,
+                    Err(_) => (
+                        axum::http::StatusCode::GATEWAY_TIMEOUT,
+                        axum::Json(serde_json::json!({"error": "request timed out"})),
+                    )
+                        .into_response(),
+                }
+            },
+        );
+        // The actual slow handler — sleeps `handler_sleep` then 200.
+        Router::new()
+            .route(
+                "/slow",
+                post(move |_b: axum::body::Bytes| async move {
+                    tokio::time::sleep(handler_sleep).await;
+                    slow_handler(axum::body::Bytes::new()).await
+                }),
+            )
+            .layer(timeout_layer)
+    }
+
+    #[tokio::test]
+    async fn slow_handler_returns_504_when_timeout_fires() {
+        // Wire: middleware timeout=50ms, handler sleeps 500ms → 504.
+        // Mirrors the production contract: a client that pumps a body
+        // slow-loris-style past the configured ceiling sees a
+        // structured timeout response instead of the daemon holding
+        // the scope open forever.
+        let router = timeout_router(Duration::from_millis(50), Duration::from_millis(500));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/slow")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // tower::timeout-style middleware returns 504 Gateway Timeout
+        // when the inner future times out. axum's `INTERNAL_SERVER_ERROR`
+        // shape would also be acceptable per the round-2 contract
+        // ("408 or 500 — whatever the timeout produces"); we picked 504
+        // deliberately because it stays distinguishable from
+        // request-shape 400s and never collides with the inner
+        // handler's own status codes.
+        assert!(
+            resp.status() == axum::http::StatusCode::GATEWAY_TIMEOUT
+                || resp.status() == axum::http::StatusCode::REQUEST_TIMEOUT
+                || resp.status() == axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "expected a timeout-style response code, got {}",
+            resp.status()
+        );
+    }
+
+    #[tokio::test]
+    async fn fast_handler_passes_through_when_timeout_does_not_fire() {
+        // Wire: middleware timeout=1s, handler sleeps 10ms → 200.
+        let router = timeout_router(Duration::from_secs(1), Duration::from_millis(10));
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/slow")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+    }
 }

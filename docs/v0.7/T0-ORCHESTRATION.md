@@ -2,8 +2,12 @@
 
 > **Status:** SHIPPING with v0.7.0 — E1
 > **Date:** 2026-05-06
-> **Script:** [`scripts/t0-orchestrate.sh`](../../scripts/t0-orchestrate.sh)
+> **Binary:** [`tools/t0-orchestrate/`](../../tools/t0-orchestrate/) → `ai-memory-t0`
 > **CI counterpart:** [`tests/calibration_t0.rs`](../../tests/calibration_t0.rs)
+>
+> **Cross-platform port (#625):** the original `scripts/t0-orchestrate.sh`
+> was reimplemented as a standalone Rust binary so the dry-run harness
+> check runs on every CI platform (Windows runners ship no bash).
 
 The Discovery Gate **T0 calibration cells** in
 `tests/calibration_t0.rs` pin the canonical capabilities-v3 phrasings
@@ -34,7 +38,8 @@ or hook events are added by E1.
 
 The four-vendor coverage matches the v0.6.5/v0.7.0 NHI Discovery Gate
 observation matrix. Adding a fifth vendor is a one-line append to the
-`LLMS=(…)` array in the script.
+`LLMS` constant in
+[`tools/t0-orchestrate/src/main.rs`](../../tools/t0-orchestrate/src/main.rs).
 
 ---
 
@@ -46,13 +51,16 @@ export OPENAI_API_KEY=sk-...
 export GOOGLE_API_KEY=...
 export XAI_API_KEY=xai-...
 
-# Build the local substrate so the script can pull live capabilities-v3
-# payloads to use as system context for each LLM call.
+# Build the local substrate so the orchestrator can pull live
+# capabilities-v3 payloads to use as system context for each LLM call.
 cargo build --release
+
+# Build the orchestrator binary itself.
+cargo build --manifest-path tools/t0-orchestrate/Cargo.toml --release
 ```
 
-Dependencies for live mode: `bash`, `curl`, `jq`. (Dry-run mode needs
-only `bash`.)
+The orchestrator binary is pure Rust; live mode uses the in-process
+`reqwest` HTTP client. No external `curl` or `jq` dependency.
 
 ---
 
@@ -60,15 +68,18 @@ only `bash`.)
 
 ```bash
 # Live run — all four LLMs, six Discovery Gate questions each.
-scripts/t0-orchestrate.sh
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml --release --
 
 # Restrict to one provider (debugging, partial outages, key rotation).
-scripts/t0-orchestrate.sh --llm claude
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml --release -- --llm claude
 
 # Dry-run — no API calls, prints the plan + result file paths.
 # Used by tests/e1_orchestration_dry_run.rs to validate harness
 # structure without spending API tokens or requiring keys.
-scripts/t0-orchestrate.sh --dry-run
+cargo run --manifest-path tools/t0-orchestrate/Cargo.toml --release -- --dry-run
+
+# Once built, you can invoke the binary directly as well:
+tools/t0-orchestrate/target/release/ai-memory-t0 --dry-run
 ```
 
 Skipped LLMs (env var unset) print `skip <llm> — <ENV> unset` and
@@ -138,7 +149,9 @@ convergence on the canonical phrasings:
    re-confirm LLM convergence on the new numbers).
 3. A frontier model rev lands on one of the four covered providers
    (Claude N+1, GPT N+1, Gemini N+1, Grok N+1). Add the new model id
-   to the `LLMS=(…)` array and re-run.
+   to the `LLMS` constant in
+   [`tools/t0-orchestrate/src/main.rs`](../../tools/t0-orchestrate/src/main.rs)
+   and re-run.
 4. The per-tool short descriptions ship from C2 (orchestration becomes
    the load-bearing check that LLMs render those descriptions sanely
    to end users).

@@ -1,0 +1,114 @@
+# Plan C — ai-memory daemon container (autonomous tier, v0.7.0-with-L1-L11 patches).
+# Co-located in v07-fixes/ so it uses plain `COPY .` and works under legacy
+# DOCKER_BUILDKIT=0.
+#
+# Option-4 slim build (2026-05-11):
+#   • Builder stage pre-builds the daemon binary + test binaries (S71, S72)
+#     + bench binary (S76) with all dev/bench deps cached in target/.
+#   • Runtime stage COPYs ONLY the resulting executables (~30 MB daemon +
+#     ~20 MB per test + ~5 MB bench) — no cargo, no rustup, no source tree.
+#   • Net image: ~350 MB (vs 3.87 GB when shipping the toolchain).
+#
+# Usage:
+#   cd /Users/fate/v07/v07-fixes
+#   DOCKER_BUILDKIT=0 docker build -f Dockerfile.plan-c -t ai-memory-plan-c:v070fix-r3 .
+
+# M6 — base images pinned by digest. Floating tags (`rust:1.95-bookworm`,
+# `debian:bookworm-slim`) move silently when Docker Hub re-publishes the
+# tag, which can shift glibc / OpenSSL / build tooling under a release
+# without bumping the Dockerfile. The digest below is the multi-arch
+# index digest captured 2026-05-11 via
+#   curl -sI -H "Accept: application/vnd.oci.image.index.v1+json" \
+#        -H "Authorization: Bearer $TOKEN" \
+#        "https://registry-1.docker.io/v2/library/rust/manifests/1.95-bookworm" \
+#        | awk -F': ' '/docker-content-digest/{print $2}'
+# Operators upgrading the toolchain MUST re-run the curl above and update
+# both the tag (1.95 → 1.x) AND the @sha256 digest together.
+FROM rust:1.95-bookworm@sha256:503651ea31e66ecb74623beabde781059a5978df1595a9e8ed03974d5fec1bf0 AS builder
+
+ARG CARGO_FEATURES=sal-postgres
+ENV CARGO_TARGET_DIR=/opt/ai-memory-src/target
+
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      build-essential pkg-config libssl-dev git curl ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/ai-memory-src
+
+COPY . /opt/ai-memory-src/
+
+# 1) Daemon release binary.
+RUN echo "=== building daemon (release) ===" && \
+    cat Cargo.toml | grep -E "^name|^version" | head -3 && \
+    cargo build --release --features ${CARGO_FEATURES} 2>&1 | tail -10
+
+RUN ./target/release/ai-memory --version
+
+# 2) Test binaries: --no-run pre-builds without executing. Uses --release
+#    profile to match the daemon build's working target-feature flags —
+#    the default dev/test profile hits a gemm-f16 inline-asm compile
+#    error on aarch64 (NEON fp16 instructions require FEAT_FP16 which is
+#    on by default for release but not dev). Release-profile test binaries
+#    are also faster at runtime so cert wall time drops.
+RUN echo "=== pre-building test binaries (S71, S72) ===" && \
+    cargo test --no-run --release --features sal-postgres,sal \
+      --test age_cte_equivalence \
+      --test sal_contract 2>&1 | tail -10 && \
+    mkdir -p /opt/built-tests && \
+    cp "$(find target/release/deps -maxdepth 1 -type f -executable -name 'age_cte_equivalence-*' ! -name '*.d' ! -name '*.rmeta' | head -1)" /opt/built-tests/age_cte_equivalence && \
+    cp "$(find target/release/deps -maxdepth 1 -type f -executable -name 'sal_contract-*' ! -name '*.d' ! -name '*.rmeta' | head -1)" /opt/built-tests/sal_contract && \
+    chmod +x /opt/built-tests/* && \
+    ls -la /opt/built-tests/
+
+# 3) Bench binary (S76 age_vs_cte). `cargo bench --no-run` produces a
+#    release-profile executable under target/release/deps/<bench>-<hash>.
+RUN echo "=== pre-building bench (S76) ===" && \
+    cargo bench --no-run --features sal-postgres --bench age_vs_cte 2>&1 | tail -10 && \
+    mkdir -p /opt/built-benches && \
+    cp "$(find target/release/deps -maxdepth 1 -type f -executable -name 'age_vs_cte-*' ! -name '*.d' ! -name '*.rmeta' | head -1)" /opt/built-benches/age_vs_cte && \
+    chmod +x /opt/built-benches/* && \
+    ls -la /opt/built-benches/
+
+# Smoke each pre-built test runs --help without DB connection
+RUN /opt/built-tests/age_cte_equivalence --help 2>&1 | head -3 || true && \
+    /opt/built-tests/sal_contract --help 2>&1 | head -3 || true
+
+#######################################################################
+
+# M6 — see digest-pin rationale on the builder stage above. Digest
+# captured 2026-05-11 for `debian:bookworm-slim` (multi-arch index).
+FROM debian:bookworm-slim@sha256:67b30a61dc87758f0caf819646104f29ecbda97d920aaf5edc834128ac8493d3 AS runtime
+
+# Runtime deps:
+#   ca-certificates, libssl3, libpq5, curl, jq, postgresql-client — daemon HTTP + db client
+#   python3 (no-recommends) — S57/S78 audit-chain monotonicity probe (stdlib only)
+RUN apt-get update -qq && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+      ca-certificates libssl3 libpq5 curl jq postgresql-client \
+      python3 && \
+    rm -rf /var/lib/apt/lists/*
+
+# Daemon binary
+COPY --from=builder /opt/ai-memory-src/target/release/ai-memory /usr/local/bin/ai-memory
+
+# Pre-built test binaries (S71, S72) — invoke directly, no cargo needed.
+# Scenarios call /opt/tests/<name> with same env vars as before.
+COPY --from=builder /opt/built-tests/age_cte_equivalence /opt/tests/age_cte_equivalence
+COPY --from=builder /opt/built-tests/sal_contract       /opt/tests/sal_contract
+
+# Pre-built bench binary (S76).
+COPY --from=builder /opt/built-benches/age_vs_cte /opt/benches/age_vs_cte
+
+RUN chmod +x /opt/tests/* /opt/benches/* && \
+    mkdir -p /var/lib/ai-memory /var/log/ai-memory/audit /etc/ai-memory \
+             /root/.config/ai-memory/keys \
+             /opt/ai-memory-src/target/bench && \
+    chmod 0700 /root/.config/ai-memory/keys && \
+    chmod 0777 /opt/ai-memory-src/target/bench
+
+COPY entrypoint.plan-c.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+EXPOSE 19077
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

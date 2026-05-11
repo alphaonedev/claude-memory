@@ -27,8 +27,12 @@ use crate::identity::{self, keypair};
 
 #[derive(Args)]
 pub struct IdentityArgs {
-    /// Override the default key storage directory
-    /// (`<config>/ai-memory/keys`).
+    /// Override the default key storage directory.
+    /// Default by platform:
+    ///   Linux:   `~/.config/ai-memory/keys/`,
+    ///   macOS:   `~/Library/Application Support/ai-memory/keys/`,
+    ///   Windows: `%APPDATA%\ai-memory\keys\`.
+    /// Honors `AI_MEMORY_KEY_DIR` env var when this flag is omitted.
     #[arg(long, value_name = "PATH", global = true)]
     pub key_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -45,11 +49,18 @@ pub enum IdentityAction {
         /// rest of the CLI synthesizes (e.g. `host:<host>:pid-<pid>-<uuid8>`).
         #[arg(long)]
         agent_id: Option<String>,
-        /// Refuse to overwrite an existing keypair for `--agent-id`.
-        /// Without this flag a `generate` for an existing id replaces
-        /// the on-disk material — useful for rotation; dangerous for
-        /// fingers.
+        /// Allow overwriting an existing keypair for `--agent-id`.
+        /// Without this flag, `generate` refuses on an existing id —
+        /// the safe default to prevent a typo from silently rotating
+        /// (and irrecoverably destroying) a daemon or peer key. Pass
+        /// `--force` only when you intend to rotate.
         #[arg(long, default_value_t = false)]
+        force: bool,
+        /// Deprecated alias retained for backward compatibility with
+        /// the v0.7.0 pre-Round-4 flag surface. The default behavior
+        /// is now refuse-on-existing; this flag is a no-op. Use
+        /// `--force` to opt INTO overwrite.
+        #[arg(long, default_value_t = false, hide = true)]
         no_overwrite: bool,
     },
     /// Import a keypair from on-disk files written by another tool.
@@ -109,8 +120,9 @@ pub fn run(args: IdentityArgs, json_out: bool, out: &mut CliOutput<'_>) -> Resul
     match args.action {
         IdentityAction::Generate {
             agent_id,
-            no_overwrite,
-        } => generate(&dir, agent_id.as_deref(), no_overwrite, json_out, out),
+            force,
+            no_overwrite: _,
+        } => generate(&dir, agent_id.as_deref(), force, json_out, out),
         IdentityAction::Import {
             agent_id,
             public,
@@ -124,15 +136,21 @@ pub fn run(args: IdentityArgs, json_out: bool, out: &mut CliOutput<'_>) -> Resul
 fn generate(
     dir: &Path,
     explicit_agent_id: Option<&str>,
-    no_overwrite: bool,
+    force: bool,
     json_out: bool,
     out: &mut CliOutput<'_>,
 ) -> Result<()> {
     let id = resolve_id(explicit_agent_id)?;
     let pub_path = dir.join(format!("{id}.pub"));
-    if no_overwrite && pub_path.exists() {
+    // Round-4 — refuse-by-default. The pre-Round-4 default was OVERWRITE,
+    // which let a typo silently rotate (and destroy) a daemon or peer
+    // keypair. Now `generate` refuses if a key already exists; the
+    // operator must pass `--force` to opt into rotation. The legacy
+    // `--no-overwrite` flag is preserved as a hidden no-op for
+    // backward compatibility with scripts that invoked it.
+    if !force && pub_path.exists() {
         bail!(
-            "keypair for {id} already exists at {} (pass without --no-overwrite to rotate)",
+            "keypair for {id} already exists at {} (pass --force to rotate; refused by default to prevent accidental key overwrite)",
             pub_path.display()
         );
     }
@@ -298,6 +316,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },
@@ -355,7 +374,12 @@ mod tests {
     }
 
     #[test]
-    fn generate_no_overwrite_refuses_existing() {
+    fn generate_refuses_existing_without_force() {
+        // Round-4 — refuse-by-default semantics. A second `generate`
+        // for an existing agent_id MUST fail unless `--force` is
+        // passed. The legacy `--no-overwrite` flag is preserved as a
+        // hidden no-op for backward compatibility with v0.7.0
+        // pre-Round-4 scripts.
         let (mut env, dir) = fresh_env();
         let dir_path = dir.path().to_path_buf();
         // First generate
@@ -366,6 +390,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },
@@ -376,15 +401,16 @@ mod tests {
         }
         env.stdout.clear();
         env.stderr.clear();
-        // Second generate with --no-overwrite should error.
+        // Second generate WITHOUT --force should error (refuse-by-default).
         let result = {
             let mut out = env.output();
             run(
                 IdentityArgs {
-                    key_dir: Some(dir_path),
+                    key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
-                        no_overwrite: true,
+                        force: false,
+                        no_overwrite: false,
                     },
                 },
                 false,
@@ -394,6 +420,35 @@ mod tests {
         let err = result.unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("already exists"), "got: {msg}");
+        assert!(
+            msg.contains("--force"),
+            "error message should guide operator toward --force, got: {msg}"
+        );
+
+        // Third generate WITH --force should succeed (intentional rotation).
+        env.stdout.clear();
+        env.stderr.clear();
+        {
+            let mut out = env.output();
+            run(
+                IdentityArgs {
+                    key_dir: Some(dir_path),
+                    action: IdentityAction::Generate {
+                        agent_id: Some("alice".to_string()),
+                        force: true,
+                        no_overwrite: false,
+                    },
+                },
+                false,
+                &mut out,
+            )
+            .unwrap();
+        }
+        let stdout = env.stdout_str().to_string();
+        assert!(
+            stdout.contains("generated keypair for alice"),
+            "rotation with --force did not succeed: {stdout}"
+        );
     }
 
     #[test]
@@ -407,6 +462,7 @@ mod tests {
                     key_dir: Some(dir_path.clone()),
                     action: IdentityAction::Generate {
                         agent_id: Some("alice".to_string()),
+                        force: false,
                         no_overwrite: false,
                     },
                 },

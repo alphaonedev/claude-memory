@@ -321,6 +321,36 @@ pub async fn broadcast_store_quorum(
             detail: "tracker arc still referenced at finalise".to_string(),
         })?
         .into_inner();
+    // H9 (v0.7.0 round-2) — partial-quorum WARN. When the leader returns
+    // success (quorum met) but some configured peers never ack-ed inside
+    // the deadline, operators need to see the gap in logs before a
+    // follow-up sync cycle catches the lagging peer up. This is the
+    // canonical observation point: the tracker is finalised, the peer
+    // set is known, and the configured-vs-acked subtraction surfaces
+    // exactly which urls fell behind.
+    if tracker.finalise(Instant::now()).is_ok() {
+        let acked = tracker.acked_peer_ids();
+        let mut missing: Vec<String> = config
+            .peers
+            .iter()
+            .filter(|p| !acked.contains(&p.id))
+            .map(|p| p.sync_push_url.clone())
+            .collect();
+        if !missing.is_empty() {
+            missing.sort();
+            tracing::warn!(
+                memory_id = %mem.id,
+                n_missing = missing.len(),
+                peer_urls = ?missing,
+                "federation: quorum met but {} peer(s) did not ack: {:?}",
+                missing.len(),
+                missing,
+            );
+            crate::metrics::registry()
+                .federation_partial_quorum_total
+                .inc();
+        }
+    }
     Ok(tracker)
 }
 
@@ -1408,19 +1438,80 @@ pub fn spawn_catchup_loop(
     db: crate::handlers::Db,
     interval: Duration,
 ) -> tokio::task::JoinHandle<()> {
+    // Pre-existing no-sal build break (caught by the #625 port subagent
+    // 2026-05-11): the historical bootstrap path forwarded through
+    // `spawn_catchup_loop_with_store`, which is `#[cfg(feature = "sal")]`
+    // only. With `sal` off the call site is unresolved. Inline the
+    // tokio::spawn loop here so the sqlite-only build compiles. Under
+    // `sal` we still route through the store-aware variant so
+    // postgres-backed daemons keep the M3 routing fix.
+    #[cfg(feature = "sal")]
+    {
+        spawn_catchup_loop_with_store(config, db, None, interval)
+    }
+    #[cfg(not(feature = "sal"))]
+    {
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            loop {
+                catchup_once(&config, &db).await;
+                tokio::time::sleep(interval).await;
+            }
+        })
+    }
+}
+
+/// v0.7.0 M3 — same as [`spawn_catchup_loop`] but accepts an optional
+/// SAL-trait store handle. When `store` is `Some`, applied memories are
+/// written through `store.apply_remote_memory` (which routes through the
+/// active backend — postgres on `--store-url postgres://` deployments,
+/// sqlite otherwise). When `None`, the legacy `db::insert_if_newer` path
+/// over the shared rusqlite connection is preserved verbatim.
+///
+/// The split exists so the bootstrap can keep the historical
+/// `spawn_catchup_loop` signature (used by tests) intact while
+/// postgres-backed daemons get the routing fix.
+#[cfg(feature = "sal")]
+pub fn spawn_catchup_loop_with_store(
+    config: FederationConfig,
+    db: crate::handlers::Db,
+    store: Option<Arc<dyn crate::store::MemoryStore>>,
+    interval: Duration,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Small upfront delay so the first catchup doesn't fire before the
         // HTTP server has bound — avoids spurious "connection refused" on
         // node-1 during rolling start of a fresh cluster.
         tokio::time::sleep(Duration::from_secs(5)).await;
         loop {
-            catchup_once(&config, &db).await;
+            catchup_once_with_store(&config, &db, store.as_ref()).await;
             tokio::time::sleep(interval).await;
         }
     })
 }
 
+/// Legacy two-arg wrapper preserved so existing tests + non-SAL builds
+/// keep dispatching through the sqlite path. Postgres-backed daemons
+/// should invoke [`catchup_once_with_store`] directly via
+/// [`spawn_catchup_loop_with_store`].
+#[cfg_attr(not(test), allow(dead_code))]
 async fn catchup_once(config: &FederationConfig, db: &crate::handlers::Db) {
+    #[cfg(feature = "sal")]
+    {
+        catchup_once_with_store(config, db, None).await;
+    }
+    #[cfg(not(feature = "sal"))]
+    {
+        catchup_once_legacy(config, db).await;
+    }
+}
+
+#[cfg(feature = "sal")]
+async fn catchup_once_with_store(
+    config: &FederationConfig,
+    db: &crate::handlers::Db,
+    store: Option<&Arc<dyn crate::store::MemoryStore>>,
+) {
     let local_id = config.sender_agent_id.clone();
     for peer in &config.peers {
         // Rebuild the peer's base URL from sync_push_url to get the
@@ -1433,6 +1524,154 @@ async fn catchup_once(config: &FederationConfig, db: &crate::handlers::Db) {
         // Load our local vector-clock entry for this peer so we only pull
         // the delta. First-time-ever runs with no prior clock pull a full
         // snapshot (capped below by ?limit=500 on the peer side).
+        let since_opt: Option<String> = {
+            let lock = db.lock().await;
+            match crate::db::sync_state_load(&lock.0, &local_id) {
+                Ok(clock) => clock.entries.get(&peer.id).cloned(),
+                Err(_) => None,
+            }
+        };
+
+        let url = match since_opt.as_deref() {
+            Some(s) => format!(
+                "{base}/api/v1/sync/since?since={}&peer={local_id}",
+                urlencoding_encode(s)
+            ),
+            None => format!("{base}/api/v1/sync/since?peer={local_id}"),
+        };
+
+        let resp = match config.client.get(&url).send().await {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                tracing::debug!(
+                    "catchup: peer {} returned HTTP {} — skipping this tick",
+                    peer.id,
+                    r.status()
+                );
+                continue;
+            }
+            Err(e) => {
+                tracing::debug!("catchup: peer {} unreachable: {e}", peer.id);
+                continue;
+            }
+        };
+
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!("catchup: peer {} returned unparseable body: {e}", peer.id);
+                continue;
+            }
+        };
+
+        let memories = match body.get("memories").and_then(|v| v.as_array()) {
+            Some(arr) => arr.clone(),
+            None => continue,
+        };
+
+        if memories.is_empty() {
+            continue;
+        }
+
+        let mut applied = 0usize;
+        let mut latest_ts: Option<String> = None;
+
+        // v0.7.0 M3 — when a SAL store handle is supplied (postgres-
+        // backed daemons) we dispatch each row through
+        // `store.apply_remote_memory`, which routes the write to the
+        // active backend instead of always landing in the local sqlite
+        // file. Default-None preserves the legacy behavior (sqlite via
+        // `db::insert_if_newer`) for daemons that don't yet have a SAL
+        // handle plumbed through (e.g. v0.6.x configurations).
+        if let Some(store) = store {
+            let ctx = crate::store::CallerContext::for_agent("federation-catchup");
+            for raw in &memories {
+                let mem: crate::models::Memory = match serde_json::from_value(raw.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("catchup: unparseable memory from peer {}: {e}", peer.id);
+                        continue;
+                    }
+                };
+                if crate::validate::validate_memory(&mem).is_err() {
+                    continue;
+                }
+                if latest_ts
+                    .as_deref()
+                    .is_none_or(|cur| mem.updated_at.as_str() > cur)
+                {
+                    latest_ts = Some(mem.updated_at.clone());
+                }
+                match store.apply_remote_memory(&ctx, &mem).await {
+                    Ok(_) => applied += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            "catchup: apply_remote_memory failed for peer {}: {e}",
+                            peer.id
+                        );
+                    }
+                }
+            }
+            if let Some(ts) = latest_ts.as_deref() {
+                let lock = db.lock().await;
+                if let Err(e) = crate::db::sync_state_observe(&lock.0, &local_id, &peer.id, ts) {
+                    tracing::warn!("catchup: sync_state_observe failed for {}: {e}", peer.id);
+                }
+            }
+        } else {
+            let lock = db.lock().await;
+            for raw in &memories {
+                let mem: crate::models::Memory = match serde_json::from_value(raw.clone()) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::warn!("catchup: unparseable memory from peer {}: {e}", peer.id);
+                        continue;
+                    }
+                };
+                if crate::validate::validate_memory(&mem).is_err() {
+                    continue;
+                }
+                if latest_ts
+                    .as_deref()
+                    .is_none_or(|cur| mem.updated_at.as_str() > cur)
+                {
+                    latest_ts = Some(mem.updated_at.clone());
+                }
+                if crate::db::insert_if_newer(&lock.0, &mem).is_ok() {
+                    applied += 1;
+                }
+            }
+            if let Some(ts) = latest_ts.as_deref()
+                && let Err(e) = crate::db::sync_state_observe(&lock.0, &local_id, &peer.id, ts)
+            {
+                tracing::warn!("catchup: sync_state_observe failed for {}: {e}", peer.id);
+            }
+        }
+
+        if applied > 0 {
+            tracing::info!(
+                "catchup: applied {applied} memories from peer {} (since={})",
+                peer.id,
+                since_opt.as_deref().unwrap_or("<full-snapshot>"),
+            );
+        }
+    }
+}
+
+/// v0.7.0 M3 — non-SAL fallback. Default sqlite-only path is preserved
+/// verbatim for builds without `--features sal`. The signature parallels
+/// the SAL variant minus the `store` parameter so callers compiled
+/// against the legacy posture continue to dispatch through the local
+/// rusqlite connection.
+#[cfg(not(feature = "sal"))]
+async fn catchup_once_legacy(config: &FederationConfig, db: &crate::handlers::Db) {
+    let local_id = config.sender_agent_id.clone();
+    for peer in &config.peers {
+        let base = peer
+            .sync_push_url
+            .trim_end_matches("/api/v1/sync/push")
+            .to_string();
+
         let since_opt: Option<String> = {
             let lock = db.lock().await;
             match crate::db::sync_state_load(&lock.0, &local_id) {
@@ -3576,6 +3815,77 @@ mod tests {
             clock.entries.get("peer-0").map(String::as_str),
             Some("2026-04-26T10:00:00Z"),
             "sync_state tracks latest_ts of validate-passing rows"
+        );
+    }
+
+    /// L11 (v0.7.0.1) — federation-replicate-then-read agent_id preservation.
+    ///
+    /// Scenario (NHI-D-fed-agentid-mutation):
+    ///   1. openclaw-1 writes memory M with `metadata.agent_id="ai:alice@plan-c"`.
+    ///   2. openclaw-2's catchup loop fetches M via `GET /api/v1/sync/since`.
+    ///   3. openclaw-2 inserts M locally via `db::insert_if_newer`.
+    ///   4. Read-back on openclaw-2 must surface the SAME `agent_id` —
+    ///      "ai:alice@plan-c" — not openclaw-2's daemon identity, not the
+    ///      receiver-side anonymous fallback.
+    ///
+    /// The contract is documented in CLAUDE.md §Agent Identity (NHI):
+    /// > Once a memory is stored, `metadata.agent_id` is preserved across
+    /// > update, dedup (UPSERT), MCP `memory_update`, HTTP `PUT /memories/{id}`,
+    /// > import, sync, and consolidate.
+    ///
+    /// Pre-fix, the regression manifested when the same memory was also
+    /// pushed through `POST /api/v1/memories` (the `create_memory` handler)
+    /// — the HTTP resolver ignored `metadata.agent_id` and clobbered it with
+    /// the per-request anonymous fallback. This test pins the catchup path
+    /// directly so future refactors of `insert_if_newer` can't silently
+    /// regress the federation contract.
+    #[tokio::test]
+    async fn l11_catchup_preserves_original_agent_id_through_replication() {
+        // Build a peer-side memory carrying alice's claim.
+        let mut alice_mem = catchup_memory("alice-note", "2026-05-10T10:00:00Z");
+        alice_mem.metadata = serde_json::json!({
+            "agent_id": "ai:alice@plan-c",
+            "shared": "alice wrote this"
+        });
+
+        let (url, hits, _, _) =
+            spawn_since_peer(SinceMockBehaviour::ReturnMemories(vec![alice_mem.clone()])).await;
+        let cfg = build_catchup_cfg(&url, 2000);
+        let db = build_test_db();
+
+        catchup_once(&cfg, &db).await;
+
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "catchup should hit once");
+
+        // Read back the replicated row and assert agent_id is intact.
+        let lock = db.lock().await;
+        let count: i64 = lock
+            .0
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "alice's row must land on the receiver");
+
+        let (raw_metadata,): (String,) = lock
+            .0
+            .query_row(
+                "SELECT metadata FROM memories WHERE title='alice-note'",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        let stored: serde_json::Value = serde_json::from_str(&raw_metadata).unwrap();
+        assert_eq!(
+            stored.get("agent_id").and_then(serde_json::Value::as_str),
+            Some("ai:alice@plan-c"),
+            "agent_id must survive federation replication verbatim — \
+             observed rewrite to receiver identity is the L11 NHI-D \
+             regression"
+        );
+        // Non-agent_id metadata fields must also round-trip.
+        assert_eq!(
+            stored.get("shared").and_then(serde_json::Value::as_str),
+            Some("alice wrote this"),
+            "sibling metadata fields must round-trip alongside agent_id"
         );
     }
 

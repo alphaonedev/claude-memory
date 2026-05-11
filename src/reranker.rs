@@ -611,6 +611,16 @@ struct RerankJob {
 /// pays one `recv_timeout(0)` round-trip — no artificial waiting.
 pub struct BatchedReranker {
     sender: Option<Sender<RerankJob>>,
+    /// H2 (v0.7.0 round-2) — explicit one-shot shutdown signal. The
+    /// worker thread selects on BOTH the work channel and this
+    /// shutdown channel; receiving on the shutdown channel makes the
+    /// worker exit its loop deterministically, even if a holder of
+    /// `sender` happens to outlive `Drop` (e.g. the test harness
+    /// stashed a `Sender` clone). `Drop` triggers this BEFORE dropping
+    /// `sender`, so a worker that is currently blocked in
+    /// `rx.recv()` wakes up via the shutdown channel without waiting
+    /// for the work-channel disconnect.
+    shutdown: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<JoinHandle<()>>,
     /// Direct handle to the underlying encoder, used for the single-query
     /// short-circuit and for callers that explicitly want non-batched
@@ -629,17 +639,48 @@ impl BatchedReranker {
     pub fn with_params(encoder: CrossEncoder, max_batch: usize, max_wait_ms: u64) -> Self {
         let encoder = Arc::new(encoder);
         let (tx, rx) = std::sync::mpsc::channel::<RerankJob>();
+        // H2 (v0.7.0 round-2) — one-shot shutdown channel. The std
+        // mpsc channel is used as a "oneshot": we never send more
+        // than one value, and the worker exits on the first
+        // `try_recv()` success OR on disconnect (Drop of the holder
+        // closes the sender side, which also surfaces as a recv
+        // outcome the worker can branch on).
+        let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
         let worker_encoder = Arc::clone(&encoder);
         let max_wait = Duration::from_millis(max_wait_ms);
 
         let worker = thread::Builder::new()
             .name("ai-memory-reranker-batcher".into())
             .spawn(move || {
-                loop {
-                    // Block until the first job arrives — no busy wait.
-                    let first = match rx.recv() {
-                        Ok(job) => job,
-                        Err(_) => return, // sender dropped → shut down
+                // H2 polling cadence: when waiting for the first job
+                // of a batch, fall back to `recv_timeout` so the worker
+                // wakes up periodically to check the shutdown signal.
+                // 100ms keeps the test in `test_drop_terminates_worker`
+                // comfortably inside its 500ms budget while staying
+                // well below the 5ms intra-batch coalescing window
+                // (no cost to the hot path).
+                const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
+                'outer: loop {
+                    // Block until the first job arrives OR the
+                    // shutdown signal fires OR the sender drops.
+                    let first = loop {
+                        // Cheap non-blocking shutdown check first so a
+                        // signal that arrived between iterations is
+                        // observed even if the work channel had a job
+                        // queued before the signal landed.
+                        match shutdown_rx.try_recv() {
+                            Ok(()) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                break 'outer;
+                            }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                        }
+                        match rx.recv_timeout(SHUTDOWN_POLL) {
+                            Ok(job) => break job,
+                            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                                break 'outer;
+                            }
+                        }
                     };
 
                     let mut batch: Vec<RerankJob> = Vec::with_capacity(max_batch);
@@ -658,7 +699,8 @@ impl BatchedReranker {
                             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
                             Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                                 // Drain the current batch then exit.
-                                break;
+                                process_batch(&worker_encoder, batch);
+                                break 'outer;
                             }
                         }
                     }
@@ -670,6 +712,7 @@ impl BatchedReranker {
 
         Self {
             sender: Some(tx),
+            shutdown: Some(shutdown_tx),
             worker: Some(worker),
             encoder,
         }
@@ -715,8 +758,24 @@ impl BatchedReranker {
 
 impl Drop for BatchedReranker {
     fn drop(&mut self) {
-        // Drop the sender so the worker observes a disconnected channel
-        // and exits its loop cleanly.
+        // H2 (v0.7.0 round-2): two-step termination.
+        //
+        //   1. Fire the explicit shutdown signal FIRST so the worker
+        //      observes it even when another holder of `Sender`
+        //      (e.g. a test that cloned the work channel) would
+        //      otherwise keep the work channel alive.
+        //   2. Then drop the work-channel sender — a worker that was
+        //      blocked in `rx.recv_timeout(...)` wakes up either via
+        //      the shutdown poll OR the disconnect, whichever
+        //      happens first.
+        //
+        // Joining the worker after BOTH signals fire bounds shutdown
+        // by the SHUTDOWN_POLL cadence (100ms) in the absolute worst
+        // case, well inside the 500ms budget exercised by
+        // `test_drop_terminates_worker`.
+        if let Some(shutdown) = self.shutdown.take() {
+            let _ = shutdown.send(());
+        }
         self.sender.take();
         if let Some(handle) = self.worker.take() {
             let _ = handle.join();
@@ -1445,7 +1504,9 @@ pub mod test_support {
 #[cfg(test)]
 mod mock_tests {
     use super::test_support::*;
+    use super::{BatchedReranker, CrossEncoder};
     use crate::models::{Memory, Tier};
+    use std::time::Duration;
 
     fn make_memory(title: &str, content: &str) -> Memory {
         Memory {
@@ -1551,6 +1612,53 @@ mod mock_tests {
         let s_neu = neural.score("machine learning", "ML title", "neural networks");
         // They should use different scoring formulas
         assert_ne!(s_lex, s_neu);
+    }
+
+    // -----------------------------------------------------------------
+    // H2 (v0.7.0 round-2) — worker-thread shutdown discipline.
+    //
+    // Contract: spawning a `BatchedReranker` and dropping it
+    // immediately must terminate the worker thread within a bounded
+    // wall-clock window. Without an explicit shutdown channel, a
+    // worker that was blocked in `rx.recv()` would only exit on
+    // sender disconnect; the explicit signal closes the worst-case
+    // (e.g. a stashed `Sender` clone) and bounds the shutdown
+    // latency by the worker's SHUTDOWN_POLL cadence.
+    // -----------------------------------------------------------------
+    #[test]
+    fn h2_drop_terminates_worker_within_500ms() {
+        use std::time::Instant;
+        let reranker = BatchedReranker::new(CrossEncoder::new());
+        // Capture the JoinHandle by exfiltrating it BEFORE drop so we
+        // can observe thread termination from the outside. We
+        // re-implement the Drop body inline for the assertion: fire
+        // shutdown, drop sender, join with a wall-clock budget.
+        let mut r = reranker;
+        let shutdown = r.shutdown.take().expect("shutdown sender present");
+        let worker = r.worker.take().expect("worker handle present");
+        // Drop the work-channel sender first to mimic the same
+        // disconnect semantics the production Drop sequence
+        // produces.
+        r.sender.take();
+        let start = Instant::now();
+        let _ = shutdown.send(());
+        // Spawn the join on a side thread so we can apply a hard
+        // wall-clock budget. `JoinHandle::join` does not take a
+        // timeout, so the side-thread + park-with-deadline form is
+        // the idiomatic Rust pattern.
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let _ = worker.join();
+            let _ = done_tx.send(());
+        });
+        let observed = done_rx
+            .recv_timeout(Duration::from_millis(500))
+            .map(|()| Instant::now().duration_since(start));
+        assert!(
+            observed.is_ok(),
+            "BatchedReranker worker did not terminate within 500ms after \
+             explicit shutdown — observed: {observed:?}"
+        );
     }
 }
 

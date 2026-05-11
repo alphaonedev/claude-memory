@@ -1,5 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
+// clippy allows (test scaffolding): pedantic lints with no behavioral impact.
+#![allow(clippy::doc_markdown)]
 //
 // v0.7.0 review #628 blocker H9 — daemon-mode stderr never drained.
 //
@@ -29,7 +31,6 @@
 //      executor surfaces `Timeout` cleanly without hanging — the
 //      drain task must let the executor's `tokio::time::timeout`
 //      trip on schedule rather than getting stuck on a full pipe.
-
 #![cfg(unix)]
 
 use std::path::PathBuf;
