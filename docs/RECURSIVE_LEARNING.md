@@ -1,11 +1,11 @@
 # Recursive learning (v0.7.0)
 
-> **Status (2026-05-12):** Tasks 1-4 of the v0.7.0 recursive-learning
+> **Status (2026-05-12):** Tasks 1-6 of the v0.7.0 recursive-learning
 > add-on (issue [#655](https://github.com/alphaonedev/ai-memory-mcp/issues/655))
-> have landed on `feat/v0.7.0-recursive-learning`. Tasks 5-8 (signed-events
-> audit row, hook events, ship-gate test suite, docs + repro script) are
-> in flight on the same branch and roll up into the v0.7.0 tag rather
-> than carving a separate v0.7.1 release.
+> have landed on `feat/v0.7.0-recursive-learning`. Tasks 7-8 (ship-gate
+> test suite + docs/release-notes/capabilities honesty pass) are in
+> flight on the same branch and roll up into the v0.7.0 tag rather than
+> carving a separate v0.7.1 release.
 
 ai-memory v0.7.0 ships a **substrate-native primitive for recursive
 refinement**: an agent reads one or more memories, synthesises a
@@ -163,27 +163,117 @@ invocation uses a fresh timestamped subdirectory).
 The script honors the project no-`/tmp` HARD RULE — all scratch lives
 under `.local-runs/`, which is gitignored.
 
-## Future work
+## Audit record on depth-cap refusal
 
-- **Task 5/8** — `signed_events` audit row for every depth-cap
-  refusal. Event type `reflection.depth_exceeded`; payload is the
-  canonical-CBOR encoding of `{agent_id, attempted, cap, namespace,
-  source_ids, proposed_title, created_at}`; `payload_hash` is
-  SHA-256 of those bytes. Fires inside `db::reflect` before the
-  refusal propagates to the caller, so every cap refusal becomes
-  part of the tamper-evident audit chain. In flight on the same
-  branch.
-- **Task 6/8** — `pre_reflect` / `post_reflect` hook events. `Write`
-  event class (same deadline budget as the other write-path hooks).
-  Pre-event is veto-capable (returning `Deny` short-circuits before
-  the cap check + before the transaction opens). Post-event is
-  notify-only and fires after `COMMIT`. In flight on the same
-  branch.
+**Landed in v0.7.0 (Task 5/8, [commit `c61a05b`](https://github.com/alphaonedev/ai-memory-mcp/commit/c61a05b)).**
+
+Every `db::reflect` call that would exceed the namespace's resolved
+`max_reflection_depth` appends a row to the append-only `signed_events`
+audit table *before* the cap refusal propagates back to the caller.
+The row carries:
+
+- `event_type = "reflection.depth_exceeded"` — the canonical type tag
+  by which downstream auditors filter cap-refusal events out of the
+  full `signed_events` stream.
+- `attest_level = "unsigned"` — the substrate refusal *is* the
+  operation being audited; per-event Ed25519 signing of refusal
+  records is a separate Track-H Bucket-1.5 line item.
+- A canonical-CBOR payload (RFC 8949 §4.2.1 — deterministic encoding,
+  shortest form, sorted map keys) binding the seven enumerable
+  provenance fields: `agent_id`, `attempted` (the depth that was
+  refused), `cap` (the resolved namespace cap that was breached),
+  `namespace`, `source_ids` (the ordered list of memories the
+  refusal would have reflected on), `proposed_title` (the
+  caller-supplied title of the reflection that was refused), and
+  `created_at` (RFC3339).
+- `payload_hash` — SHA-256 of those canonical-CBOR bytes. The hash is
+  the substrate's tamper-evident commitment to the audit payload;
+  downstream auditors re-encode the audit row's payload and compare
+  the hash to detect mutation.
+
+**PII guarantee.** The reflection's `content` body is deliberately
+omitted from the audit payload. The cap-refusal audit captures only
+the enumerable provenance the refusal needed to make its decision —
+the proposed title is human-readable but the body is not. A caller
+that placed PII in `content` and tripped the cap therefore does *not*
+leak that body into the audit chain.
+
+**Best-effort write semantics.** Audit-row insertion is best-effort:
+on insertion failure (disk full, lock contention, table corruption),
+the substrate logs at `WARN` via
+`tracing::warn!(target: "signed_events", ...)` but the cap refusal
+still propagates to the caller with the same
+`ReflectError::DepthExceeded` shape. The wire contract is unchanged
+by audit-write success/failure — operators reading
+`/api/v1/audit/signed_events` reconcile gaps against the daemon's
+`signed_events` warn-log target rather than the caller observing a
+different error.
+
+## Hook integration
+
+**Landed in v0.7.0 (Task 6/8, [commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit/fbf093c)).**
+
+The Track-G hook pipeline grows from 21 to 23 events with two new
+`HookEvent` variants for the reflection primitive:
+
+- **`PreReflect`** — decision-class hook, [`crate::hooks::EventClass::Write`](../src/hooks/timeouts.rs),
+  5-second deadline budget (same as the other `Write`-class hooks
+  `pre_store`, `pre_delete`, `pre_promote`, …). Fires inside
+  `db::reflect_with_hooks` at **step 4** — after sources are loaded
+  and the proposed depth is computed, **before step 5** runs the
+  cap check, and well before the write transaction opens.
+- **`PostReflect`** — notify-class hook,
+  [`crate::hooks::EventClass::Write`](../src/hooks/timeouts.rs), 5-second
+  deadline budget. Fires inside `db::reflect_with_hooks` at **step 7**
+  — after `COMMIT` succeeds. Post-handlers read the fully-durable
+  reflection memory + its `reflects_on` links via the same
+  connection.
+
+The hook decision surface is the narrow
+[`ReflectHookDecision`](../src/db.rs) enum:
+
+```rust
+pub enum ReflectHookDecision {
+    /// Continue with the reflection unchanged. Default decision.
+    Allow,
+    /// Reject the reflection. Propagates as
+    /// `ReflectError::HookVeto { reason, code }` distinct from the
+    /// Task 5 substrate cap refusal so callers can disambiguate
+    /// caller-policy refusals from substrate-policy refusals.
+    Deny { reason: String, code: u16 },
+}
+```
+
+Returning `Deny` from a `PreReflect` handler short-circuits the
+reflection and propagates as
+`ReflectError::HookVeto`, which surfaces on the wire as
+`"REFLECTION_HOOK_VETO (code=<N>): <reason>"`. Notify-class
+`PostReflect` handlers cannot veto — their return value is ignored
+beyond logging.
+
+**Explicit non-interaction with the Task 5 audit.** A `PreReflect`
+hook veto does **not** emit a Task 5 `reflection.depth_exceeded`
+audit row. The Task 5 row is the substrate's tamper-evident record
+that the *substrate* refused the reflection on cap grounds.
+Caller-policy refusals (hook vetoes) carry their own provenance via
+the hook's own audit channel — conflating them with substrate-cap
+refusals would dilute the cap-refusal audit signal and mis-attribute
+the refusal source.
+
+## Forward roadmap
+
+- **G7+** — MCP wire-in of `hooks.toml` → `ReflectHooks` bridge. The
+  v0.7.0 `memory_reflect` MCP handler ships an unreachable
+  `HookVeto` arm pending that bridge; the wire surface is forward-
+  compatible but the production handler does not yet dispatch
+  `pre_reflect` / `post_reflect` events. G7+ is the ticket where the
+  bridge lands.
 - **Task 7/8** — ship-gate test suite consolidating the Task 1-6
   regression coverage into the standard `cargo test --features
   sal-postgres` ladder. Includes the
   `recursive_learning_task{1..6}_*.rs` integration tests + the
-  capabilities-honesty assertions Task 8 introduces.
+  capabilities-honesty assertions Task 8 introduces. In flight on
+  the same branch.
 - **Task 8/8** — docs + release-notes + capabilities-JSON-honesty
   pass + reproducibility script. **This page** is the docs leg of
   Task 8.
@@ -207,6 +297,8 @@ under `.local-runs/`, which is gitignored.
 - Task 2 commit: [`630a6db`](https://github.com/alphaonedev/ai-memory-mcp/commit/630a6db)
 - Task 3 commit: [`b51a3f3`](https://github.com/alphaonedev/ai-memory-mcp/commit/b51a3f3)
 - Task 4 commit: [`3dc76f3`](https://github.com/alphaonedev/ai-memory-mcp/commit/3dc76f3)
+- Task 5 commit: [`c61a05b`](https://github.com/alphaonedev/ai-memory-mcp/commit/c61a05b)
+- Task 6 commit: [`fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit/fbf093c)
 - v0.7.0 epic scope: [`v0.7/V0.7-EPIC.md`](v0.7/V0.7-EPIC.md)
 - ROADMAP context: [`../ROADMAP2.md`](../ROADMAP2.md) §7.4 (recursive
   learning) and §Pillar 2.5 (reflection-pass curator)
