@@ -2771,7 +2771,28 @@ pub fn reflect(
     let cap = policy.effective_max_reflection_depth();
 
     // ─── 5. Refuse if proposed depth exceeds cap ────────────────────
+    //
+    // Task 5/8 (v0.7.0): before propagating the refusal to the caller,
+    // append a `reflection.depth_exceeded` row to `signed_events`. The
+    // audit row is the cryptographic-provenance leg of the v0.7.0 cap
+    // contract — every cap refusal becomes part of the tamper-evident
+    // audit chain so a future operator can prove that the daemon
+    // honored the cap, not just "trusted the agent didn't try".
+    //
+    // Note: audit is fired only by this cap refusal; hook vetoes
+    // (Task 6/8 `pre_reflect`) carry their own provenance via the
+    // hook's own decision record (if any), so they are deliberately
+    // NOT emitted here.
     if new_depth_u32 > cap {
+        emit_reflection_depth_exceeded_audit(
+            conn,
+            &input.agent_id,
+            new_depth_u32,
+            cap,
+            &target_namespace,
+            &input.source_ids,
+            &input.title,
+        );
         return Err(ReflectError::DepthExceeded {
             attempted: new_depth_u32,
             cap,
@@ -2868,6 +2889,132 @@ pub fn reflect(
             }
             Err(e)
         }
+    }
+}
+
+/// v0.7.0 recursive-learning Task 5/8 — canonical-CBOR encoding of the
+/// `reflection.depth_exceeded` audit payload.
+///
+/// Mirrors the deterministic encoding contract used by
+/// [`crate::identity::sign::canonical_cbor`] — map keys sorted
+/// lexicographically (`BTreeMap` iteration order), `Option::None`
+/// encoded as `Null`, integers in shortest-form. The same payload
+/// hashes to the same bytes on every host so a downstream auditor can
+/// re-derive the `payload_hash` from the four structured fields below.
+///
+/// Note that we deliberately do NOT include the rejected reflection's
+/// `content` body in the payload — that would balloon the audit row
+/// (and risk leaking PII into the chain). Title + source ids is the
+/// provenance hook; the body is not the audit's job.
+///
+/// # Errors
+///
+/// Returns the underlying CBOR encoder error if encoding fails — in
+/// practice unreachable for the fixed-shape input above, surfaced as
+/// a `Result` so callers don't have to choose between panicking and
+/// silently logging an incomplete payload.
+pub fn canonical_cbor_reflection_depth_exceeded(
+    agent_id: &str,
+    attempted: u32,
+    cap: u32,
+    namespace: &str,
+    source_ids: &[String],
+    proposed_title: &str,
+    created_at: &str,
+) -> anyhow::Result<Vec<u8>> {
+    use std::collections::BTreeMap;
+    let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+    map.insert("agent_id", ciborium::Value::Text(agent_id.to_string()));
+    map.insert("attempted", ciborium::Value::Integer(attempted.into()));
+    map.insert("cap", ciborium::Value::Integer(cap.into()));
+    map.insert("created_at", ciborium::Value::Text(created_at.to_string()));
+    map.insert("namespace", ciborium::Value::Text(namespace.to_string()));
+    map.insert(
+        "proposed_title",
+        ciborium::Value::Text(proposed_title.to_string()),
+    );
+    map.insert(
+        "source_ids",
+        ciborium::Value::Array(
+            source_ids
+                .iter()
+                .map(|s| ciborium::Value::Text(s.clone()))
+                .collect(),
+        ),
+    );
+    let entries: Vec<(ciborium::Value, ciborium::Value)> = map
+        .into_iter()
+        .map(|(k, v)| (ciborium::Value::Text(k.to_string()), v))
+        .collect();
+    let value = ciborium::Value::Map(entries);
+    let mut out: Vec<u8> = Vec::with_capacity(256);
+    ciborium::ser::into_writer(&value, &mut out)
+        .context("CBOR encode reflection_depth_exceeded audit payload")?;
+    Ok(out)
+}
+
+/// v0.7.0 recursive-learning Task 5/8 — append a
+/// `reflection.depth_exceeded` row to `signed_events` for an in-flight
+/// cap refusal.
+///
+/// Mirrors the [`invalidate_link`] audit-emit pattern: best-effort —
+/// audit-write failure is logged via `tracing::warn!(target:
+/// "signed_events", ...)` but does NOT crater the refusal path. The
+/// refusal still propagates to the caller regardless of audit-write
+/// success, because (a) the refusal already happened and (b) crashing
+/// the legitimate caller for a substrate problem they cannot fix would
+/// be worse than a missed audit row.
+///
+/// `attest_level` is `"unsigned"` because the substrate emits this row
+/// itself (the caller did not sign it with their keypair). The
+/// `signature` column is `None`. The `payload_hash` is SHA-256 over
+/// the canonical-CBOR encoding of the structured fields, so a future
+/// auditor can re-derive the same hash from any honest source of the
+/// same fields.
+pub(crate) fn emit_reflection_depth_exceeded_audit(
+    conn: &Connection,
+    agent_id: &str,
+    attempted: u32,
+    cap: u32,
+    namespace: &str,
+    source_ids: &[String],
+    proposed_title: &str,
+) {
+    let created_at = Utc::now().to_rfc3339();
+    let cbor = match canonical_cbor_reflection_depth_exceeded(
+        agent_id,
+        attempted,
+        cap,
+        namespace,
+        source_ids,
+        proposed_title,
+        &created_at,
+    ) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(
+                target: "signed_events",
+                agent_id, attempted, cap, namespace,
+                "failed to encode canonical CBOR for reflection_depth_exceeded audit: {e}"
+            );
+            return;
+        }
+    };
+    let event = crate::signed_events::SignedEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id: agent_id.to_string(),
+        event_type: "reflection.depth_exceeded".to_string(),
+        payload_hash: crate::signed_events::payload_hash(&cbor),
+        signature: None,
+        attest_level: "unsigned".to_string(),
+        timestamp: created_at,
+    };
+    if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
+        tracing::warn!(
+            target: "signed_events",
+            agent_id, attempted, cap, namespace,
+            "failed to append reflection_depth_exceeded audit row: {e}"
+        );
     }
 }
 

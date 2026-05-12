@@ -3245,7 +3245,23 @@ impl PostgresStore {
         let cap = policy.effective_max_reflection_depth();
 
         // ─── 5. Refuse if proposed depth exceeds cap ────────────────
+        //
+        // Task 5/8 (v0.7.0): before propagating the refusal, append a
+        // `reflection.depth_exceeded` row to `signed_events`. Mirrors
+        // the SQLite parity path in `db::reflect`. Audit-write failure
+        // is logged (best-effort); the refusal still propagates. Hook
+        // vetoes (Task 6/8 `pre_reflect`) carry their own provenance
+        // and are deliberately NOT emitted here.
         if new_depth_u32 > cap {
+            self.emit_reflection_depth_exceeded_audit(
+                &input.agent_id,
+                new_depth_u32,
+                cap,
+                &target_namespace,
+                &input.source_ids,
+                &input.title,
+            )
+            .await;
             return Err(ReflectError::DepthExceeded {
                 attempted: new_depth_u32,
                 cap,
@@ -3373,6 +3389,71 @@ impl PostgresStore {
             reflects_on: input.source_ids.clone(),
             namespace: target_namespace,
         })
+    }
+
+    /// v0.7.0 recursive-learning Task 5/8 — append a
+    /// `reflection.depth_exceeded` row to `signed_events` for an
+    /// in-flight cap refusal on the Postgres backend.
+    ///
+    /// Mirrors the SQLite `db::emit_reflection_depth_exceeded_audit`
+    /// helper byte-for-byte (the canonical-CBOR encoding lives in
+    /// `db::canonical_cbor_reflection_depth_exceeded` and is shared
+    /// across both substrates so the `payload_hash` round-trips).
+    /// Best-effort: audit-write failure is logged but does NOT crater
+    /// the refusal path.
+    async fn emit_reflection_depth_exceeded_audit(
+        &self,
+        agent_id: &str,
+        attempted: u32,
+        cap: u32,
+        namespace: &str,
+        source_ids: &[String],
+        proposed_title: &str,
+    ) {
+        let created_at_dt = Utc::now();
+        let created_at = created_at_dt.to_rfc3339();
+        let cbor = match crate::db::canonical_cbor_reflection_depth_exceeded(
+            agent_id,
+            attempted,
+            cap,
+            namespace,
+            source_ids,
+            proposed_title,
+            &created_at,
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(
+                    target: "signed_events",
+                    agent_id, attempted, cap, namespace,
+                    "failed to encode canonical CBOR for reflection_depth_exceeded audit: {e}"
+                );
+                return;
+            }
+        };
+        let id = uuid::Uuid::new_v4().to_string();
+        let payload_hash = crate::signed_events::payload_hash(&cbor);
+        if let Err(e) = sqlx::query(
+            "INSERT INTO signed_events \
+                (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(&id)
+        .bind(agent_id)
+        .bind("reflection.depth_exceeded")
+        .bind(&payload_hash)
+        .bind(Option::<Vec<u8>>::None)
+        .bind("unsigned")
+        .bind(created_at_dt)
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(
+                target: "signed_events",
+                agent_id, attempted, cap, namespace,
+                "failed to append reflection_depth_exceeded audit row: {e}"
+            );
+        }
     }
 }
 
