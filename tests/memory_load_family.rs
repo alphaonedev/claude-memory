@@ -54,6 +54,7 @@ fn seed_family_memory(
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({"family": family}),
+        reflection_depth: 0,
     };
     let _ = models::default_metadata(); // keep the import live for parity with sibling tests
     db::insert(conn, &mem).expect("db::insert")

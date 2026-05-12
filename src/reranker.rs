@@ -840,6 +840,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         }
     }
 
@@ -1385,6 +1386,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 },
                 0.6,
             ),
@@ -1405,6 +1407,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 },
                 0.4,
             ),
@@ -1525,6 +1528,7 @@ mod mock_tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         }
     }
 

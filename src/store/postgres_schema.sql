@@ -100,7 +100,13 @@ CREATE TABLE IF NOT EXISTS memories (
     -- the malformed row at the write boundary instead. Fresh schemas
     -- carry this inline; existing schemas pick it up via migrate_v30().
     CONSTRAINT memories_metadata_is_object
-        CHECK (jsonb_typeof(metadata) = 'object')
+        CHECK (jsonb_typeof(metadata) = 'object'),
+    -- v0.7.0 Task 1/8 (schema v31, recursive learning) — depth in the
+    -- substrate-native reflection recursion tree. `0` for caller-minted
+    -- (or pre-v0.7.0) rows; positive for memories synthesised by the
+    -- reflection pass over lower-depth peers. Fresh schemas carry this
+    -- inline; existing schemas pick it up via migrate_v31().
+    reflection_depth  INTEGER NOT NULL DEFAULT 0
 );
 
 -- v0.6.0 blocker #294 fix: upsert contract is `(title, namespace)`.

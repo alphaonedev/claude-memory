@@ -148,6 +148,7 @@ pub fn run(
         last_accessed_at: None,
         expires_at,
         metadata,
+        reflection_depth: 0,
     };
 
     // W5b/C5: governance enforcement routes through `cli::governance::enforce`

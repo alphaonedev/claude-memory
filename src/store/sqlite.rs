@@ -861,6 +861,7 @@ impl MemoryStore for SqliteStore {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let conn = self.state.lock().await;
         db::insert(&conn, &mem).map_err(box_err)
@@ -909,6 +910,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id": "alice"}),
+            reflection_depth: 0,
         }
     }
 

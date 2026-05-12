@@ -3503,6 +3503,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: crate::models::default_metadata(),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         db::set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -3544,6 +3545,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: Some(past),
             metadata: crate::models::default_metadata(),
+            reflection_depth: 0,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);

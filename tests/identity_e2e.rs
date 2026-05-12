@@ -161,6 +161,7 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         last_accessed_at: None,
         expires_at: None,
         metadata: models::default_metadata(),
+        reflection_depth: 0,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

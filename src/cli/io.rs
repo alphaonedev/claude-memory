@@ -306,6 +306,7 @@ pub fn mine(
             last_accessed_at: None,
             expires_at,
             metadata,
+            reflection_depth: 0,
         };
 
         match db::insert(&conn, &mem) {

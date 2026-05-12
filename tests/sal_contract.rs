@@ -65,6 +65,7 @@ fn make_memory(namespace: &str, title: &str, content: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id": "ai:contract-test"}),
+        reflection_depth: 0,
     }
 }
 

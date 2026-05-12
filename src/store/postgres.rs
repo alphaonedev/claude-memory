@@ -64,6 +64,14 @@ use crate::quotas::{
 /// Bootstrap schema run at adapter init — idempotent via IF NOT EXISTS.
 const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 
+/// v0.7.0 Task 1/8 (recursive learning) — add `memories.reflection_depth`.
+/// Mirrors the SQLite v29 migration in `src/db.rs`. The body is in a
+/// separate SQL file so operators can inspect and replay the DDL outside
+/// the daemon if needed; the migration runner pipes it through
+/// `sqlx::raw_sql` inside the v31 transaction.
+const MIGRATION_V31_REFLECTION_DEPTH: &str =
+    include_str!("../../migrations/postgres/0013_v0700_reflection_depth.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -101,7 +109,13 @@ const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 ///       (array / scalar / NULL); the CHECK rejects malformed
 ///       metadata at the write boundary instead of degrading to
 ///       null-scope rows.
-const CURRENT_SCHEMA_VERSION: i32 = 30;
+// v31 = v0.7.0 Task 1/8 (recursive learning) — `memories.reflection_depth`
+//       INTEGER NOT NULL DEFAULT 0 column, mirroring SQLite schema v29.
+//       `ADD COLUMN IF NOT EXISTS` keeps the migration idempotent on
+//       Postgres 14+; the base schema in `postgres_schema.sql` carries
+//       the column inline so fresh installs land it without the
+//       migration step running.
+const CURRENT_SCHEMA_VERSION: i32 = 31;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -490,6 +504,9 @@ impl PostgresStore {
         if current_version < 30 {
             self.migrate_v30().await?;
         }
+        if current_version < 31 {
+            self.migrate_v31().await?;
+        }
 
         Ok(())
     }
@@ -571,6 +588,46 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v30 applied (memories_metadata_is_object CHECK)"
+        );
+        Ok(())
+    }
+
+    /// v31 — `memories.reflection_depth INTEGER NOT NULL DEFAULT 0`
+    /// (v0.7.0 Task 1/8, recursive learning).
+    ///
+    /// Adds the column that tracks each memory's depth in the substrate-
+    /// native reflection recursion tree (`0` for caller-minted rows,
+    /// positive for synthesised reflections). Mirrors the SQLite v29
+    /// migration in `src/db.rs`.
+    ///
+    /// Idempotent via `ADD COLUMN IF NOT EXISTS` (Postgres 14+) — fresh
+    /// schemas pick the column up inline from `postgres_schema.sql`, so
+    /// a fresh install never runs this step. The migration body is
+    /// pulled from `migrations/postgres/0013_v0700_reflection_depth.sql`
+    /// at compile time via `include_str!` so the SQL stays operator-
+    /// inspectable alongside the rest of the per-version migration
+    /// scripts.
+    async fn migrate_v31(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v31 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V31_REFLECTION_DEPTH)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v31 reflection_depth", e))?;
+
+        record_schema_version(&mut tx, 31).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v31 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v31 applied (memories.reflection_depth column)"
         );
         Ok(())
     }
@@ -3042,6 +3099,11 @@ impl PostgresStore {
             .try_get("metadata")
             .map_err(|e| to_store_err("read metadata", e))?;
 
+        // v0.7.0 Task 1/8 — read the v31 column; tolerate pre-v31 reads
+        // (column missing on a freshly-restored backup, for instance) by
+        // falling back to 0, which matches the SQL-side `DEFAULT 0`.
+        let reflection_depth: i32 = row.try_get("reflection_depth").unwrap_or(0);
+
         Ok(Memory {
             id: row.try_get("id").map_err(|e| to_store_err("read id", e))?,
             tier,
@@ -3072,6 +3134,7 @@ impl PostgresStore {
             last_accessed_at: last_accessed_at.map(|t| t.to_rfc3339()),
             expires_at: expires_at.map(|t| t.to_rfc3339()),
             metadata,
+            reflection_depth,
         })
     }
 }
@@ -3910,8 +3973,8 @@ impl MemoryStore for PostgresStore {
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
-                expires_at, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                expires_at, metadata, reflection_depth
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (title, namespace) DO UPDATE SET
                 content = EXCLUDED.content,
                 tier = CASE
@@ -3931,7 +3994,11 @@ impl MemoryStore for PostgresStore {
                             memories.metadata -> 'agent_id'
                         )
                     ELSE EXCLUDED.metadata
-                END
+                END,
+                -- v0.7.0 Task 1/8 — recursion depth takes max on upsert so a
+                -- newer reflection at higher depth doesn't lose its provenance
+                -- signal when re-stored at the same (title, namespace).
+                reflection_depth = GREATEST(memories.reflection_depth, EXCLUDED.reflection_depth)
             RETURNING id",
         )
         .bind(&memory.id)
@@ -3949,6 +4016,7 @@ impl MemoryStore for PostgresStore {
         .bind(last_accessed_at)
         .bind(expires_at)
         .bind(&memory.metadata)
+        .bind(memory.reflection_depth)
         .fetch_one(&mut *tx)
         .await
         .map_err(|e| to_store_err("insert memory", e))?
@@ -4001,8 +4069,8 @@ impl MemoryStore for PostgresStore {
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
-                expires_at, metadata, embedding
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+                expires_at, metadata, reflection_depth, embedding
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             ON CONFLICT (title, namespace) DO UPDATE SET
                 content = EXCLUDED.content,
                 tier = CASE
@@ -4023,6 +4091,8 @@ impl MemoryStore for PostgresStore {
                         )
                     ELSE EXCLUDED.metadata
                 END,
+                -- v0.7.0 Task 1/8 — recursion depth takes max on upsert.
+                reflection_depth = GREATEST(memories.reflection_depth, EXCLUDED.reflection_depth),
                 embedding = COALESCE(EXCLUDED.embedding, memories.embedding)
             RETURNING id",
         )
@@ -4041,6 +4111,7 @@ impl MemoryStore for PostgresStore {
         .bind(last_accessed_at)
         .bind(expires_at)
         .bind(&memory.metadata)
+        .bind(memory.reflection_depth)
         .bind(emb_pgvec)
         .fetch_one(&mut *tx)
         .await
@@ -4446,8 +4517,8 @@ impl MemoryStore for PostgresStore {
             "INSERT INTO memories (
                 id, tier, namespace, title, content, tags, priority, confidence,
                 source, access_count, created_at, updated_at, last_accessed_at,
-                expires_at, metadata
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+                expires_at, metadata, reflection_depth
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
             ON CONFLICT (title, namespace) DO UPDATE SET
                 content = CASE
                     WHEN EXCLUDED.updated_at > memories.updated_at
@@ -4492,7 +4563,10 @@ impl MemoryStore for PostgresStore {
                             ELSE EXCLUDED.metadata
                         END
                     ELSE memories.metadata
-                END
+                END,
+                -- v0.7.0 Task 1/8 — recursion depth takes max so the reflection
+                -- signal isn't lost on newer-wins federation merges.
+                reflection_depth = GREATEST(memories.reflection_depth, EXCLUDED.reflection_depth)
             RETURNING id",
         )
         .bind(&memory.id)
@@ -4510,6 +4584,7 @@ impl MemoryStore for PostgresStore {
         .bind(last_accessed_at)
         .bind(expires_at)
         .bind(&memory.metadata)
+        .bind(memory.reflection_depth)
         .fetch_one(&self.pool)
         .await
         .map_err(|e| to_store_err("apply_remote_memory upsert", e))?;
@@ -5048,6 +5123,7 @@ impl MemoryStore for PostgresStore {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
 
         self.store(ctx, &mem).await.map(|_| ())
@@ -5271,6 +5347,10 @@ impl MemoryStore for PostgresStore {
                         )
                     ELSE EXCLUDED.metadata
                 END
+                -- reflection_depth intentionally not surfaced here: the
+                -- consolidate path mints a fresh memory and the DB column
+                -- DEFAULT 0 applies. The UPSERT branch preserves the
+                -- existing row's reflection_depth (no SET clause = keep).
             RETURNING id",
         )
         .bind(&new_id)
@@ -5557,6 +5637,7 @@ impl MemoryStore for PostgresStore {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         self.store(ctx, &mem).await
     }
@@ -7460,6 +7541,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id":"ai:sal-test"}),
+            reflection_depth: 0,
         }
     }
 
@@ -7746,11 +7828,13 @@ mod tests {
         // conversion helper); v30 is Postgres-only too (M15 —
         // `memories_metadata_is_object` CHECK; SQLite doesn't carry an
         // analogue because the SQLite metadata column has no JSON
-        // type-checking primitive equivalent to `jsonb_typeof`). A
-        // future bump on either side without the corresponding port
-        // re-trips this assertion before the migration runner gets a
-        // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 30);
+        // type-checking primitive equivalent to `jsonb_typeof`). v31
+        // mirrors SQLite v29 (`memories.reflection_depth`, v0.7.0
+        // Task 1/8 — recursive learning). A future bump on either side
+        // without the corresponding port re-trips this assertion before
+        // the migration runner gets a chance to write a partial schema
+        // to disk.
+        assert_eq!(CURRENT_SCHEMA_VERSION, 31);
     }
 
     #[tokio::test]

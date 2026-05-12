@@ -122,6 +122,7 @@ async fn seed_pending_delete_row(
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({}),
+        reflection_depth: 0,
     };
     let mem_id = ai_memory::db::insert(&lock.0, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-security"});

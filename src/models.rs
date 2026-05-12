@@ -78,6 +78,44 @@ pub struct Memory {
     pub expires_at: Option<String>,
     #[serde(default = "default_metadata")]
     pub metadata: Value,
+    /// v0.7.0 Task 1/8 (recursive learning) — depth in the substrate-native
+    /// reflection recursion tree. `0` for memories minted directly from a
+    /// caller (or any pre-v0.7.0 row), positive for memories synthesised by
+    /// the reflection pass over lower-depth peers. Operators can cap recursion
+    /// depth at write time; readers can filter / sort by it.
+    ///
+    /// `#[serde(default)]` lets pre-v0.7.0 JSON payloads (and older federation
+    /// peers) deserialize cleanly — missing → 0, which matches the SQL
+    /// `DEFAULT 0` on the column added in schema v29 (SQLite) / v31 (Postgres).
+    #[serde(default)]
+    pub reflection_depth: i32,
+}
+
+impl Default for Memory {
+    /// All-zero / empty defaults. Useful as a base for ad-hoc test fixtures
+    /// — `Memory { id: ..., title: ..., ..Default::default() }` — and for
+    /// `#[serde(default)]` deserialisation of partial JSON. Tier defaults to
+    /// `Mid` to match the API-layer default in [`CreateMemory`].
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            tier: Tier::Mid,
+            namespace: "global".to_string(),
+            title: String::new(),
+            content: String::new(),
+            tags: Vec::new(),
+            priority: 5,
+            confidence: 1.0,
+            source: "api".to_string(),
+            access_count: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: default_metadata(),
+            reflection_depth: 0,
+        }
+    }
 }
 
 /// v0.7 Track H — attestation level for a `memory_links` row.
@@ -1630,6 +1668,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: default_metadata(),
+            reflection_depth: 0,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();

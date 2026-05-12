@@ -501,6 +501,7 @@ fn persist_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Result<()
             "agent_id": "ai:curator",
             "action": entry.action_tag(),
         }),
+        reflection_depth: 0,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -546,6 +547,7 @@ pub fn persist_self_report(
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id": "ai:curator"}),
+        reflection_depth: 0,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -715,6 +717,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id":"ai:test"}),
+            reflection_depth: 0,
         }
     }
 

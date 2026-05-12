@@ -1664,6 +1664,7 @@ fn handle_store(
         last_accessed_at: None,
         expires_at,
         metadata,
+        reflection_depth: 0,
     };
 
     // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
@@ -5608,6 +5609,7 @@ pub(crate) fn handle_notify(
         last_accessed_at: None,
         expires_at,
         metadata,
+        reflection_depth: 0,
     };
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
 
@@ -8282,6 +8284,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -8358,6 +8361,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));
@@ -8401,6 +8405,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: json!({}),
+                reflection_depth: 0,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -8447,6 +8452,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: json!({}),
+                reflection_depth: 0,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -8955,6 +8961,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
         db::set_namespace_standard(&conn, "m9-parent", &std_id, None).unwrap();
@@ -8975,6 +8982,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(&conn, "repo/team/sub", &child_id, None).unwrap();
@@ -9038,6 +9046,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let parent_id = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "m9-explicit-parent", &parent_id, None).unwrap();
@@ -9058,6 +9067,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(
@@ -9115,6 +9125,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(conn, &mem).unwrap();
         db::set_namespace_standard(conn, namespace, &id, None).unwrap();
@@ -9397,6 +9408,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -9516,6 +9528,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -9691,6 +9704,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
 
@@ -9796,6 +9810,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10140,6 +10155,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10172,6 +10188,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10243,6 +10260,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10279,6 +10297,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10310,6 +10329,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -10593,6 +10613,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let pid = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "w12-explicit-grand", &pid, None).unwrap();
@@ -10690,6 +10711,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_promote", json!({"id": id}));
@@ -10813,6 +10835,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10858,6 +10881,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -10900,6 +10924,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -10935,6 +10960,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -10979,6 +11005,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -11016,6 +11043,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -11059,6 +11087,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -11475,6 +11504,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -11526,6 +11556,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: Some(chrono::Utc::now().to_rfc3339()),
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_update", json!({"id": id, "expires_at": ""}));
@@ -11557,6 +11588,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -11596,6 +11628,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));

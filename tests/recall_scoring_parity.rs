@@ -72,6 +72,7 @@ fn make_corpus(namespace: &str) -> Vec<Memory> {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "ai:recall-parity"}),
+                reflection_depth: 0,
             }
         })
         .collect()

@@ -166,6 +166,7 @@ fn fresh_memory(namespace: &str, title: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({}),
+        reflection_depth: 0,
     }
 }
 

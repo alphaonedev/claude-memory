@@ -325,6 +325,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id":"ai:migrate-test"}),
+            reflection_depth: 0,
         }
     }
 

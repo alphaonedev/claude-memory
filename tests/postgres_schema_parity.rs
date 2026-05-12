@@ -49,7 +49,7 @@ use sqlx::postgres::PgPoolOptions;
 /// either backend's `schema_version` stamp. A future bump on the
 /// `SQLite` side without the corresponding `Postgres` port will trip
 /// this test.
-const SQLITE_CURRENT_VERSION: i64 = 28;
+const SQLITE_CURRENT_VERSION: i64 = 29;
 
 /// `Postgres` `CURRENT_SCHEMA_VERSION` — tracks
 /// `src/store/postgres.rs::CURRENT_SCHEMA_VERSION`. Diverges from the
@@ -57,7 +57,10 @@ const SQLITE_CURRENT_VERSION: i64 = 28;
 ///   - v29: in-place `vector(N)` conversion (no SQLite analogue).
 ///   - v30: `memories_metadata_is_object` CHECK (M15; SQLite metadata
 ///     column has no `jsonb_typeof` equivalent).
-const POSTGRES_CURRENT_VERSION: i64 = 30;
+///   - v31: `memories.reflection_depth` column (v0.7.0 Task 1/8 —
+///     recursive learning). Mirrors SQLite v29; the offset by two is
+///     why the ladders diverge by 2 here.
+const POSTGRES_CURRENT_VERSION: i64 = 31;
 
 /// Returns Some(url) when the live-PG fixture is configured, None otherwise.
 fn postgres_url() -> Option<String> {

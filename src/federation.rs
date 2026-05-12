@@ -1810,6 +1810,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id":"ai:test"}),
+            reflection_depth: 0,
         }
     }
 
@@ -3026,6 +3027,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id":"ai:peer-0"}),
+            reflection_depth: 0,
         }
     }
 

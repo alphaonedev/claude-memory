@@ -79,6 +79,7 @@ fn seed(db_path: &std::path::Path, ns: &str, title: &str, content: &str) -> Stri
         last_accessed_at: None,
         expires_at: None,
         metadata,
+        reflection_depth: 0,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }
@@ -494,6 +495,7 @@ fn dry_run_classifies_update_when_remote_newer() {
         last_accessed_at: None,
         expires_at: None,
         metadata: metadata.clone(),
+        reflection_depth: 0,
     };
     let mut mem_remote = mem_local.clone();
     mem_remote.content = "new".to_string();
@@ -560,6 +562,7 @@ fn dry_run_classifies_pull_noop_and_push_update() {
         last_accessed_at: None,
         expires_at: None,
         metadata: metadata.clone(),
+        reflection_depth: 0,
     };
     // Local: newer (same id)
     let mut mem_local = mem_remote.clone();
@@ -616,6 +619,7 @@ fn restamp_agent_id_with_non_object_metadata_is_safe() {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::Value::String("just-a-string".to_string()),
+            reflection_depth: 0,
         };
         // db::insert may reject non-object metadata via JSON serialization;
         // if so, fall back to inserting a row whose metadata becomes

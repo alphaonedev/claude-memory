@@ -50,6 +50,7 @@ fn seed_memory(id: &str, ns: &str, title: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id":"ai:migrate-roundtrip"}),
+        reflection_depth: 0,
     }
 }
 

@@ -148,6 +148,7 @@ fn cmd_forget_proceeds_with_confirm_global() {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         };
         db::insert(&conn, &m).unwrap();
     }

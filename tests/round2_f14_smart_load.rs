@@ -51,6 +51,7 @@ fn seed_family(conn: &rusqlite::Connection, family: &str) -> String {
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({"family": family}),
+        reflection_depth: 0,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

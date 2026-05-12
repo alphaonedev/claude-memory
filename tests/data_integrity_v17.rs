@@ -47,6 +47,7 @@ fn make_memory(title: &str, ns: &str, tier: Tier) -> Memory {
             .default_ttl_secs()
             .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339()),
         metadata: serde_json::json!({}),
+        reflection_depth: 0,
     }
 }
 

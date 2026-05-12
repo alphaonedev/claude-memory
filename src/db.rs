@@ -141,7 +141,12 @@ CREATE TABLE IF NOT EXISTS memories (
     updated_at       TEXT NOT NULL,
     last_accessed_at TEXT,
     expires_at       TEXT,
-    metadata         TEXT NOT NULL DEFAULT '{}'
+    metadata         TEXT NOT NULL DEFAULT '{}',
+    -- v0.7.0 Task 1/8 (recursive learning, schema v29) — depth in the
+    -- substrate-native reflection recursion tree. `0` for caller-minted
+    -- memories (and any pre-v0.7.0 row); positive for synthesised
+    -- reflections. Mirrors `models::Memory::reflection_depth`.
+    reflection_depth INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -248,7 +253,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       namespace TTL overrides arrive via the `[transcripts]`
 //       config section (`config.rs`) and are resolved against the
 //       transcript's namespace at sweep time.
-const CURRENT_SCHEMA_VERSION: i64 = 28;
+// v29 = v0.7.0 Task 1/8 (recursive learning) — `memories.reflection_depth`
+//       INTEGER NOT NULL DEFAULT 0 column. Depth in the substrate-native
+//       reflection recursion tree; 0 for caller-minted (or pre-v0.7.0)
+//       rows. ALTER TABLE emitted from Rust (SQLite has no `ADD COLUMN
+//       IF NOT EXISTS`); fresh-schema installs pick it up inline from
+//       the `SCHEMA` constant above.
+const CURRENT_SCHEMA_VERSION: i64 = 29;
 
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path).context("failed to open database")?;
@@ -949,6 +960,22 @@ fn migrate(conn: &Connection) -> Result<()> {
             // substrate documentation.
             conn.execute_batch(MIGRATION_V28_SQLITE)?;
         }
+        if version < 29 {
+            // v0.7.0 Task 1/8 (recursive learning) — add
+            // `memories.reflection_depth INTEGER NOT NULL DEFAULT 0`.
+            // ALTER TABLE done inline (SQLite has no `ADD COLUMN IF NOT
+            // EXISTS`); the column-existence probe makes the step
+            // idempotent against a partially-stamped database.
+            let has_reflection_depth = conn
+                .prepare("SELECT reflection_depth FROM memories LIMIT 0")
+                .is_ok();
+            if !has_reflection_depth {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN reflection_depth INTEGER NOT NULL DEFAULT 0",
+                    [],
+                )?;
+            }
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -998,6 +1025,11 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         last_accessed_at: row.get("last_accessed_at")?,
         expires_at: row.get("expires_at")?,
         metadata,
+        // v0.7.0 Task 1/8 — schema v29 column. `.unwrap_or(0)` keeps the
+        // reader tolerant of pre-v29 row reads (no panic if the migration
+        // ladder hasn't reached this DB yet) and is consistent with the
+        // SQL-side `DEFAULT 0`.
+        reflection_depth: row.get("reflection_depth").unwrap_or(0_i32),
     })
 }
 
@@ -1012,8 +1044,8 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -1036,13 +1068,17 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                     json_extract(memories.metadata, '$.agent_id')
                 )
                 ELSE excluded.metadata
-            END
+            END,
+            -- v0.7.0 Task 1/8 — recursion depth takes the max across upsert
+            -- so a subsequent reflection at higher depth doesn't lose its
+            -- provenance signal when re-stored at the same (title, namespace).
+            reflection_depth = MAX(memories.reflection_depth, excluded.reflection_depth)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
-            metadata_json,
+            metadata_json, mem.reflection_depth,
         ],
         |r| r.get(0),
     )?;
@@ -1497,7 +1533,7 @@ pub fn search(
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1
@@ -1846,7 +1882,7 @@ pub fn recall(
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
                 (fts.rank * -1)
                 + (m.priority * 0.5)
                 + (MIN(m.access_count, 50) * 0.1)
@@ -1885,7 +1921,10 @@ pub fn recall(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            let score: f64 = row.get(15)?;
+            // Index 16 = score (the trailing computed column). Bumped from
+            // 15 in v29 (Task 1/8) when `reflection_depth` was inserted
+            // between `metadata` and the score expression above.
+            let score: f64 = row.get(16)?;
             Ok((mem, score))
         },
     )?;
@@ -1967,6 +2006,7 @@ pub fn promote_to_namespace(
         last_accessed_at: None,
         expires_at: source.expires_at.clone(),
         metadata: source.metadata.clone(),
+        reflection_depth: source.reflection_depth,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -2036,7 +2076,7 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1 AND m.namespace = ?2
@@ -3171,6 +3211,7 @@ pub fn entity_register(
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -3993,6 +4034,7 @@ pub fn register_agent(
         last_accessed_at: None,
         expires_at: None,
         metadata,
+        reflection_depth: 0,
     };
 
     insert(conn, &mem)
@@ -4419,8 +4461,8 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at
                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
@@ -4456,13 +4498,16 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
                                OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                           THEN excluded.metadata
                           ELSE memories.metadata END
-            END
+            END,
+            -- v0.7.0 Task 1/8 — recursion depth takes max so the reflection
+            -- signal isn't lost on newer-wins federation merges.
+            reflection_depth = MAX(memories.reflection_depth, excluded.reflection_depth)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
-            metadata_json,
+            metadata_json, mem.reflection_depth,
         ],
         |r| r.get(0),
     )?;
@@ -4789,7 +4834,7 @@ pub fn recall_hybrid_with_telemetry(
     let fts_sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata, m.embedding,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth, m.embedding,
                 (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
                 + (m.confidence * 2.0)
                 + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
@@ -4815,7 +4860,7 @@ pub fn recall_hybrid_with_telemetry(
     let sem_sql = format!(
         "SELECT id, tier, namespace, title, content, tags, priority,
                 confidence, source, access_count, created_at, updated_at,
-                last_accessed_at, expires_at, metadata, embedding
+                last_accessed_at, expires_at, metadata, reflection_depth, embedding
          FROM memories
          WHERE embedding IS NOT NULL
            AND (?1 IS NULL OR namespace = ?1)
@@ -4848,7 +4893,10 @@ pub fn recall_hybrid_with_telemetry(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            let fts_score: f64 = row.get(16)?;
+            // Index 17 = fts_score (the trailing computed column). Bumped
+            // from 16 in v29 (Task 1/8) when `reflection_depth` was inserted
+            // between `metadata` and `embedding` in the SELECT list above.
+            let fts_score: f64 = row.get(17)?;
             Ok((mem, fts_score))
         },
     )?;
@@ -6575,6 +6623,7 @@ mod tests {
                 .default_ttl_secs()
                 .map(|s| (chrono::Utc::now() + chrono::Duration::seconds(s)).to_rfc3339()),
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         }
     }
 
@@ -9384,6 +9433,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -9506,6 +9556,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();

@@ -445,6 +445,7 @@ fn synth_memory(namespace: &str, i: usize, prefix: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: serde_json::json!({"agent_id": "bench"}),
+        reflection_depth: 0,
     }
 }
 

@@ -439,6 +439,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         db::insert(&conn, &mem).expect("db::insert")
     }
@@ -477,6 +478,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata,
+                reflection_depth: 0,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -542,6 +544,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: metadata.clone(),
+                reflection_depth: 0,
             };
             let m2 = crate::models::Memory {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -559,6 +562,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata,
+                reflection_depth: 0,
             };
             t1 = db::insert(&conn, &m1).unwrap();
             t2 = db::insert(&conn, &m2).unwrap();
@@ -622,6 +626,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata,
+                reflection_depth: 0,
             };
             target = db::insert(&conn, &mem).unwrap();
         }
@@ -655,6 +660,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata,
+                reflection_depth: 0,
             };
             entry_id = db::insert(&conn, &mem).unwrap();
         }

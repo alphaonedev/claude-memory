@@ -1543,6 +1543,7 @@ pub async fn create_memory(
             last_accessed_at: None,
             expires_at: body.expires_at.clone(),
             metadata,
+            reflection_depth: 0,
         };
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
 
@@ -1786,6 +1787,7 @@ pub async fn create_memory(
         last_accessed_at: None,
         expires_at,
         metadata,
+        reflection_depth: 0,
     };
 
     // Task 1.9: governance enforcement (store-side).
@@ -4941,6 +4943,7 @@ pub async fn entity_register(
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let created = prior_aliases.is_empty();
         return match app.store.store(&ctx, &mem).await {
@@ -7272,6 +7275,7 @@ pub async fn bulk_create(
                 last_accessed_at: None,
                 expires_at,
                 metadata: body.metadata,
+                reflection_depth: 0,
             };
             match app.store.store(&ctx, &mem).await {
                 Ok(_) => created += 1,
@@ -7315,6 +7319,7 @@ pub async fn bulk_create(
                 last_accessed_at: None,
                 expires_at,
                 metadata: body.metadata,
+                reflection_depth: 0,
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),
@@ -9371,6 +9376,7 @@ pub async fn subscribe(
             last_accessed_at: None,
             expires_at: None,
             metadata,
+            reflection_depth: 0,
         };
         let ctx = crate::store::CallerContext::for_agent(&caller);
         return match app.store.store(&ctx, &mem).await {
@@ -9891,6 +9897,7 @@ async fn set_namespace_standard_inner(
                     last_accessed_at: None,
                     expires_at: None,
                     metadata,
+                    reflection_depth: 0,
                 };
                 match app.store.store(&ctx, &placeholder).await {
                     Ok(id) => id,
@@ -10014,6 +10021,7 @@ async fn set_namespace_standard_inner(
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "system"}),
+                reflection_depth: 0,
             };
             match db::insert(&lock.0, &placeholder) {
                 Ok(id) => id,
@@ -10915,6 +10923,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
         let got = db::get(&lock.0, &id).unwrap().unwrap();
@@ -10942,6 +10951,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         };
         db::insert(&lock.0, &mem).unwrap();
         let (results, _outcome) = db::recall(
@@ -11019,6 +11029,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"http_test": true, "version": 1}),
+            reflection_depth: 0,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
 
@@ -11311,6 +11322,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11436,6 +11448,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11505,6 +11518,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11571,6 +11585,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11950,6 +11965,7 @@ mod tests {
                         "agent_id": agent,
                         "topic": topic,
                     }),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -12036,6 +12052,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -12106,6 +12123,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+                reflection_depth: 0,
             };
             let m1_id = db::insert(&lock.0, &m1).unwrap();
             let m2 = Memory {
@@ -12124,6 +12142,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
+                reflection_depth: 0,
             };
             let m2_id = db::insert(&lock.0, &m2).unwrap();
             (m1_id, m2_id)
@@ -12198,6 +12217,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -12260,6 +12280,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -12797,6 +12818,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -12843,6 +12865,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -13449,6 +13472,7 @@ mod tests {
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({}),
+            reflection_depth: 0,
         };
         db::insert(&lock.0, &mem).unwrap()
     }
@@ -14821,6 +14845,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -15037,6 +15062,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -15166,6 +15192,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             let a = db::insert(&lock.0, &mk("source-a")).unwrap();
             let b = db::insert(&lock.0, &mk("target-b")).unwrap();
@@ -15346,6 +15373,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -15513,6 +15541,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -15584,6 +15613,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -16689,6 +16719,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -16741,6 +16772,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -16800,6 +16832,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -17759,6 +17792,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "bob"}),
+                reflection_depth: 0,
             };
             let read = Memory {
                 id: Uuid::new_v4().to_string(),
@@ -17776,6 +17810,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "bob"}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &unread).unwrap();
             db::insert(&lock.0, &read).unwrap();
@@ -17827,6 +17862,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({"agent_id": "carol"}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -17930,6 +17966,7 @@ mod tests {
                     last_accessed_at: None,
                     expires_at: None,
                     metadata: serde_json::json!({"agent_id": "alice"}),
+                    reflection_depth: 0,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -18018,6 +18055,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "alice"}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -18944,6 +18982,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "alice"}),
+                reflection_depth: 0,
             };
             let a = db::insert(&lock.0, &mk("draft-a")).unwrap();
             let b = db::insert(&lock.0, &mk("draft-b")).unwrap();
@@ -19184,6 +19223,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"topic": "earth-shape"}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mk("alice-says", "earth is round")).unwrap();
             db::insert(&lock.0, &mk("bob-says", "earth is flat")).unwrap();
@@ -19238,6 +19278,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mk("ns-iso-a", "first opinion")).unwrap();
             db::insert(&lock.0, &mk("ns-iso-b", "different opinion")).unwrap();
@@ -19815,6 +19856,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -21033,6 +21075,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: Some((now + Duration::seconds(3600)).to_rfc3339()),
                 metadata: serde_json::json!({}),
+                reflection_depth: 0,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -22768,6 +22811,7 @@ mod tests {
                 "agent_id": "ai:owner",
                 "governance": policy,
             }),
+            reflection_depth: 0,
         };
         let standard_id = db::insert(&lock.0, &standard).unwrap();
         db::set_namespace_standard(&lock.0, ns, &standard_id, None).unwrap();
@@ -23396,6 +23440,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "alice"}),
+                reflection_depth: 0,
             };
             let a = db::insert(&lock.0, &mk("aom101-0", "first")).unwrap();
             let b = db::insert(&lock.0, &mk("aom101-1", "second")).unwrap();
@@ -23492,6 +23537,7 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: serde_json::json!({"agent_id": "alice"}),
+                reflection_depth: 0,
             };
             let a = db::insert(
                 &lock.0,

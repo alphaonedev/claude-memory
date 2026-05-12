@@ -56,6 +56,7 @@ fn make_memory(title: &str, content: &str) -> Memory {
         last_accessed_at: None,
         expires_at: None,
         metadata: json!({}),
+        reflection_depth: 0,
     }
 }
 

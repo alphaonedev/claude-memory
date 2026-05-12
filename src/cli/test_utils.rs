@@ -137,6 +137,7 @@ pub fn seed_memory(db_path: &Path, namespace: &str, title: &str, content: &str) 
         last_accessed_at: None,
         expires_at: None,
         metadata,
+        reflection_depth: 0,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }
