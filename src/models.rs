@@ -186,7 +186,7 @@ impl std::fmt::Display for AttestLevel {
 pub struct MemoryLink {
     pub source_id: String,
     pub target_id: String,
-    pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from"
+    pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from", "reflects_on"
     pub created_at: String,
     /// v0.7 H3 — optional 64-byte Ed25519 signature carried over the
     /// federation wire. `None` for legacy peers (pre-v0.7) that do not

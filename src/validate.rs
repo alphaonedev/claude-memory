@@ -38,7 +38,43 @@ const VALID_SOURCES: &[&str] = &[
     // never reaches the target's inbox on peer nodes.
     "notify",
 ];
-const VALID_RELATIONS: &[&str] = &["related_to", "supersedes", "contradicts", "derived_from"];
+// Canonical relation taxonomy. The validator (`validate_relation`) accepts
+// these names via the fast-path branch and also accepts any caller-supplied
+// `[a-z0-9_]+` identifier via the lenient branch (post-cb92998). Adding a
+// name here is therefore documentation-driven: the name becomes part of the
+// MCP `memory_link` schema's `enum`, the wire-shape advertised to peers,
+// and the closed set surfaced in CLI/API docs.
+//
+// Semantics of each relation (directionality reads left-to-right, source → target):
+//   * `related_to`   — symmetric association; no provenance claim.
+//   * `supersedes`   — winner → loser; the source replaces the target.
+//   * `contradicts`  — asserts the source contradicts the target.
+//   * `derived_from` — clone/summary (source) → original (target). `derived_from`
+//                      is written by `memory_consolidate` (consolidated → each
+//                      source) and `memory_promote --to-namespace` (clone →
+//                      source). The arrow points FROM the derived memory TO
+//                      the original.
+//   * `reflects_on`  — v0.7.0 Task 3/8 (recursive learning). reflection
+//                      memory (source) → source memory it reflects on
+//                      (target). Mirrors the `derived_from` convention: the
+//                      newer/derived row is the link's `source_id`; the
+//                      thing it points back to is the `target_id`. The
+//                      reflection memory is the one with `reflection_depth
+//                      > 0` (see Memory.reflection_depth, Task 1/8). Task
+//                      4/8 (`memory_reflect` MCP tool) will write these
+//                      links from a reflection memory to each source it
+//                      reflects on. `reflects_on` participates in
+//                      `find_paths` traversal naturally because that BFS
+//                      walks `memory_links` without filtering by relation
+//                      label — operators tracing reflection chains see them
+//                      surface alongside the other relations.
+const VALID_RELATIONS: &[&str] = &[
+    "related_to",
+    "supersedes",
+    "contradicts",
+    "derived_from",
+    "reflects_on",
+];
 
 fn is_valid_rfc3339(s: &str) -> bool {
     chrono::DateTime::parse_from_rfc3339(s).is_ok()
@@ -879,6 +915,10 @@ mod tests {
         assert!(validate_relation("derived_from").is_ok());
         assert!(validate_relation("contradicts").is_ok());
         assert!(validate_relation("supersedes").is_ok());
+        // v0.7.0 Task 3/8 (recursive learning) — `reflects_on` joins the
+        // canonical set as the relation a reflection memory writes back
+        // to each source it reflects on. See VALID_RELATIONS docstring.
+        assert!(validate_relation("reflects_on").is_ok());
 
         // Caller-supplied lowercase identifier — accepted by the
         // post-cb92998 permissive arm. Previously rejected.
@@ -1068,9 +1108,18 @@ mod tests {
         #[test]
         fn prop_validate_link_rejects_self_link_for_every_relation(
             id in r"[a-z][a-zA-Z0-9_-]{0,32}",
-            rel_idx in 0usize..4,
+            rel_idx in 0usize..5,
         ) {
-            let relations = ["related_to", "supersedes", "contradicts", "derived_from"];
+            // v0.7.0 Task 3/8 (recursive learning) — `reflects_on` joins the
+            // canonical relation set; the self-link rejection invariant
+            // applies to it too.
+            let relations = [
+                "related_to",
+                "supersedes",
+                "contradicts",
+                "derived_from",
+                "reflects_on",
+            ];
             let rel = relations[rel_idx];
             let result = validate_link(&id, &id, rel);
             prop_assert!(result.is_err(), "self-link must reject for relation {rel}, id {:?}", id);

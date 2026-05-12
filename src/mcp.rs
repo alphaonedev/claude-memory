@@ -875,13 +875,13 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_link",
                 "description": "Create a typed link between two memories.",
-                "docs": "Create a directional link between two memories with one of four relations: related_to, supersedes, contradicts, derived_from. v0.7 H-track signs the link with the active Ed25519 keypair when one is configured (verifiable via memory_verify).",
+                "docs": "Create a directional link between two memories with one of five canonical relations: related_to, supersedes, contradicts, derived_from, reflects_on. v0.7.0 Task 3/8 (recursive learning) added `reflects_on` — a reflection memory (with reflection_depth > 0) writes this link back to each source memory it reflects on (matches the `derived_from` directionality: newer/derived row is source_id, the thing it points back to is target_id). v0.7 H-track signs the link with the active Ed25519 keypair when one is configured (verifiable via memory_verify).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "source_id": {"type": "string", "description": "Source memory ID"},
                         "target_id": {"type": "string", "description": "Target memory ID"},
-                        "relation": {"type": "string", "enum": ["related_to", "supersedes", "contradicts", "derived_from"], "default": "related_to"}
+                        "relation": {"type": "string", "enum": ["related_to", "supersedes", "contradicts", "derived_from", "reflects_on"], "default": "related_to"}
                     },
                     "required": ["source_id", "target_id"]
                 }
@@ -908,7 +908,7 @@ pub fn tool_definitions() -> Value {
                         "link_id": {"type": "string", "description": "Composite link identifier in the form 'source_id--relation-->target_id'. Equivalent to passing source_id+target_id+relation explicitly."},
                         "source_id": {"type": "string", "description": "Source memory ID. Required when link_id is omitted."},
                         "target_id": {"type": "string", "description": "Target memory ID. Required when link_id is omitted."},
-                        "relation": {"type": "string", "enum": ["related_to", "supersedes", "contradicts", "derived_from"], "default": "related_to", "description": "Link relation. Defaults to related_to when omitted (matches memory_link's default)."}
+                        "relation": {"type": "string", "enum": ["related_to", "supersedes", "contradicts", "derived_from", "reflects_on"], "default": "related_to", "description": "Link relation. Defaults to related_to when omitted (matches memory_link's default). v0.7.0 Task 3/8 added `reflects_on`."}
                     }
                 }
             },
@@ -1387,7 +1387,7 @@ fn prompt_content(name: &str, params: &Value) -> Result<Value, String> {
         GET: memory_get(id) → single memory with links\n\
         PROMOTE: memory_promote(id) — mid→long, clears expiry\n\
         CONSOLIDATE: memory_consolidate(ids, title) — merge N→1, LLM summary if available\n\
-        LINK: memory_link(source_id, target_id, relation) — related_to|supersedes|contradicts|derived_from\n\
+        LINK: memory_link(source_id, target_id, relation) — related_to|supersedes|contradicts|derived_from|reflects_on\n\
         TAG: memory_auto_tag(id) — LLM generates tags (smart+ tier)\n\
         EXPAND: memory_expand_query(query) — LLM broadens search terms (smart+ tier)\n\
         CONTRADICT: memory_detect_contradiction(id_a, id_b) — LLM checks conflict (smart+ tier)"
