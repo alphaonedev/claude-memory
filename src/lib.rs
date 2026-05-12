@@ -21,7 +21,19 @@ pub mod color;
 pub mod config;
 pub mod curator;
 pub mod daemon_runtime;
-pub mod db;
+// v0.7.0 L0.5-3 — module renamed from `db` → `storage` as part of
+// the flat-to-modular refactor. The `pub use storage as db;` shim
+// below preserves every `crate::db::*` path across the codebase
+// (handlers, mcp, cli, autonomy, bench, store, curator, transcripts,
+// tests) so the rename is a pure refactor with zero callsite churn.
+pub mod storage;
+
+// Backward-compat shim from L0.5-3 rename — preserves
+// `crate::db::*` paths used elsewhere in the codebase. To be
+// removed in a future cleanup once all callsites migrate to
+// `crate::storage::*`.
+#[allow(dead_code)]
+pub use storage as db;
 pub mod embeddings;
 pub mod errors;
 pub mod federation;
