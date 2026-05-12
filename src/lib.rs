@@ -52,7 +52,20 @@ pub mod models;
 // Wired into the five op paths (store, link, delete, archive,
 // consolidate) so callers consult one evaluator regardless of
 // which source produced the outcome.
-pub mod permissions;
+//
+// v0.7.0 L0.5-4 — module renamed from `permissions` → `governance`
+// as part of the flat-to-modular refactor. The `pub use governance
+// as permissions;` shim below preserves every `crate::permissions::*`
+// path across the codebase (handlers, mcp, config, cli, tests) so the
+// rename is a pure refactor with zero callsite churn.
+pub mod governance;
+
+// Backward-compat shim from L0.5-4 rename — preserves
+// `crate::permissions::*` paths used elsewhere in the codebase.
+// To be removed in a future cleanup once all callsites migrate
+// to `crate::governance::*`.
+#[allow(dead_code)]
+pub use governance as permissions;
 pub mod profile;
 // v0.7 Track K, Task K8 — per-agent rate limits + storage caps.
 // `agent_quotas` table backs three counters (memories/day, storage
