@@ -1,0 +1,347 @@
+// Copyright 2026 AlphaOne LLC
+// SPDX-License-Identifier: Apache-2.0
+
+use serde::{Deserialize, Serialize};
+
+/// v0.7 Track H — attestation level for a `memory_links` row.
+///
+/// H2 (#566) and H3 (#572) already write the three string variants
+/// directly into the `memory_links.attest_level` TEXT column
+/// (`"unsigned"`, `"self_signed"`, `"peer_attested"`). H4 formalises
+/// the enum so the `memory_verify` MCP tool — and any future verifier
+/// surface — can reason in terms of a closed set rather than an
+/// open-ended string.
+///
+/// `#[serde(rename_all = "snake_case")]` keeps the wire shape byte-
+/// identical to what the database column already holds. The
+/// [`AttestLevel::from_str`] / [`AttestLevel::as_str`] helpers exist
+/// because the column is read as a `String` in many call sites that
+/// are not deserialising through serde (e.g. `rusqlite::Row::get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestLevel {
+    /// No signature on the row, or no key enrolled for `observed_by` on
+    /// the receiver. Federation back-compat default — unsigned rows
+    /// still land but downstream consumers know they cannot verify.
+    Unsigned,
+    /// Row was signed locally by this writer (H2 outbound path).
+    SelfSigned,
+    /// Row arrived from a peer with a signature that verified against
+    /// the enrolled `observed_by` public key on this host (H3 inbound
+    /// path).
+    PeerAttested,
+}
+
+impl AttestLevel {
+    /// Parse the string form stored in `memory_links.attest_level`.
+    ///
+    /// Returns `None` for unknown values so callers can decide whether
+    /// to treat the column as legacy/`unsigned` or surface an error.
+    /// Keeps the unit-of-truth on the database column shape — H2/H3
+    /// already write the canonical lowercase snake_case strings.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "unsigned" => Some(Self::Unsigned),
+            "self_signed" => Some(Self::SelfSigned),
+            "peer_attested" => Some(Self::PeerAttested),
+            _ => None,
+        }
+    }
+
+    /// Canonical wire string for this variant. Mirrors the `serde`
+    /// rename_all and the literals H2/H3 already write to the DB.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unsigned => "unsigned",
+            Self::SelfSigned => "self_signed",
+            Self::PeerAttested => "peer_attested",
+        }
+    }
+}
+
+impl std::fmt::Display for AttestLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryLink {
+    pub source_id: String,
+    pub target_id: String,
+    pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from", "reflects_on"
+    pub created_at: String,
+    /// v0.7 H3 — optional 64-byte Ed25519 signature carried over the
+    /// federation wire. `None` for legacy peers (pre-v0.7) that do not
+    /// sign outbound links; receivers in that case land the row with
+    /// `attest_level = "unsigned"`. When `Some`, it is verified against
+    /// the public key associated with `observed_by` before insert.
+    /// `skip_serializing_if` keeps the wire shape byte-identical to
+    /// pre-H3 for unsigned rows so v0.6.x peers continue to deserialize
+    /// without surprise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<Vec<u8>>,
+    /// v0.7 H3 — agent_id that asserts this link. Mirrors the H2
+    /// `SignableLink.observed_by` field. Required when `signature` is
+    /// `Some` (it is the lookup key for the verifying public key);
+    /// `None` is treated as "no claim" and short-circuits to unsigned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_by: Option<String>,
+    /// v0.7 H3 — RFC3339 instant the link became true (matches the
+    /// homonymous column in `memory_links`). Part of the signed bundle;
+    /// must round-trip byte-identical with what the sender signed for
+    /// verification to succeed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_from: Option<String>,
+    /// v0.7 H3 — RFC3339 instant the link was invalidated, or `None` if
+    /// still valid. Part of the signed bundle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub valid_until: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkBody {
+    /// Canonical name. Aliased by `from` (S82's wire shape).
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// `from` alias for `source_id`.
+    #[serde(default)]
+    pub from: Option<String>,
+    /// Canonical name. Aliased by `to` (S82's wire shape).
+    #[serde(default)]
+    pub target_id: Option<String>,
+    /// `to` alias for `target_id`.
+    #[serde(default)]
+    pub to: Option<String>,
+    /// Canonical name. Aliased by `rel_type` (S82's wire shape).
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// `rel_type` alias for `relation`.
+    #[serde(default)]
+    pub rel_type: Option<String>,
+}
+
+impl LinkBody {
+    /// Resolve the canonical (source_id, target_id, relation) tuple
+    /// from the canonical fields or their aliases. Defaults relation
+    /// to `related_to` when neither field is supplied.
+    #[must_use]
+    pub fn resolved(&self) -> (String, String, String) {
+        let s = self
+            .source_id
+            .clone()
+            .or_else(|| self.from.clone())
+            .unwrap_or_default();
+        let t = self
+            .target_id
+            .clone()
+            .or_else(|| self.to.clone())
+            .unwrap_or_default();
+        let r = self
+            .relation
+            .clone()
+            .or_else(|| self.rel_type.clone())
+            .unwrap_or_else(default_relation);
+        (s, t, r)
+    }
+}
+
+fn default_relation() -> String {
+    "related_to".to_string()
+}
+
+/// Tag stamped on entity-typed memories so `(title, namespace)` can be
+/// shared across regular memories and entities without ambiguity (Pillar
+/// 2 / Stream B).
+pub const ENTITY_TAG: &str = "entity";
+
+/// Marker written to `metadata.kind` on entity-typed memories. The
+/// db layer keys entity lookups off this field so the alias resolver
+/// never returns a regular memory that happens to share a title with an
+/// entity registered later.
+pub const ENTITY_KIND: &str = "entity";
+
+/// Resolved entity record returned by `db::entity_get_by_alias` and
+/// embedded in the `db::entity_register` response (Pillar 2 / Stream B).
+/// `aliases` is the full alias set for the entity, ordered by
+/// `created_at ASC, alias ASC` for stable display.
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRecord {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+}
+
+/// Outcome of `db::entity_register`. `created` is `true` when a new
+/// entity memory was inserted, `false` when an existing entity was
+/// reused (idempotent re-registration that just merged new aliases into
+/// the existing record).
+#[derive(Debug, Clone, Serialize)]
+pub struct EntityRegistration {
+    pub entity_id: String,
+    pub canonical_name: String,
+    pub namespace: String,
+    pub aliases: Vec<String>,
+    pub created: bool,
+}
+
+/// Single row returned by `db::kg_timeline` (Pillar 2 / Stream C).
+///
+/// Captures one outbound assertion from a source memory: the
+/// `target_id` and its `relation`, the temporal-validity window
+/// (`valid_from` / `valid_until`), the agent that observed it
+/// (`observed_by`), and the target's display fields (`title`,
+/// `target_namespace`) for caller convenience. `valid_from` is the
+/// authoritative ordering key — events with NULL `valid_from` are
+/// excluded from the timeline by the query.
+#[derive(Debug, Clone, Serialize)]
+pub struct KgTimelineEvent {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_from: String,
+    pub valid_until: Option<String>,
+    pub observed_by: Option<String>,
+    pub title: String,
+    pub target_namespace: String,
+}
+
+/// One node returned by `db::kg_query` (Pillar 2 / Stream C —
+/// `memory_kg_query`). Each node represents a memory reachable from the
+/// query's source through one outbound link, carrying the link's
+/// temporal-validity columns plus the target memory's display fields and
+/// the traversal path. `depth` is the actual number of hops from the
+/// source (1..=`KG_QUERY_MAX_SUPPORTED_DEPTH`); `path` is the
+/// `src->mid->target` chain as discovered by the recursive CTE.
+#[derive(Debug, Clone, Serialize)]
+pub struct KgQueryNode {
+    pub target_id: String,
+    pub relation: String,
+    pub valid_from: Option<String>,
+    pub valid_until: Option<String>,
+    pub observed_by: Option<String>,
+    pub title: String,
+    pub target_namespace: String,
+    pub depth: usize,
+    pub path: String,
+}
+
+/// One nearest-neighbor result from a `memory_check_duplicate` lookup
+/// (Pillar 2 / Stream D). `similarity` is the cosine similarity in
+/// `[-1.0, 1.0]`, rounded to three decimals at the response layer.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateMatch {
+    pub id: String,
+    pub title: String,
+    pub namespace: String,
+    pub similarity: f32,
+}
+
+/// Result envelope returned by `db::check_duplicate`.
+///
+/// `is_duplicate` is `nearest.similarity >= threshold`. `nearest` is
+/// `None` only when the candidate pool is empty (no embedded, live
+/// memories matched the namespace filter). When `is_duplicate` is true,
+/// `nearest.id` doubles as the suggested merge target — we surface it
+/// under that name in the JSON response so the contract stays explicit.
+#[derive(Debug, Clone, Serialize)]
+pub struct DuplicateCheck {
+    pub is_duplicate: bool,
+    pub threshold: f32,
+    pub nearest: Option<DuplicateMatch>,
+    pub candidates_scanned: usize,
+}
+
+/// One node of the hierarchical namespace tree returned by
+/// `memory_get_taxonomy` (Pillar 1 / Stream A).
+///
+/// `count` is the number of memories at *exactly* this namespace;
+/// `subtree_count` is the count of memories at this node plus every
+/// descendant the depth limit allowed us to expand. Children are sorted
+/// alphabetically by `name` so callers get a stable rendering order.
+#[derive(Debug, Clone, Serialize)]
+pub struct TaxonomyNode {
+    /// Full namespace path of this node. Empty string for the synthetic
+    /// root when no `namespace_prefix` is supplied.
+    pub namespace: String,
+    /// Last `/`-delimited segment of `namespace` (display label). Empty
+    /// for the synthetic root.
+    pub name: String,
+    /// Memories whose namespace equals this node's `namespace`.
+    pub count: usize,
+    /// Memories at this node plus all descendants visible within the
+    /// requested `depth`. Memories beneath the depth cutoff still
+    /// contribute to the `subtree_count` of the boundary ancestor.
+    pub subtree_count: usize,
+    /// Direct child nodes, sorted alphabetically by `name`.
+    pub children: Vec<TaxonomyNode>,
+}
+
+/// Result envelope returned by `db::get_taxonomy`.
+///
+/// `total_count` is the global memory count for the prefix (independent
+/// of `depth`/`limit` truncation) so callers can render an honest
+/// "X memories in N namespaces" header even when the tree was
+/// truncated. `truncated` is set when the `limit` parameter forced us
+/// to drop input rows when assembling the tree.
+#[derive(Debug, Clone, Serialize)]
+pub struct Taxonomy {
+    pub tree: TaxonomyNode,
+    pub total_count: usize,
+    pub truncated: bool,
+}
+
+/// Phase 3 foundation (issue #224): vector clock tracking the latest
+/// `updated_at` this peer has seen from each known remote peer.
+///
+/// Entries are populated lazily — both on HTTP `/sync/push` (receiver
+/// records the sender's latest `updated_at`) and on HTTP `/sync/since`
+/// (sender advances `last_pulled_at`). Full CRDT-lite merge rules using
+/// the clock are **not** in the v0.6.0 GA foundation; they land in a
+/// follow-up PR under issue #224 Task 3a.1. The foundation ships the
+/// wire format so adding the merge semantics later does not force a
+/// schema migration.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct VectorClock {
+    /// Map of peer `agent_id` -> latest RFC3339 `updated_at` seen from
+    /// that peer. A peer absent from the map is equivalent to
+    /// "never-seen-anything." Encoded as a JSON object on the wire.
+    #[serde(default)]
+    pub entries: std::collections::BTreeMap<String, String>,
+}
+
+impl VectorClock {
+    /// Advance this clock to include `peer_id`'s latest seen timestamp.
+    /// Monotonic — an older timestamp never overwrites a newer one.
+    #[allow(dead_code)] // Consumed by Task 3a.1 CRDT-lite merge (issue #224).
+    pub fn observe(&mut self, peer_id: &str, at: &str) {
+        self.entries
+            .entry(peer_id.to_string())
+            .and_modify(|existing| {
+                if at > existing.as_str() {
+                    *existing = at.to_string();
+                }
+            })
+            .or_insert_with(|| at.to_string());
+    }
+
+    /// Look up the latest timestamp this clock has from `peer_id`.
+    #[must_use]
+    #[allow(dead_code)] // Consumed by Task 3a.1 CRDT-lite merge (issue #224).
+    pub fn latest_from(&self, peer_id: &str) -> Option<&str> {
+        self.entries.get(peer_id).map(String::as_str)
+    }
+}
+
+/// Phase 3 foundation: one row of the `sync_state` table serialised for
+/// diagnostic / API responses.
+#[allow(dead_code)] // Consumed by Task 3b.2 sync diagnostics API (issue #224).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyncStateEntry {
+    pub agent_id: String,
+    pub peer_id: String,
+    pub last_seen_at: String,
+    pub last_pulled_at: String,
+}
