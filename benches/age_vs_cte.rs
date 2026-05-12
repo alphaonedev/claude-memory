@@ -521,6 +521,11 @@ async fn insert_fixture(
             last_accessed_at: None,
             expires_at: None,
             metadata: serde_json::json!({"agent_id": "ai:j8-bench"}),
+            // v0.7.0 Task 1/8 — substrate-native reflection depth. J8
+            // bench fixture nodes are caller-equivalent (depth 0), so the
+            // KG traversal benchmark targets the same shape it would in
+            // production.
+            reflection_depth: 0,
         };
         store.store(&ctx, &mem).await?;
     }
