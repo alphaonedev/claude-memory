@@ -74,11 +74,14 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // `memory_subscription_replay` + `memory_subscription_dlq_list`;
     // to 49 in v0.7 J7 — Family::Graph gained `memory_find_paths`;
     // to 50 in v0.7 B2 — Family::Core gained `memory_smart_load`;
-    // to 51 in v0.7 K8 — Family::Power gained `memory_quota_status`.
+    // to 51 in v0.7 K8 — Family::Power gained `memory_quota_status`;
+    // to 52 in v0.7.0 Task 4/8 (#655) — Family::Power gained `memory_reflect`.
     // Loaded under core bumped from 5 to 6 with B1 then to 7 with B2,
     // so the preview now overflows the 5-name cap (ends in ", ...").
+    // memory_reflect lives in Family::Power, so it grows the "more"
+    // bucket from 43 to 44 without changing the loaded count of 7.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 43 more \
+                    (store, recall, list, get, search, ...). 44 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -94,7 +97,7 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // ---------------------------------------------------------------------------
 // T0-A2-FULL — `to_describe_to_user` on `--profile full` uses the
 // "nothing more to load" closing form (excludes the always-on bootstrap
-// from the user-facing 50 count). Bumped from 42 to 43 in v0.7.0 I4 —
+// from the user-facing 51 count). Bumped from 42 to 43 in v0.7.0 I4 —
 // Family::Graph gained `memory_replay`; to 44 in v0.7 H4 —
 // Family::Graph gained `memory_verify`; to 45 in v0.7 B1 —
 // Family::Core gained `memory_load_family`; to 47 in v0.7 K7 —
@@ -102,7 +105,8 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // `memory_subscription_dlq_list`; to 48 in v0.7 J7 —
 // Family::Graph gained `memory_find_paths`; to 49 in v0.7 B2 —
 // Family::Core gained `memory_smart_load`; to 50 in v0.7 K8 —
-// Family::Power gained `memory_quota_status`.
+// Family::Power gained `memory_quota_status`; to 51 in v0.7.0
+// Task 4/8 (#655) — Family::Power gained `memory_reflect`.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_full_profile_canonical_phrasing() {
@@ -111,7 +115,7 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
         .as_str()
         .expect("describe present");
 
-    let expected = "I can directly use all 50 memory tools right now \
+    let expected = "I can directly use all 51 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -133,7 +137,9 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 // `memory_find_paths`; to 18 in v0.7 B2 — Family::Core gained
 // `memory_smart_load`. Total bumped to 51 in v0.7 K8 — Family::Power
 // gained `memory_quota_status` (not loaded under graph profile, so
-// `more` count grows from 31 to 32).
+// `more` count grew from 31 to 32). To 52 in v0.7.0 Task 4/8 (#655) —
+// Family::Power gained `memory_reflect` (also not loaded under graph,
+// so `more` count grows from 32 to 33).
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -143,7 +149,7 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
         .expect("describe present");
 
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 32 more \
+                    (store, recall, list, get, search, ...). 33 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
