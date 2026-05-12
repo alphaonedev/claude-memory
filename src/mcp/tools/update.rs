@@ -8,7 +8,7 @@ use crate::hnsw::VectorIndex;
 use crate::models::Tier;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_update(
+pub(super) fn handle_update(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,

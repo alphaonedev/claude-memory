@@ -6,7 +6,7 @@
 use crate::models::Tier;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let query = params["query"].as_str().ok_or("query is required")?;
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);

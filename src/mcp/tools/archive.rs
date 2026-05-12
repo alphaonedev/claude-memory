@@ -5,7 +5,10 @@
 
 use crate::db;
 use serde_json::{Value, json};
-pub fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_archive_list(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(50)).unwrap_or(usize::MAX);
     let offset = usize::try_from(params["offset"].as_u64().unwrap_or(0)).unwrap_or(usize::MAX);
@@ -14,7 +17,7 @@ pub fn handle_archive_list(conn: &rusqlite::Connection, params: &Value) -> Resul
     Ok(json!({"archived": items, "count": items.len()}))
 }
 
-pub fn handle_archive_restore(
+pub(super) fn handle_archive_restore(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -27,7 +30,10 @@ pub fn handle_archive_restore(
     Ok(json!({"restored": true, "id": id}))
 }
 
-pub fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_archive_purge(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let older_than_days = params["older_than_days"].as_i64();
 
     // v0.7.0 K9 — unified permission pipeline (archive-side).
@@ -63,11 +69,11 @@ pub fn handle_archive_purge(conn: &rusqlite::Connection, params: &Value) -> Resu
     Ok(json!({"purged": purged}))
 }
 
-pub fn handle_archive_stats(conn: &rusqlite::Connection) -> Result<Value, String> {
+pub(super) fn handle_archive_stats(conn: &rusqlite::Connection) -> Result<Value, String> {
     db::archive_stats(conn).map_err(|e| e.to_string())
 }
 
-pub fn handle_gc(
+pub(super) fn handle_gc(
     conn: &rusqlite::Connection,
     params: &Value,
     archive: bool,

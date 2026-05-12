@@ -5,7 +5,10 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_agent_register(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_agent_register(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let agent_id = params["agent_id"].as_str().ok_or("agent_id is required")?;
     let agent_type = params["agent_type"]
         .as_str()
@@ -35,7 +38,7 @@ pub fn handle_agent_register(conn: &rusqlite::Connection, params: &Value) -> Res
     }))
 }
 
-pub fn handle_agent_list(conn: &rusqlite::Connection) -> Result<Value, String> {
+pub(super) fn handle_agent_list(conn: &rusqlite::Connection) -> Result<Value, String> {
     let agents = db::list_agents(conn).map_err(|e| e.to_string())?;
     Ok(json!({
         "count": agents.len(),
@@ -50,6 +53,6 @@ pub fn handle_agent_list(conn: &rusqlite::Connection) -> Result<Value, String> {
 /// Reuses the same sanitization regex that `validate_namespace` enforces
 /// on writes, so any `agent_id` that passes `validate::validate_agent_id`
 /// produces an acceptable namespace here.
-pub fn messages_namespace_for(agent_id: &str) -> String {
+pub(super) fn messages_namespace_for(agent_id: &str) -> String {
     format!("_messages/{agent_id}")
 }

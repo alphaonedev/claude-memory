@@ -6,7 +6,7 @@
 use crate::llm::OllamaClient;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_auto_tag(
+pub(super) fn handle_auto_tag(
     conn: &rusqlite::Connection,
     llm: Option<&OllamaClient>,
     params: &Value,

@@ -5,7 +5,10 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_kg_query(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_kg_query(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let source_id = params["source_id"]
         .as_str()
         .ok_or("source_id is required")?;

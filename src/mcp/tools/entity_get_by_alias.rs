@@ -5,7 +5,7 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_entity_get_by_alias(
+pub(super) fn handle_entity_get_by_alias(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {

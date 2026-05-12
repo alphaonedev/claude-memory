@@ -7,7 +7,7 @@ use crate::mcp::VectorIndex;
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
-pub fn handle_delete(
+pub(super) fn handle_delete(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

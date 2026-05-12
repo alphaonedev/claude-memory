@@ -6,7 +6,7 @@
 use crate::llm::OllamaClient;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_detect_contradiction(
+pub(super) fn handle_detect_contradiction(
     conn: &rusqlite::Connection,
     llm: Option<&OllamaClient>,
     params: &Value,

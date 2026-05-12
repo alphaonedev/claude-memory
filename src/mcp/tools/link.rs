@@ -6,7 +6,7 @@
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
-pub fn handle_link(
+pub(super) fn handle_link(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,
@@ -148,7 +148,10 @@ pub fn handle_link(
     }))
 }
 
-pub fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_get_links(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
     let links = db::get_links(conn, id).map_err(|e| e.to_string())?;
@@ -167,7 +170,7 @@ pub fn handle_get_links(conn: &rusqlite::Connection, params: &Value) -> Result<V
 /// form reads naturally in logs and is unambiguous because `--` and
 /// `-->` are not valid characters inside a memory id (memory ids are
 /// validated by `validate::validate_id`).
-pub fn parse_link_id(s: &str) -> Option<(String, String, String)> {
+pub(super) fn parse_link_id(s: &str) -> Option<(String, String, String)> {
     // Returns `(source_id, target_id, relation)` to match the
     // destructuring shape `handle_verify` uses below.
     //

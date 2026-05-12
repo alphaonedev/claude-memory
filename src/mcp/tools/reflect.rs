@@ -24,7 +24,7 @@ use std::path::Path;
 /// `signed_events` audit emission against the `DepthExceeded` variant
 /// without touching the happy-path code.
 
-pub fn handle_reflect(
+pub(super) fn handle_reflect(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

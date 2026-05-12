@@ -5,7 +5,7 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_get(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     validate::validate_id(id).map_err(|e| e.to_string())?;
     match db::resolve_id(conn, id).map_err(|e| e.to_string())? {

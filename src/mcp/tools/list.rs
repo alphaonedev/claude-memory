@@ -6,7 +6,7 @@
 use crate::models::Tier;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
     let tier = params["tier"].as_str().and_then(Tier::from_str);
     // Ultrareview #339: saturate instead of panic (see handle_search).

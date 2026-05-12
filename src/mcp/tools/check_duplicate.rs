@@ -6,7 +6,7 @@
 use crate::embeddings::Embedder;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_check_duplicate(
+pub(super) fn handle_check_duplicate(
     conn: &rusqlite::Connection,
     params: &Value,
     embedder: Option<&Embedder>,

@@ -6,7 +6,7 @@
 use crate::models::GovernancePolicy;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_namespace_set_standard(
+pub(crate) fn handle_namespace_set_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -75,7 +75,7 @@ pub fn handle_namespace_set_standard(
     Ok(resp)
 }
 
-pub fn handle_namespace_get_standard(
+pub(crate) fn handle_namespace_get_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -153,7 +153,7 @@ pub(super) fn extract_governance(mem_val: &Value) -> Value {
     }
 }
 
-pub fn handle_namespace_clear_standard(
+pub(crate) fn handle_namespace_clear_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {

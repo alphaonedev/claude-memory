@@ -10,7 +10,7 @@ use crate::models::Tier;
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
-pub fn handle_consolidate(
+pub(super) fn handle_consolidate(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

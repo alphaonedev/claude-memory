@@ -6,7 +6,7 @@
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
-pub fn handle_kg_invalidate(
+pub(super) fn handle_kg_invalidate(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

@@ -4,7 +4,7 @@
 //! MCP subscription management handlers.
 
 use serde_json::{Value, json};
-pub fn handle_subscribe(
+pub(super) fn handle_subscribe(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,
@@ -75,13 +75,16 @@ pub fn handle_subscribe(
     Ok(response)
 }
 
-pub fn handle_unsubscribe(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(crate) fn handle_unsubscribe(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;
     let removed = crate::subscriptions::delete(conn, id).map_err(|e| e.to_string())?;
     Ok(json!({"id": id, "removed": removed}))
 }
 
-pub fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
+pub(super) fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, String> {
     let subs = crate::subscriptions::list(conn).map_err(|e| e.to_string())?;
     Ok(json!({"count": subs.len(), "subscriptions": subs}))
 }
@@ -90,7 +93,7 @@ pub fn handle_list_subscriptions(conn: &rusqlite::Connection) -> Result<Value, S
 /// wrapper around [`crate::subscriptions::memory_subscription_replay`]
 /// that exposes the operator/governance reliability tool over the
 /// MCP wire. Family: `Power` (operator-scoped, not data-plane).
-pub fn handle_subscription_replay(
+pub(super) fn handle_subscription_replay(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {

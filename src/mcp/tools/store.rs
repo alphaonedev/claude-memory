@@ -146,7 +146,7 @@ fn forward_store_to_http(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-pub fn handle_store(
+pub(super) fn handle_store(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,

@@ -6,7 +6,7 @@
 use crate::db;
 use crate::llm::OllamaClient;
 use serde_json::{Value, json};
-pub fn handle_session_start(
+pub(crate) fn handle_session_start(
     conn: &rusqlite::Connection,
     params: &Value,
     llm: Option<&OllamaClient>,

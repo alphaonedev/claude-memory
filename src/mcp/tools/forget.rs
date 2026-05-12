@@ -7,7 +7,7 @@ use crate::db;
 use crate::models::Tier;
 use serde_json::{Value, json};
 use std::path::Path;
-pub fn handle_forget(
+pub(super) fn handle_forget(
     conn: &rusqlite::Connection,
     params: &Value,
     archive: bool,
@@ -28,7 +28,7 @@ pub fn handle_forget(
     Ok(json!({"deleted": deleted, "archived": archive}))
 }
 
-pub fn handle_stats(conn: &rusqlite::Connection, db_path: &Path) -> Result<Value, String> {
+pub(super) fn handle_stats(conn: &rusqlite::Connection, db_path: &Path) -> Result<Value, String> {
     let stats = db::stats(conn, db_path).map_err(|e| e.to_string())?;
     serde_json::to_value(stats).map_err(|e| e.to_string())
 }

@@ -5,7 +5,10 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_get_taxonomy(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_get_taxonomy(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     // Defaults match the JSON schema. Trailing '/' is forgiven so MCP
     // clients can pass either `"alpha"` or `"alpha/"` without an extra
     // round trip — the underlying validate_namespace rejects the

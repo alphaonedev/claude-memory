@@ -5,7 +5,7 @@
 
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub fn handle_entity_register(
+pub(super) fn handle_entity_register(
     conn: &rusqlite::Connection,
     params: &Value,
     mcp_client: Option<&str>,

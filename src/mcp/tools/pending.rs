@@ -31,7 +31,10 @@ pub(crate) fn handle_subscription_dlq_list(
     }))
 }
 
-pub fn handle_pending_list(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
+pub(super) fn handle_pending_list(
+    conn: &rusqlite::Connection,
+    params: &Value,
+) -> Result<Value, String> {
     let status = params["status"].as_str();
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(100))
         .unwrap_or(usize::MAX)
