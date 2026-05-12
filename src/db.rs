@@ -2581,6 +2581,14 @@ pub enum ReflectError {
         cap: u32,
         namespace: String,
     },
+    /// v0.7.0 recursive-learning Task 6/8 — a `pre_reflect` hook
+    /// callback returned [`ReflectHookDecision::Deny`], vetoing the
+    /// reflection. Distinct from `DepthExceeded` because the substrate
+    /// cap was NOT evaluated (the veto fires earlier in step 4) and
+    /// because the Task 5 depth-cap audit row is NOT emitted on this
+    /// path — hook vetoes are caller-policy refusals that carry their
+    /// own provenance via the hook's own decision record (if any).
+    HookVeto { reason: String, code: i32 },
     /// Database error during the atomic write. Carries the underlying
     /// rusqlite / anyhow string.
     Database(String),
@@ -2599,6 +2607,12 @@ impl std::fmt::Display for ReflectError {
                 "reflection depth {attempted} would exceed namespace \
                  max_reflection_depth {cap} (namespace='{namespace}')"
             ),
+            Self::HookVeto { reason, code } => {
+                write!(
+                    f,
+                    "pre_reflect hook vetoed reflection (code={code}): {reason}"
+                )
+            }
         }
     }
 }
@@ -2618,6 +2632,85 @@ pub struct ReflectOutcome {
     /// Namespace the reflection landed in (resolved to the first source's
     /// namespace when the caller omitted the field).
     pub namespace: String,
+}
+
+/// v0.7.0 recursive-learning Task 6/8 — substrate-level decision
+/// surface returned by a `pre_reflect` hook callback.
+///
+/// Mirrors the shape of [`crate::hooks::HookDecision`] minus the
+/// `Modify` and `AskUser` variants — the substrate hook surface only
+/// exposes the two outcomes that affect the reflect control flow:
+/// continue (`Allow`) or veto (`Deny`). Hook-supplied delta merging
+/// and operator prompts are handled by the wire-level
+/// [`crate::hooks::HookChain`] when the daemon's hook pipeline is
+/// configured (G7+ wiring); this in-substrate variant is the path
+/// the substrate uses today to fire `PreReflect` / `PostReflect`
+/// events on the reflect codepath.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReflectHookDecision {
+    /// Continue evaluating the reflect — proceed to the cap check.
+    Allow,
+    /// Veto the reflect. The substrate returns
+    /// [`ReflectError::HookVeto`] with the supplied reason +
+    /// HTTP-style status code; the cap check is NOT evaluated and
+    /// the depth-cap audit row is NOT emitted (this is a caller-
+    /// policy refusal, not a substrate cap refusal — Task 5 audits
+    /// the latter; hook vetoes carry their own provenance).
+    Deny { reason: String, code: i32 },
+}
+
+/// v0.7.0 recursive-learning Task 6/8 — optional in-substrate hook
+/// callbacks fired by [`reflect_with_hooks`]. Bundled into a single
+/// struct so the substrate signature stays compact and so future
+/// callbacks (e.g. on-rollback) can land without churning every
+/// call site.
+///
+/// Both callbacks are `Option<...>`; when `None`, the substrate
+/// behaves identically to the unhooked [`reflect`] entry-point. The
+/// callback type is `Box<dyn Fn(...)>` so the substrate stays
+/// allocator-friendly (one allocation per reflect call) and so test
+/// code can pass simple closures that capture observation state.
+pub struct ReflectHooks<'a> {
+    /// Fired BEFORE the cap check (step 4 of `reflect`). Receives a
+    /// read-only view of the in-flight [`ReflectInput`] (the
+    /// substrate-side equivalent of [`crate::hooks::events::ReflectDelta`]
+    /// — the in-process callback gets the typed input directly,
+    /// while the cross-process wire path serialises a `ReflectDelta`).
+    /// Returns [`ReflectHookDecision::Deny`] to veto.
+    pub pre_reflect: Option<Box<dyn Fn(&ReflectInput) -> ReflectHookDecision + Send + Sync + 'a>>,
+    /// Fired AFTER the transaction commits (step 7 of `reflect`).
+    /// Receives a read-only snapshot of the post-commit outcome
+    /// (mirrors [`crate::hooks::events::ReflectResult`]). Notify-class
+    /// — return value is ignored; the reflect already landed.
+    pub post_reflect: Option<Box<dyn Fn(&ReflectOutcome) + Send + Sync + 'a>>,
+}
+
+impl<'a> ReflectHooks<'a> {
+    /// Empty bundle — both callbacks `None`. The default used by
+    /// callers that don't want to register hooks (today: the MCP
+    /// handler at `mcp::handle_reflect`).
+    #[must_use]
+    pub fn empty() -> Self {
+        Self {
+            pre_reflect: None,
+            post_reflect: None,
+        }
+    }
+}
+
+impl<'a> Default for ReflectHooks<'a> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<'a> std::fmt::Debug for ReflectHooks<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ReflectHooks")
+            .field("pre_reflect", &self.pre_reflect.as_ref().map(|_| "<fn>"))
+            .field("post_reflect", &self.post_reflect.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 /// Input bundle for [`reflect`]. Holds every caller-tunable field of the
@@ -2687,10 +2780,43 @@ pub struct ReflectInput {
 /// variant carries enough information for the caller to render a clean
 /// operator-readable message and (for `DepthExceeded`) for Task 5/8 to
 /// emit a structured audit row.
-#[allow(clippy::too_many_lines)]
 pub fn reflect(
     conn: &Connection,
     input: &ReflectInput,
+) -> std::result::Result<ReflectOutcome, ReflectError> {
+    // Thin shim over [`reflect_with_hooks`] with an empty hook bundle.
+    // Existing callers (MCP `memory_reflect`, the `tests/recursive_
+    // learning_task4_*` suite, the Postgres parity test) keep using
+    // this entry-point unchanged; the new in-substrate hook surface
+    // is opt-in via `reflect_with_hooks`.
+    reflect_with_hooks(conn, input, &ReflectHooks::empty())
+}
+
+/// v0.7.0 recursive-learning Task 6/8 — variant of [`reflect`] with
+/// in-substrate hook callbacks. See [`reflect`] for the full step
+/// list; the only deltas are:
+///
+///   * Between step 4 (depth + cap resolution) and step 5 (cap
+///     check), `hooks.pre_reflect` fires when configured. A
+///     [`ReflectHookDecision::Deny`] return propagates as
+///     [`ReflectError::HookVeto`]; the cap check is NOT evaluated and
+///     the Task 5 depth-cap audit is NOT emitted on this path.
+///   * After step 6 commits (transaction COMMIT succeeds, just before
+///     returning `ReflectOutcome`), `hooks.post_reflect` fires with
+///     the read-only outcome. Notify-class — return value is ignored.
+///
+/// Calling `reflect_with_hooks(conn, input, &ReflectHooks::empty())`
+/// is identical to calling `reflect(conn, input)`.
+///
+/// # Errors
+///
+/// Same five [`ReflectError`] variants as [`reflect`] plus
+/// [`ReflectError::HookVeto`] when a pre_reflect handler vetoes.
+#[allow(clippy::too_many_lines)]
+pub fn reflect_with_hooks(
+    conn: &Connection,
+    input: &ReflectInput,
+    hooks: &ReflectHooks<'_>,
 ) -> std::result::Result<ReflectOutcome, ReflectError> {
     use crate::validate;
     // ─── 1. Validate inputs ──────────────────────────────────────────
@@ -2769,6 +2895,25 @@ pub fn reflect(
     let policy = resolve_governance_policy(conn, &target_namespace)
         .unwrap_or_else(GovernancePolicy::default);
     let cap = policy.effective_max_reflection_depth();
+
+    // ─── 4.5 `pre_reflect` hook (v0.7.0 Task 6/8) ──────────────────
+    //
+    // Fires BEFORE the cap check so a hook handler may VETO the
+    // reflection by returning `ReflectHookDecision::Deny`. Vetoes
+    // from `pre_reflect` are distinct from the cap refusal —
+    // caller-policy refusals (e.g. "this agent is rate-limited",
+    // "this content type is policy-restricted") rather than
+    // depth-cap refusals. The Task 5 `reflection.depth_exceeded`
+    // audit row is NOT emitted on this path; the hook handler may
+    // emit its own audit if desired.
+    if let Some(pre) = hooks.pre_reflect.as_ref() {
+        match (pre)(input) {
+            ReflectHookDecision::Allow => {}
+            ReflectHookDecision::Deny { reason, code } => {
+                return Err(ReflectError::HookVeto { reason, code });
+            }
+        }
+    }
 
     // ─── 5. Refuse if proposed depth exceeds cap ────────────────────
     //
@@ -2876,12 +3021,24 @@ pub fn reflect(
         Ok(actual_id) => {
             conn.execute_batch("COMMIT")
                 .map_err(|e| ReflectError::Database(e.to_string()))?;
-            Ok(ReflectOutcome {
+            let outcome = ReflectOutcome {
                 id: actual_id,
                 reflection_depth: new_depth_i32,
                 reflects_on: input.source_ids.clone(),
                 namespace: target_namespace,
-            })
+            };
+            // ─── 7. `post_reflect` hook (v0.7.0 Task 6/8) ───────────
+            //
+            // Fires AFTER the transaction commits so the hook handler
+            // can read the new reflection memory + its `reflects_on`
+            // links via the same connection. Notify-class — the
+            // return value is ignored beyond logging (post-commit
+            // events cannot veto a side-effect that already
+            // happened).
+            if let Some(post) = hooks.post_reflect.as_ref() {
+                (post)(&outcome);
+            }
+            Ok(outcome)
         }
         Err(e) => {
             if let Err(rb) = conn.execute_batch("ROLLBACK") {

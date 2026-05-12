@@ -3165,11 +3165,36 @@ impl PostgresStore {
     /// 2. source-not-found (no partial write)
     /// 3. depth-exceeded refusal
     /// 4. database errors during the atomic write
-    #[allow(clippy::too_many_lines)]
     pub async fn reflect(
         &self,
         ctx: &super::CallerContext,
         input: &crate::db::ReflectInput,
+    ) -> std::result::Result<crate::db::ReflectOutcome, crate::db::ReflectError> {
+        // Thin shim over [`reflect_with_hooks`] with an empty hook
+        // bundle — keeps the public entry-point shape stable while
+        // the v0.7.0 Task 6/8 pre_reflect / post_reflect surface
+        // lands behind an opt-in second function.
+        self.reflect_with_hooks(ctx, input, &crate::db::ReflectHooks::empty())
+            .await
+    }
+
+    /// v0.7.0 recursive-learning Task 6/8 — Postgres twin of
+    /// [`crate::db::reflect_with_hooks`]. Fires `pre_reflect` BEFORE
+    /// the depth-cap check (a `Deny` propagates as
+    /// [`crate::db::ReflectError::HookVeto`]; cap audit is NOT
+    /// emitted on this path) and fires `post_reflect` AFTER the
+    /// transaction commits (notify-class; return value ignored).
+    ///
+    /// # Errors
+    ///
+    /// Same variants as [`PostgresStore::reflect`] plus
+    /// [`crate::db::ReflectError::HookVeto`] on `pre_reflect` veto.
+    #[allow(clippy::too_many_lines)]
+    pub async fn reflect_with_hooks(
+        &self,
+        ctx: &super::CallerContext,
+        input: &crate::db::ReflectInput,
+        hooks: &crate::db::ReflectHooks<'_>,
     ) -> std::result::Result<crate::db::ReflectOutcome, crate::db::ReflectError> {
         use crate::db::ReflectError;
         use crate::validate;
@@ -3243,6 +3268,20 @@ impl PostgresStore {
             .map_err(|e| ReflectError::Database(e.to_string()))?
             .unwrap_or_else(crate::models::GovernancePolicy::default);
         let cap = policy.effective_max_reflection_depth();
+
+        // ─── 4.5 `pre_reflect` hook (v0.7.0 Task 6/8) ──────────────
+        //
+        // Fires BEFORE the cap check so a hook handler may VETO the
+        // reflection. The veto path returns `ReflectError::HookVeto`
+        // and does NOT emit the Task 5 depth-cap audit row.
+        if let Some(pre) = hooks.pre_reflect.as_ref() {
+            match (pre)(input) {
+                crate::db::ReflectHookDecision::Allow => {}
+                crate::db::ReflectHookDecision::Deny { reason, code } => {
+                    return Err(ReflectError::HookVeto { reason, code });
+                }
+            }
+        }
 
         // ─── 5. Refuse if proposed depth exceeds cap ────────────────
         //
@@ -3383,12 +3422,21 @@ impl PostgresStore {
             .await
             .map_err(|e| ReflectError::Database(format!("commit reflect tx: {e}")))?;
 
-        Ok(crate::db::ReflectOutcome {
+        let outcome = crate::db::ReflectOutcome {
             id: actual_id,
             reflection_depth: new_depth_i32,
             reflects_on: input.source_ids.clone(),
             namespace: target_namespace,
-        })
+        };
+        // ─── 7. `post_reflect` hook (v0.7.0 Task 6/8) ───────────────
+        //
+        // Fires AFTER the transaction commits so the hook handler can
+        // see a fully durable reflection memory + its links. Notify-
+        // class — the return value is ignored.
+        if let Some(post) = hooks.post_reflect.as_ref() {
+            (post)(&outcome);
+        }
+        Ok(outcome)
     }
 
     /// v0.7.0 recursive-learning Task 5/8 — append a

@@ -382,6 +382,10 @@ pub fn is_pre_event(event: HookEvent) -> bool {
             // G10: hot-path query expansion fires before the recall
             // call — Modify decisions rewrite the in-flight query.
             | HookEvent::PreRecallExpand
+            // v0.7.0 Task 6/8: pre_reflect fires before the depth-cap
+            // check so a Deny veto refuses the reflection BEFORE the
+            // substrate evaluates `effective_max_reflection_depth()`.
+            | HookEvent::PreReflect
     )
 }
 
@@ -655,7 +659,8 @@ mod tests {
 
     #[test]
     fn is_pre_event_classifies_all_variants() {
-        // Pre- variants (G10 added PreRecallExpand)
+        // Pre- variants (G10 added PreRecallExpand; v0.7.0 Task 6/8
+        // added PreReflect).
         for ev in [
             HookEvent::PreStore,
             HookEvent::PreRecall,
@@ -668,10 +673,11 @@ mod tests {
             HookEvent::PreArchive,
             HookEvent::PreTranscriptStore,
             HookEvent::PreRecallExpand,
+            HookEvent::PreReflect,
         ] {
             assert!(is_pre_event(ev), "expected {ev:?} to be a pre- event");
         }
-        // Post- + on- variants
+        // Post- + on- variants (v0.7.0 Task 6/8 added PostReflect).
         for ev in [
             HookEvent::PostStore,
             HookEvent::PostRecall,
@@ -683,6 +689,7 @@ mod tests {
             HookEvent::PostGovernanceDecision,
             HookEvent::OnIndexEviction,
             HookEvent::PostTranscriptStore,
+            HookEvent::PostReflect,
         ] {
             assert!(!is_pre_event(ev), "expected {ev:?} to be a post-/on- event");
         }

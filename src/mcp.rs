@@ -5240,6 +5240,16 @@ fn handle_reflect(
                  namespace max_reflection_depth {cap} (namespace='{namespace}')"
             ));
         }
+        Err(db::ReflectError::HookVeto { reason, code }) => {
+            // v0.7.0 Task 6/8 — a pre_reflect hook callback returned
+            // Deny, vetoing the reflection. The MCP handler today
+            // does NOT register any in-substrate hooks (the MCP-side
+            // hook chain wiring is G7+'s problem), so this arm is
+            // currently unreachable on the MCP path. We surface a
+            // stable error-string shape anyway so a future MCP-side
+            // hook wire-in lands without churning this arm.
+            return Err(format!("REFLECTION_HOOK_VETO (code={code}): {reason}"));
+        }
         Err(db::ReflectError::Database(m)) => return Err(m),
     };
 
