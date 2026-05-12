@@ -80,6 +80,28 @@ What it does NOT do:
 
 Reverting to the brew-managed binary: `brew link --overwrite ai-memory`.
 
+## Reproducing the v0.7.0 recursive-learning primitive
+
+`scripts/reproduce-recursive-learning.sh` is the self-contained end-to-end
+demo for the v0.7.0 recursive-learning add-on (issue #655, Tasks 1-4
+landed; Tasks 5-8 in flight on `feat/v0.7.0-recursive-learning`). It
+builds the release binary, creates a fresh sqlite DB under
+`.local-runs/repro-recursive-learning-<timestamp>/` (honoring the
+project no-`/tmp` HARD RULE), inserts 3 sample memories, drives
+`memory_reflect` over MCP stdio JSON-RPC up to the default depth cap
+(3), and demonstrates the refusal at depth=4 with a clearly-formatted
+`REFLECTION_DEPTH_EXCEEDED` verdict block. Idempotent (each run uses
+a fresh timestamped subdir).
+
+```bash
+scripts/reproduce-recursive-learning.sh
+# Set REPRO_KEEP_DB=1 to retain the demo DB for inspection after the run.
+```
+
+The full conceptual primer lives at `docs/RECURSIVE_LEARNING.md`; the
+release-notes intro lives under `docs/v0.7.0/release-notes.md`
+§"Substrate-native recursive refinement".
+
 ## Architecture
 
 **ai-memory** is a Rust-based persistent memory system exposing three interfaces over a shared SQLite database layer:
