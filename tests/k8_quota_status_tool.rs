@@ -59,8 +59,8 @@ fn k8_quota_status_loaded_under_full_profile() {
     );
     assert_eq!(
         Profile::full().expected_tool_count(),
-        51,
-        "tool count cascade must advance to 51 with K8 (post-B2 rebase)"
+        52,
+        "tool count cascade must advance to 52 with v0.7.0 Task 4/8 memory_reflect (post-K8)"
     );
 }
 

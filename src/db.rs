@@ -2554,6 +2554,323 @@ pub fn consolidate(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Reflection (v0.7.0 recursive-learning Task 4/8, issue #655).
+// ---------------------------------------------------------------------------
+
+/// Typed substrate-level error surface for [`reflect`]. Kept distinct
+/// from [`crate::errors::MemoryError`] so the SQLite substrate layer
+/// stays free of HTTP-status concerns; the caller at the MCP / HTTP
+/// boundary maps these into the wire-shaped variant. Task 5/8 matches
+/// on `ReflectError::DepthExceeded` here (and the equivalent
+/// `MemoryError::ReflectionDepthExceeded` variant) to emit the
+/// `signed_events` audit record for the refusal decision.
+#[derive(Debug)]
+pub enum ReflectError {
+    /// Input violated a validator. Carries the operator-readable
+    /// reason; the MCP layer surfaces it verbatim.
+    Validation(String),
+    /// One of the requested source memories does not exist. Carries
+    /// the offending id so the caller can name the missing source.
+    SourceNotFound(String),
+    /// Proposed reflection depth exceeds the resolved namespace cap.
+    /// The triple is the structured payload Task 5/8 will attach to
+    /// the audit row.
+    DepthExceeded {
+        attempted: u32,
+        cap: u32,
+        namespace: String,
+    },
+    /// Database error during the atomic write. Carries the underlying
+    /// rusqlite / anyhow string.
+    Database(String),
+}
+
+impl std::fmt::Display for ReflectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Validation(m) | Self::SourceNotFound(m) | Self::Database(m) => f.write_str(m),
+            Self::DepthExceeded {
+                attempted,
+                cap,
+                namespace,
+            } => write!(
+                f,
+                "reflection depth {attempted} would exceed namespace \
+                 max_reflection_depth {cap} (namespace='{namespace}')"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ReflectError {}
+
+/// Outcome of a successful [`reflect`] write. Mirrors the MCP `memory_reflect`
+/// wire shape so the dispatch layer is a thin serialization wrapper.
+#[derive(Debug, Clone)]
+pub struct ReflectOutcome {
+    /// Newly minted reflection memory id.
+    pub id: String,
+    /// Depth assigned to the new memory (max source depth + 1).
+    pub reflection_depth: i32,
+    /// Source memory ids the new memory reflects on, in input order.
+    pub reflects_on: Vec<String>,
+    /// Namespace the reflection landed in (resolved to the first source's
+    /// namespace when the caller omitted the field).
+    pub namespace: String,
+}
+
+/// Input bundle for [`reflect`]. Holds every caller-tunable field of the
+/// new reflection memory plus the source-id list. Defaults mirror the
+/// MCP tool schema (`tier=mid`, `priority=5`, `confidence=1.0`,
+/// `source="claude"`) so the dispatch layer can build this from the
+/// raw JSON arguments without further fixup.
+#[derive(Debug, Clone)]
+pub struct ReflectInput {
+    pub source_ids: Vec<String>,
+    pub title: String,
+    pub content: String,
+    /// `None` → resolve to the namespace of the first source memory.
+    pub namespace: Option<String>,
+    pub tier: Tier,
+    pub tags: Vec<String>,
+    pub priority: i32,
+    pub confidence: f64,
+    pub source: String,
+    pub agent_id: String,
+    /// Caller-supplied metadata. The reflection writer merges system-
+    /// generated `reflection_metadata` keys underneath this object;
+    /// caller-supplied keys win on collision (the additive contract
+    /// documented on the MCP tool).
+    pub metadata: serde_json::Value,
+}
+
+/// v0.7.0 recursive-learning Task 4/8 (issue #655) — substrate-native
+/// reflection primitive.
+///
+/// Steps (matches the MCP tool contract):
+///
+/// 1. Validate inputs (`title`, `content`, namespace, tags, priority,
+///    confidence, agent_id, source_ids).
+/// 2. Load each source memory; bail with [`ReflectError::SourceNotFound`]
+///    on any missing id (no partial write).
+/// 3. Compute `new_depth = max(source.reflection_depth) + 1`.
+/// 4. Resolve the effective namespace cap via
+///    [`resolve_governance_policy`] (walks the ancestor chain leaf-
+///    first), fall back to [`GovernancePolicy::default`] when the chain
+///    has no policy at any level, then call
+///    [`GovernancePolicy::effective_max_reflection_depth`] on the
+///    resolved policy.
+/// 5. Refuse with [`ReflectError::DepthExceeded`] when
+///    `new_depth > max_dep`.
+/// 6. Insert the new reflection memory and write a `reflects_on` link
+///    from the new memory to each source — all inside a single
+///    `BEGIN IMMEDIATE` … `COMMIT` block. Any insert / link failure
+///    rolls back the entire write so a half-written reflection cannot
+///    survive.
+///
+/// The new memory's metadata is the caller-supplied object with a
+/// system-generated `reflection_metadata` key spliced in (recording
+/// the source-id list, the resolved depth, and the RFC3339 creation
+/// timestamp). **Caller-supplied keys win on collision** — if the
+/// caller already supplied `reflection_metadata` we honor their value
+/// and skip the system splice. This is the documented additive contract.
+///
+/// The `agent_id` field on the input bundle is stamped into
+/// `metadata.agent_id` before insert; the caller is responsible for
+/// resolving it via [`crate::identity::resolve_agent_id`].
+///
+/// # Errors
+///
+/// Returns one of the four [`ReflectError`] variants. The DB-error
+/// variant is the only one with no structured payload — every other
+/// variant carries enough information for the caller to render a clean
+/// operator-readable message and (for `DepthExceeded`) for Task 5/8 to
+/// emit a structured audit row.
+#[allow(clippy::too_many_lines)]
+pub fn reflect(
+    conn: &Connection,
+    input: &ReflectInput,
+) -> std::result::Result<ReflectOutcome, ReflectError> {
+    use crate::validate;
+    // ─── 1. Validate inputs ──────────────────────────────────────────
+    validate::validate_title(&input.title).map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_content(&input.content)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_tags(&input.tags).map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_priority(input.priority)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_confidence(input.confidence)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_source(&input.source)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+    validate::validate_agent_id(&input.agent_id)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+    if input.source_ids.is_empty() {
+        return Err(ReflectError::Validation(
+            "source_ids cannot be empty — a reflection must reflect on at least one source memory"
+                .into(),
+        ));
+    }
+    // Each source id must be well-formed before we hit the DB; this
+    // gives the caller a clean "bad id at index N" surface for free.
+    let mut seen = std::collections::HashSet::new();
+    for (i, id) in input.source_ids.iter().enumerate() {
+        validate::validate_id(id)
+            .map_err(|e| ReflectError::Validation(format!("source_ids[{i}]: {e}")))?;
+        if !seen.insert(id.as_str()) {
+            return Err(ReflectError::Validation(format!(
+                "source_ids[{i}]: duplicate id '{id}'"
+            )));
+        }
+    }
+    if let Some(ref ns) = input.namespace {
+        validate::validate_namespace(ns).map_err(|e| ReflectError::Validation(e.to_string()))?;
+    }
+    validate::validate_metadata(&input.metadata)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+
+    // ─── 2. Load each source memory; bail on any missing id ─────────
+    let mut sources = Vec::with_capacity(input.source_ids.len());
+    for id in &input.source_ids {
+        match get(conn, id).map_err(|e| ReflectError::Database(e.to_string()))? {
+            Some(m) => sources.push(m),
+            None => return Err(ReflectError::SourceNotFound(id.clone())),
+        }
+    }
+
+    // ─── 3. Compute new_depth = max(source depths) + 1 ──────────────
+    let max_src_depth = sources
+        .iter()
+        .map(|m| m.reflection_depth)
+        .max()
+        .unwrap_or(0);
+    // Clamp to non-negative before adding 1 (the column is i32 but the
+    // cap is u32; pre-v0.7.0 rows landed at 0 so `max < 0` can't happen
+    // in practice, but a `.max(0)` here is cheap belt-and-braces).
+    let new_depth_i32 = max_src_depth.max(0).saturating_add(1);
+    // u32 conversion: new_depth is at most i32::MAX which fits in u32.
+    #[allow(clippy::cast_sign_loss)]
+    let new_depth_u32: u32 = new_depth_i32 as u32;
+
+    // ─── 4. Resolve target namespace + governance cap ───────────────
+    let target_namespace = match input.namespace {
+        Some(ref ns) => ns.clone(),
+        // Default to the namespace of the FIRST source memory — matches
+        // the documented MCP schema default. Operators who want a
+        // different target namespace pass it explicitly.
+        None => sources[0].namespace.clone(),
+    };
+    // Carry-forward (Task 2 note): `resolve_governance_policy` returns
+    // `None` when no level of the ancestor chain has a policy at all.
+    // Treat that as "use the compiled default" — i.e. fall back to
+    // `GovernancePolicy::default()` which has `max_reflection_depth =
+    // None` and therefore yields the compiled-in cap of 3.
+    let policy = resolve_governance_policy(conn, &target_namespace)
+        .unwrap_or_else(GovernancePolicy::default);
+    let cap = policy.effective_max_reflection_depth();
+
+    // ─── 5. Refuse if proposed depth exceeds cap ────────────────────
+    if new_depth_u32 > cap {
+        return Err(ReflectError::DepthExceeded {
+            attempted: new_depth_u32,
+            cap,
+            namespace: target_namespace,
+        });
+    }
+
+    // ─── 6. Atomic insert + N links inside a single transaction ─────
+    // Build the system-generated reflection_metadata block. The caller-
+    // supplied object wins on key collisions — if `reflection_metadata`
+    // is already set, we leave it alone.
+    let now = Utc::now().to_rfc3339();
+    let mut metadata = match input.metadata.clone() {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    // Always stamp agent_id (the resolver already validated it).
+    metadata.insert(
+        "agent_id".to_string(),
+        serde_json::Value::String(input.agent_id.clone()),
+    );
+    // Splice reflection_metadata only when the caller didn't pre-set it.
+    if !metadata.contains_key("reflection_metadata") {
+        let reflection_meta = serde_json::json!({
+            "reflected_on_source_ids": input.source_ids,
+            "reflection_depth": new_depth_i32,
+            "reflection_created_at": now,
+        });
+        metadata.insert("reflection_metadata".to_string(), reflection_meta);
+    }
+    let metadata_value = serde_json::Value::Object(metadata);
+    // Re-validate the merged metadata so an oversized splice surfaces
+    // here (vs. a confusing DB constraint error later).
+    validate::validate_metadata(&metadata_value)
+        .map_err(|e| ReflectError::Validation(e.to_string()))?;
+
+    let new_mem = Memory {
+        id: uuid::Uuid::new_v4().to_string(),
+        tier: input.tier.clone(),
+        namespace: target_namespace.clone(),
+        title: input.title.clone(),
+        content: input.content.clone(),
+        tags: input.tags.clone(),
+        priority: input.priority.clamp(1, 10),
+        confidence: input.confidence.clamp(0.0, 1.0),
+        source: input.source.clone(),
+        access_count: 0,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        last_accessed_at: None,
+        expires_at: None,
+        metadata: metadata_value,
+        reflection_depth: new_depth_i32,
+    };
+
+    // Atomic boundary: insert the reflection row + N `reflects_on`
+    // links inside a single BEGIN IMMEDIATE ... COMMIT block. If any
+    // link insert fails, ROLLBACK undoes the reflection row too.
+    // Matches the `consolidate` pattern earlier in this file.
+    conn.execute_batch("BEGIN IMMEDIATE")
+        .map_err(|e| ReflectError::Database(e.to_string()))?;
+
+    let txn_result = (|| -> std::result::Result<String, ReflectError> {
+        let actual_id =
+            insert(conn, &new_mem).map_err(|e| ReflectError::Database(e.to_string()))?;
+        // Self-link rejection lives in `validate_link`; a self-link
+        // (source id appearing in the source list) would only happen
+        // via caller error, but we still surface it as a validation
+        // failure with the txn rolled back so the reflection never
+        // lands.
+        for src_id in &input.source_ids {
+            validate::validate_link(&actual_id, src_id, "reflects_on")
+                .map_err(|e| ReflectError::Validation(e.to_string()))?;
+            create_link(conn, &actual_id, src_id, "reflects_on")
+                .map_err(|e| ReflectError::Database(e.to_string()))?;
+        }
+        Ok(actual_id)
+    })();
+
+    match txn_result {
+        Ok(actual_id) => {
+            conn.execute_batch("COMMIT")
+                .map_err(|e| ReflectError::Database(e.to_string()))?;
+            Ok(ReflectOutcome {
+                id: actual_id,
+                reflection_depth: new_depth_i32,
+                reflects_on: input.source_ids.clone(),
+                namespace: target_namespace,
+            })
+        }
+        Err(e) => {
+            if let Err(rb) = conn.execute_batch("ROLLBACK") {
+                tracing::error!("ROLLBACK failed in reflect: {}", rb);
+            }
+            Err(e)
+        }
+    }
+}
+
 /// Strip zero-width and invisible Unicode characters that could bypass FTS search.
 fn strip_invisible(s: &str) -> String {
     s.chars()

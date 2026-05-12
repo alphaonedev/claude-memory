@@ -152,10 +152,12 @@ impl Family {
             | "memory_namespace_clear_standard"
             | "memory_subscribe"
             | "memory_unsubscribe" => Some(Self::Governance),
-            // power (9 — v0.7 K7 added the subscription-reliability pair:
+            // power (10 — v0.7 K7 added the subscription-reliability pair:
             // `memory_subscription_replay` + `memory_subscription_dlq_list`;
             // v0.7 K8 added `memory_quota_status` for the per-agent quota
-            // substrate. All operator/governance, not data-plane.)
+            // substrate; v0.7.0 Task 4/8 added `memory_reflect` — the
+            // substrate-native recursive-learning primitive. All
+            // operator/governance, not data-plane.)
             "memory_consolidate"
             | "memory_detect_contradiction"
             | "memory_check_duplicate"
@@ -164,7 +166,8 @@ impl Family {
             | "memory_inbox"
             | "memory_subscription_replay"
             | "memory_subscription_dlq_list"
-            | "memory_quota_status" => Some(Self::Power),
+            | "memory_quota_status"
+            | "memory_reflect" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -226,8 +229,9 @@ impl Family {
             // memory_find_paths (v0.7 J7) = 11.
             Self::Graph => 11,
             Self::Governance => 8,
-            // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) = 9.
-            Self::Power => 9,
+            // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) +
+            // 1 (v0.7.0 Task 4/8 — memory_reflect substrate primitive) = 10.
+            Self::Power => 10,
             Self::Archive => 4,
             Self::Other => 2,
         }
@@ -316,6 +320,11 @@ impl Family {
                 // bytes, links/day). Operator-facing inspector for the K8
                 // rate-limit substrate.
                 "memory_quota_status",
+                // v0.7.0 Task 4/8 (recursive learning, issue #655) —
+                // substrate-native reflection primitive. Inserts a
+                // reflection memory plus N `reflects_on` provenance
+                // links in a single atomic transaction.
+                "memory_reflect",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -602,12 +611,13 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 51,
+            total, 52,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
              + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` \
-             + v0.7 K8 `memory_quota_status` = 51. If this drifts, update \
+             + v0.7 K8 `memory_quota_status` + v0.7.0 Task 4/8 \
+             `memory_reflect` = 52. If this drifts, update \
              Family::expected_tool_count and the family map docs together."
         );
     }
@@ -685,21 +695,23 @@ mod tests {
         // v0.7 B1 + v0.7 B2 — Core now ships 7 tools (was 5).
         // v0.7 K7 — Power got the subscription-reliability pair (+2 → 8).
         // v0.7 K8 — Power got memory_quota_status (+1 → 9).
-        assert_eq!(p.expected_tool_count(), 7 + 9);
+        // v0.7.0 Task 4/8 — Power got memory_reflect (+1 → 10).
+        assert_eq!(p.expected_tool_count(), 7 + 10);
     }
 
     #[test]
     fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7 K8 (post-B2/J7) — full surface = 43 baseline + memory_replay (I4) +
+        // v0.7.0 Task 4/8 (post-K8) — full surface = 43 baseline + memory_replay (I4) +
         // memory_verify (H4) + memory_load_family (B1) + memory_smart_load (B2) +
         // memory_subscription_replay (K7) + memory_subscription_dlq_list (K7) +
-        // memory_find_paths (J7) + memory_quota_status (K8) = 51.
-        assert_eq!(p.expected_tool_count(), 51);
+        // memory_find_paths (J7) + memory_quota_status (K8) +
+        // memory_reflect (Task 4/8 — recursive learning) = 52.
+        assert_eq!(p.expected_tool_count(), 52);
 
-        // The K7+K8 additions live in Family::Power (operator/governance),
-        // so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 9);
+        // The K7+K8 + Task 4/8 additions live in Family::Power
+        // (operator/governance), so the `power` profile picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 10);
     }
 
     // ---------- Profile::parse ----------

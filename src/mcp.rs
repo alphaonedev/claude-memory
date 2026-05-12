@@ -926,6 +926,27 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_reflect",
+                "description": "Persist a reflection memory plus reflects_on provenance links to each source.",
+                "docs": "v0.7.0 Task 4/8 (recursive learning, issue #655) — the substrate-native primitive for recursive learning. An agent reads one or more memories, synthesises a higher-order reflection (a lesson, pattern, contradiction-resolution, etc.), and persists it with cryptographic-grade provenance to the sources it derives from. The reflection memory's `reflection_depth` is `max(source_depths) + 1`; the namespace cap on `governance.max_reflection_depth` (Task 2/8) gates the depth — refusal returns the structured `REFLECTION_DEPTH_EXCEEDED` error so callers and the Task 5/8 audit emitter can branch on it. The new memory plus N `reflects_on` link writes are a single atomic transaction — any link-insert failure rolls back the entire reflection. The reflection memory's `metadata.reflection_metadata` records the source-id list, the resolved depth, and the RFC3339 creation timestamp (caller-supplied metadata keys win on collision).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "source_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Memory IDs this reflection reflects on. Must be non-empty; one reflects_on link is written from the new memory back to each id."},
+                        "title": {"type": "string", "description": "Short descriptive title for the reflection memory."},
+                        "content": {"type": "string", "description": "Full reflection content."},
+                        "namespace": {"type": "string", "description": "Target namespace for the reflection memory. Defaults to the namespace of the first source memory when omitted."},
+                        "tier": {"type": "string", "enum": ["short", "mid", "long"], "default": "mid"},
+                        "tags": {"type": "array", "items": {"type": "string"}, "default": []},
+                        "priority": {"type": "integer", "minimum": 1, "maximum": 10, "default": 5},
+                        "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0, "default": 1.0},
+                        "agent_id": {"type": "string", "description": "Agent identifier for the reflection writer. Defaults to the NHI-hardened resolution chain when omitted (matches memory_store)."},
+                        "metadata": {"type": "object", "description": "Free-form metadata; merged with system-generated reflection_metadata fields. Caller-supplied keys win on collision."}
+                    },
+                    "required": ["source_ids", "title", "content"]
+                }
+            },
+            {
                 "name": "memory_consolidate",
                 "description": "Consolidate multiple memories into one long-term summary.",
                 "docs": "Consolidate multiple memories into one long-term summary. Deletes source memories and creates derived_from links from the consolidated memory back to each source. If summary is omitted and an LLM is available (smart/autonomous tier), the summary is auto-generated. Minimum 2, maximum 100 source ids per call.",
@@ -5109,6 +5130,169 @@ pub fn handle_replay(
     }))
 }
 
+/// v0.7.0 recursive-learning Task 4/8 (issue #655) — handler for the
+/// `memory_reflect` MCP tool.
+///
+/// Wraps [`db::reflect`] (the atomic substrate primitive) with MCP-shape
+/// arg parsing, agent_id resolution, embedding generation (best effort),
+/// and the post-write subscription dispatch. Returns the JSON envelope
+/// `{id, reflection_depth, reflects_on, namespace}` documented in the
+/// tool's input schema.
+///
+/// Errors are returned as plain strings (MCP convention). Substrate
+/// errors are matched in arm-priority order so Task 5/8 can plug in the
+/// `signed_events` audit emission against the `DepthExceeded` variant
+/// without touching the happy-path code.
+fn handle_reflect(
+    conn: &rusqlite::Connection,
+    db_path: &Path,
+    params: &Value,
+    embedder: Option<&Embedder>,
+    vector_index: Option<&VectorIndex>,
+    mcp_client: Option<&str>,
+) -> Result<Value, String> {
+    // ─── Argument parsing ───────────────────────────────────────────
+    let source_ids_arr = params["source_ids"]
+        .as_array()
+        .ok_or("source_ids is required (array of memory IDs)")?;
+    if source_ids_arr.is_empty() {
+        return Err("source_ids cannot be empty".to_string());
+    }
+    let mut source_ids: Vec<String> = Vec::with_capacity(source_ids_arr.len());
+    for (i, v) in source_ids_arr.iter().enumerate() {
+        match v.as_str() {
+            Some(s) => source_ids.push(s.to_string()),
+            None => return Err(format!("source_ids[{i}] must be a string")),
+        }
+    }
+    let title = params["title"]
+        .as_str()
+        .ok_or("title is required")?
+        .to_string();
+    let content = params["content"]
+        .as_str()
+        .ok_or("content is required")?
+        .to_string();
+    let tier_str = params["tier"].as_str().unwrap_or("mid");
+    let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;
+    let namespace = params["namespace"].as_str().map(str::to_string);
+    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).unwrap_or(5);
+    let confidence = params["confidence"].as_f64().unwrap_or(1.0);
+    let tags: Vec<String> = params["tags"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let metadata = if params["metadata"].is_object() {
+        params["metadata"].clone()
+    } else {
+        serde_json::json!({})
+    };
+
+    // NHI: resolve agent_id via the same precedence chain memory_store
+    // uses, so the reflection memory's `metadata.agent_id` is consistent
+    // with regular stores.
+    let explicit_agent_id = params["agent_id"]
+        .as_str()
+        .or_else(|| metadata.get("agent_id").and_then(serde_json::Value::as_str));
+    let agent_id = crate::identity::resolve_agent_id(explicit_agent_id, mcp_client)
+        .map_err(|e| e.to_string())?;
+
+    let input = db::ReflectInput {
+        source_ids,
+        title: title.clone(),
+        content: content.clone(),
+        namespace,
+        tier,
+        tags,
+        priority,
+        confidence,
+        source: "claude".to_string(),
+        agent_id,
+        metadata,
+    };
+
+    // ─── Substrate write ────────────────────────────────────────────
+    // Error mapping is deliberate: `DepthExceeded` is left as a distinct
+    // string shape so Task 5/8 can match on the prefix when wiring the
+    // `signed_events` audit emission (and so the HTTP layer can map it
+    // back to the typed `MemoryError::ReflectionDepthExceeded` variant).
+    let outcome = match db::reflect(conn, &input) {
+        Ok(o) => o,
+        Err(db::ReflectError::Validation(m)) => return Err(m),
+        Err(db::ReflectError::SourceNotFound(id)) => {
+            return Err(format!("source memory not found: {id}"));
+        }
+        Err(db::ReflectError::DepthExceeded {
+            attempted,
+            cap,
+            namespace,
+        }) => {
+            // Stable error string shape — Task 5/8 will key its audit
+            // emission off this refusal. Keep the structured triple
+            // visible (attempted=N, cap=M, namespace='...') so the
+            // log analyser doesn't need a regex.
+            return Err(format!(
+                "REFLECTION_DEPTH_EXCEEDED: reflection depth {attempted} would exceed \
+                 namespace max_reflection_depth {cap} (namespace='{namespace}')"
+            ));
+        }
+        Err(db::ReflectError::Database(m)) => return Err(m),
+    };
+
+    // ─── Best-effort post-write side effects ────────────────────────
+    // Generate + persist an embedding for the new reflection memory so
+    // semantic recall can find it. Failure is logged, not fatal — the
+    // memory is already committed.
+    if let Some(emb) = embedder {
+        let text = format!("{title} {content}");
+        match emb.embed(&text) {
+            Ok(embedding) => {
+                if let Err(e) = db::set_embedding(conn, &outcome.id, &embedding) {
+                    tracing::warn!(
+                        "failed to store embedding for reflection {}: {}",
+                        &outcome.id,
+                        e
+                    );
+                }
+                if let Some(idx) = vector_index {
+                    idx.insert(outcome.id.clone(), embedding);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "failed to generate embedding for reflection {}: {}",
+                    &outcome.id,
+                    e
+                );
+            }
+        }
+    }
+
+    // Fire the standard `memory_store` webhook event so downstream
+    // subscribers see the new memory the same way they would a direct
+    // store. Task 6/8 will layer `pre_reflect` / `post_reflect` hook
+    // events on top of this baseline.
+    crate::subscriptions::dispatch_event(
+        conn,
+        "memory_store",
+        &outcome.id,
+        &outcome.namespace,
+        Some(&input.agent_id),
+        db_path,
+    );
+
+    Ok(json!({
+        "id": outcome.id,
+        "reflection_depth": outcome.reflection_depth,
+        "reflects_on": outcome.reflects_on,
+        "namespace": outcome.namespace,
+    }))
+}
+
 fn handle_consolidate(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -6323,6 +6507,12 @@ fn handle_request(
                     vector_index,
                     mcp_client,
                 ),
+                // v0.7.0 Task 4/8 (recursive learning, issue #655) —
+                // substrate-native reflection primitive. See
+                // `handle_reflect` for the contract.
+                "memory_reflect" => {
+                    handle_reflect(conn, db_path, arguments, embedder, vector_index, mcp_client)
+                }
                 "memory_capabilities" => {
                     // v0.6.4-006 — runtime expansion via family enumeration.
                     // When `family` is set, route to the family-listing path
@@ -6962,9 +7152,10 @@ mod tests {
         // v0.7 J7 adds memory_find_paths (Family::Graph) → 49.
         // v0.7 B2 adds memory_smart_load (Family::Core) → 50.
         // v0.7 K8 adds memory_quota_status (Family::Power) → 51.
+        // v0.7.0 Task 4/8 adds memory_reflect (Family::Power) → 52.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 51);
+        assert_eq!(tools.len(), 52);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -7019,12 +7210,13 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            51,
+            52,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
              v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
-             v0.7 J7 memory_find_paths (1) + v0.7 K8 memory_quota_status (1) = 51"
+             v0.7 J7 memory_find_paths (1) + v0.7 K8 memory_quota_status (1) + \
+             v0.7.0 Task 4/8 memory_reflect (1) = 52"
         );
     }
 

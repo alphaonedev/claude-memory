@@ -3137,6 +3137,243 @@ impl PostgresStore {
             reflection_depth,
         })
     }
+
+    /// v0.7.0 recursive-learning Task 4/8 (issue #655) — Postgres parity
+    /// for [`crate::db::reflect`]. Inherent method (not on the
+    /// [`MemoryStore`] trait) to keep the trait surface minimal per the
+    /// Task 4 spec.
+    ///
+    /// Atomicity: the reflection memory insert + N `reflects_on` link
+    /// inserts run inside a single `sqlx::Transaction`. Any link
+    /// failure rolls back the entire write. Mirrors the
+    /// `BEGIN IMMEDIATE` … `COMMIT` block on the SQLite path.
+    ///
+    /// Governance: walks the namespace ancestor chain via
+    /// [`MemoryStore::resolve_governance_policy`], falls back to
+    /// [`crate::models::GovernancePolicy::default`] when no policy is
+    /// configured anywhere in the chain, then evaluates
+    /// [`crate::models::GovernancePolicy::effective_max_reflection_depth`].
+    ///
+    /// Returns the [`crate::db::ReflectOutcome`] shape the SQLite path
+    /// returns so test code can be backend-agnostic.
+    ///
+    /// # Errors
+    ///
+    /// Same [`crate::db::ReflectError`] variants as the SQLite path,
+    /// emitted in the same order:
+    /// 1. validation
+    /// 2. source-not-found (no partial write)
+    /// 3. depth-exceeded refusal
+    /// 4. database errors during the atomic write
+    #[allow(clippy::too_many_lines)]
+    pub async fn reflect(
+        &self,
+        ctx: &super::CallerContext,
+        input: &crate::db::ReflectInput,
+    ) -> std::result::Result<crate::db::ReflectOutcome, crate::db::ReflectError> {
+        use crate::db::ReflectError;
+        use crate::validate;
+
+        // ─── 1. Validate inputs ─────────────────────────────────────
+        validate::validate_title(&input.title)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_content(&input.content)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_tags(&input.tags)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_priority(input.priority)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_confidence(input.confidence)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_source(&input.source)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        validate::validate_agent_id(&input.agent_id)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        if input.source_ids.is_empty() {
+            return Err(ReflectError::Validation(
+                "source_ids cannot be empty — a reflection must reflect on at least one source memory".into(),
+            ));
+        }
+        let mut seen = std::collections::HashSet::new();
+        for (i, id) in input.source_ids.iter().enumerate() {
+            validate::validate_id(id)
+                .map_err(|e| ReflectError::Validation(format!("source_ids[{i}]: {e}")))?;
+            if !seen.insert(id.as_str()) {
+                return Err(ReflectError::Validation(format!(
+                    "source_ids[{i}]: duplicate id '{id}'"
+                )));
+            }
+        }
+        if let Some(ref ns) = input.namespace {
+            validate::validate_namespace(ns)
+                .map_err(|e| ReflectError::Validation(e.to_string()))?;
+        }
+        validate::validate_metadata(&input.metadata)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+
+        // ─── 2. Load each source memory ─────────────────────────────
+        let mut sources = Vec::with_capacity(input.source_ids.len());
+        for id in &input.source_ids {
+            match super::MemoryStore::get(self, ctx, id).await {
+                Ok(m) => sources.push(m),
+                Err(StoreError::NotFound { .. }) => {
+                    return Err(ReflectError::SourceNotFound(id.clone()));
+                }
+                Err(e) => return Err(ReflectError::Database(e.to_string())),
+            }
+        }
+
+        // ─── 3. Compute new_depth ───────────────────────────────────
+        let max_src_depth = sources
+            .iter()
+            .map(|m| m.reflection_depth)
+            .max()
+            .unwrap_or(0);
+        let new_depth_i32 = max_src_depth.max(0).saturating_add(1);
+        #[allow(clippy::cast_sign_loss)]
+        let new_depth_u32: u32 = new_depth_i32 as u32;
+
+        // ─── 4. Resolve target namespace + cap ──────────────────────
+        let target_namespace = match input.namespace {
+            Some(ref ns) => ns.clone(),
+            None => sources[0].namespace.clone(),
+        };
+        let policy = super::MemoryStore::resolve_governance_policy(self, &target_namespace)
+            .await
+            .map_err(|e| ReflectError::Database(e.to_string()))?
+            .unwrap_or_else(crate::models::GovernancePolicy::default);
+        let cap = policy.effective_max_reflection_depth();
+
+        // ─── 5. Refuse if proposed depth exceeds cap ────────────────
+        if new_depth_u32 > cap {
+            return Err(ReflectError::DepthExceeded {
+                attempted: new_depth_u32,
+                cap,
+                namespace: target_namespace,
+            });
+        }
+
+        // ─── 6. Atomic insert + N links inside a single tx ──────────
+        let now = Utc::now().to_rfc3339();
+        let mut metadata = match input.metadata.clone() {
+            serde_json::Value::Object(map) => map,
+            _ => serde_json::Map::new(),
+        };
+        metadata.insert(
+            "agent_id".to_string(),
+            serde_json::Value::String(input.agent_id.clone()),
+        );
+        if !metadata.contains_key("reflection_metadata") {
+            let reflection_meta = serde_json::json!({
+                "reflected_on_source_ids": input.source_ids,
+                "reflection_depth": new_depth_i32,
+                "reflection_created_at": now,
+            });
+            metadata.insert("reflection_metadata".to_string(), reflection_meta);
+        }
+        let metadata_value = serde_json::Value::Object(metadata);
+        validate::validate_metadata(&metadata_value)
+            .map_err(|e| ReflectError::Validation(e.to_string()))?;
+
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let created_at_dt = chrono::DateTime::parse_from_rfc3339(&now)
+            .map_err(|e| ReflectError::Database(format!("parse now: {e}")))?
+            .with_timezone(&Utc);
+        let tags_json = serde_json::to_value(&input.tags)
+            .map_err(|e| ReflectError::Database(format!("serialize tags: {e}")))?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| ReflectError::Database(format!("begin reflect tx: {e}")))?;
+
+        // Insert the reflection memory inside the tx.
+        let actual_id: String = sqlx::query(
+            "INSERT INTO memories (
+                id, tier, namespace, title, content, tags, priority, confidence,
+                source, access_count, created_at, updated_at, last_accessed_at,
+                expires_at, metadata, reflection_depth
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NULL, NULL, $13, $14)
+            ON CONFLICT (title, namespace) DO UPDATE SET
+                content = EXCLUDED.content,
+                tier = CASE
+                    WHEN tier_rank(EXCLUDED.tier) >= tier_rank(memories.tier)
+                        THEN EXCLUDED.tier
+                    ELSE memories.tier
+                END,
+                tags = EXCLUDED.tags,
+                priority = EXCLUDED.priority,
+                confidence = EXCLUDED.confidence,
+                updated_at = EXCLUDED.updated_at,
+                metadata = CASE
+                    WHEN memories.metadata ? 'agent_id'
+                        THEN jsonb_set(
+                            EXCLUDED.metadata,
+                            '{agent_id}',
+                            memories.metadata -> 'agent_id'
+                        )
+                    ELSE EXCLUDED.metadata
+                END,
+                reflection_depth = GREATEST(memories.reflection_depth, EXCLUDED.reflection_depth)
+            RETURNING id",
+        )
+        .bind(&new_id)
+        .bind(input.tier.as_str())
+        .bind(&target_namespace)
+        .bind(&input.title)
+        .bind(&input.content)
+        .bind(&tags_json)
+        .bind(input.priority.clamp(1, 10))
+        .bind(input.confidence.clamp(0.0, 1.0))
+        .bind(&input.source)
+        .bind(0_i64)
+        .bind(created_at_dt)
+        .bind(created_at_dt)
+        .bind(&metadata_value)
+        .bind(new_depth_i32)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| ReflectError::Database(format!("insert reflection memory: {e}")))?
+        .try_get::<String, _>("id")
+        .map_err(|e| ReflectError::Database(format!("read returned id: {e}")))?;
+
+        // Write each `reflects_on` link inside the same tx.
+        for src_id in &input.source_ids {
+            validate::validate_link(&actual_id, src_id, "reflects_on")
+                .map_err(|e| ReflectError::Validation(e.to_string()))?;
+            // Inline a minimal `memory_links` INSERT — full
+            // `link_internal` runs its own queries on the pool and
+            // wouldn't share the tx. SQLite parity calls
+            // `db::create_link` which uses the same connection; we
+            // mirror that here with a `&mut tx` binding so a link
+            // failure rolls back the memory insert.
+            sqlx::query(
+                "INSERT INTO memory_links \
+                    (source_id, target_id, relation, created_at, valid_from, attest_level) \
+                 VALUES ($1, $2, $3, $4, $4, 'unsigned') \
+                 ON CONFLICT (source_id, target_id, relation) DO NOTHING",
+            )
+            .bind(&actual_id)
+            .bind(src_id)
+            .bind("reflects_on")
+            .bind(created_at_dt)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ReflectError::Database(format!("insert reflects_on link: {e}")))?;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| ReflectError::Database(format!("commit reflect tx: {e}")))?;
+
+        Ok(crate::db::ReflectOutcome {
+            id: actual_id,
+            reflection_depth: new_depth_i32,
+            reflects_on: input.source_ids.clone(),
+            namespace: target_namespace,
+        })
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]

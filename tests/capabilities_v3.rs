@@ -618,12 +618,13 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
         .expect("top-level tools must be present and an array under v3");
     assert_eq!(
         tools.len(),
-        51,
-        "v3 must surface all 51 tools regardless of profile (v0.7.0 I4 added \
+        52,
+        "v3 must surface all 52 tools regardless of profile (v0.7.0 I4 added \
          memory_replay; v0.7 H4 added memory_verify; v0.7 B1 added \
          memory_load_family; v0.7 B2 added memory_smart_load; v0.7 K7 added \
          memory_subscription_replay + memory_subscription_dlq_list; v0.7 J7 \
-         added memory_find_paths; v0.7 K8 added memory_quota_status); got {}",
+         added memory_find_paths; v0.7 K8 added memory_quota_status; v0.7.0 \
+         Task 4/8 added memory_reflect); got {}",
         tools.len()
     );
 

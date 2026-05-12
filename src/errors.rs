@@ -20,6 +20,20 @@ pub enum MemoryError {
     ValidationFailed(String),
     DatabaseError(String),
     Conflict(String),
+    /// v0.7.0 recursive-learning Task 4/8 (issue #655) — emitted by the
+    /// `memory_reflect` write path when the proposed reflection's depth
+    /// exceeds the resolved namespace
+    /// [`crate::models::GovernancePolicy::effective_max_reflection_depth`]
+    /// cap. The variant carries the structured triple so Task 5/8 can
+    /// match on it without parsing a string, then emit a `signed_events`
+    /// audit row for the refusal decision.
+    ///
+    /// Wire shape (HTTP): `409 CONFLICT` with code `REFLECTION_DEPTH_EXCEEDED`.
+    ReflectionDepthExceeded {
+        attempted: u32,
+        cap: u32,
+        namespace: String,
+    },
 }
 
 impl MemoryError {
@@ -29,6 +43,7 @@ impl MemoryError {
             Self::ValidationFailed(_) => "VALIDATION_FAILED",
             Self::DatabaseError(_) => "DATABASE_ERROR",
             Self::Conflict(_) => "CONFLICT",
+            Self::ReflectionDepthExceeded { .. } => "REFLECTION_DEPTH_EXCEEDED",
         }
     }
 
@@ -37,16 +52,27 @@ impl MemoryError {
             Self::NotFound(_) => StatusCode::NOT_FOUND,
             Self::ValidationFailed(_) => StatusCode::BAD_REQUEST,
             Self::DatabaseError(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::Conflict(_) => StatusCode::CONFLICT,
+            // The substrate refusal is a policy-conflict (caller asked
+            // for an action the configured cap forbids); CONFLICT matches
+            // the rest of governance-style refusals.
+            Self::Conflict(_) | Self::ReflectionDepthExceeded { .. } => StatusCode::CONFLICT,
         }
     }
 
-    pub fn message(&self) -> &str {
+    pub fn message(&self) -> String {
         match self {
             Self::NotFound(m)
             | Self::ValidationFailed(m)
             | Self::DatabaseError(m)
-            | Self::Conflict(m) => m,
+            | Self::Conflict(m) => m.clone(),
+            Self::ReflectionDepthExceeded {
+                attempted,
+                cap,
+                namespace,
+            } => format!(
+                "reflection depth {attempted} would exceed namespace \
+                 max_reflection_depth {cap} (namespace='{namespace}')"
+            ),
         }
     }
 }
@@ -55,7 +81,7 @@ impl IntoResponse for MemoryError {
     fn into_response(self) -> Response {
         let body = ApiError {
             code: self.code(),
-            message: self.message().to_string(),
+            message: self.message(),
         };
         (self.status(), Json(body)).into_response()
     }
