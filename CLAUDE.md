@@ -305,3 +305,67 @@ This policy is the project's response to two empirical failure modes:
    control.
 
 The default-flexible-commit / explicit-push split is the cleaner discipline.
+
+## No agent-created files under /tmp, /var/tmp, /private/tmp, or any tmpfs (project hard rule)
+
+> This is a **project hard rule**, not a preference. It overrides any
+> tool, shell, or library default that would land scratch files on a
+> tmpfs path. It applies to every agent that touches this repository.
+
+**The rule.** Agents working in this repository MUST NOT create files
+under any of the following paths, ever:
+
+- `/tmp/...`
+- `/var/tmp/...`
+- `/private/tmp/...` (the macOS realpath of `/tmp`)
+- any other tmpfs-backed path the host exposes
+
+This covers, at minimum: bash one-liner output redirects (`> /tmp/log`),
+`heredoc` write-throughs, log captures, `script(1)` typescripts,
+container-test artifacts, capability JSON dumps, ad-hoc fixtures,
+benchmark output, dogfood-rebuild backup files, and any
+`mktemp`/`mktempfile` call where the path is not explicitly overridden
+to a project-local location. The rule applies to files that the agent
+itself creates; it does NOT apply to files OS tooling creates beneath
+the agent (e.g., compiler `/var/folders/...` scratch, the Claude Code
+harness's own session cache).
+
+**Allowed scratch location.** All agent-created scratch lives under:
+
+```
+/Users/fate/v07/v07-fixes/.local-runs/
+```
+
+This directory is gitignored (see `.gitignore`). It is the canonical
+home for: log captures from background `cargo` runs, container-test
+output dumps, ad-hoc verification scripts, throwaway fixture JSON,
+benchmark roll-ups, and similar transient artifacts. Sub-organize
+freely (`.local-runs/r8-cert/`, `.local-runs/2026-05-12/`, etc.) —
+the directory has no enforced internal structure.
+
+If a tool or third-party script defaults to `/tmp`, pass it an
+explicit `--output-dir` / `TMPDIR=$PWD/.local-runs` / equivalent.
+If it has no such override, write the output to a project-local
+path first and post-process it instead.
+
+**Why this is a hard rule.** During the v0.7.0 cert sequence
+(2026-05-11/05-12), accumulated agent scratch on `/private/tmp`
+across multiple agents (~30+ logs/scripts/typescripts) contributed to
+a full-disk ENOSPC failure that halted in-flight work, forced a
+`colima delete -f` to recover, and lost the Plan C container fleet.
+The root cause was not any single file — it was the absence of an
+enforced project-local scratch convention. This rule closes that
+gap. Future agents inherit the convention by reading this file at
+session start.
+
+**Discipline.** Zero strikes from here forward. A single violation
+is grounds for the agent to self-revert the offending command, move
+the file under `.local-runs/`, and update its working memory with
+the redirect so the mistake doesn't repeat in-session. The operator
+will be informed if a violation occurs so the convention can be
+hardened further (e.g., a pre-tool-use hook).
+
+**Cleanup.** `.local-runs/` is intentionally NOT auto-cleaned. Each
+agent is expected to delete its own scratch when a task finishes
+green and the artifacts are no longer needed for the handoff memory.
+A long-lived `.local-runs/` is a smell — flag it in the handoff.
