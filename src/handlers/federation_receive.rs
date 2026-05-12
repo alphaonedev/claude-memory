@@ -14,8 +14,10 @@ use crate::db;
 use crate::models::{Memory, MemoryLink};
 use crate::validate;
 
+use super::MAX_BULK_SIZE;
+#[cfg(feature = "sal")]
+use super::store_err_to_response;
 use super::{AppState, StorageBackend};
-use super::{MAX_BULK_SIZE, store_err_to_response};
 
 // ---------------------------------------------------------------------------
 // Phase 3 foundation (issue #224) — HTTP sync endpoints.

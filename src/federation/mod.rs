@@ -42,7 +42,9 @@ pub mod sync;
 pub mod vector_clock;
 
 pub use quorum::*;
-pub use receive::{spawn_catchup_loop, spawn_catchup_loop_with_store};
+pub use receive::spawn_catchup_loop;
+#[cfg(feature = "sal")]
+pub use receive::spawn_catchup_loop_with_store;
 pub use sync::*;
 
 use crate::replication::QuorumPolicy;
