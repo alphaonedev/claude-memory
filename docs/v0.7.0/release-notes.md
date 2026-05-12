@@ -208,6 +208,85 @@ Plus three v0.7.0 cert-driven fixes surfaced by Plan C R4:
   `spawn_catchup_loop_with_store`. Cfg-branched the body so the
   sqlite-only build compiles.
 
+### Substrate-native recursive refinement (issue [#655](https://github.com/alphaonedev/ai-memory-mcp/issues/655))
+
+ai-memory v0.7.0 ships **substrate-native recursive refinement with
+cryptographic provenance and bounded depth**, alongside the broader
+attested-cortex epic and the Anthropic dreaming research preview. An
+agent reads one or more memories, synthesises a higher-order
+reflection (a lesson, pattern, contradiction-resolution, etc.), and
+persists it with cryptographic-grade provenance back to each source
+it reflects on. The reflection memory is just another memory row —
+the same recall, search, governance, federation, attestation, and
+audit primitives apply to it. The recursion is what's new.
+
+**Bounded by design — not by aspiration.** Reflection depth is
+substrate-enforced, not application-enforced: every reflection write
+goes through a single `db::reflect` substrate function that consults
+`GovernancePolicy.max_reflection_depth` (per-namespace), falls back
+to a compiled default of 3, and refuses any reflection whose
+proposed depth exceeds the cap with a structured
+`REFLECTION_DEPTH_EXCEEDED` error (HTTP 409). The cap is set in JSON
+governance metadata so operators can tune it per namespace without
+a schema migration. A per-namespace cap of `Some(0)` is a documented
+kill-switch — every reflection refuses, regardless of depth — for
+deployments that want to opt every namespace under that subtree out
+of the primitive entirely. **No autonomous goal modification, no
+model fine-tuning loops, no unbounded recursion.**
+
+Concrete API hooks shipped in Tasks 1-4 of the epic (commits below;
+Tasks 5-8 land on the same branch and roll up into this v0.7.0 tag):
+
+- **New column** ([commit `f5d8a9e`](https://github.com/alphaonedev/ai-memory-mcp/commit/f5d8a9e), Task 1/8) —
+  `memories.reflection_depth INTEGER NOT NULL DEFAULT 0` on SQLite
+  (schema v29) and Postgres (`CURRENT_SCHEMA_VERSION 31`). The
+  `Memory` struct gains the field with `#[serde(default)]` so v0.6.4
+  federation peers continue to round-trip cleanly. UPSERT clauses on
+  both adapters take `MAX(old, new)` so federation merges preserve
+  the higher-depth signal.
+- **New governance field** ([commit `630a6db`](https://github.com/alphaonedev/ai-memory-mcp/commit/630a6db), Task 2/8) —
+  `GovernancePolicy.max_reflection_depth: Option<u32>` (pure JSON
+  metadata; no schema bump). Accessor
+  `effective_max_reflection_depth()` returns `3` when unset; `Some(0)`
+  is the documented kill-switch.
+- **New relation** ([commit `b51a3f3`](https://github.com/alphaonedev/ai-memory-mcp/commit/b51a3f3), Task 3/8) —
+  `reflects_on` joins the canonical link relation set
+  (`related_to` / `supersedes` / `contradicts` / `derived_from` /
+  `reflects_on`). Directionality matches `derived_from`: the
+  reflection row is `source_id`, the original being reflected on is
+  `target_id`. `db::find_paths` auto-walks the new label — reflection
+  chains surface naturally in chain-walk queries without further
+  work.
+- **New MCP tool** ([commit `3dc76f3`](https://github.com/alphaonedev/ai-memory-mcp/commit/3dc76f3), Task 4/8) —
+  `memory_reflect` (Power family, tool count 51 → 52). Atomic insert
+  of a reflection memory + N `reflects_on` link writes in a single
+  transaction; any link-insert failure rolls back the entire write.
+  Postgres parity via inherent `PostgresStore::reflect`.
+- **New error code** (Task 4/8) — `MemoryError::ReflectionDepthExceeded
+  { attempted: u32, cap: u32, namespace: String }`. HTTP status
+  `409 CONFLICT`, code `REFLECTION_DEPTH_EXCEEDED`. The structured
+  triple is what downstream auditors and hook emitters need without
+  parsing error strings.
+
+The relevant CHANGELOG block sits under the same v0.7.0 heading
+("v0.7.0 recursive-learning add-on"). Conceptual model, depth-cap
+rationale, directionality contract, and the
+`find_paths` chain-walk behaviour are written up in
+[`docs/RECURSIVE_LEARNING.md`](../RECURSIVE_LEARNING.md). The
+reproducibility script is at
+[`scripts/reproduce-recursive-learning.sh`](../../scripts/reproduce-recursive-learning.sh) —
+a self-contained Bash demo that builds the release binary, inserts
+three sample memories into a fresh sqlite DB under `.local-runs/`,
+reflects on them at depth=1, recursively reflects up to depth=3
+(the default cap), and demonstrates the refusal at depth=4 with a
+clear `REFLECTION_DEPTH_EXCEEDED` verdict block.
+
+<!-- TASK 5+6 SECTION: sibling agent will add the `signed_events`
+     `reflection.depth_exceeded` audit-row description (Task 5/8) and
+     the `pre_reflect` / `post_reflect` hook-events surface (Task 6/8)
+     here. The Task-8 batch-2 capabilities sweep adds the matching
+     entries to capabilities JSON and tools list. -->
+
 ### Quality
 
 - **Hard coverage gate ≥ 93%.** CI fails any PR below the line floor.
