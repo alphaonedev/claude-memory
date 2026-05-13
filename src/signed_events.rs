@@ -470,4 +470,88 @@ mod tests {
             }
         }
     }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — row decode error paths (row_to_event row.get(N)?).
+    //
+    // The Err-arms of `row.get(0..6)?` in `row_to_event` are
+    // triggered when the SELECTed columns can't be decoded into the
+    // target Rust type. We exercise this by constructing an
+    // in-memory DB with the SAME shape but a deliberately wrong
+    // value type for the `agent_id` column (NULL where NOT NULL is
+    // expected by the Rust type — rusqlite reports a type error on
+    // String::from_sql when the column is NULL).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn list_signed_events_row_decode_error_propagates() {
+        // Build a permissive signed_events shape (no NOT NULL on
+        // agent_id) so we can INSERT a NULL there. The list_signed_events
+        // query selects agent_id into a String — String::from_sql
+        // refuses NULL, which exercises the row_to_event row.get(1)?
+        // Err arm.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        // Drop the SQL-file table and recreate a NULL-permissive shape
+        // with the SAME column order so the SELECT in
+        // list_signed_events still works.
+        conn.execute_batch(
+            "CREATE TABLE signed_events (
+                id              TEXT PRIMARY KEY,
+                agent_id        TEXT,
+                event_type      TEXT NOT NULL,
+                payload_hash    BLOB NOT NULL,
+                signature       BLOB,
+                attest_level    TEXT NOT NULL,
+                timestamp       TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        // Insert one row with NULL in agent_id — the SELECT shape
+        // matches list_signed_events but row.get(1)? fails on the
+        // NULL→String decode.
+        conn.execute(
+            "INSERT INTO signed_events \
+             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp) \
+             VALUES ('row1', NULL, 'memory_link.created', X'00', NULL, 'unsigned', \
+             '2026-05-13T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        // Listing now exercises the row.get(1)? Err arm.
+        let res = list_signed_events(&conn, None, 10, 0);
+        assert!(res.is_err(), "row decode must fail when agent_id is NULL");
+    }
+
+    #[test]
+    fn list_signed_events_with_agent_filter_row_decode_error_propagates() {
+        // Same as above, but exercise the agent_id == Some(...) branch
+        // of list_signed_events. The `WHERE agent_id = ?1` won't
+        // match NULL rows (NULL ≠ anything), so we need a row whose
+        // agent_id is the queried string but another column NULLs out.
+        // Insert a row whose `event_type` is NULL — row.get(2)?
+        // fails on NULL→String when listing filtered by agent.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE signed_events (
+                id              TEXT PRIMARY KEY,
+                agent_id        TEXT NOT NULL,
+                event_type      TEXT,
+                payload_hash    BLOB NOT NULL,
+                signature       BLOB,
+                attest_level    TEXT NOT NULL,
+                timestamp       TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO signed_events \
+             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp) \
+             VALUES ('row2', 'alice', NULL, X'00', NULL, 'unsigned', \
+             '2026-05-13T00:00:00+00:00')",
+            [],
+        )
+        .unwrap();
+        let res = list_signed_events(&conn, Some("alice"), 10, 0);
+        assert!(res.is_err(), "row decode must fail when event_type is NULL");
+    }
 }

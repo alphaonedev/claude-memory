@@ -75,6 +75,30 @@ impl Metrics {
         Self::try_new().expect("prometheus registry init failed")
     }
 
+    // COVERAGE: every `?` Err-arm closure on `IntCounterVec::new(...)?`,
+    //           `IntCounter::new(...)?`, `IntGauge::new(...)?`,
+    //           `HistogramVec::new(...)?`, and
+    //           `registry.register(Box::new(...))?` in this function
+    //           is structurally unreachable in production:
+    //
+    //           1. The function constructs a fresh `Registry::new()`
+    //              per call (no shared state). Registration can only
+    //              fail on duplicate metric name; with a fresh registry
+    //              and unique names per counter, collision is
+    //              impossible.
+    //           2. Every metric name + label name passed to the
+    //              constructors is a compile-time string literal that
+    //              already matches the Prometheus regex
+    //              `[a-zA-Z_:][a-zA-Z0-9_:]*` — construction cannot
+    //              fail on name-validation grounds.
+    //
+    //           The Err-arms exist because the prometheus crate's
+    //           API returns `Result<...>` from these constructors, and
+    //           the `?` propagation is the idiomatic Rust pattern.
+    //           Triggering coverage would require a synthetic
+    //           registry-injection layer that doesn't exist (and
+    //           shouldn't — try_new owns its registry by design).
+    //           Documented per L0.7 playbook §3c.
     #[allow(clippy::too_many_lines)]
     pub(crate) fn try_new() -> prometheus::Result<Self> {
         let registry = Registry::new();

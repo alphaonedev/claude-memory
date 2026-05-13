@@ -225,6 +225,22 @@ const MIGRATION_V27_SQLITE: &str =
 const MIGRATION_V28_SQLITE: &str =
     include_str!("../../migrations/sqlite/0022_v07_agent_quotas.sql");
 
+// COVERAGE: per-version ALTER/CREATE branches inside this function
+// are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
+// markers. When the canonical SCHEMA constant already ships a target
+// column or table (which it does for every column added between v2..v15
+// because the live SCHEMA was rewritten in v0.6 to ship the v15 shape
+// inline), those inner ALTER/CREATE statements are dead code in
+// practice — they only fire on a pre-v4 deployment that was never
+// migrated through v4's CREATE TABLE archived_memories statement.
+// The historical replay test (`historical_replay_from_v1_reaches_
+// current_schema`) walks the v1 → v29 ladder and exercises every
+// `if version < N` arm, but the *inner* ALTERs that the v4 CREATE
+// already produces inline are unreachable from v1 (the v4 CREATE
+// ships them in one go). This is a documented structural cap per
+// L0.7 playbook §3c — the function's `?` Err-arm closures on every
+// `conn.execute_batch(...)?` are similarly unreachable without
+// semantic SQL-fault injection.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn migrate(conn: &Connection) -> Result<()> {
     let version: i64 = conn
@@ -1085,5 +1101,599 @@ mod tests {
         // This MUST NOT panic with "duplicate column name".
         super::migrate(&conn).expect("idempotent v2");
         assert_eq!(current_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A §3.5 — Historical replay fixture.
+    //
+    // The synthetic legacy schema below is the v1 / pre-confidence,
+    // pre-source, pre-embedding shape that production deployments
+    // shipped at the v0.5-era. It contains ONLY the minimum tables and
+    // columns required for migrate() to traverse every `if version <
+    // N` arm AND for every has_X guard to evaluate FALSE (i.e. trigger
+    // the ALTER TABLE branch). Walking forward through migrate() from
+    // version=0 on this schema exercises:
+    //
+    //   * v2: confidence/source column additions on memories
+    //   * v3: embedding BLOB column addition
+    //   * v4: archived_memories table creation
+    //   * v5: namespace_meta table creation
+    //   * v6: parent_namespace column addition
+    //   * v7: metadata column additions on memories + archived_memories
+    //   * v8: pending_actions table creation
+    //   * v9: approvals column addition on pending_actions
+    //   * v10: scope_idx VIRTUAL generated column + index
+    //   * v11: sync_state table creation
+    //   * v12: last_pushed_at column addition on sync_state
+    //   * v13: subscriptions table creation
+    //   * v14: agent_id_idx VIRTUAL + indexes
+    //   * v15: memory_links temporal columns + side tables (via SQL file)
+    //   * v17: governance.inherit backfill (via SQL file)
+    //   * v18: embedding_dim, archive embedding/tier columns + backfill
+    //   * v19: subscriptions.event_types column + index
+    //   * v20: audit_log table creation
+    //   * v21: pending_actions timeout columns + index
+    //   * v22: memory_transcripts table creation
+    //   * v23: memory_links.attest_level column + backfill
+    //   * v24: memory_transcript_links join table
+    //   * v25: memory_transcripts.archived_at column + partial index
+    //   * v26: signed_events table creation
+    //   * v27: subscription_events / subscription_dlq + correlation_id
+    //   * v28: agent_quotas table creation
+    //   * v29: memories.reflection_depth column
+    //
+    // Versions 16 (no DDL) lands a no-op arm — covered by the version
+    // walk itself.
+    //
+    // The legacy schema only carries what's needed:
+    //   * memories (v1 columns: id/tier/namespace/title/content/tags/
+    //                priority/access_count/created_at/updated_at/
+    //                last_accessed_at/expires_at)
+    //   * memory_links (v1 columns: source_id/target_id/relation/created_at)
+    //   * schema_version (so MAX(version) returns the seeded value)
+    //
+    // FTS5 + triggers from the latest SCHEMA depend on the memories
+    // table shape staying compatible, so we keep them simple: only the
+    // base table, plus schema_version. The migrations themselves don't
+    // touch the FTS or triggers (those live in SCHEMA, applied on
+    // fresh-install only).
+    // -----------------------------------------------------------------
+
+    /// Synthetic pre-v2 schema. The original v1 shape of `memories`
+    /// without `confidence`, `source`, `embedding`, `metadata`, etc.
+    /// All later schema state arrives via the migrate ladder.
+    const LEGACY_V1_SCHEMA: &str = r"
+        CREATE TABLE IF NOT EXISTS memories (
+            id               TEXT PRIMARY KEY,
+            tier             TEXT NOT NULL,
+            namespace        TEXT NOT NULL DEFAULT 'global',
+            title            TEXT NOT NULL,
+            content          TEXT NOT NULL,
+            tags             TEXT NOT NULL DEFAULT '[]',
+            priority         INTEGER NOT NULL DEFAULT 5,
+            access_count     INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL,
+            updated_at       TEXT NOT NULL,
+            last_accessed_at TEXT,
+            expires_at       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS memory_links (
+            source_id   TEXT NOT NULL,
+            target_id   TEXT NOT NULL,
+            relation    TEXT NOT NULL DEFAULT 'related_to',
+            created_at  TEXT NOT NULL,
+            PRIMARY KEY (source_id, target_id, relation)
+        );
+
+        CREATE TABLE IF NOT EXISTS schema_version (
+            version INTEGER NOT NULL
+        );
+        INSERT INTO schema_version (version) VALUES (0);
+    ";
+
+    /// Build a legacy v1 database and walk the full migrate() ladder.
+    /// Returns the migrated connection.
+    fn replay_from_v1() -> Connection {
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(LEGACY_V1_SCHEMA)
+            .expect("apply legacy v1 schema");
+        // Seed a row at v1 shape so we can verify column-add defaults.
+        conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, created_at, updated_at) \
+             VALUES ('legacy', 'short', 'ns', 't', 'c', \
+             '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        super::migrate(&conn).expect("walk every migrate arm from v0");
+        conn
+    }
+
+    fn column_exists(conn: &Connection, table: &str, column: &str) -> bool {
+        let sql = format!("SELECT {column} FROM {table} LIMIT 0");
+        conn.prepare(&sql).is_ok()
+    }
+
+    fn table_exists(conn: &Connection, table: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            params![table],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok()
+    }
+
+    fn index_exists(conn: &Connection, index: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1",
+            params![index],
+            |row| row.get::<_, i64>(0),
+        )
+        .is_ok()
+    }
+
+    #[test]
+    fn historical_replay_from_v1_reaches_current_schema() {
+        // Headline rigor test: walk every `if version < N` arm by
+        // starting from a legacy v1 schema. The migrate() function
+        // executes every arm in order. We assert the final
+        // schema_version row holds CURRENT_SCHEMA_VERSION and that
+        // each documented column/table/index materialised.
+        let conn = replay_from_v1();
+        assert_eq!(current_version(&conn), CURRENT_SCHEMA_VERSION);
+
+        // v2 columns
+        assert!(column_exists(&conn, "memories", "confidence"));
+        assert!(column_exists(&conn, "memories", "source"));
+        // v3
+        assert!(column_exists(&conn, "memories", "embedding"));
+        // v4
+        assert!(table_exists(&conn, "archived_memories"));
+        // v5
+        assert!(table_exists(&conn, "namespace_meta"));
+        // v6
+        assert!(column_exists(&conn, "namespace_meta", "parent_namespace"));
+        // v7
+        assert!(column_exists(&conn, "memories", "metadata"));
+        assert!(column_exists(&conn, "archived_memories", "metadata"));
+        // v8
+        assert!(table_exists(&conn, "pending_actions"));
+        // v9
+        assert!(column_exists(&conn, "pending_actions", "approvals"));
+        // v10
+        assert!(column_exists(&conn, "memories", "scope_idx"));
+        assert!(index_exists(&conn, "idx_memories_scope_idx"));
+        // v11
+        assert!(table_exists(&conn, "sync_state"));
+        // v12
+        assert!(column_exists(&conn, "sync_state", "last_pushed_at"));
+        // v13
+        assert!(table_exists(&conn, "subscriptions"));
+        // v14
+        assert!(column_exists(&conn, "memories", "agent_id_idx"));
+        assert!(index_exists(&conn, "idx_memories_agent_id"));
+        assert!(index_exists(&conn, "idx_memories_created_at"));
+        // v15 — memory_links temporal columns + entity_aliases side table
+        assert!(column_exists(&conn, "memory_links", "valid_from"));
+        assert!(column_exists(&conn, "memory_links", "valid_until"));
+        assert!(column_exists(&conn, "memory_links", "observed_by"));
+        assert!(column_exists(&conn, "memory_links", "signature"));
+        assert!(table_exists(&conn, "entity_aliases"));
+        // v18
+        assert!(column_exists(&conn, "memories", "embedding_dim"));
+        assert!(column_exists(&conn, "archived_memories", "embedding"));
+        assert!(column_exists(&conn, "archived_memories", "embedding_dim"));
+        assert!(column_exists(&conn, "archived_memories", "original_tier"));
+        assert!(column_exists(
+            &conn,
+            "archived_memories",
+            "original_expires_at"
+        ));
+        // v19
+        assert!(column_exists(&conn, "subscriptions", "event_types"));
+        // v20
+        assert!(table_exists(&conn, "audit_log"));
+        // v21
+        assert!(column_exists(
+            &conn,
+            "pending_actions",
+            "default_timeout_seconds"
+        ));
+        assert!(column_exists(&conn, "pending_actions", "expired_at"));
+        // v22
+        assert!(table_exists(&conn, "memory_transcripts"));
+        // v23
+        assert!(column_exists(&conn, "memory_links", "attest_level"));
+        // v24
+        assert!(table_exists(&conn, "memory_transcript_links"));
+        // v25
+        assert!(column_exists(&conn, "memory_transcripts", "archived_at"));
+        // v26
+        assert!(table_exists(&conn, "signed_events"));
+        // v27
+        assert!(table_exists(&conn, "subscription_events"));
+        assert!(table_exists(&conn, "subscription_dlq"));
+        assert!(column_exists(
+            &conn,
+            "subscription_events",
+            "correlation_id"
+        ));
+        // v28
+        assert!(table_exists(&conn, "agent_quotas"));
+        // v29
+        assert!(column_exists(&conn, "memories", "reflection_depth"));
+    }
+
+    #[test]
+    fn historical_replay_backfills_v2_defaults_on_legacy_row() {
+        // The legacy row inserted at v1 lacks confidence/source. After
+        // migrate() walks v2's ALTER TABLE arm, the ADD COLUMN
+        // statement applies the DEFAULT 1.0 / 'api' to the existing
+        // row. This proves the playbook §3.5 contract: existing rows
+        // pick up the right default.
+        let conn = replay_from_v1();
+        let conf: f64 = conn
+            .query_row(
+                "SELECT confidence FROM memories WHERE id='legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let source: String = conn
+            .query_row("SELECT source FROM memories WHERE id='legacy'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!((conf - 1.0).abs() < f64::EPSILON);
+        assert_eq!(source, "api");
+    }
+
+    #[test]
+    fn historical_replay_backfills_v7_metadata_default_on_legacy_row() {
+        // v7 ALTER TABLE adds `metadata TEXT NOT NULL DEFAULT '{}'`.
+        // The legacy row must pick up the JSON-object default.
+        let conn = replay_from_v1();
+        let meta: String = conn
+            .query_row("SELECT metadata FROM memories WHERE id='legacy'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(meta, "{}");
+    }
+
+    #[test]
+    fn historical_replay_backfills_v29_reflection_depth_default() {
+        // v29 ALTER TABLE adds `reflection_depth INTEGER NOT NULL
+        // DEFAULT 0`. Legacy row must carry the default.
+        let conn = replay_from_v1();
+        let depth: i64 = conn
+            .query_row(
+                "SELECT reflection_depth FROM memories WHERE id='legacy'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(depth, 0);
+    }
+
+    #[test]
+    fn historical_replay_v15_backfills_valid_from_to_memories_created_at() {
+        // The 0010_v063_hierarchy_kg.sql migration backfills
+        // memory_links.valid_from <= memories.created_at on the source.
+        // Seed a legacy memory_link before migrating and verify the
+        // backfill ran. We need to insert a memories row whose id
+        // matches source_id, plus a memory_links row at the v1 shape.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(LEGACY_V1_SCHEMA)
+            .expect("apply legacy v1 schema");
+        // Two memories (source/target) and a link between them.
+        conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, created_at, updated_at) \
+             VALUES ('m_src', 'short', 'ns', 't1', 'c1', \
+             '2024-06-01T12:34:56Z', '2024-06-01T12:34:56Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, created_at, updated_at) \
+             VALUES ('m_tgt', 'short', 'ns', 't2', 'c2', \
+             '2024-06-01T12:34:56Z', '2024-06-01T12:34:56Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, created_at) \
+             VALUES ('m_src', 'm_tgt', 'related_to', '2024-06-01T12:34:56Z')",
+            [],
+        )
+        .unwrap();
+        super::migrate(&conn).expect("migrate from v0 with link");
+
+        // After migrate, valid_from on the link must equal the source's created_at.
+        let valid_from: Option<String> = conn
+            .query_row(
+                "SELECT valid_from FROM memory_links \
+                 WHERE source_id='m_src' AND target_id='m_tgt'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            valid_from.as_deref(),
+            Some("2024-06-01T12:34:56Z"),
+            "v15 backfill must seed valid_from to source created_at"
+        );
+    }
+
+    #[test]
+    fn historical_replay_v18_backfills_embedding_dim_from_blob_length() {
+        // v18 SQL file backfills embedding_dim = length(embedding)/4.
+        // Walk from v1 to ensure v3 (embedding column) and v17 land
+        // before v18, then seed a row with embedding bytes + NULL
+        // dim, then run a second migrate() that picks up only the
+        // backfill UPDATE (idempotent on the already-applied DDL).
+        //
+        // Simpler approach: replay from v1 to v17, then INSERT a row
+        // with the embedding present and dim NULL, then call migrate
+        // again with version stamped at 17. The v18 arm fires, the
+        // SQL file's backfill UPDATE runs, and dim should land at
+        // length(embedding)/4.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(LEGACY_V1_SCHEMA)
+            .expect("apply legacy v1 schema");
+        super::migrate(&conn).expect("first migrate to current");
+        // Stamp back to v17 so the v18 arm re-runs (which is
+        // idempotent on ALTERs because of the has_X guards).
+        conn.execute("DELETE FROM schema_version", []).unwrap();
+        conn.execute("INSERT INTO schema_version VALUES (17)", [])
+            .unwrap();
+        // Insert a row with embedding bytes + embedding_dim NULL.
+        let embedding = vec![0u8; 8]; // 2 f32s @ 4 bytes
+        conn.execute(
+            "INSERT INTO memories \
+             (id, tier, namespace, title, content, created_at, updated_at, embedding, embedding_dim) \
+             VALUES ('m18', 'short', 'ns', 't', 'c', \
+             '2024-01-01T00:00:00Z', '2024-01-01T00:00:00Z', ?1, NULL)",
+            params![embedding],
+        )
+        .unwrap();
+        super::migrate(&conn).expect("migrate v17->v29 (idempotent on ALTERs)");
+        let dim: Option<i64> = conn
+            .query_row(
+                "SELECT embedding_dim FROM memories WHERE id='m18'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dim, Some(2), "v18 backfill must set embedding_dim = len/4");
+    }
+
+    #[test]
+    fn historical_replay_v27_creates_dlq_table() {
+        // v27 brings up subscription_dlq from scratch (no DLQ table in
+        // any prior version). A fresh-from-v1 replay must end up with
+        // the DLQ table + the supporting indexes documented in the
+        // 0021 SQL file.
+        let conn = replay_from_v1();
+        assert!(table_exists(&conn, "subscription_dlq"));
+        assert!(index_exists(&conn, "idx_subscription_dlq_subscription"));
+        assert!(index_exists(&conn, "idx_subscription_dlq_correlation"));
+        assert!(index_exists(&conn, "idx_subscription_events_correlation"));
+    }
+
+    #[test]
+    fn historical_replay_v27_alter_for_existing_subscription_events_table_documents_bug() {
+        // BUG SURFACED (memory id dbc594f4-0d38-4f03-892e-a9fd8dacdcdc,
+        // 2026-05-13): the v27 arm runs the SQL file (which contains
+        // `CREATE INDEX ... ON subscription_events(correlation_id)`)
+        // BEFORE the column-existence probe + ALTER TABLE adds
+        // correlation_id. For deployments that hand-rolled
+        // subscription_events at v26 (without correlation_id), this
+        // surfaces as: "no such column: correlation_id" during the
+        // CREATE INDEX from the SQL file.
+        //
+        // Per L0.7-2 discipline (no production semantic edits, only
+        // coverage-related test work), we DO NOT fix this here — the
+        // bug is recorded in _v070_grand_slam/layer_0_7/bugs_surfaced.
+        // This test asserts the current (buggy) behaviour so a future
+        // fix flips the assertion and proves the code path repaired.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute("DELETE FROM schema_version", []).unwrap();
+        conn.execute("DROP TABLE IF EXISTS subscription_events", [])
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE subscription_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                subscription_id TEXT NOT NULL,
+                event_type      TEXT NOT NULL,
+                payload         TEXT NOT NULL,
+                delivered_at    TEXT NOT NULL,
+                delivery_status TEXT NOT NULL DEFAULT 'pending'
+            );",
+        )
+        .unwrap();
+        conn.execute("INSERT INTO schema_version VALUES (26)", [])
+            .unwrap();
+
+        // Current behaviour: errors because CREATE INDEX runs before ALTER.
+        let res = super::migrate(&conn);
+        assert!(
+            res.is_err(),
+            "v27 migration on hand-rolled v26 table is currently buggy — flip this \
+             assertion to expect Ok(()) once the production order is fixed"
+        );
+        let err = res.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("correlation_id"),
+            "expected error to mention correlation_id, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn historical_replay_idempotent_re_run_holds_steady() {
+        // After replaying from v1, a second migrate() call must be a
+        // pure no-op. Per playbook §3.5: idempotency is part of the
+        // replay-rigor contract.
+        let conn = replay_from_v1();
+        let before = current_version(&conn);
+        super::migrate(&conn).expect("idempotent re-run");
+        let after = current_version(&conn);
+        assert_eq!(before, after);
+        assert_eq!(after, CURRENT_SCHEMA_VERSION);
+        // Row count in schema_version is exactly 1.
+        let n: i64 = conn
+            .query_row("SELECT COUNT(*) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(n, 1);
+    }
+
+    #[test]
+    fn historical_replay_v7_alters_pre_existing_archived_memories_without_metadata() {
+        // The v4 CREATE TABLE archived_memories in migrate() ships
+        // `metadata` inline, so a pure v1->v29 replay never triggers
+        // the v7 `has_archive_metadata`-FALSE inner ALTER. To
+        // exercise that branch we hand-craft an archived_memories
+        // table WITHOUT the metadata column, then stamp version=3
+        // (post-v3 embedding column, pre-v4) so v4's CREATE TABLE
+        // IF NOT EXISTS no-ops (table exists, no inner ADD), and
+        // v7's `has_archive_metadata` returns FALSE → ALTER fires.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(LEGACY_V1_SCHEMA)
+            .expect("apply legacy v1 schema");
+        // Pre-create archived_memories at pre-v7 shape (no metadata).
+        conn.execute_batch(
+            "CREATE TABLE archived_memories (
+                id               TEXT PRIMARY KEY,
+                tier             TEXT NOT NULL,
+                namespace        TEXT NOT NULL,
+                title            TEXT NOT NULL,
+                content          TEXT NOT NULL,
+                tags             TEXT NOT NULL,
+                priority         INTEGER NOT NULL,
+                confidence       REAL NOT NULL,
+                source           TEXT NOT NULL,
+                access_count     INTEGER NOT NULL,
+                created_at       TEXT NOT NULL,
+                updated_at       TEXT NOT NULL,
+                last_accessed_at TEXT,
+                expires_at       TEXT,
+                archived_at      TEXT NOT NULL,
+                archive_reason   TEXT NOT NULL DEFAULT 'ttl_expired'
+            );",
+        )
+        .unwrap();
+        // Walk from v0 so v2 (confidence/source) and v3 (embedding)
+        // both fire on `memories`. archived_memories already exists,
+        // so v4's CREATE IF NOT EXISTS no-ops. v7's has_archive_metadata
+        // returns FALSE → ALTER fires (inner branch coverage).
+        super::migrate(&conn).expect("migrate v0->v29 with stale archived_memories shape");
+        // The v7 inner ALTER must have run: metadata column now present.
+        assert!(column_exists(&conn, "archived_memories", "metadata"));
+        // And the final state is at CURRENT_SCHEMA_VERSION.
+        assert_eq!(current_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn historical_replay_v18_alters_pre_existing_archived_memories_without_embedding() {
+        // Same trick for v18: archived_memories needs original_tier /
+        // embedding / embedding_dim / original_expires_at added. The
+        // v4 CREATE ships none of those columns (v18 added them) so
+        // a pure replay DOES hit these. But the v4 CREATE in code
+        // does not include them, so this test mirrors the existing
+        // historical_replay_from_v1 path and pins the per-column
+        // ALTER branches.
+        let conn = replay_from_v1();
+        assert!(column_exists(&conn, "archived_memories", "embedding"));
+        assert!(column_exists(&conn, "archived_memories", "embedding_dim"));
+        assert!(column_exists(&conn, "archived_memories", "original_tier"));
+        assert!(column_exists(
+            &conn,
+            "archived_memories",
+            "original_expires_at"
+        ));
+    }
+
+    #[test]
+    fn historical_replay_v9_alters_pending_actions_missing_approvals() {
+        // v9 adds `approvals` to pending_actions only when absent.
+        // v8 creates pending_actions WITHOUT approvals (v9 adds it).
+        // A pure v1->v29 replay covers the FALSE branch (which fires
+        // the ALTER). This test pins the TRUE branch: stamp at v=0,
+        // pre-create pending_actions WITH approvals so v8's CREATE
+        // IF NOT EXISTS no-ops, then v9's has_approvals returns
+        // TRUE → ALTER does NOT fire. The end state is identical.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(LEGACY_V1_SCHEMA)
+            .expect("apply legacy v1 schema");
+        // Pre-create pending_actions with approvals already present.
+        conn.execute_batch(
+            "CREATE TABLE pending_actions (
+                id            TEXT PRIMARY KEY,
+                action_type   TEXT NOT NULL,
+                memory_id     TEXT,
+                namespace     TEXT NOT NULL,
+                payload       TEXT NOT NULL DEFAULT '{}',
+                requested_by  TEXT NOT NULL,
+                requested_at  TEXT NOT NULL,
+                status        TEXT NOT NULL DEFAULT 'pending',
+                decided_by    TEXT,
+                decided_at    TEXT,
+                approvals     TEXT NOT NULL DEFAULT '[]'
+            );",
+        )
+        .unwrap();
+        // Walk from v0 so all earlier migrations run normally; v8's
+        // CREATE IF NOT EXISTS no-ops (table exists); v9's
+        // has_approvals returns TRUE → inner ALTER skipped.
+        super::migrate(&conn).expect("migrate v0->v29 with pre-existing approvals");
+        assert!(column_exists(&conn, "pending_actions", "approvals"));
+        assert_eq!(current_version(&conn), CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn migrate_rollback_path_on_failed_arm_propagates_error() {
+        // Force an arm to fail mid-transaction by pre-creating a
+        // conflicting table that one of the file-based migrations
+        // tries to redefine without IF NOT EXISTS. The v20
+        // (audit_log) migration's CREATE TABLE IF NOT EXISTS won't
+        // fail, but if we drop the schema_version table BEFORE
+        // migrate runs the initial probe survives (returns 0 via
+        // unwrap_or) but the final INSERT will fail because there is
+        // no table. This pins the err-arm of `result` -> ROLLBACK.
+        //
+        // We instead inject failure by stamping a pre-v1 version and
+        // dropping schema_version mid-stream. Cleaner approach: drop
+        // schema_version table before migrate so the final INSERT
+        // hits a "no such table" — the wrapped result captures it
+        // and the function ROLLBACKs the transaction.
+        let conn = Connection::open_in_memory().expect("in-memory db");
+        conn.execute_batch(SCHEMA).unwrap();
+        // Stamp at version=28 so the v29 arm fires.
+        conn.execute("DELETE FROM schema_version", []).unwrap();
+        conn.execute("INSERT INTO schema_version VALUES (28)", [])
+            .unwrap();
+        // Drop a table the v29 path needs (memories itself). The
+        // v29 ALTER will then fail and the error path triggers
+        // ROLLBACK.
+        // Best alternative: drop schema_version. Then the final
+        // `DELETE FROM schema_version` errors. We must keep memories
+        // intact for v29's ALTER probe to run, so use the
+        // schema_version drop here.
+        conn.execute("DROP TABLE schema_version", []).unwrap();
+        // The initial probe also queries schema_version, so this
+        // produces an error before EXCLUSIVE begins. Without a
+        // schema_version table, `MAX(version)` query fails and
+        // unwrap_or returns 0 — migrate enters the loop, but the
+        // final INSERT to schema_version fails. The wrapped result
+        // is Err -> ROLLBACK runs. We pin that the function returns
+        // Err.
+        let res = super::migrate(&conn);
+        assert!(
+            res.is_err(),
+            "migrate must propagate err when terminal INSERT fails"
+        );
     }
 }

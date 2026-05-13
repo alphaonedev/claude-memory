@@ -190,6 +190,10 @@ fn fall_through_to_config_or_default(
 pub fn platform_default(kind: DirKind) -> ResolvedDir {
     // systemd-managed daemon: prefer /var/log/ai-memory if writable.
     // Skip in tests so the resolver test suite is deterministic.
+    // COVERAGE: SystemdLogsDir branch unreachable on macOS dev host
+    //           (/var/log/ai-memory parent not writable to the test
+    //           user); exercised by Linux systemd integration tests
+    //           in the production CI matrix.
     if std::env::var_os("INVOCATION_ID").is_some() {
         let p = PathBuf::from("/var/log/ai-memory").join(kind.suffix());
         if is_writable_dir(&p.parent().unwrap_or(&p)) {
@@ -200,6 +204,11 @@ pub fn platform_default(kind: DirKind) -> ResolvedDir {
         }
     }
 
+    // COVERAGE: target_os="windows" branch unreachable on macOS dev
+    //           host; exercised by GitHub Actions matrix CI.
+    // COVERAGE: target_os="linux" (non-macOS, non-windows) branch
+    //           unreachable on macOS dev host; exercised by GitHub
+    //           Actions matrix CI.
     let p = if cfg!(target_os = "macos") {
         macos_default(kind)
     } else if cfg!(target_os = "windows") {
@@ -293,6 +302,12 @@ pub fn enforce_not_world_writable(rd: &ResolvedDir) -> Result<()> {
         if !rd.path.exists() {
             return Ok(());
         }
+        // COVERAGE: fs::metadata error closure (lines 296-302) is
+        //           reachable only under a TOCTOU race between
+        //           `exists()` returning true and `metadata()` failing
+        //           (e.g. the dir is rm-rf'd between the two syscalls).
+        //           Not deterministically triggerable from a single-
+        //           process test.
         let md = std::fs::metadata(&rd.path).with_context(|| {
             format!(
                 "stat {} (resolved via {})",
@@ -334,6 +349,11 @@ pub fn ensure_dir_secure(dir: &Path) -> Result<()> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
+        // COVERAGE: set_permissions error closure (line 338) reachable
+        //           only when the dir was just created (so create_dir_all
+        //           succeeded) but the test user lacks chmod permission
+        //           on it — e.g. SELinux MAC override. Not portable to
+        //           tests on macOS/Linux dev hosts.
         std::fs::set_permissions(dir, perms)
             .with_context(|| format!("setting mode 0700 on log directory {}", dir.display()))?;
     }

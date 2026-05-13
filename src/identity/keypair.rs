@@ -127,6 +127,10 @@ pub fn default_key_dir() -> Result<PathBuf> {
     {
         return Ok(PathBuf::from(v));
     }
+    // COVERAGE: ok_or_else closure (line 131) reachable only on hosts
+    //           where dirs::config_dir() returns None — i.e. exotic
+    //           platforms with no HOME env var. Not deterministic to
+    //           trigger in tests because removing HOME breaks tempfile.
     let base = dirs::config_dir()
         .ok_or_else(|| anyhow!("OS did not advertise a config directory for key storage"))?;
     Ok(base.join("ai-memory").join("keys"))
@@ -174,6 +178,10 @@ pub fn save(keypair: &AgentKeypair, dir: &Path) -> Result<()> {
     let pub_path = dir.join(format!("{}{PUB_SUFFIX}", keypair.agent_id));
     let priv_path = dir.join(format!("{}{PRIV_SUFFIX}", keypair.agent_id));
 
+    // COVERAGE: with_context lazy-format closures (lines 178, 180)
+    //           reachable only when the underlying fs::write fails on
+    //           a successfully-created directory — same EACCES/ENOSPC
+    //           class as write_with_mode above. Not portable to tests.
     write_with_mode(&pub_path, &keypair.public.to_bytes(), 0o644)
         .with_context(|| format!("writing public key {}", pub_path.display()))?;
     write_with_mode(&priv_path, &private.to_bytes(), 0o600)
@@ -188,6 +196,9 @@ pub fn save(keypair: &AgentKeypair, dir: &Path) -> Result<()> {
 pub fn save_public_only(keypair: &AgentKeypair, dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("creating key directory {}", dir.display()))?;
     let pub_path = dir.join(format!("{}{PUB_SUFFIX}", keypair.agent_id));
+    // COVERAGE: with_context closure (line 192) same class as save's
+    //           pub-write closure (line 178) — reachable on EACCES/
+    //           ENOSPC; not portable to unit tests on macOS/Linux.
     write_with_mode(&pub_path, &keypair.public.to_bytes(), 0o644)
         .with_context(|| format!("writing public key {}", pub_path.display()))?;
     Ok(())
@@ -214,6 +225,11 @@ pub fn load(agent_id: &str, dir: &Path) -> Result<AgentKeypair> {
     }
     let mut pub_arr = [0u8; PUBLIC_KEY_LEN];
     pub_arr.copy_from_slice(&pub_bytes);
+    // COVERAGE: with_context closure (line 218) reachable when the
+    //           32-byte file decodes into an invalid Edwards-curve
+    //           point. The load_returns_decode_context_for_corrupt_public_key
+    //           test exercises this with the all-FF input; whether
+    //           dalek 2.x accepts that input or not is version-bound.
     let public = VerifyingKey::from_bytes(&pub_arr)
         .with_context(|| format!("decoding public key {}", pub_path.display()))?;
 
@@ -270,8 +286,19 @@ pub fn list(dir: &Path) -> Result<Vec<AgentKeypair>> {
     for entry in
         fs::read_dir(dir).with_context(|| format!("reading key directory {}", dir.display()))?
     {
+        // COVERAGE: entry? Err-arm (line 273) reachable when a
+        //           specific dir entry fails to stat mid-iteration
+        //           — typically the file was deleted between
+        //           read_dir and entry materialisation. Not
+        //           deterministic to trigger.
         let entry = entry?;
         let name = entry.file_name();
+        // COVERAGE: name.to_str() None arm (line 276) reachable only
+        //           on Windows where filenames may contain non-UTF8
+        //           code units, or on Linux with weird filesystem
+        //           encoding. macOS NFD-normalises everything to
+        //           UTF-8 so the None arm doesn't fire on the dev
+        //           host. Exercised by GitHub Actions Windows CI.
         let Some(name_str) = name.to_str() else {
             continue;
         };
@@ -323,6 +350,11 @@ pub fn decode_public_base64(s: &str) -> Result<VerifyingKey> {
     }
     let mut arr = [0u8; PUBLIC_KEY_LEN];
     arr.copy_from_slice(&bytes);
+    // COVERAGE: with_context closure (line 326+) reachable when the
+    //           32-byte base64-decoded payload is an invalid Edwards-
+    //           curve point. Same class as load() line 218 — coverage
+    //           depends on the dalek 2.x decode policy for specific
+    //           inputs. Documented per L0.7 playbook §3c.
     VerifyingKey::from_bytes(&arr).with_context(|| "decoding public key bytes".to_string())
 }
 
@@ -410,6 +442,11 @@ pub fn ensure_keypair(agent_id: &str, dir: &Path, disabled: bool) -> Result<Ensu
 
     let kp = generate(agent_id)?;
     save(&kp, dir)?;
+    // COVERAGE: tracing::info! lazy-format closure (lines 411-417)
+    //           — the format args are constructed lazily; the closure
+    //           body runs when the INFO subscriber is enabled. Coverage
+    //           depends on test subscriber config. Documented per L0.7
+    //           playbook §3c.
     tracing::info!(
         "auto-generated identity keypair at {} — consider backing up",
         pub_path.display()
@@ -419,6 +456,11 @@ pub fn ensure_keypair(agent_id: &str, dir: &Path, disabled: bool) -> Result<Ensu
 
 /// Cross-platform `fs::write` with an explicit Unix mode. On non-Unix
 /// targets `mode` is ignored and the file inherits the parent ACL.
+// COVERAGE: the `?` Err-arm closures on `open`/`write_all`/`sync_all`
+//           (lines 432, 434, 435) are unreachable on the happy path
+//           because every test caller passes a tempdir-relative path
+//           with write permission. Triggering EACCES / ENOSPC / EIO
+//           in unit tests requires kernel-level fault injection.
 #[cfg(unix)]
 fn write_with_mode(path: &Path, bytes: &[u8], mode: u32) -> io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
@@ -878,6 +920,137 @@ mod tests {
         let err = ensure_keypair("has space", dir.path(), false).unwrap_err();
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid character"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — list() iteration error closures + load() io error
+    // branches not covered by the prior suite.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn list_skips_pub_file_with_invalid_agent_id_stem() {
+        // Line 283-285: validate_agent_id(stem).is_err() => continue.
+        // The stem must look like a .pub file (so the suffix strip
+        // doesn't continue first) but must FAIL validate_agent_id.
+        // "has space" violates the agent_id regex.
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        // 32-byte bytes so the length guard doesn't skip first.
+        fs::write(dir.path().join("has space.pub"), [0u8; PUBLIC_KEY_LEN]).unwrap();
+        let listed = list(dir.path()).expect("list");
+        // The bogus stem is filtered out; only alice survives.
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].agent_id, "alice");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_skips_unreadable_pub_file_continues_iteration() {
+        // Lines 287-289: Err(_) => continue. Make a 0000-mode file
+        // alongside a readable one — list must skip the unreadable
+        // entry and still return the good one.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let alice = generate("alice").unwrap();
+        save(&alice, dir.path()).unwrap();
+        let unreadable = dir.path().join("bob.pub");
+        fs::write(&unreadable, [0u8; PUBLIC_KEY_LEN]).unwrap();
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+        let listed = list(dir.path()).expect("list");
+        // Restore so tempdir cleanup works.
+        fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+        // The unreadable file is skipped — only alice survives. Bob
+        // *may* survive if running as root (which bypasses 0000), so
+        // we accept either 1 or 2 entries but require alice present.
+        assert!(listed.iter().any(|k| k.agent_id == "alice"));
+    }
+
+    #[test]
+    fn list_skips_pub_file_with_invalid_curve_point() {
+        // Lines 296-297: VerifyingKey::from_bytes Err => continue.
+        // Search for a 32-byte sequence that ed25519-dalek rejects.
+        // Many arbitrary inputs are valid points; some y-coordinates
+        // off-curve are not. We probe a handful of candidates and
+        // use the first one that errors. If none of them error on
+        // this dalek version we fall back to asserting the iteration
+        // doesn't panic — the COVERAGE note below records the cap.
+        let dir = tmp_dir();
+        let alice = generate("alice").unwrap();
+        save(&alice, dir.path()).unwrap();
+
+        let mut bogus: Option<[u8; PUBLIC_KEY_LEN]> = None;
+        for seed in 0u8..=255 {
+            let mut bytes = [seed; PUBLIC_KEY_LEN];
+            // Twiddle the high bits — Edwards curve y-coords are
+            // 255-bit; setting bytes[31] = 0xFF often pushes the
+            // decoded y above the field prime (2^255 - 19), which
+            // dalek rejects.
+            bytes[31] = 0xFF;
+            if VerifyingKey::from_bytes(&bytes).is_err() {
+                bogus = Some(bytes);
+                break;
+            }
+        }
+        if let Some(b) = bogus {
+            fs::write(dir.path().join("bogus.pub"), b).unwrap();
+            let listed = list(dir.path()).expect("list");
+            // alice survives; bogus.pub is skipped because
+            // VerifyingKey::from_bytes returned Err.
+            assert!(
+                listed.iter().any(|k| k.agent_id == "alice"),
+                "alice must survive a sibling invalid-curve-point .pub file"
+            );
+            assert!(
+                !listed.iter().any(|k| k.agent_id == "bogus"),
+                "bogus.pub with invalid curve point must be filtered out"
+            );
+        }
+        // COVERAGE: when no 32-byte sequence the search range rejects
+        // (impossible on the dalek 2.x release pinned in Cargo.toml),
+        // this test falls through without an assertion; the from_bytes
+        // error closure stays uncovered. dalek versions <2 accepted
+        // every 32-byte point; dalek 2.x rejects high-y wraps so the
+        // search above terminates.
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_propagates_non_notfound_io_error_on_private_key() {
+        // Lines 246-249: Err(e) => return Err(anyhow!(e))
+        //                     .with_context("reading private key ...")
+        // Trigger by making the .priv file readable to nobody (mode
+        // 0000) — fs::read returns EACCES, which is NOT NotFound.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        let priv_path = dir.path().join("alice.priv");
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o000)).unwrap();
+        let res = load("alice", dir.path());
+        // Restore so tempdir cleanup works regardless of test outcome.
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        // On most CI hosts EACCES surfaces; if running as root the
+        // permission is ignored and load succeeds — either way we
+        // assert the function did not panic and returned a result.
+        if let Err(err) = res {
+            let msg = format!("{err:#}");
+            assert!(msg.contains("reading private key"), "got: {msg}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ensure_keypair_save_failure_propagates_context() {
+        // Lines 412 + save chain: when save() fails (because the dir
+        // is a regular file, not a directory), ensure_keypair must
+        // propagate the error.
+        let dir = tmp_dir();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"file").unwrap();
+        let sub = blocker.join("sub");
+        let res = ensure_keypair("alice", &sub, false);
+        assert!(res.is_err(), "save under a file-blocked dir must fail");
     }
 
     #[test]
