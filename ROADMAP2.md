@@ -68,6 +68,9 @@ This is the floor every plan below builds on. Numbers are sourced from the publi
 | Modules ≥ 90% coverage (v0.6.3 baseline) | 39 of 47 (7 at 100%) | evidence.html |
 | Platform CI matrix | ubuntu-latest, macos-latest, windows-latest | evidence.html |
 | Schema version (v0.6.3.1) | v19 (was v15 on v0.6.3; ladder v15→v17→v18→v19) | release notes |
+| Schema version (v0.7.0 in-flight, as of L1-5 `3aa00c5`) | **v30** (sqlite) — ladder v19 → v20 (v0.6.4 audit log) → v22 (v0.7.0 RC: attestation + recursive-learning inclusion) → v29 (L0.7-1 base, recursive-learning Task 1/8 reflection_depth) → v30 (L1-1) → further bumps queued for B1 CHECK constraints + A4 L1-6 Goal | commit log on `feat/v0.7.0-layer-1` |
+
+> **Doc-vs-substrate qualifier.** Schema versions can advance ahead of this document during in-flight work; the doc is updated at every layer §16 gate. Numbers in this row are "as of" the named commit on the named integration branch.
 
 ### 4.2 Ship-gate (4 phases on 4-node DigitalOcean)
 
@@ -143,6 +146,13 @@ CI guard: `bench --baseline performance/baseline.json` fails any PR that exceeds
 - **4 feature tiers:** keyword (FTS5 only) · semantic (+ MiniLM 384d) · smart (+ Ollama LLM) · autonomous (+ nomic 768d + cross-encoder rerank)
 - **3 memory tiers:** short (6 h) · mid (7 d) · long (permanent)
 - **6-factor recall scoring:** FTS relevance · priority · access count · confidence · tier boost · recency decay
+
+**v0.7.0 grand-slam ship (as of `feat/v0.7.0-layer-1` HEAD, registry-confirmed):**
+
+- **52 MCP tools total** at v0.7.0 grand-slam ship: 43 baseline + `memory_reflect` (recursive-learning Task 4/8) + `memory_skill_register` / `_list` / `_get` / `_resource` / `_export` (L1-5 Agent Skills, **5 tools**, not 6 — `memory_skill_promote_from_reflection` is L2-6 and ships in v0.8.0) + `memory_load_family` (B1 always-on) + `memory_subscribe_replay` / `_dlq_list` (K7 subscription reliability)
+- **25 hook events on `l1/compaction-pipeline`** at L1-7 ship: 20 baseline (Bucket 0 plan) + `pre_recall_expand` (G10 hot-path) + `pre_reflect` + `post_reflect` (recursive-learning Task 6/8, `21 → 23`) + `pre_compaction` + `on_compaction_rollback` (L1-7, `23 → 25`). v0.7.0 RC base before recursive-learning lands ships **22 events** (20 + 2 from G10 + Bucket 0 substrate); the `23` floor sits on `feat/v0.7.0-recursive-learning`; the `25` floor sits on `feat/v0.7.0-layer-1` after L1-7 lands
+
+> **Doc-vs-substrate qualifier.** The hook count and tool count in this block are "as of" the named integration branch HEAD at the time of writing. Both can advance in subsequent layer work; the doc is updated at every §16 gate.
 
 ### 4.8 Certification posture (cold honesty)
 
@@ -314,7 +324,7 @@ Defer: G5/G6/G9, R7 (doctor), TOON wire format polish.
 
 Programmable lifecycle events at every memory operation point. Subprocess JSON-over-stdio with daemon-mode IPC for hot paths.
 
-- 20 lifecycle events (16 base + 2 compaction + 2 transcripts).
+- 20 lifecycle events at plan time (16 base + 2 compaction + 2 transcripts). **Actual grand-slam ship is 25** on `feat/v0.7.0-layer-1` (20 plan + `pre_recall_expand` G10 + `pre_reflect` + `post_reflect` recursive-learning Task 6/8 + `pre_compaction` + `on_compaction_rollback` L1-7); see §4.7 grand-slam block for the ladder.
 - Decision types: `Allow` / `Modify(MemoryDelta)` / `Deny` / `AskUser`.
 - Chain ordering by priority with first-deny-wins short-circuit.
 - Hard timeouts per event class (5000 ms write, 2000 ms read).
@@ -432,7 +442,7 @@ Multi-agent coordination across federation boundaries with cryptographic non-rep
 
 **Differentiated from competitors.** agentmemory signals carry read receipts but no cryptographic guarantee. This substrate's signals are Ed25519-signed by the sender (reusing v0.7.0 Track H attestation infrastructure), verified on read, hash-chained into `signed_events`. Sender cannot repudiate. Recipient cannot fabricate. Audit chain is procurement-defensible.
 
-Data model (additive to schema v22):
+Data model (additive to the v0.7.0 grand-slam terminal schema, see §4.1 ladder):
 
 ```sql
 CREATE TABLE signals (
@@ -572,7 +582,7 @@ Federal procurement asks specifically about supply-chain attestation on model we
 | Audit chain | not tied to model used | every `signed_events` row carries the `model_digest` that produced it |
 | Customer evidence packet | none | `ai-memory model-attest --evidence > packet.json` |
 
-New `model_attestations` table (schema v22 add-only): `model_id`, `model_digest`, `attested_by_pubkey`, `signature`, `attestation_date`, `source_url`. Loader gains `verify_model_attestation()` before model instantiation; refuses to load on signature mismatch. Audit chain records `model_id` with every LLM-derived output.
+New `model_attestations` table (additive on top of v0.7.0 grand-slam terminal schema, see §4.1 ladder): `model_id`, `model_digest`, `attested_by_pubkey`, `signature`, `attestation_date`, `source_url`. Loader gains `verify_model_attestation()` before model instantiation; refuses to load on signature mismatch. Audit chain records `model_id` with every LLM-derived output.
 
 **Why it's strategic.** Turns "we run Gemma 4" into "we run cryptographically attested Gemma 4 with verifiable supply-chain provenance." Different procurement conversation entirely. Currently **no competitor has this** — neither Anthropic Managed Memory, agentmemory, Total Recall, Hindsight, nor Mastra OM. See issue #654 for the IP-investment dossier.
 
@@ -595,7 +605,7 @@ Optional axum subroute on the HTTP daemon (`ai-memory serve --viewer`) exposing 
 
 #### Hook pipeline expansion — v0.7.0 → v0.8.0
 
-v0.7.0 ships 20 lifecycle events. v0.8.0 adds 10 events for coordination substrate. Backward compatible.
+v0.7.0 grand-slam ships **25 lifecycle events** on `feat/v0.7.0-layer-1` (20 plan baseline + `pre_recall_expand` G10 + `pre_reflect` + `post_reflect` recursive-learning Task 6/8 + `pre_compaction` + `on_compaction_rollback` L1-7). v0.8.0 adds 10 events for coordination substrate on top of that. Backward compatible.
 
 | Event | Fires at | Decision types |
 |---|---|---|
@@ -610,12 +620,12 @@ v0.7.0 ships 20 lifecycle events. v0.8.0 adds 10 events for coordination substra
 | `post_checkpoint_resolve` | After checkpoint resolved | Notify only |
 | `pre_routine_run` | Before routine instantiation | Allow / Modify(parameters) / Deny |
 
-#### Schema migration — v21 → v22
+#### Schema migration — v30 → v3X
 
-v0.7.0 ships schema v20 → v21 (audit log + Ed25519 attestation columns).
-v0.8.0 Pillar 1 expansion: schema v22.
+v0.7.0 grand-slam ships schema **v30** at L1-5 (sqlite, ladder per §4.1 schema row).
+The original §7.4 plan called for v21 (audit log + Ed25519 attestation columns) → v22 (Pillar 1); the in-flight v0.7.0 work consumed v20–v30 ahead of doc-time, so v0.8.0 Pillar 1 expansion lands at **v3X (above v30)** with the additive tables enumerated below — exact terminal version pinned at the §16 gate.
 
-Migration v21 → v22:
+Migration v30 → v3X (above v30):
 - Add `actions` + `action_edges` tables
 - Add `leases` table
 - Add `signals` table
@@ -641,7 +651,7 @@ All `CREATE TABLE` operations are additive. No existing table modifications. Mig
 | §7.4.C vLLM first-class inference backend (RFC #651) | 0 | +5 | 5 |
 | §7.4.D Model signature verification chain | 0 | +2 | 2 |
 | Hook pipeline integration (10 new events) | 0 | +1.5 | 1.5 |
-| Schema migration v21 → v22 | 0 | +0.5 | 0.5 |
+| Schema migration v30 → v3X (above v30) | 0 | +0.5 | 0.5 |
 | Test suite (~540 new tests) | 0 | +3 | 3 |
 | Documentation + reproducibility scripts | 0 | +1 | 1 |
 | **TOTAL** | **24.5** | **+22.5** | **~47 sessions** |
@@ -841,7 +851,7 @@ If any of these commitments are ever broken, OSS users have the right to fork th
 
 ## 16. Net
 
-ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms.
+ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms. v0.7.0 grand-slam ship state (as of `feat/v0.7.0-layer-1` HEAD, L1-7 / L1-5 landed): schema **v30** (sqlite ladder per §4.1), **52 MCP tools** total (including 5 Agent Skills tools from L1-5, not 6 — the 6th `_promote_from_reflection` is L2-6 / v0.8.0), and **25 hook lifecycle events** (see §4.7 grand-slam block for the ladder).
 
 The audit found 22 distinct gaps. None block the published v0.6.3 claims. One (G1 — namespace-inheritance enforcement) is a security-shaped bug that gets a cutline-protected slot in v0.7 Bucket 3. Eight are capabilities-JSON theater that v0.6.3.1 Capabilities v2 makes honest. The remaining thirteen distribute cleanly across v0.6.3.1 / v0.7 / v0.8 / v0.9 / v1.0.
 
