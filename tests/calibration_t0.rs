@@ -75,7 +75,8 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // to 49 in v0.7 J7 — Family::Graph gained `memory_find_paths`;
     // to 50 in v0.7 B2 — Family::Core gained `memory_smart_load`;
     // to 51 in v0.7 K8 — Family::Power gained `memory_quota_status`;
-    // to 52 in v0.7.0 Task 4/8 (#655) — Family::Power gained `memory_reflect`.
+    // to 52 in v0.7.0 Task 4/8 (#655) — Family::Power gained `memory_reflect`;
+    // to 56 in v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools.
     // Loaded under core bumped from 5 to 6 with B1 then to 7 with B2,
     // so the preview now overflows the 5-name cap (ends in ", ...").
     // memory_reflect lives in Family::Power, so it grows the "more"
@@ -86,8 +87,10 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // v0.7.0 (issue #691) — Family::Power gained
     // `memory_check_agent_action` + `memory_rule_list` (not loaded
     // under core), so the "more" count grows from 45 to 47.
+    // v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools (not
+    // loaded under core), so the "more" count grows from 47 to 52.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 47 more \
+                    (store, recall, list, get, search, ...). 52 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -103,7 +106,7 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // ---------------------------------------------------------------------------
 // T0-A2-FULL — `to_describe_to_user` on `--profile full` uses the
 // "nothing more to load" closing form (excludes the always-on bootstrap
-// from the user-facing 51 count). Bumped from 42 to 43 in v0.7.0 I4 —
+// from the user-facing count). Bumped from 42 to 43 in v0.7.0 I4 —
 // Family::Graph gained `memory_replay`; to 44 in v0.7 H4 —
 // Family::Graph gained `memory_verify`; to 45 in v0.7 B1 —
 // Family::Core gained `memory_load_family`; to 47 in v0.7 K7 —
@@ -112,7 +115,8 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
 // Family::Graph gained `memory_find_paths`; to 49 in v0.7 B2 —
 // Family::Core gained `memory_smart_load`; to 50 in v0.7 K8 —
 // Family::Power gained `memory_quota_status`; to 51 in v0.7.0
-// Task 4/8 (#655) — Family::Power gained `memory_reflect`.
+// Task 4/8 (#655) — Family::Power gained `memory_reflect`; to 56
+// in v0.7.0 L1-5 — Family::Other gained 5 memory_skill_* tools.
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_full_profile_canonical_phrasing() {
@@ -129,7 +133,10 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
     // `memory_rule_list` added to Family::Power → 54 visible (the
     // "all 54" form excludes the always-on `memory_capabilities`
     // bootstrap from the 55-tool total).
-    let expected = "I can directly use all 54 memory tools right now \
+    // v0.7.0 L1-5 — 5 memory_skill_* tools added to Family::Other →
+    // 59 visible (the "all 59" form excludes the always-on
+    // `memory_capabilities` bootstrap from the 60-tool total).
+    let expected = "I can directly use all 59 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -153,7 +160,9 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
 // gained `memory_quota_status` (not loaded under graph profile, so
 // `more` count grew from 31 to 32). To 52 in v0.7.0 Task 4/8 (#655) —
 // Family::Power gained `memory_reflect` (also not loaded under graph,
-// so `more` count grows from 32 to 33).
+// so `more` count grows from 32 to 33). To 56 in v0.7.0 L1-5 —
+// Family::Other gained 5 memory_skill_* tools (not loaded under graph,
+// so `more` count grows from 33 to 38).
 // ---------------------------------------------------------------------------
 #[test]
 fn t0_describe_to_user_graph_profile_canonical_phrasing() {
@@ -168,8 +177,10 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
     // v0.7.0 (issue #691) — `memory_check_agent_action` +
     // `memory_rule_list` added to Family::Power (not loaded under
     // graph), so the "more" count grows from 34 to 36.
+    // v0.7.0 L1-5 — 5 memory_skill_* tools added to Family::Other (not
+    // loaded under graph), so the "more" count grows from 36 to 41.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 36 more \
+                    (store, recall, list, get, search, ...). 41 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";

@@ -1242,6 +1242,68 @@ pub fn tool_definitions() -> Value {
                         "enabled_only": {"type": "boolean", "description": "Optional — when true, skip disabled rules. Default false."}
                     }
                 }
+            },
+            {
+                "name": "memory_skill_register",
+                "description": "Register an agentskills.io-compliant SKILL.md skill from a folder or inline text.",
+                "docs": "v0.7.0 L1-5 — Register a SKILL.md skill into the skills table with Ed25519 attestation and version chaining. Accepts either folder_path (directory containing SKILL.md) or inline_skill (raw SKILL.md text). Re-registering the same name+namespace creates a new version row; the previous row is superseded.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "folder_path": {"type": "string", "description": "Path to a directory containing SKILL.md (and optional resources/ sub-directory)."},
+                        "inline_skill": {"type": "string", "description": "Raw SKILL.md text including YAML frontmatter and markdown body."}
+                    }
+                }
+            },
+            {
+                "name": "memory_skill_list",
+                "description": "List current (non-superseded) skills — discovery payload (~100 tokens/skill, body not returned).",
+                "docs": "v0.7.0 L1-5 — Discovery endpoint. Returns name, description, id, namespace, digest and metadata for all current skills. Body is NOT decompressed/returned — use memory_skill_get for the activation payload.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": {"type": "string", "description": "Filter to this namespace. Omit (or pass '%') for all namespaces."},
+                        "filter": {"type": "string", "description": "Optional text filter applied to name and description."}
+                    }
+                }
+            },
+            {
+                "name": "memory_skill_get",
+                "description": "Get the full activation payload for a skill (metadata + decompressed body). Old versions still accessible by id.",
+                "docs": "v0.7.0 L1-5 — Returns the full activation payload: all metadata plus the decompressed SKILL.md body (<5000 tokens). Durable history: old version ids remain addressable after supersession.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "The UUID of the skill to retrieve."}
+                    },
+                    "required": ["skill_id"]
+                }
+            },
+            {
+                "name": "memory_skill_resource",
+                "description": "Fetch and digest-verify a skill resource (script, reference, or asset).",
+                "docs": "v0.7.0 L1-5 — Returns the decompressed content of a skill_resources row after verifying its SHA-256 digest. Returns an error on digest mismatch.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "The UUID of the parent skill."},
+                        "resource_path": {"type": "string", "description": "The relative path of the resource (e.g. 'scripts/run.sh')."}
+                    },
+                    "required": ["skill_id", "resource_path"]
+                }
+            },
+            {
+                "name": "memory_skill_export",
+                "description": "Export a skill to a folder as a round-trip-compatible SKILL.md (re-registering produces identical digest).",
+                "docs": "v0.7.0 L1-5 — Writes SKILL.md + resources/ sub-directory to target_folder. Re-registering from the exported folder via memory_skill_register produces the IDENTICAL SHA-256 digest — the round-trip guarantee. Appends a skill.exported signed_events row.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "The UUID of the skill to export."},
+                        "target_folder": {"type": "string", "description": "Path to the destination directory (created if absent)."}
+                    },
+                    "required": ["skill_id", "target_folder"]
+                }
             }
         ]
     })

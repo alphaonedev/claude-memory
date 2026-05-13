@@ -48,6 +48,12 @@ pub(super) mod session_start;
 // per design revision 2026-05-13 — operator uses CLI or HTTP.
 pub(super) mod check_agent_action;
 pub(super) mod rule_list;
+// v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
+pub(super) mod skill_register;
+pub(super) mod skill_list;
+pub(super) mod skill_get;
+pub(super) mod skill_resource;
+pub(super) mod skill_export;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
@@ -118,4 +124,9 @@ pub(super) use self::{
     session_start::handle_session_start,
     check_agent_action::handle_check_agent_action,
     rule_list::handle_rule_list,
+    skill_register::handle_skill_register,
+    skill_list::handle_skill_list,
+    skill_get::handle_skill_get,
+    skill_resource::handle_skill_resource,
+    skill_export::handle_skill_export,
 };

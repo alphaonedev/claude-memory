@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 31).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 32).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -166,7 +166,17 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       memory_kind='reflection') plus the supporting index. Originally
 //       authored as v30 on l1/typed-memorykind; renumbered to v31 during
 //       the L1 wave merge after substrate-rules (issue #691) took v30.
-const CURRENT_SCHEMA_VERSION: i64 = 31;
+// v32 = v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
+//       `skills` table (id, namespace, name, description, license,
+//       compatibility, allowed_tools, metadata, body_blob, digest,
+//       signature, signing_agent, created_at, superseded_by) +
+//       `skill_resources` table (skill_id, resource_path, resource_kind,
+//       content_blob, digest, signature) + indexes. Fully idempotent
+//       (CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS).
+//       Reverse migration drops both tables; MCP skill tools disappear
+//       from the registry automatically. Originally authored as v30 on
+//       l1/agent-skills; renumbered to v32 during the L1 wave merge.
+const CURRENT_SCHEMA_VERSION: i64 = 32;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -263,6 +273,15 @@ const MIGRATION_V30_SQLITE: &str =
 // substrate-rules took v30. File name kept stable to preserve the
 // historical record of the L1-1 patch.
 const MIGRATION_V31_SQLITE: &str = include_str!("../../migrations/sqlite/0025_v07_memory_kind.sql");
+// v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
+// `skills` + `skill_resources` tables with supporting indexes.
+// CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS — fully
+// idempotent; safe to replay on a database that already ran this
+// migration. Renumbered from v30 → v32 during the L1 wave merge after
+// substrate-rules took v30 and L1-1 took v31; file renamed
+// 0023_v07_agent_skills.sql → 0026_v07_agent_skills.sql.
+const MIGRATION_V32_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0026_v07_agent_skills.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -920,6 +939,12 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // Backfill + index — fully idempotent.
             conn.execute_batch(MIGRATION_V31_SQLITE)?;
         }
+        if version < 32 {
+            // v0.7.0 L1-5 — Agent Skills ingestion substrate. Both
+            // tables and all indexes use CREATE TABLE/INDEX IF NOT EXISTS
+            // so this step is fully idempotent on a partially-migrated DB.
+            conn.execute_batch(MIGRATION_V32_SQLITE)?;
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -994,12 +1019,12 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
-        // The module docstring advertises 31; bumping the constant
+        // The module docstring advertises 32; bumping the constant
         // without updating the docstring is a documented foot-gun.
         // We pin the relationship so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 31,
-            "module docstring advertises 31; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 32,
+            "module docstring advertises 32; bump the docstring when this number changes"
         );
     }
 

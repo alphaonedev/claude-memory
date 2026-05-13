@@ -60,6 +60,8 @@ pub mod mcp;
 pub mod metrics;
 pub mod mine;
 pub mod models;
+// v0.7.0 L1-5 — SKILL.md parser and structured-document ingestion pipelines.
+pub mod parsing;
 // v0.7.0 K9 — unified permission system. Composes declarative
 // `[permissions.rules]` matchers, the K3 `[permissions].mode`
 // knob, and G1-G11 hook decisions into a single `Decision`.

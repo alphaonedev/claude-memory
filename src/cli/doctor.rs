@@ -2479,8 +2479,8 @@ mod tests {
             "default profile should be core; got: {stdout}"
         );
         assert!(
-            stdout.contains("Full   (55 tools loaded)"),
-            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list)"
+            stdout.contains("Full   (60 tools loaded)"),
+            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools = 60)"
         );
         assert!(
             stdout.contains("Tokenizer: cl100k_base"),
@@ -2508,9 +2508,11 @@ mod tests {
         // canonical source-of-truth) rather than an exact value; the
         // exact-figure invariant lives in
         // `sizes::tests::full_profile_total_in_honest_measured_range`.
+        // v0.7.0 L1-5 adds 5 skill tools, bumping the full-profile
+        // verbose token total past 10K. Updated upper bound to 12K.
         let total = v["full_profile_total_tokens"].as_u64().unwrap();
         assert!(
-            (5_000..=11_000).contains(&total),
+            (5_000..=13_000).contains(&total),
             "full_profile_total_tokens out of honest range: {total}"
         );
         assert!(v["active_total_tokens"].as_u64().unwrap() > 0);
@@ -2538,8 +2540,8 @@ mod tests {
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            55,
-            "raw_table must include all 55 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list)"
+            60,
+            "raw_table must include all 60 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools = 60)"
         );
         // memory_store is in core and must be loaded under the default
         // (core) profile.

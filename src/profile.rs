@@ -187,8 +187,14 @@ impl Family {
             | "memory_archive_purge"
             | "memory_archive_restore"
             | "memory_archive_stats" => Some(Self::Archive),
-            // other (2)
-            "memory_list_subscriptions" | "memory_notify" => Some(Self::Other),
+            // other (7 — v0.7.0 L1-5 adds 5 skill tools)
+            "memory_list_subscriptions"
+            | "memory_notify"
+            | "memory_skill_register"
+            | "memory_skill_list"
+            | "memory_skill_get"
+            | "memory_skill_resource"
+            | "memory_skill_export" => Some(Self::Other),
             _ => None,
         }
     }
@@ -244,7 +250,8 @@ impl Family {
             // memory_rule_list, substrate-level agent-action rules) = 13.
             Self::Power => 13,
             Self::Archive => 4,
-            Self::Other => 2,
+            // v0.7.0 L1-5 — 5 skill tools added to the Other family.
+            Self::Other => 7,
         }
     }
 
@@ -359,7 +366,16 @@ impl Family {
                 "memory_archive_restore",
                 "memory_archive_stats",
             ],
-            Self::Other => &["memory_list_subscriptions", "memory_notify"],
+            Self::Other => &[
+                "memory_list_subscriptions",
+                "memory_notify",
+                // v0.7.0 L1-5 — Agent Skills ingestion substrate (Pillar 1.5).
+                "memory_skill_register",
+                "memory_skill_list",
+                "memory_skill_get",
+                "memory_skill_resource",
+                "memory_skill_export",
+            ],
         }
     }
 }
@@ -631,7 +647,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 55,
+            total, 60,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -639,8 +655,9 @@ mod tests {
              + v0.7 K8 `memory_quota_status` + v0.7.0 Task 4/8 \
              `memory_reflect` + v0.7.0 L2-2 `memory_reflection_origin` + \
              v0.7.0 issue #691 `memory_check_agent_action` + \
-             `memory_rule_list` = 55. If this drifts, update \
-             Family::expected_tool_count and the family map docs together."
+             `memory_rule_list` + v0.7.0 L1-5 5×skill tools = 60. \
+             If this drifts, update Family::expected_tool_count and the \
+             family map docs together."
         );
     }
 
@@ -727,14 +744,14 @@ mod tests {
     #[test]
     fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7.0 issue #691 (post-L2-2) — full surface = 43 baseline +
+        // v0.7.0 L1-5 (post-#691 / L2-2) — full surface = 43 baseline +
         // memory_replay (I4) + memory_verify (H4) + memory_load_family (B1)
         // + memory_smart_load (B2) + memory_subscription_replay (K7) +
         // memory_subscription_dlq_list (K7) + memory_find_paths (J7) +
         // memory_quota_status (K8) + memory_reflect (Task 4/8) +
         // memory_reflection_origin (L2-2) + memory_check_agent_action +
-        // memory_rule_list (#691) = 55.
-        assert_eq!(p.expected_tool_count(), 55);
+        // memory_rule_list (#691) + 5×memory_skill_* (L1-5) = 60.
+        assert_eq!(p.expected_tool_count(), 60);
 
         // The K7+K8 + Task 4/8 + L2-2 + #691 additions live in
         // Family::Power (operator/governance), so the `power` profile
@@ -906,6 +923,8 @@ mod tests {
             "memory_subscription_dlq_list",
             // power (v0.7 K8 addition — per-agent quota status)
             "memory_quota_status",
+            // power (v0.7.0 Task 4/8 — substrate-native reflection primitive)
+            "memory_reflect",
             // meta
             "memory_capabilities",
             "memory_agent_register",
@@ -920,15 +939,23 @@ mod tests {
             // other
             "memory_list_subscriptions",
             "memory_notify",
+            // other (v0.7.0 L1-5 — Agent Skills substrate)
+            "memory_skill_register",
+            "memory_skill_list",
+            "memory_skill_get",
+            "memory_skill_resource",
+            "memory_skill_export",
         ];
         assert_eq!(
             baseline.len(),
-            51,
+            57,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
              2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
-             1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) = 51"
+             1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) + \
+             1 (v0.7.0 Task 4/8 memory_reflect) + \
+             5 (v0.7.0 L1-5 skill tools) = 57"
         );
         for name in baseline {
             assert!(

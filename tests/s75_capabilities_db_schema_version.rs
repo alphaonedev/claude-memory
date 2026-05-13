@@ -155,11 +155,12 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
 
     // 3) Value tracks the live SAL adapter's `schema_version` table.
     //    A freshly-opened SqliteStore runs every migration up to
-    //    CURRENT_SCHEMA_VERSION (31 at v0.7.0 after substrate-rules
-    //    (issue #691) took v30 for the `governance_rules` table and
-    //    L1-1 took v31 for the `memories.memory_kind` column) on
-    //    `open`, so the live read MUST land at that value — proving the
-    //    field comes from the SAL trait lookup rather than a hard-coded
+    //    CURRENT_SCHEMA_VERSION (32 at v0.7.0 after substrate-rules
+    //    (issue #691) took v30 for the `governance_rules` table, L1-1
+    //    took v31 for the `memories.memory_kind` column, and L1-5 took
+    //    v32 for the `skills` + `skill_resources` tables) on `open`,
+    //    so the live read MUST land at that value — proving the field
+    //    comes from the SAL trait lookup rather than a hard-coded
     //    constant.
     assert!(
         v >= 1,
@@ -168,14 +169,15 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          time); got {v}"
     );
     assert_eq!(
-        v, 31,
+        v, 32,
         "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (31 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
-         `governance_rules` table backing the substrate-level \
-         agent-action rules engine, then L1-1 bumped 30 to 31 to add \
-         the typed `memories.memory_kind` column). A drift here means \
-         either the binary's migrate ladder skipped a step or the new \
-         SAL `schema_version()` lookup is reading from the wrong source."
+         (32 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
+         `governance_rules` table, L1-1 bumped 30 to 31 to add the \
+         typed `memories.memory_kind` column, and L1-5 bumped 31 to \
+         32 to add `skills` + `skill_resources` tables for the Agent \
+         Skills ingestion substrate). A drift here means either the \
+         binary's migrate ladder skipped a step or the new SAL \
+         `schema_version()` lookup is reading from the wrong source."
     );
 
     // 4) The wire-format discriminator stays alongside but distinct

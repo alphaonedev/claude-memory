@@ -108,6 +108,11 @@ base64 = "0.22"
 # transitively via the candle stack — promoted to a direct dep here
 # so `src/identity/sign.rs` can rely on a stable version pin.
 ciborium = "0.2"
+# v0.7.0 L1-5 — SKILL.md YAML frontmatter parsing for the Agent Skills
+# substrate. `serde_yaml` is the de-facto `serde`-native YAML backend;
+# version 0.9 compiles to pure Rust (no C libyaml), making it compatible
+# with the rest of the zero-C-dep policy.
+serde_yaml = "0.9"
 
 # Semantic embedding support
 candle-core = "0.10"

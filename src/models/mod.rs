@@ -8,6 +8,7 @@ pub mod link;
 pub mod memory;
 pub mod namespace;
 pub mod reflection;
+pub mod skill;
 pub mod tag;
 
 #[allow(unused_imports)]
