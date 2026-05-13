@@ -6423,4 +6423,704 @@ mod tests {
         );
         assert_eq!(transcripts[0]["id"], live.id);
     }
+
+    // =====================================================================
+    // L0.7-3 Tier B coverage closure — `memory_reflect` MCP handler.
+    //
+    // The substrate-level `db::reflect` primitive is exhaustively pinned by
+    // `tests/recursive_learning_task4_memory_reflect.rs` and the approval
+    // gate by `tests/approval_reflect.rs`. This block exercises the
+    // *handler* surface: argument parsing, agent_id resolution, embedder
+    // fan-out (best-effort, not fatal), `ReflectError` → MCP error mapping,
+    // and the L1-8 pre-substrate `require_approval_above_depth` gate.
+    //
+    // Coverage targets `src/mcp/tools/reflect.rs` (baseline 0%).
+    // =====================================================================
+
+    /// Seed a source memory at the given namespace + reflection_depth.
+    /// Returns the inserted id.
+    fn reflect_test_seed_source(
+        conn: &rusqlite::Connection,
+        namespace: &str,
+        title: &str,
+        depth: i32,
+    ) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Mid,
+            namespace: namespace.to_string(),
+            title: title.to_string(),
+            content: format!("seed body for {title}"),
+            tags: vec!["reflect-test".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "test-agent-reflect"}),
+            reflection_depth: depth,
+        };
+        db::insert(conn, &mem).unwrap()
+    }
+
+    /// Persist a namespace standard with the supplied raw governance JSON.
+    /// Mirrors `tests/approval_reflect.rs::seed_governance_json` so we can
+    /// drive `require_approval_above_depth` and `max_reflection_depth`
+    /// from within the in-module test set.
+    fn reflect_test_seed_governance(
+        conn: &rusqlite::Connection,
+        namespace: &str,
+        governance: Value,
+    ) {
+        let now = chrono::Utc::now().to_rfc3339();
+        let metadata = json!({
+            "agent_id": "test-agent-reflect",
+            "governance": governance,
+        });
+        let standard = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: format!("_standards-{namespace}"),
+            title: format!("standard for {namespace}"),
+            content: "reflect-test policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 0,
+        };
+        let std_id = db::insert(conn, &standard).unwrap();
+        db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();
+    }
+
+    // ─── A. Happy path ────────────────────────────────────────────────
+
+    #[test]
+    fn handle_reflect_happy_path_single_source_returns_envelope() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/reflect-a", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "pattern: alpha",
+                "content": "synthesised reflection content",
+                "namespace": "team/reflect-a",
+                "tier": "mid",
+                "priority": 7,
+                "confidence": 0.9,
+                "tags": ["reflection", "alpha"],
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert!(payload["id"].is_string());
+        assert_eq!(payload["reflection_depth"], 1);
+        assert_eq!(payload["namespace"], "team/reflect-a");
+        let reflects_on = payload["reflects_on"].as_array().unwrap();
+        assert_eq!(reflects_on.len(), 1);
+    }
+
+    #[test]
+    fn handle_reflect_happy_path_metadata_object_is_accepted() {
+        // Passing a `metadata` object exercises the `is_object()` branch
+        // (vs. the default empty-object fallback). The substrate stamps
+        // its own metadata fields; the input metadata is preserved.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/reflect-meta", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "with metadata",
+                "content": "body",
+                "metadata": {"custom_field": "abc"},
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert!(payload["id"].is_string());
+    }
+
+    #[test]
+    fn handle_reflect_omitted_namespace_defaults_to_first_source_namespace() {
+        // Exercises the `namespace = None` branch + the substrate default
+        // (first source's namespace). The approval-gate prefetch ALSO
+        // dereferences this path via `db::get(conn, id)`.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/reflect-defns", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "defaulted namespace",
+                "content": "body",
+                // namespace intentionally omitted
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["namespace"], "team/reflect-defns");
+    }
+
+    #[test]
+    fn handle_reflect_explicit_agent_id_is_honoured() {
+        // Exercises the `agent_id` precedence chain: explicit field wins.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/reflect-aid", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "agent override",
+                "content": "body",
+                "namespace": "team/reflect-aid",
+                "agent_id": "ai:explicit-agent",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        let new_id = payload["id"].as_str().unwrap();
+        let stored = db::get(&conn, new_id).unwrap().unwrap();
+        assert_eq!(
+            stored.metadata["agent_id"].as_str(),
+            Some("ai:explicit-agent")
+        );
+    }
+
+    #[test]
+    fn handle_reflect_agent_id_from_metadata_blob_is_honoured() {
+        // The handler also extracts agent_id from `metadata.agent_id`
+        // when the top-level field is absent — `.or_else(...)` arm.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/reflect-mid", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "agent from metadata",
+                "content": "body",
+                "namespace": "team/reflect-mid",
+                "metadata": {"agent_id": "ai:meta-agent"},
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        let new_id = payload["id"].as_str().unwrap();
+        let stored = db::get(&conn, new_id).unwrap().unwrap();
+        assert_eq!(stored.metadata["agent_id"].as_str(), Some("ai:meta-agent"));
+    }
+
+    // ─── B. Input validation errors ──────────────────────────────────
+
+    #[test]
+    fn handle_reflect_missing_source_ids_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_reflect", json!({"title": "t", "content": "c"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source_ids"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_empty_source_ids_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({"source_ids": [], "title": "t", "content": "c"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("cannot be empty"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_non_string_source_id_returns_error() {
+        // source_ids[i] must be a string — number / null / object should
+        // surface a typed error naming the index.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": ["valid-id", 42, "another"],
+                "title": "t",
+                "content": "c",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source_ids[1]"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_missing_title_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/r-mt", "src", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({"source_ids": [src], "content": "c"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("title"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_missing_content_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/r-mc", "src", 0);
+        let req = make_tools_call("memory_reflect", json!({"source_ids": [src], "title": "t"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("content"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_invalid_tier_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = reflect_test_seed_source(&conn, "team/r-tier", "src", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [src],
+                "title": "t",
+                "content": "c",
+                "tier": "ephemeral",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("invalid tier"), "got {text}");
+    }
+
+    // ─── D. State-dependent errors (substrate ReflectError mapping) ──
+
+    #[test]
+    fn handle_reflect_source_not_found_returns_error_string() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": ["nonexistent-id"],
+                "title": "t",
+                "content": "c",
+                "namespace": "team/r-nf",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source memory not found"), "got {text}",);
+        assert!(text.contains("nonexistent-id"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_depth_exceeded_returns_typed_error() {
+        // Configure namespace cap = 1, then attempt depth-2 reflection.
+        // Hits the `ReflectError::DepthExceeded` arm; substrate refusal,
+        // NOT the L1-8 pre-substrate approval gate (no
+        // require_approval_above_depth in this governance blob).
+        //
+        // GovernancePolicy requires `write` for deserialization (the
+        // other fields have serde defaults). Supplying a minimal valid
+        // shape here exercises the substrate cap path; without `write`
+        // the resolver returns `None` and the cap falls back to the
+        // compiled-in default of 3, which would allow the attempted
+        // depth-2 write through.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        reflect_test_seed_governance(
+            &conn,
+            "team/r-depth",
+            json!({
+                "write": "any",
+                "max_reflection_depth": 1,
+            }),
+        );
+        let s1 = reflect_test_seed_source(&conn, "team/r-depth", "src-1", 1);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [s1],
+                "title": "would be depth 2",
+                "content": "body",
+                "namespace": "team/r-depth",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("REFLECTION_DEPTH_EXCEEDED"),
+            "expected typed error prefix; got {text}",
+        );
+        assert!(text.contains("depth 2"), "got {text}");
+        assert!(text.contains("max_reflection_depth 1"), "got {text}",);
+        assert!(text.contains("namespace='team/r-depth'"), "got {text}",);
+    }
+
+    // ─── C. Authorization / approval-gate path (L1-8) ────────────────
+
+    #[test]
+    fn handle_reflect_approval_gate_queues_pending_above_threshold() {
+        // Configure namespace with `require_approval_above_depth = 1`.
+        // A reflection that would land at depth 2 must be intercepted
+        // BEFORE the substrate write, returning a `status: "pending"`
+        // envelope with a fresh pending_id.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        reflect_test_seed_governance(
+            &conn,
+            "team/r-approve",
+            json!({"require_approval_above_depth": 1}),
+        );
+        let s1 = reflect_test_seed_source(&conn, "team/r-approve", "src-1", 1);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [s1],
+                "title": "would need approval",
+                "content": "body",
+                "namespace": "team/r-approve",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["status"], "pending");
+        assert!(payload["pending_id"].is_string());
+        assert_eq!(payload["action"], "reflect");
+        assert_eq!(payload["namespace"], "team/r-approve");
+        assert_eq!(payload["proposed_depth"], 2);
+        assert_eq!(payload["require_approval_above_depth"], 1);
+    }
+
+    #[test]
+    fn handle_reflect_approval_gate_under_threshold_proceeds() {
+        // Threshold = 5, depth-1 reflection → substrate write proceeds,
+        // no pending row queued. Confirms the under-threshold branch.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        reflect_test_seed_governance(
+            &conn,
+            "team/r-under",
+            json!({"require_approval_above_depth": 5}),
+        );
+        let s1 = reflect_test_seed_source(&conn, "team/r-under", "src-1", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [s1],
+                "title": "under threshold",
+                "content": "body",
+                "namespace": "team/r-under",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        // Must NOT be a pending envelope.
+        assert!(payload["status"].as_str() != Some("pending"));
+        assert!(payload["id"].is_string());
+        assert_eq!(payload["reflection_depth"], 1);
+    }
+
+    // =====================================================================
+    // L0.7-3 Tier B coverage closure — `memory_quota_status` MCP handler.
+    //
+    // The integration test in `tests/k8_quota_status_tool.rs` calls
+    // `handle_quota_status` directly. Those tests exist as a separate test
+    // binary, so `cargo llvm-cov --lib` (the L0.7 baseline) does NOT report
+    // their coverage against `src/mcp/tools/quota_status.rs`. These in-lib
+    // tests drive the same surface through the MCP dispatch path so the
+    // covered-line count reflects the actual production surface.
+    //
+    // Coverage targets `src/mcp/tools/quota_status.rs` (baseline 53%).
+    // =====================================================================
+
+    // =====================================================================
+    // L0.7-3 Tier B coverage closure — `memory_check_duplicate` MCP handler.
+    //
+    // The handler's happy path requires a real `Embedder` (LLM-bound;
+    // playbook §4 stipulates real embedder must never run in `cargo test`).
+    // The error/validation arms — the bulk of the line count — are driven
+    // here. The embedder-required path is exercised by the `tests/round2_f18_*`
+    // integration suite with a downloaded MiniLM weight.
+    //
+    // Coverage targets `src/mcp/tools/check_duplicate.rs` (baseline 48%).
+    // =====================================================================
+
+    #[test]
+    fn handle_check_duplicate_missing_title_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_check_duplicate", json!({"content": "c"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("title"), "got {text}");
+    }
+
+    #[test]
+    fn handle_check_duplicate_missing_content_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_check_duplicate", json!({"title": "t"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("content"), "got {text}");
+    }
+
+    #[test]
+    fn handle_check_duplicate_no_embedder_returns_error() {
+        // `invoke_handle_request` always passes `None` for the embedder.
+        // The handler must refuse with the documented "requires the
+        // embedder" message — exercises the `Option::ok_or` error arm.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_check_duplicate",
+            json!({
+                "title": "duplicate-check",
+                "content": "body",
+                "namespace": "team/dup",
+                "threshold": 0.85,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("requires the embedder"),
+            "expected embedder-required error; got {text}",
+        );
+    }
+
+    #[test]
+    fn handle_check_duplicate_whitespace_only_namespace_is_filtered() {
+        // The handler trims `namespace` and filters out empty-after-trim
+        // values — so a `   ` namespace is treated as if it were absent.
+        // The handler must NOT call `validate_namespace` (which would
+        // reject the trimmed-empty value) — instead it falls through to
+        // the embedder-required arm. Exercises the `.filter(|s|
+        // !s.is_empty())` short-circuit.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_check_duplicate",
+            json!({
+                "title": "t",
+                "content": "c",
+                "namespace": "   ",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        // Falls through to the embedder-required arm because the
+        // whitespace-only namespace gets filtered out before reaching
+        // `validate_namespace`. If this assertion fails because the
+        // filter changed semantics, the spec is no longer "trim and
+        // ignore" — fix the handler or update this test deliberately.
+        assert!(
+            text.contains("requires the embedder"),
+            "expected fallthrough to embedder gate; got {text}",
+        );
+    }
+
+    #[test]
+    fn handle_check_duplicate_explicit_threshold_is_accepted() {
+        // Covers the `params["threshold"].as_f64()` → `Some(t)` arm.
+        // The handler must still surface the no-embedder error because
+        // that gate fires after the threshold parse. This is an
+        // F-category (idempotency / shape) test — the threshold is
+        // accepted without panicking before the next stage.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_check_duplicate",
+            json!({
+                "title": "t",
+                "content": "c",
+                "threshold": 0.92,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("requires the embedder"), "got {text}");
+    }
+
+    #[test]
+    fn handle_quota_status_with_agent_id_returns_single_envelope() {
+        // Exercises the `Some(agent_id)` arm. The substrate auto-inserts a
+        // zero-usage row when the agent has none, so this exercises the
+        // happy path for both seen-before and never-seen agents.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_quota_status", json!({"agent_id": "agent-status-a"}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["agent_id"], "agent-status-a");
+        // Single-row envelope must carry the `quota` object.
+        assert!(payload["quota"].is_object(), "expected quota object");
+        // The list-envelope keys must NOT appear on this branch.
+        assert!(payload["count"].is_null());
+        assert!(payload["quotas"].is_null());
+    }
+
+    #[test]
+    fn handle_quota_status_without_agent_id_returns_list_envelope() {
+        // Exercises the `else` arm — bulk-list over all quota rows.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Seed two distinct agent rows by asking for them first; the
+        // substrate auto-inserts zero-usage on lookup, populating the list.
+        let _ = invoke_handle_request(
+            &conn,
+            &make_tools_call("memory_quota_status", json!({"agent_id": "agent-a"})),
+        );
+        let _ = invoke_handle_request(
+            &conn,
+            &make_tools_call("memory_quota_status", json!({"agent_id": "agent-b"})),
+        );
+        let req = make_tools_call("memory_quota_status", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        // List envelope.
+        assert!(payload["count"].is_number());
+        assert!(payload["quotas"].is_array());
+        assert!(payload["count"].as_u64().unwrap() >= 2);
+        // The single-row envelope keys must NOT appear on this branch.
+        assert!(payload["agent_id"].is_null());
+        assert!(payload["quota"].is_null());
+    }
+
+    // =====================================================================
+    // L0.7-3 Tier B coverage closures — small-module validation arms.
+    //
+    // Several MCP tool handlers sit just below the 95% Tier B floor
+    // because their `*_is_required` validation branches are only
+    // exercised by the smoke-matrix happy paths in the integration tests
+    // (which run in `cargo test --tests`, not `--lib`). These tests
+    // drive each missing-required-param arm via the dispatch path so the
+    // line-coverage report matches the actual surface count.
+    // =====================================================================
+
+    #[test]
+    fn handle_entity_register_missing_namespace_returns_error() {
+        // src/mcp/tools/entity_register.rs:18 — `namespace is required`.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_entity_register", json!({"canonical_name": "Pluto"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("namespace"), "got {text}");
+    }
+
+    #[test]
+    fn handle_entity_register_metadata_object_is_accepted() {
+        // src/mcp/tools/entity_register.rs:28 — `metadata.is_object()` arm.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_entity_register",
+            json!({
+                "canonical_name": "Charon",
+                "namespace": "team/dwarf",
+                "metadata": {"orbit": "outer"},
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert!(payload["entity_id"].is_string());
+        assert_eq!(payload["canonical_name"], "Charon");
+        assert_eq!(payload["namespace"], "team/dwarf");
+    }
+
+    #[test]
+    fn handle_kg_invalidate_missing_target_id_returns_error() {
+        // src/mcp/tools/kg_invalidate.rs:19 — `target_id is required`.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_kg_invalidate",
+            json!({"source_id": "abc", "relation": "related_to"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("target_id"), "got {text}");
+    }
+
+    #[test]
+    fn handle_kg_invalidate_missing_relation_returns_error() {
+        // src/mcp/tools/kg_invalidate.rs:20 — `relation is required`.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_kg_invalidate",
+            json!({"source_id": "abc", "target_id": "def"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("relation"), "got {text}");
+    }
+
+    #[test]
+    fn handle_reflect_approval_gate_uses_default_namespace() {
+        // L1-8 gate must also fire when the caller omits `namespace` —
+        // the resolver falls through to the first source's namespace.
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        reflect_test_seed_governance(
+            &conn,
+            "team/r-defgate",
+            json!({"require_approval_above_depth": 0}),
+        );
+        let s1 = reflect_test_seed_source(&conn, "team/r-defgate", "src", 0);
+        let req = make_tools_call(
+            "memory_reflect",
+            json!({
+                "source_ids": [s1],
+                "title": "default-namespace gate",
+                "content": "body",
+                // namespace omitted — resolver picks team/r-defgate
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected error: {:?}", resp.error);
+        let payload = i4_decode_response_payload(&resp);
+        assert_eq!(payload["status"], "pending");
+        assert_eq!(payload["namespace"], "team/r-defgate");
+        assert_eq!(payload["proposed_depth"], 1);
+    }
 }
