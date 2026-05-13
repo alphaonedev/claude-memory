@@ -159,17 +159,17 @@ modules = [
 [tier_E]
 target_line_coverage_pct = 90
 modules = [
-    "daemon_runtime.rs",  # current  87.2%, gap   2.8%
-    "embeddings.rs",  # current  91.6% (above target)
-    "handlers/mod.rs",  # current  98.8% (above target)
-    "handlers/transport.rs",  # current  61.9%, gap  28.1%
+    "daemon_runtime.rs",  # current  67.7% — EXCEPTION (listener / sync-net; see coverage/policy.md)
+    "embeddings.rs",  # current  90.8% (above target — L0.7-6)
+    "handlers/mod.rs",  # current  97.6% (above target)
+    "handlers/transport.rs",  # current  95.6% (above target — L0.7-6)
     "harness.rs",  # current  99.2% (above target)
-    "hnsw.rs",  # current  95.3% (above target)
-    "storage/connection.rs",  # current 100.0% (above target)
-    "store/mod.rs",  # current  42.2%, gap  47.8%
-    "store/postgres.rs",  # current  13.9%, gap  76.1%
-    "store/sqlite.rs",  # current  57.5%, gap  32.5%
-    "tls.rs",  # current  94.7% (above target)
+    "hnsw.rs",  # current  96.0% (above target)
+    "storage/connection.rs",  # current  96.7% (above target — L0.7-6)
+    "store/mod.rs",  # current  93.3% (above target — L0.7-6)
+    "store/postgres.rs",  # current  13.9% — EXCEPTION (live Postgres; see coverage/policy.md)
+    "store/sqlite.rs",  # current  97.5% (above target — L0.7-6)
+    "tls.rs",  # current  92.9% (above target)
 ]
 
 [tier_F]

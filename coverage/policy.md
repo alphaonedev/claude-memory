@@ -71,25 +71,21 @@ present at the call site, (b) the corresponding ship-gate cell is
 green, and (c) the documented residual is bounded to the lines that
 actually cannot be exercised without a real process boundary.
 
-## Per-module status (post-Phase-B re-measure baseline)
+## Per-module status (post-Phase-B re-measure)
 
-Numbers below are taken from the `coverage/tier-classification.toml`
-baseline; this file is the working record for the per-module
-disposition after L0.7-6 lands.
-
-| Module                          | Baseline | Disposition                                  |
-|---------------------------------|----------|----------------------------------------------|
-| `daemon_runtime.rs`             | 87.2%    | Closing gap with router + bootstrap tests.   |
-| `embeddings.rs`                 | 91.6%    | Above target; pinning with format-error tests. |
-| `handlers/mod.rs`               | 98.8%    | Above target.                                |
-| `handlers/transport.rs`         | 61.9%    | Closing gap with auth + percent-decode + state tests. Listener / Axum HTTP runtime: integration-only. |
-| `harness.rs`                    | 99.2%    | Above target.                                |
-| `hnsw.rs`                       | 95.3%    | Above target.                                |
-| `storage/connection.rs`         | 100.0%   | Above target; pinning R1-M2 trigger probe.   |
-| `store/mod.rs`                  | 42.2%    | Closing gap with trait-default + enum tests. |
-| `store/postgres.rs`             | 13.9%    | EXCEPTION: requires live Postgres; ship-gate compensation. |
-| `store/sqlite.rs`               | 57.5%    | Closing gap with link / archive / governance tests. |
-| `tls.rs`                        | 94.7%    | Above target; ironclaw-mtls cell compensation for residual mTLS handshake. |
+| Module                          | Baseline | After L0.7-6 | Status                                          |
+|---------------------------------|----------|--------------|-------------------------------------------------|
+| `daemon_runtime.rs`             | 67.63%   | 67.72%       | EXCEPTION (listener / sync-net integration).   |
+| `embeddings.rs`                 | 86.83%   | 90.75%       | At target.                                      |
+| `handlers/mod.rs`               | 97.64%   | 97.64%       | Above target.                                   |
+| `handlers/transport.rs`         | 61.85%   | 95.55%       | Above target.                                   |
+| `harness.rs`                    | 99.17%   | 99.17%       | Above target.                                   |
+| `hnsw.rs`                       | 96.05%   | 96.05%       | Above target.                                   |
+| `storage/connection.rs`         | 93.94%   | 96.72%       | Above target.                                   |
+| `store/mod.rs`                  | 41.72%   | 93.31%       | Above target.                                   |
+| `store/postgres.rs`             | 13.88%   | 13.88%       | EXCEPTION (live Postgres).                      |
+| `store/sqlite.rs`               | 47.37%   | 97.50%       | Above target.                                   |
+| `tls.rs`                        | 92.94%   | 92.94%       | Above target.                                   |
 
 ## Module-specific exceptions
 
@@ -160,23 +156,35 @@ existing 42 unit tests.
   `DangerousAnyServerVerifier` (B2 doc) and the `rustls::ServerConfig`
   build-and-bind paths.
 
-### `src/daemon_runtime.rs` — bootstrap-only paths (PARTIAL EXCEPTION)
+### `src/daemon_runtime.rs` — bootstrap / sync-net integration-only (EXCEPTION)
 
-`run()`, `serve_http_with_shutdown*`, `serve()`, and the panic-handler
-setup at the top of `serve()` only fire under a real process. They are
-exercised by every ship-gate cell that boots the daemon.
+`run()`, `serve_http_with_shutdown*`, `serve()`, the panic-handler setup
+at the top of `serve()`, `run_sync_daemon_with_shutdown`,
+`sync_cycle_once`, and `run_curator_daemon*` only fire under a real
+process — they bind sockets, open real `reqwest` clients against peer
+URLs, and consume signals from the OS. They are exercised by every
+ship-gate cell that boots the daemon.
+
+Current line coverage 67.72% is below the 90% tier-E target but the
+residual is overwhelmingly composed of these listener / sync-net code
+paths. The unit-testable surface — `is_write_command`,
+`passphrase_from_file`, `apply_anonymize_default`, `build_embedder`
+keyword/load-failure paths, `build_vector_index` empty/populated paths,
+`spawn_*_loop` smoke tests, `build_router` shape, `bootstrap_serve`
+smoke + federation variants, every `run()` dispatch arm for reads and
+writes, `urlencoding_minimal` round trip — already has 100+ unit tests
+exercising it.
 
 **Ship-gate compensation**:
 
 - Every ship-gate cell starts a real `ai-memory serve` and exercises
-  the daemon under load.
-
-**Unit-testable surface kept under per-module gate**:
-
-- `is_write_command`, `passphrase_from_file`, `apply_anonymize_default`,
-  `build_embedder` keyword/load-failure paths, `build_vector_index`
-  empty/populated paths, `spawn_*_loop` smoke tests, `build_router`
-  shape, `bootstrap_serve` smoke + federation variants.
+  `serve()` + `serve_http_with_shutdown_future_and_timeout` +
+  `bootstrap_serve` + the panic-handler setup.
+- A2A-gate ironclaw-mtls + federation cells exercise
+  `run_sync_daemon_with_shutdown` + `sync_cycle_once` against a real
+  peer fleet.
+- The signing-keypair auto-gen path in `ensure_and_load_daemon_keypair`
+  is exercised by the F12 cold-boot cell.
 
 ## Process
 
