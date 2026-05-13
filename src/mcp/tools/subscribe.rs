@@ -17,6 +17,22 @@ pub(super) fn handle_subscribe(
     let created_by =
         crate::identity::resolve_agent_id(None, mcp_client).map_err(|e| e.to_string())?;
 
+    // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): refuse subscription
+    // registration when neither a per-subscription `secret` nor a
+    // server-wide `[hooks.subscription] hmac_secret` is configured.
+    // Mirrors the HTTP subscribe handler — see
+    // `crate::handlers::subscribe` for the rationale.
+    if secret.is_none_or(str::is_empty) && crate::config::active_hooks_hmac_secret().is_none() {
+        return Err(
+            "HMAC secret required: configure per-subscription `hmac_secret` or \
+             server-wide `[security] hmac_secret`. Pass `secret: <value>` in the \
+             tool call, OR set [hooks.subscription] hmac_secret in the daemon \
+             config. Unsigned subscription dispatch was disabled in v0.7.0 \
+             (fix campaign R3-S1.HMAC, 2026-05-13)."
+                .to_string(),
+        );
+    }
+
     // P5 (G9): optional structured per-event-type opt-in. Callers pass
     // `event_types: ["memory_store", "memory_link_created"]` to scope a
     // subscription to a narrow event subset. When omitted, the legacy

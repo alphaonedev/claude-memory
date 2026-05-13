@@ -604,6 +604,41 @@ pub fn dispatch_event_with_details(
                     hmac_sha256_hex(&key_hash, &canonical)
                 }),
             };
+            // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): refuse to
+            // dispatch an unsigned payload. New subscriptions cannot
+            // register without a per-sub or server-wide secret (see
+            // `crate::handlers::subscribe` + MCP `handle_subscribe`), so
+            // hitting this branch means a legacy row was persisted before
+            // the gate landed, or the server-wide override was removed
+            // after registration. Either way, fail loudly to the DLQ
+            // instead of dispatching the body in clear so a receiver
+            // never has to guess whether a body is authentic.
+            if signature.is_none() {
+                tracing::error!(
+                    "subscription {sub_id} dispatch refused: no per-sub secret AND no \
+                     server-wide [hooks.subscription] hmac_secret configured. \
+                     Configure one of the two and replay via memory_subscription_replay. \
+                     (v0.7.0 fix campaign R3-S1.HMAC, 2026-05-13)"
+                );
+                let outcome = DeliveryOutcome::unsigned_refused();
+                let ok = outcome.success;
+                record_dispatch(&db_path, &sub_id, ok);
+                update_event_status(&db_path, &correlation_id, ok);
+                if let Err(e) = record_dlq(
+                    &db_path,
+                    &sub_id,
+                    &correlation_id,
+                    &event_owned,
+                    &body,
+                    outcome.attempts,
+                    &outcome.last_error,
+                    &outcome.first_failed_at,
+                    &outcome.last_failed_at,
+                ) {
+                    tracing::warn!("subscription DLQ write failed: {e}");
+                }
+                return;
+            }
             let outcome =
                 deliver_with_retry(&url, &body, &ts, signature.as_deref(), &correlation_id);
             let ok = outcome.success;
@@ -715,6 +750,26 @@ struct DeliveryOutcome {
     last_error: String,
     first_failed_at: String,
     last_failed_at: String,
+}
+
+impl DeliveryOutcome {
+    /// R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): synthesise a failure
+    /// outcome for a dispatch refused at the gate because neither a
+    /// per-sub secret nor a server-wide override was configured. The
+    /// DLQ row carries an explicit `last_error` so operators can tell a
+    /// missing-secret refusal apart from a transport failure.
+    fn unsigned_refused() -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
+        Self {
+            success: false,
+            attempts: 0,
+            last_error: "dispatch refused: no per-subscription secret AND no server-wide \
+                 [hooks.subscription] hmac_secret configured (v0.7.0 R3-S1.HMAC)"
+                .to_string(),
+            first_failed_at: now.clone(),
+            last_failed_at: now,
+        }
+    }
 }
 
 /// v0.7.0 K6 — dispatcher driver. Issues the initial POST plus up to
@@ -2579,7 +2634,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "approval_requested",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
@@ -2792,7 +2849,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "*",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,
@@ -2867,7 +2926,9 @@ mod tests {
                 &NewSubscription {
                     url: &url,
                     events: "*",
-                    secret: None,
+                    // R3-S1.HMAC (2026-05-13): dispatch refuses
+                    // unsigned bodies; supply a per-sub secret.
+                    secret: Some("test-sub-secret"),
                     namespace_filter: None,
                     agent_filter: None,
                     created_by: None,

@@ -1777,6 +1777,44 @@ pub async fn bootstrap_serve(
     args: &ServeArgs,
     app_config: &AppConfig,
 ) -> Result<ServeBootstrap> {
+    // S5-C1 (v0.7.0 fix campaign 2026-05-13): refuse default-off auth
+    // on non-loopback binds. When `api_key` is unset, the `api_key_auth`
+    // middleware is a pass-through — every privileged endpoint (write,
+    // approve, reject, governance state) is reachable by any caller
+    // that can open a TCP connection. The K10 SSE/approval path is
+    // HMAC-gated and the legacy /approve + /reject paths are now also
+    // HMAC-gated (see `handlers::approve_pending` and
+    // `handlers::reject_pending`), but the broader write surface
+    // (POST /api/v1/memories, /links, /agents, /subscriptions, …)
+    // still rides on `api_key_auth`. Refusing to bind to a routable
+    // address with no API key configured is the safe default;
+    // operators who *intentionally* run a public daemon must set
+    // `[api] api_key` (or `--api-key` on the CLI) explicitly.
+    if app_config.api_key.is_none() {
+        let host = args.host.as_str();
+        let is_loopback = host == "127.0.0.1"
+            || host == "::1"
+            || host == "localhost"
+            || host == "0:0:0:0:0:0:0:1"
+            || host == "[::1]";
+        if !is_loopback {
+            anyhow::bail!(
+                "refusing to bind to non-loopback address {host:?} without an API key: \
+                 the daemon's api_key is unset (default-off auth would expose every \
+                 privileged endpoint to any caller that can reach the bind address). \
+                 Either set [api] api_key in config (or --api-key on the CLI) and rebind, \
+                 or rebind to 127.0.0.1 / ::1 / localhost for a single-tenant deployment. \
+                 (v0.7.0 fix campaign S5-C1, 2026-05-13)"
+            );
+        }
+        tracing::warn!(
+            "API key NOT configured — daemon bound to loopback {host:?}. \
+             Privileged endpoints (POST /memories, /links, /agents, /subscriptions) \
+             accept any local caller. Set [api] api_key for production. \
+             /approve and /reject remain HMAC-gated regardless."
+        );
+    }
+
     let resolved_ttl = app_config.effective_ttl();
     let archive_on_gc = app_config.effective_archive_on_gc();
     let conn = db::open(db_path)?;

@@ -333,7 +333,7 @@ pub(crate) const APPROVAL_HMAC_MAX_SKEW_SECS: i64 = 60;
 /// reformatted byte invalidates the signature, which is the whole
 /// point of HMAC. We compare in constant time via `constant_time_eq`
 /// to avoid timing oracles on the hex digest.
-fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
+pub(crate) fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
     let secret = match crate::config::active_hooks_hmac_secret() {
         Some(s) => s,
         None => {
@@ -727,6 +727,29 @@ mod tests {
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let path = std::path::PathBuf::from(":memory:");
         Arc::new(Mutex::new((conn, path, ResolvedTtl::default(), true)))
+    }
+
+    /// S5-C1 fix campaign (2026-05-13): tests that hit
+    /// `approve_pending` / `reject_pending` MUST acquire this mutex and
+    /// install a server-wide HMAC secret via
+    /// [`crate::config::set_active_hooks_hmac_secret`] before signing.
+    /// The process-wide secret is global state; serialising prevents
+    /// cross-test interleaving from flipping the secret out from under
+    /// an in-flight request.
+    pub(super) static APPROVE_HMAC_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// S5-C1 fix campaign (2026-05-13): synthesise a K7-style
+    /// `(timestamp, signature)` pair for an inbound approve/reject body.
+    /// Mirrors the reference helper in `tests/k10_approval_http.rs::sign`
+    /// but uses the in-crate `pub(crate)` helpers so we don't redeclare
+    /// the HMAC primitive in two places.
+    pub(super) fn sign_approve_body(secret: &str, body: &[u8]) -> (String, String) {
+        let ts = chrono::Utc::now().timestamp().to_string();
+        let body_str = std::str::from_utf8(body).unwrap_or("");
+        let canonical = format!("{ts}.{body_str}");
+        let key_hash = crate::subscriptions::sha256_hex(secret);
+        let sig = crate::subscriptions::hmac_sha256_hex(&key_hash, &canonical);
+        (ts, format!("sha256={sig}"))
     }
 
     #[tokio::test]
@@ -3013,10 +3036,14 @@ mod tests {
             .route("/api/v1/subscriptions", axum_post(subscribe))
             .with_state(test_app_state(state));
 
+        // R3-S1.HMAC (2026-05-13): subscribe now requires a per-sub
+        // `secret` (or server-wide HMAC override). Supply one so the
+        // SSRF guard is the gate this test pins, not the HMAC check.
         // Private IP range: http:// to non-loopback requires https
         let body = serde_json::json!({
             "url": "http://10.0.0.1/webhook",
-            "events": "*"
+            "events": "*",
+            "secret": "test-sub-secret",
         });
         let resp = app
             .oneshot(
@@ -3054,7 +3081,8 @@ mod tests {
 
         let body = serde_json::json!({
             "url": "file:///etc/passwd",
-            "events": "*"
+            "events": "*",
+            "secret": "test-sub-secret",
         });
         let resp = app
             .oneshot(
@@ -3081,7 +3109,8 @@ mod tests {
 
         let body = serde_json::json!({
             "url": "http://localhost/webhook",
-            "events": "*"
+            "events": "*",
+            "secret": "test-sub-secret",
         });
         let resp = app
             .oneshot(
@@ -3857,22 +3886,32 @@ mod tests {
         // An unknown but-valid uuid surfaces as 403 (rejected) or 500
         // (DB row missing). Either is acceptable — both confirm the
         // post-validation handler arms execute.
+        // S5-C1 (2026-05-13): /approve is now HMAC-gated; install the
+        // server-wide secret and sign the empty body before dispatching.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let unknown = Uuid::new_v4().to_string();
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{unknown}/approve"))
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert!(
             resp.status() == StatusCode::FORBIDDEN
                 || resp.status() == StatusCode::INTERNAL_SERVER_ERROR
@@ -3886,64 +3925,94 @@ mod tests {
     async fn http_approve_pending_rejects_invalid_agent_id() {
         // Passing a malformed X-Agent-Id (containing a space) triggers
         // resolve_http_agent_id's validation and yields a 400.
+        // S5-C1 (2026-05-13): /approve is HMAC-gated — sign so the
+        // body reaches the agent-id validator (which is what we're
+        // pinning here).
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let id = Uuid::new_v4().to_string();
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{id}/approve"))
                     .method("POST")
                     .header("x-agent-id", "bad agent")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn http_reject_pending_unknown_id_returns_404() {
+        // S5-C1 (2026-05-13): /reject is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let unknown = Uuid::new_v4().to_string();
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{unknown}/reject"))
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
     async fn http_reject_pending_rejects_invalid_agent_id() {
+        // S5-C1 (2026-05-13): /reject is HMAC-gated; sign so the body
+        // reaches the agent-id validator.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let id = Uuid::new_v4().to_string();
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{id}/reject"))
                     .method("POST")
                     .header("x-agent-id", "bad agent")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -6795,6 +6864,7 @@ mod tests {
         let body = serde_json::json!({
             "url": "https://example.com/webhook",
             "events": "*",
+            "secret": "h8b-test-secret",
         });
         let resp = app
             .oneshot(
@@ -6827,7 +6897,9 @@ mod tests {
             .route("/api/v1/subscriptions", axum_post(subscribe))
             .with_state(test_app_state(state));
 
-        let body = serde_json::json!({"events": "*"});
+        // R3-S1.HMAC (2026-05-13): supply secret so this test pins the
+        // url-or-namespace branch (not the HMAC branch).
+        let body = serde_json::json!({"events": "*", "secret": "h8b-test-secret"});
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -6860,6 +6932,7 @@ mod tests {
         let body = serde_json::json!({
             "url": "not-a-url",
             "events": "*",
+            "secret": "h8b-test-secret",
         });
         let resp = app
             .oneshot(
@@ -6890,6 +6963,7 @@ mod tests {
         let body = serde_json::json!({
             "url": "https://169.254.169.254/latest/meta-data/",
             "events": "*",
+            "secret": "h8b-test-secret",
         });
         let resp = app
             .oneshot(
@@ -6929,6 +7003,7 @@ mod tests {
         let body = serde_json::json!({
             "agent_id": "alice",
             "namespace": "team/research",
+            "secret": "h8b-test-secret",
         });
         let resp = app
             .oneshot(
@@ -6971,6 +7046,7 @@ mod tests {
             "url": "https://example.com/hook",
             "events": "memory.created",
             "namespace_filter": "global",
+            "secret": "h8b-test-secret",
         });
         let resp = app
             .oneshot(
@@ -8407,6 +8483,11 @@ mod tests {
     async fn http_approve_pending_happy_path_executes_store() {
         // Queue a Store payload, approve it, expect 200 + executed=true +
         // a memory_id we can fetch back.
+        // S5-C1 (2026-05-13): /approve is now HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         use crate::models::GovernedAction;
         let state = test_state();
         let now_rfc = Utc::now().to_rfc3339();
@@ -8439,21 +8520,26 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state.clone()));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pending_id}/approve"))
                     .method("POST")
                     .header("x-agent-id", "approver-alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
+        assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["approved"], true);
         assert_eq!(v["executed"], true);
@@ -8472,21 +8558,31 @@ mod tests {
         // validate_id rejects ids with embedded control chars — handler
         // returns 400 BEFORE touching the DB. We use %01 (SOH) which
         // is_clean_string flags as invalid.
+        // S5-C1 (2026-05-13): /approve is HMAC-gated; sign so the
+        // body reaches validate_id (which is what we're pinning).
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/v1/pending/bad%01id/approve")
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -8494,6 +8590,11 @@ mod tests {
     async fn http_approve_pending_already_approved_is_rejected() {
         // Once an action is decided, a follow-up approve must NOT execute
         // again — it returns FORBIDDEN with `approve rejected: already decided`.
+        // S5-C1 (2026-05-13): /approve is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         use crate::models::GovernedAction;
         let state = test_state();
         let pid = {
@@ -8520,21 +8621,26 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pid}/approve"))
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
+        assert_eq!(status, StatusCode::FORBIDDEN);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let err = v["error"].as_str().unwrap_or("");
         assert!(
@@ -8548,6 +8654,11 @@ mod tests {
         // After a successful approve the row's decided_by is the same id
         // we passed via X-Agent-Id, not the requester. This is the
         // executor-records-approval invariant.
+        // S5-C1 (2026-05-13): /approve is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         use crate::models::GovernedAction;
         let state = test_state();
         let now_rfc = Utc::now().to_rfc3339();
@@ -8578,17 +8689,21 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state.clone()));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pid}/approve"))
                     .method("POST")
                     .header("x-agent-id", "executor-claude")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::OK);
         let lock = state.lock().await;
         let pa = db::get_pending_action(&lock.0, &pid).unwrap().unwrap();
@@ -8631,21 +8746,31 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state.clone()));
+        // S5-C1 (2026-05-13): /approve is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pid}/approve"))
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
+        assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         let mem_id = v["memory_id"].as_str().expect("memory_id present");
         let lock = state.lock().await;
@@ -8660,6 +8785,11 @@ mod tests {
     async fn http_reject_pending_happy_path_marks_rejected_no_execution() {
         // Reject path: row goes to status='rejected', decided_by stamped,
         // and NO underlying memory is created.
+        // S5-C1 (2026-05-13): /reject is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         use crate::models::GovernedAction;
         let state = test_state();
         let pid = {
@@ -8684,21 +8814,26 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state.clone()));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pid}/reject"))
                     .method("POST")
                     .header("x-agent-id", "rejector-alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
+        let status = resp.status();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
+        assert_eq!(status, StatusCode::OK);
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["rejected"], true);
         assert_eq!(v["decided_by"], "rejector-alice");
@@ -8729,6 +8864,11 @@ mod tests {
     async fn http_reject_pending_already_rejected_returns_404() {
         // Once decided, decide_pending_action returns false; the handler
         // surfaces this as 404 ("not found or already decided").
+        // S5-C1 (2026-05-13): /reject is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         use crate::models::GovernedAction;
         let state = test_state();
         let pid = {
@@ -8755,17 +8895,21 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{pid}/reject"))
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
@@ -8773,21 +8917,30 @@ mod tests {
     async fn http_reject_pending_invalid_id_format_400() {
         // validate_id flags ids containing control chars; %01 hits that
         // arm and returns 400 before any DB lookup.
+        // S5-C1 (2026-05-13): /reject is HMAC-gated.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/v1/pending/bad%01id/reject")
                     .method("POST")
                     .header("x-agent-id", "alice")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -11635,11 +11788,13 @@ mod tests {
 
     #[tokio::test]
     async fn http_subscribe_with_namespace_synthesizes_loopback_url_and_returns_201() {
+        // R3-S1.HMAC (2026-05-13): subscribe requires per-sub or
+        // server-wide HMAC secret.
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/subscribe", axum_post(subscribe))
             .with_state(test_app_state(state));
-        let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice"});
+        let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice", "secret": "ns-test-secret"});
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -11683,13 +11838,14 @@ mod tests {
 
     #[tokio::test]
     async fn http_unsubscribe_by_agent_namespace_after_subscribe_returns_removed() {
+        // R3-S1.HMAC (2026-05-13): subscribe requires HMAC secret.
         let state = test_state();
         // Subscribe via the handler so the row lands consistent with the
         // unsubscribe lookup.
         let sub_app = Router::new()
             .route("/api/v1/subscribe", axum_post(subscribe))
             .with_state(test_app_state(state.clone()));
-        let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice"});
+        let body = serde_json::json!({"agent_id": "ai:alice", "namespace": "team/alice", "secret": "ns-test-secret"});
         let resp = sub_app
             .oneshot(
                 axum::http::Request::builder()
@@ -11728,12 +11884,13 @@ mod tests {
 
     #[tokio::test]
     async fn http_list_subscriptions_returns_subscription_rows() {
+        // R3-S1.HMAC (2026-05-13): subscribe requires HMAC secret.
         let state = test_state();
         // Drop one subscription via the subscribe handler.
         let sub_app = Router::new()
             .route("/api/v1/subscribe", axum_post(subscribe))
             .with_state(test_app_state(state.clone()));
-        let body = serde_json::json!({"agent_id": "ai:carol", "namespace": "team/carol"});
+        let body = serde_json::json!({"agent_id": "ai:carol", "namespace": "team/carol", "secret": "ns-test-secret"});
         let resp = sub_app
             .oneshot(
                 axum::http::Request::builder()
@@ -12332,22 +12489,32 @@ mod tests {
 
     #[tokio::test]
     async fn http_approve_pending_with_bad_header_agent_id_returns_400() {
+        // S5-C1 (2026-05-13): /approve is HMAC-gated; sign so the body
+        // reaches agent-id validation.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let id = "abcdef0123456789abcdef0123456789";
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{id}/approve"))
                     .method("POST")
                     .header("x-agent-id", "bad agent id")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 
@@ -12355,22 +12522,32 @@ mod tests {
 
     #[tokio::test]
     async fn http_reject_pending_with_bad_header_agent_id_returns_400() {
+        // S5-C1 (2026-05-13): /reject is HMAC-gated; sign so the body
+        // reaches agent-id validation.
+        let _g = APPROVE_HMAC_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
         let state = test_state();
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let id = "abcdef0123456789abcdef0123456789";
+        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
                     .uri(format!("/api/v1/pending/{id}/reject"))
                     .method("POST")
                     .header("x-agent-id", "bad agent id")
+                    .header("x-ai-memory-timestamp", &ts)
+                    .header("x-ai-memory-signature", &sig)
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
+        crate::config::set_active_hooks_hmac_secret(None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
     }
 

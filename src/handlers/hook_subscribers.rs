@@ -327,6 +327,30 @@ pub async fn subscribe(
         }
     };
 
+    // R3-S1.HMAC (v0.7.0 fix campaign 2026-05-13): refuse to register a
+    // subscription when neither a per-subscription `secret` nor a
+    // server-wide `[hooks.subscription] hmac_secret` is configured.
+    // Previously the dispatch loop silently delivered unsigned bodies
+    // when no key was available (subscriptions.rs:600-606), which
+    // overstates the "HMAC non-optional" guarantee documented for
+    // Bucket-3 receivers. This is a deliberate behaviour break:
+    // operators upgrading from <=v0.6 must either supply a per-sub
+    // secret or configure the process-wide override before
+    // subscribing.
+    if body.secret.as_deref().is_none_or(str::is_empty)
+        && crate::config::active_hooks_hmac_secret().is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "HMAC secret required: configure per-subscription `hmac_secret` or server-wide `[security] hmac_secret`",
+                "hint": "Pass `secret: <value>` in the subscribe request body, OR set [hooks.subscription] hmac_secret in the daemon config. \
+                        Unsigned subscription dispatch was disabled in v0.7.0 (fix campaign R3-S1.HMAC, 2026-05-13)."
+            })),
+        )
+            .into_response();
+    }
+
     // Rewrite S33's `{agent_id, namespace}` body into the webhook shape.
     let mut url_was_synthesized = false;
     // Suppress dead-code lint when sal feature is off (the variable is

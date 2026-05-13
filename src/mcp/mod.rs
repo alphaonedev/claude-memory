@@ -2321,8 +2321,10 @@ mod tests {
                 required_arg: None,
             },
             ToolCase {
+                // R3-S1.HMAC (2026-05-13): memory_subscribe now requires
+                // either a per-sub `secret` or a server-wide HMAC config.
                 name: "memory_subscribe",
-                valid_args: json!({"url": "https://example.com/webhook"}),
+                valid_args: json!({"url": "https://example.com/webhook", "secret": "tool-case-secret"}),
                 required_arg: Some("url"),
             },
             ToolCase {
@@ -3112,10 +3114,12 @@ mod tests {
     #[test]
     fn handle_subscribe_error_unregistered_agent() {
         // memory_subscribe refuses unregistered callers (#301 item 4).
+        // R3-S1.HMAC (2026-05-13): supply secret so the registration
+        // gate (not the HMAC gate) is what this test pins.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let req = make_tools_call(
             "memory_subscribe",
-            json!({"url": "https://example.com/hook"}),
+            json!({"url": "https://example.com/hook", "secret": "mcp-sub-test-secret"}),
         );
         let resp = invoke_handle_request(&conn, &req);
         let result = resp.result.unwrap();
@@ -5141,12 +5145,15 @@ mod tests {
         // value we can pass the subscribe gate.
         let resolved = crate::identity::resolve_agent_id(None, None).unwrap();
         db::register_agent(&conn, &resolved, "human", &[]).unwrap();
+        // R3-S1.HMAC (2026-05-13): supply secret so the HMAC gate
+        // passes (registration now requires per-sub or server-wide).
         let req = make_tools_call(
             "memory_subscribe",
             json!({
                 "url": "https://example.com/hook",
                 "events": "memory_store,memory_delete",
                 "namespace_filter": "w12-sub",
+                "secret": "mcp-sub-test-secret",
             }),
         );
         let resp = invoke_handle_request(&conn, &req);
@@ -5164,10 +5171,15 @@ mod tests {
     fn handle_subscribe_invalid_url_after_registered() {
         // After registering, a malformed URL still falls through to the
         // url-validate branch.
+        // R3-S1.HMAC (2026-05-13): supply secret so the URL-validate
+        // branch (not the HMAC branch) is what this test pins.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let resolved = crate::identity::resolve_agent_id(None, None).unwrap();
         db::register_agent(&conn, &resolved, "human", &[]).unwrap();
-        let req = make_tools_call("memory_subscribe", json!({"url": "not-a-url-at-all"}));
+        let req = make_tools_call(
+            "memory_subscribe",
+            json!({"url": "not-a-url-at-all", "secret": "mcp-sub-test-secret"}),
+        );
         let resp = invoke_handle_request(&conn, &req);
         let result = resp.result.unwrap();
         assert_eq!(result["isError"], true);
@@ -6005,12 +6017,13 @@ mod tests {
     #[test]
     fn handle_unsubscribe_after_subscribe_removes_row() {
         // Drives the removed=1 branch.
+        // R3-S1.HMAC (2026-05-13): supply secret.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let resolved = crate::identity::resolve_agent_id(None, None).unwrap();
         db::register_agent(&conn, &resolved, "human", &[]).unwrap();
         let sub = make_tools_call(
             "memory_subscribe",
-            json!({"url": "https://example.com/hook2"}),
+            json!({"url": "https://example.com/hook2", "secret": "mcp-sub-test-secret"}),
         );
         let sub_resp = invoke_handle_request(&conn, &sub);
         let sub_text = sub_resp.result.unwrap()["content"][0]["text"]
@@ -6037,12 +6050,13 @@ mod tests {
 
     #[test]
     fn handle_list_subscriptions_after_subscribe_returns_one() {
+        // R3-S1.HMAC (2026-05-13): supply secret.
         let conn = db::open(std::path::Path::new(":memory:")).unwrap();
         let resolved = crate::identity::resolve_agent_id(None, None).unwrap();
         db::register_agent(&conn, &resolved, "human", &[]).unwrap();
         let sub = make_tools_call(
             "memory_subscribe",
-            json!({"url": "https://example.com/listed"}),
+            json!({"url": "https://example.com/listed", "secret": "mcp-sub-test-secret"}),
         );
         let _ = invoke_handle_request(&conn, &sub);
         let req = make_tools_call("memory_list_subscriptions", json!({}));

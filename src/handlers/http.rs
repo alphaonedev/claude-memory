@@ -1143,9 +1143,32 @@ pub async fn approve_pending(
     State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body_bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
     use crate::db::ApproveOutcome;
     use crate::models::PendingDecision;
+    // S5-C1 (v0.7.0 fix campaign 2026-05-13): privileged governance
+    // endpoints MUST verify HMAC. The legacy `api_key_auth` middleware
+    // pass-throughs when `api_key` is unset (default!), which means an
+    // attacker could approve any pending action by spoofing `X-Agent-Id`.
+    // We mirror the K10 SSE handler's posture and require
+    // `X-AI-Memory-Signature` on every inbound approve request,
+    // regardless of `api_key` configuration. Without a server-wide
+    // `[hooks.subscription].hmac_secret`, `verify_approval_hmac`
+    // refuses every request — the safe default.
+    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes) {
+        return (
+            status,
+            Json(json!({
+                "error": "invalid or missing X-AI-Memory-Signature",
+                "hint": "POST /api/v1/pending/{id}/approve requires HMAC signing per K7's pattern. \
+                        Set [hooks.subscription] hmac_secret in config and send \
+                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<body>\")> \
+                        with X-AI-Memory-Timestamp: <unix-epoch-secs>."
+            })),
+        )
+            .into_response();
+    }
     let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (
@@ -1346,8 +1369,26 @@ pub async fn reject_pending(
     State(app): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    body_bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
     use crate::models::PendingDecision;
+    // S5-C1 (v0.7.0 fix campaign 2026-05-13): parity with approve_pending.
+    // Legacy reject endpoint MUST verify HMAC for the same reason — an
+    // unsigned reject is just as dangerous (denial-of-service against
+    // governance state, write-amplifies pending row churn).
+    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes) {
+        return (
+            status,
+            Json(json!({
+                "error": "invalid or missing X-AI-Memory-Signature",
+                "hint": "POST /api/v1/pending/{id}/reject requires HMAC signing per K7's pattern. \
+                        Set [hooks.subscription] hmac_secret in config and send \
+                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<body>\")> \
+                        with X-AI-Memory-Timestamp: <unix-epoch-secs>."
+            })),
+        )
+            .into_response();
+    }
     let state = app.db.clone();
     if let Err(e) = validate::validate_id(&id) {
         return (

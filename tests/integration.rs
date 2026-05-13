@@ -9134,10 +9134,12 @@ async fn http_subscriptions_s33_shape_round_trip() {
         "scenario33-pubsub-{}",
         &uuid::Uuid::new_v4().to_string()[..6]
     );
+    // R3-S1.HMAC (2026-05-13): subscribe requires per-sub or
+    // server-wide HMAC secret. Supply a per-sub `secret` field.
     let (code, _body) = route_post(
         &d,
         "/api/v1/subscriptions",
-        &serde_json::json!({"agent_id": "ai:bob", "namespace": ns}),
+        &serde_json::json!({"agent_id": "ai:bob", "namespace": ns, "secret": "integration-test-secret"}),
         Some("ai:bob"),
     )
     .await;
@@ -10724,12 +10726,14 @@ async fn test_subscription_webhook_namespace_filter() {
     // Create a namespace filter subscription.
     let filter_ns = "webhook-test-foo";
 
+    // R3-S1.HMAC (2026-05-13): subscribe requires HMAC secret.
     let (code, resp) = route_post(
         &d,
         "/api/v1/subscriptions",
         &serde_json::json!({
             "agent_id": "webhook-receiver",
-            "namespace": filter_ns
+            "namespace": filter_ns,
+            "secret": "integration-test-secret",
         }),
         Some("webhook-receiver"),
     )
@@ -11189,13 +11193,15 @@ async fn http_smoke_matrix_phases_1_3() {
     }
 
     // POST /api/v1/subscriptions — subscribe
+    // R3-S1.HMAC (2026-05-13): supply per-sub secret.
     {
         let (code, body) = route_post(
             &d,
             "/api/v1/subscriptions",
             &serde_json::json!({
                 "url": "https://example.com/webhook",
-                "events": "*"
+                "events": "*",
+                "secret": "smoke-secret",
             }),
             None,
         )
@@ -11210,7 +11216,10 @@ async fn http_smoke_matrix_phases_1_3() {
         }
     }
 
-    // POST /api/v1/pending/{id}/approve — test with nonexistent id (expect 404)
+    // POST /api/v1/pending/{id}/approve — test with nonexistent id.
+    // S5-C1 (2026-05-13): /approve is HMAC-gated; an unsigned request
+    // refuses with 401 (the new correct response). Without HMAC the
+    // endpoint never reaches the row-lookup arm.
     {
         let (code, _body) = route_post(
             &d,
@@ -11219,13 +11228,13 @@ async fn http_smoke_matrix_phases_1_3() {
             None,
         )
         .await;
-        assert!(
-            code == "403" || code == "404",
-            "approve_pending on nonexistent"
+        assert_eq!(
+            code, "401",
+            "approve_pending without HMAC must refuse (S5-C1)"
         );
     }
 
-    // POST /api/v1/pending/{id}/reject — test with nonexistent id (expect 404)
+    // POST /api/v1/pending/{id}/reject — same as above.
     {
         let (code, _body) = route_post(
             &d,
@@ -11234,9 +11243,9 @@ async fn http_smoke_matrix_phases_1_3() {
             None,
         )
         .await;
-        assert!(
-            code == "403" || code == "404",
-            "reject_pending on nonexistent"
+        assert_eq!(
+            code, "401",
+            "reject_pending without HMAC must refuse (S5-C1)"
         );
     }
 }
