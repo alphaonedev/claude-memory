@@ -193,3 +193,319 @@ pub(super) fn parse_link_id(s: &str) -> Option<(String, String, String)> {
     }
     Some((source.to_string(), target.to_string(), relation.to_string()))
 }
+
+#[cfg(test)]
+mod tests {
+    //! L0.7-3 Tier B chunk-A — coverage tests for `handle_link`,
+    //! `handle_get_links`, and `parse_link_id`.
+    //!
+    //! Six-category template:
+    //! A. happy path — link created, attest_level surfaced, webhook path
+    //! B. validation — missing/invalid ids, bad relation
+    //! D. state-dependent — source or target absent (FK error from substrate)
+    //! E. idempotency — second create errors via PK collision
+    //! F. audit chain — signed_events grows on each link (via storage layer)
+
+    use super::*;
+    use crate::models::{Memory, Tier};
+    use crate::storage as db;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn db_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(":memory:")
+    }
+
+    fn make_mem(title: &str) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Mid,
+            namespace: "test".to_string(),
+            title: title.to_string(),
+            content: format!("body {title}"),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "ai:alice"}),
+            reflection_depth: 0,
+        }
+    }
+
+    fn insert_two(conn: &rusqlite::Connection) -> (String, String) {
+        let a = make_mem("a");
+        let b = make_mem("b");
+        let a_id = db::insert(conn, &a).unwrap();
+        let b_id = db::insert(conn, &b).unwrap();
+        (a_id, b_id)
+    }
+
+    // A. happy path — unsigned attest level when no keypair
+    #[test]
+    fn happy_path_creates_unsigned_link() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let out = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a, "target_id": b, "relation": "related_to"}),
+            None,
+        )
+        .expect("ok");
+        assert_eq!(out["linked"].as_bool(), Some(true));
+        assert_eq!(out["relation"].as_str(), Some("related_to"));
+        assert_eq!(out["attest_level"].as_str(), Some("unsigned"));
+    }
+
+    // A. happy path — default relation (omitted) → "related_to"
+    #[test]
+    fn default_relation_when_omitted() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let out = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a, "target_id": b}),
+            None,
+        )
+        .expect("ok");
+        assert_eq!(out["relation"].as_str(), Some("related_to"));
+    }
+
+    // B. missing source_id
+    #[test]
+    fn missing_source_id_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let err = handle_link(&conn, &db_path, &json!({"target_id": "x"}), None).unwrap_err();
+        assert!(err.contains("source_id"));
+    }
+
+    // B. missing target_id
+    #[test]
+    fn missing_target_id_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let err = handle_link(&conn, &db_path, &json!({"source_id": "x"}), None).unwrap_err();
+        assert!(err.contains("target_id"));
+    }
+
+    // B. invalid relation
+    #[test]
+    fn invalid_relation_errors() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let err = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a, "target_id": b, "relation": "weird-relation"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // D. state-dependent — source missing → storage rejects (FK violation)
+    #[test]
+    fn missing_source_memory_errors() {
+        let conn = fresh_conn();
+        let (_, b) = insert_two(&conn);
+        let db_path = db_path();
+        let bad_src = uuid::Uuid::new_v4().to_string();
+        let err = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": bad_src, "target_id": b, "relation": "related_to"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // E. idempotency — second insert of same (src, tgt, rel) is a no-op
+    // (storage uses INSERT OR IGNORE on the composite PK). Confirms the
+    // operation is safe under retry without producing a duplicate row.
+    #[test]
+    fn duplicate_link_is_idempotent() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let _ = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a.clone(), "target_id": b.clone(), "relation": "related_to"}),
+            None,
+        )
+        .expect("first");
+        // Second call returns linked=true again; row count remains 1.
+        let _ = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a.clone(), "target_id": b.clone(), "relation": "related_to"}),
+            None,
+        )
+        .expect("second is idempotent");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links WHERE source_id = ?1 AND target_id = ?2",
+                rusqlite::params![&a, &b],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    // F. audit — signed_events table is populated (best-effort via storage).
+    #[test]
+    fn signed_events_records_link() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let _ = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a, "target_id": b, "relation": "related_to"}),
+            None,
+        )
+        .expect("ok");
+        // Best-effort: signed_events table presence depends on schema;
+        // count rows where event_type relates to memory_link.
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM signed_events WHERE event_type LIKE 'memory_link%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert!(
+            cnt >= 1,
+            "expected at least one signed_event row, got {cnt}"
+        );
+    }
+
+    // handle_get_links — happy
+    #[test]
+    fn handle_get_links_returns_links() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        db::create_link(&conn, &a, &b, "related_to").unwrap();
+        let out = handle_get_links(&conn, &json!({"id": a})).expect("ok");
+        assert_eq!(out["count"].as_u64(), Some(1));
+        let links = out["links"].as_array().unwrap();
+        assert_eq!(links.len(), 1);
+    }
+
+    // handle_get_links — missing id
+    #[test]
+    fn handle_get_links_missing_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_get_links(&conn, &json!({})).unwrap_err();
+        assert!(err.contains("id"));
+    }
+
+    // handle_get_links — invalid id
+    #[test]
+    fn handle_get_links_invalid_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_get_links(&conn, &json!({"id": ""})).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // parse_link_id — happy
+    #[test]
+    fn parse_link_id_happy() {
+        let parsed = parse_link_id("src-id--related_to-->tgt-id").expect("some");
+        assert_eq!(parsed.0, "src-id");
+        assert_eq!(parsed.1, "tgt-id");
+        assert_eq!(parsed.2, "related_to");
+    }
+
+    // parse_link_id — wrong shape
+    #[test]
+    fn parse_link_id_wrong_shape_returns_none() {
+        assert!(parse_link_id("plain-string").is_none());
+        assert!(parse_link_id("src-id-->tgt-id").is_none(), "missing -- ");
+        assert!(parse_link_id("--rel-->tgt").is_none(), "empty source");
+        assert!(parse_link_id("src--rel-->").is_none(), "empty target");
+        assert!(parse_link_id("src---->tgt").is_none(), "empty relation");
+    }
+
+    // C. K9 Ask path — only path the MCP layer evaluates locally (Allow/Deny
+    // are deferred to storage). Drive an Ask rule and assert envelope shape.
+    // The scope holds BOTH the rules and mode locks (see delete.rs docs).
+    fn lock_rules() -> std::sync::MutexGuard<'static, ()> {
+        crate::mcp::SHARED_PERMISSION_RULES_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    struct RulesScope {
+        _rules: std::sync::MutexGuard<'static, ()>,
+        _mode: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for RulesScope {
+        fn drop(&mut self) {
+            crate::permissions::clear_active_permission_rules_for_test();
+            crate::config::clear_permissions_mode_override_for_test();
+        }
+    }
+    fn rules_scope() -> RulesScope {
+        let mode = crate::config::lock_permissions_mode_for_test();
+        let rules = lock_rules();
+        crate::permissions::clear_active_permission_rules_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Advisory,
+        );
+        RulesScope {
+            _rules: rules,
+            _mode: mode,
+        }
+    }
+
+    #[test]
+    fn k9_ask_returns_ask_envelope() {
+        use crate::permissions::{PermissionRule, RuleDecision, set_active_permission_rules};
+        let _g = rules_scope();
+        let conn = fresh_conn();
+        // Insert two memories in a unique namespace
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut a = make_mem("a");
+        a.namespace = "k9-ask-link".to_string();
+        a.created_at = now.clone();
+        a.updated_at = now.clone();
+        let mut b = make_mem("b");
+        b.namespace = "k9-ask-link".to_string();
+        b.created_at = now.clone();
+        b.updated_at = now;
+        let a_id = db::insert(&conn, &a).expect("ins");
+        let b_id = db::insert(&conn, &b).expect("ins");
+        let db_path = db_path();
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "k9-ask-link".to_string(),
+            op: "memory_link".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Ask,
+            reason: Some("operator approval required".to_string()),
+        }]);
+        let out = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a_id, "target_id": b_id, "relation": "related_to"}),
+            None,
+        )
+        .expect("ask returns Ok");
+        assert_eq!(out["status"].as_str(), Some("ask"));
+        assert_eq!(out["action"].as_str(), Some("link"));
+    }
+}

@@ -388,3 +388,542 @@ pub fn handle_recall(
     super::inject_namespace_standard(conn, namespace, &mut resp);
     Ok(resp)
 }
+
+#[cfg(test)]
+mod tests {
+    //! L0.7-3 Tier B chunk-A — coverage tests for `handle_recall`
+    //! and `handle_recall_with_pre_recall_hook`.
+    //!
+    //! Six-category template:
+    //! A. happy path — keyword + hybrid + reranker
+    //! B. validation — missing context
+    //! D. state-dependent — empty result, namespace filter miss
+    //! Embedder-bound: BOTH None and Some(&dyn Embed) paths.
+
+    use super::*;
+    use crate::config::{RecallScope, ResolvedScoring, ResolvedTtl};
+    use crate::embeddings::test_support::MockEmbedder;
+    use crate::hnsw::VectorIndex;
+    use crate::models::{Memory, Tier};
+    use crate::reranker::{BatchedReranker, CrossEncoder};
+    use crate::storage as db;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn make_mem(title: &str, content: &str, ns: &str) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "ai:test"}),
+            reflection_depth: 0,
+        }
+    }
+
+    fn seed(conn: &rusqlite::Connection) {
+        db::insert(
+            conn,
+            &make_mem(
+                "Rust ownership",
+                "Rust ownership rules prevent data races",
+                "test",
+            ),
+        )
+        .unwrap();
+        db::insert(
+            conn,
+            &make_mem(
+                "Python typing",
+                "Python typing is dynamic with hints",
+                "test",
+            ),
+        )
+        .unwrap();
+        db::insert(conn, &make_mem("Other topic", "Unrelated content", "other")).unwrap();
+    }
+
+    // B. validation — missing context
+    #[test]
+    fn missing_context_errors() {
+        let conn = fresh_conn();
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let err = handle_recall(
+            &conn,
+            &json!({}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("context"));
+    }
+
+    // A. happy path — keyword-only (embedder=None)
+    #[test]
+    fn keyword_only_path() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test"}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("keyword"));
+        assert_eq!(resp["meta"]["recall_mode"].as_str(), Some("keyword_only"));
+    }
+
+    // A. happy path — hybrid (embedder=Some)
+    #[test]
+    fn hybrid_path_with_embedder() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership rules", "namespace": "test"}),
+            Some(&mock as &dyn crate::embeddings::Embed),
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("hybrid"));
+        assert_eq!(resp["meta"]["recall_mode"].as_str(), Some("hybrid"));
+    }
+
+    // A. happy path — hybrid + reranker
+    #[test]
+    fn hybrid_with_reranker_path() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let lex = CrossEncoder::new();
+        let batched = BatchedReranker::new(lex);
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership rules", "namespace": "test"}),
+            Some(&mock as &dyn crate::embeddings::Embed),
+            None,
+            Some(&batched),
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("hybrid+rerank"));
+        assert_eq!(resp["meta"]["reranker_used"].as_str(), Some("lexical"));
+    }
+
+    // hybrid with vector_index Some-path
+    #[test]
+    fn hybrid_with_vector_index() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let idx = VectorIndex::empty();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test"}),
+            Some(&mock as &dyn crate::embeddings::Embed),
+            Some(&idx),
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("hybrid"));
+    }
+
+    // budget_tokens path
+    #[test]
+    fn budget_tokens_meta_emitted() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test", "budget_tokens": 100u64}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["meta"]["budget_tokens_used"].is_number());
+        assert_eq!(resp["budget_tokens"].as_u64(), Some(100));
+    }
+
+    // budget_tokens=0 (R1 semantic: allow zero)
+    #[test]
+    fn budget_tokens_zero_returns_empty() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test", "budget_tokens": 0u64}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["meta"]["budget_overflow"].is_boolean());
+    }
+
+    // session_default + recall_scope splice
+    #[test]
+    fn session_default_recall_scope_splices_defaults() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let scope = RecallScope {
+            namespaces: Some(vec!["test".to_string()]),
+            since: Some("24h".to_string()),
+            tier: None,
+            limit: Some(2),
+        };
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "session_default": true}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            Some(&scope),
+        )
+        .expect("ok");
+        // Should match the spliced namespace ("test")
+        assert!(resp["count"].as_u64().unwrap() <= 2);
+    }
+
+    // context_tokens fusion path (with embedder)
+    #[test]
+    fn context_tokens_fusion_path() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let resp = handle_recall(
+            &conn,
+            &json!({
+                "context": "ownership",
+                "namespace": "test",
+                "context_tokens": ["rust", "memory"]
+            }),
+            Some(&mock as &dyn crate::embeddings::Embed),
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("hybrid"));
+    }
+
+    // as_agent path (visibility filter)
+    #[test]
+    fn as_agent_validated() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test", "as_agent": "ai:viewer"}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["count"].is_number());
+    }
+
+    // as_agent invalid
+    #[test]
+    fn as_agent_invalid_errors() {
+        let conn = fresh_conn();
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let err = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "as_agent": "has space"}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // archive_on_gc=true exercises gc_if_needed branch
+    #[test]
+    fn archive_on_gc_true_runs_gc() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test"}),
+            None,
+            None,
+            None,
+            true,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["memories"].is_array());
+    }
+
+    // until + since explicit filters
+    #[test]
+    fn since_until_filters_applied() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({
+                "context": "ownership",
+                "namespace": "test",
+                "since": "2000-01-01T00:00:00Z",
+                "until": "2100-01-01T00:00:00Z",
+                "tags": "rust",
+            }),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["memories"].is_array());
+    }
+
+    // limit huge → saturate
+    #[test]
+    fn limit_overflow_saturates() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test", "limit": u64::MAX}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["memories"].is_array());
+    }
+
+    // Failing embedder — drives the per-query embed-error fallback
+    // (lines 357/364) and the context_tokens embed-error fallback
+    // (lines 314-316).
+    struct FailEmbedder {
+        fail_first: bool,
+        fail_second: bool,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    impl FailEmbedder {
+        fn primary_fail() -> Self {
+            Self {
+                fail_first: true,
+                fail_second: false,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+        fn secondary_fail() -> Self {
+            Self {
+                fail_first: false,
+                fail_second: true,
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+    impl crate::embeddings::Embed for FailEmbedder {
+        fn embed(&self, _: &str) -> anyhow::Result<Vec<f32>> {
+            let n = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if (n == 0 && self.fail_first) || (n >= 1 && self.fail_second) {
+                anyhow::bail!("FailEmbedder: synthetic failure on call {n}");
+            }
+            Ok(vec![0.1_f32; 384])
+        }
+    }
+
+    #[test]
+    fn primary_embedder_error_falls_back_to_keyword() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let fe = FailEmbedder::primary_fail();
+        let resp = handle_recall(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test"}),
+            Some(&fe as &dyn crate::embeddings::Embed),
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("keyword"));
+        assert_eq!(resp["meta"]["recall_mode"].as_str(), Some("keyword_only"));
+    }
+
+    #[test]
+    fn context_tokens_embedder_error_uses_primary_only() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let fe = FailEmbedder::secondary_fail();
+        let resp = handle_recall(
+            &conn,
+            &json!({
+                "context": "ownership",
+                "namespace": "test",
+                "context_tokens": ["rust", "memory"]
+            }),
+            Some(&fe as &dyn crate::embeddings::Embed),
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            None,
+        )
+        .expect("ok");
+        // hybrid mode still — primary succeeded, context_tokens failed
+        assert_eq!(resp["mode"].as_str(), Some("hybrid"));
+    }
+
+    // Pre-recall hook variant: empty chain → falls through
+    #[tokio::test]
+    async fn pre_recall_hook_empty_chain_passes_through() {
+        let conn = fresh_conn();
+        seed(&conn);
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let chain = crate::hooks::HookChain::new(vec![]);
+        let mut registry = crate::hooks::ExecutorRegistry::default();
+        let resp = handle_recall_with_pre_recall_hook(
+            &conn,
+            &json!({"context": "ownership", "namespace": "test"}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            &chain,
+            &mut registry,
+            None,
+        )
+        .await
+        .expect("ok");
+        assert_eq!(resp["mode"].as_str(), Some("keyword"));
+    }
+
+    // Pre-recall hook variant: context missing
+    #[tokio::test]
+    async fn pre_recall_hook_missing_context_errors() {
+        let conn = fresh_conn();
+        let ttl = ResolvedTtl::default();
+        let scoring = ResolvedScoring::default();
+        let chain = crate::hooks::HookChain::new(vec![]);
+        let mut registry = crate::hooks::ExecutorRegistry::default();
+        let err = handle_recall_with_pre_recall_hook(
+            &conn,
+            &json!({}),
+            None,
+            None,
+            None,
+            false,
+            &ttl,
+            &scoring,
+            &chain,
+            &mut registry,
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.contains("context"));
+    }
+}

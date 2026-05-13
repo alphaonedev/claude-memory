@@ -622,3 +622,1096 @@ pub(super) fn handle_store(
     }
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests {
+    //! L0.7-3 Tier B chunk-A — coverage tests for `handle_store` and
+    //! the `OnConflict` / `default_on_conflict_for_client` /
+    //! `parse_link_id` helpers.
+
+    use super::*;
+    use crate::config::ResolvedTtl;
+    use crate::embeddings::test_support::MockEmbedder;
+    use crate::hnsw::VectorIndex;
+    use crate::storage as db;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn db_path() -> std::path::PathBuf {
+        std::path::PathBuf::from(":memory:")
+    }
+
+    fn base_params(title: &str) -> Value {
+        json!({
+            "title": title,
+            "content": format!("This is the body of {title}, long enough to be meaningful prose."),
+            "namespace": "test-ns",
+            "tier": "mid",
+            "tags": ["tag1"],
+            "priority": 5,
+            "confidence": 0.9,
+            "source": "claude",
+            "agent_id": "ai:alice",
+        })
+    }
+
+    // OnConflict::parse: all valid + invalid
+    #[test]
+    fn on_conflict_parse_variants() {
+        assert_eq!(OnConflict::parse("error").unwrap(), OnConflict::Error);
+        assert_eq!(OnConflict::parse("merge").unwrap(), OnConflict::Merge);
+        assert_eq!(OnConflict::parse("version").unwrap(), OnConflict::Version);
+        assert!(OnConflict::parse("nope").is_err());
+    }
+
+    // default_on_conflict_for_client: matrix
+    #[test]
+    fn default_on_conflict_for_client_matrix() {
+        assert_eq!(default_on_conflict_for_client(None), OnConflict::Merge);
+        assert_eq!(
+            default_on_conflict_for_client(Some("ai:claude-code@host:pid-1")),
+            OnConflict::Error
+        );
+        assert_eq!(
+            default_on_conflict_for_client(Some("AI:Claude-Code@whatever")),
+            OnConflict::Error,
+            "case-insensitive prefix match"
+        );
+        assert_eq!(
+            default_on_conflict_for_client(Some("ai:ai-memory-cli/v2-something")),
+            OnConflict::Error
+        );
+        assert_eq!(
+            default_on_conflict_for_client(Some("ai:unknown-client@host:pid-1")),
+            OnConflict::Merge
+        );
+    }
+
+    // A. happy path — no embedder, no LLM, no hooks
+    #[test]
+    fn happy_path_basic_store() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &base_params("first"),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["id"].is_string());
+        assert_eq!(resp["title"].as_str(), Some("first"));
+        assert_eq!(resp["agent_id"].as_str(), Some("ai:alice"));
+    }
+
+    // A. happy path — Embedder Some-branch (semantic write)
+    #[test]
+    fn happy_path_with_embedder() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let idx = VectorIndex::empty();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &base_params("embedded"),
+            Some(&mock as &dyn Embed),
+            None,
+            Some(&idx),
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("ok");
+        let id = resp["id"].as_str().unwrap();
+        // embedding written
+        let emb = db::get_embedding(&conn, id).expect("ok").expect("some");
+        assert_eq!(emb.len(), 384);
+    }
+
+    // B. validation — missing title
+    #[test]
+    fn missing_title_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let err = handle_store(
+            &conn,
+            &db_path,
+            &json!({"content": "body"}),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("title"));
+    }
+
+    // B. validation — missing content
+    #[test]
+    fn missing_content_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let err = handle_store(
+            &conn,
+            &db_path,
+            &json!({"title": "t"}),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("content"));
+    }
+
+    // B. validation — invalid tier
+    #[test]
+    fn invalid_tier_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("bt");
+        params["tier"] = json!("flibbertigibbet");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid tier"));
+    }
+
+    // B. validation — invalid title (empty)
+    #[test]
+    fn empty_title_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("x");
+        params["title"] = json!("");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // B. validation — invalid namespace
+    #[test]
+    fn invalid_namespace_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("ns");
+        params["namespace"] = json!("has space");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // B. validation — invalid priority
+    #[test]
+    fn invalid_priority_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("p");
+        params["priority"] = json!(99);
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // B. validation — invalid on_conflict
+    #[test]
+    fn invalid_on_conflict_errors() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("oc");
+        params["on_conflict"] = json!("bogus");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid on_conflict"));
+    }
+
+    // B. priority i64 → i32 saturate (extreme value handled, validation catches it)
+    #[test]
+    fn priority_extreme_saturates_and_validates() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("p");
+        params["priority"] = json!(9_999_999_999_i64);
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // OnConflict::Error path — second store with same title errors
+    #[test]
+    fn on_conflict_error_rejects_duplicate() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("dup");
+        params["on_conflict"] = json!("error");
+        let _ = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("first");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(err.contains("CONFLICT"));
+    }
+
+    // OnConflict::Version path — second store gets suffixed title
+    #[test]
+    fn on_conflict_version_suffixes_title() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("ver");
+        params["on_conflict"] = json!("version");
+        let r1 = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("first");
+        let r2 = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("second");
+        assert_eq!(r1["title"].as_str(), Some("ver"));
+        assert_ne!(r2["title"].as_str(), Some("ver"));
+        assert!(r2["title"].as_str().unwrap().contains("ver"));
+    }
+
+    // OnConflict::Merge (legacy default) — dedup branch yields duplicate=true
+    #[test]
+    fn on_conflict_merge_dedup_branch() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("merged");
+        params["on_conflict"] = json!("merge");
+        let r1 = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("first");
+        let r2 = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("second");
+        assert_eq!(r1["id"], r2["id"], "dedup yields same id");
+        assert_eq!(r2["duplicate"].as_bool(), Some(true));
+    }
+
+    // Merge dedup with embedder — content_changed triggers re-embed
+    #[test]
+    fn merge_dedup_reembeds_on_content_change() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mock = MockEmbedder::new_local().expect("mock");
+        let idx = VectorIndex::empty();
+        let mut params = base_params("dup-emb");
+        params["on_conflict"] = json!("merge");
+        let _ = handle_store(
+            &conn,
+            &db_path,
+            &params,
+            Some(&mock as &dyn Embed),
+            None,
+            Some(&idx),
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("first");
+        // Change content for the second call to drive content_changed=true
+        params["content"] = json!("Now this is a brand new body that differs from the first.");
+        let r2 = handle_store(
+            &conn,
+            &db_path,
+            &params,
+            Some(&mock as &dyn Embed),
+            None,
+            Some(&idx),
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("second");
+        assert_eq!(r2["duplicate"].as_bool(), Some(true));
+    }
+
+    // E. idempotency — same write twice produces same id under Merge default
+    #[test]
+    fn idempotent_merge_default_for_unknown_client() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        // Unknown client → Merge default
+        let params = base_params("idem");
+        let r1 = handle_store(
+            &conn,
+            &db_path,
+            &params,
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            Some("ai:unknown@host"),
+            None,
+        )
+        .expect("first");
+        let r2 = handle_store(
+            &conn,
+            &db_path,
+            &params,
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            Some("ai:unknown@host"),
+            None,
+        )
+        .expect("second");
+        assert_eq!(r1["id"], r2["id"]);
+    }
+
+    // scope (#151) — metadata.scope path
+    #[test]
+    fn scope_validated_and_merged_into_metadata() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("scoped");
+        params["scope"] = json!("team");
+        let resp = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("ok");
+        let mem = db::get(&conn, resp["id"].as_str().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(mem.metadata["scope"].as_str(), Some("team"));
+    }
+
+    // metadata.agent_id passthrough (alternative location)
+    #[test]
+    fn agent_id_via_metadata_inline() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &json!({
+                "title": "mid",
+                "content": "long enough content body for the post-store autonomy hook gate",
+                "namespace": "ns",
+                "metadata": {"agent_id": "ai:bob"},
+            }),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["agent_id"].as_str(), Some("ai:bob"));
+    }
+
+    // Hooks-skipped-reason="disabled" branch — autonomous_hooks=false
+    #[test]
+    fn autonomy_hook_skipped_disabled_no_field_when_off() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &base_params("auto-off"),
+            None,
+            None,
+            None,
+            &ttl,
+            false, // hooks disabled
+            None,
+            None,
+        )
+        .expect("ok");
+        // Field only emitted when autonomous_hooks=true; off => absent
+        assert!(resp.get("autonomy_hook_skipped").is_none());
+    }
+
+    // Hooks enabled but no LLM → "no_llm" reason surfaced
+    #[test]
+    fn autonomy_hook_skipped_no_llm_reason() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &base_params("no-llm"),
+            None,
+            None,
+            None,
+            &ttl,
+            true, // hooks enabled
+            None,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(resp["autonomy_hook_skipped"].as_str(), Some("no_llm"));
+    }
+
+    // Hooks enabled, content_too_short
+    #[test]
+    fn autonomy_hook_skipped_content_too_short() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        // Stub LLM via OllamaClient::new (constructor doesn't need server).
+        let llm = crate::llm::OllamaClient::new("dummy-model").ok();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &json!({
+                "title": "tiny",
+                "content": "short",
+                "namespace": "ns",
+            }),
+            None,
+            llm.as_ref(),
+            None,
+            &ttl,
+            true,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(
+            resp["autonomy_hook_skipped"].as_str(),
+            Some("content_too_short")
+        );
+    }
+
+    // Hooks enabled, internal_namespace ("_*")
+    #[test]
+    fn autonomy_hook_skipped_internal_namespace() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let llm = crate::llm::OllamaClient::new("dummy-model").ok();
+        let resp = handle_store(
+            &conn,
+            &db_path,
+            &json!({
+                "title": "internal",
+                "content": "This content is long enough to exceed AUTONOMY_MIN_CONTENT_LEN clearly here.",
+                "namespace": "_internal",
+            }),
+            None,
+            llm.as_ref(),
+            None,
+            &ttl,
+            true,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert_eq!(
+            resp["autonomy_hook_skipped"].as_str(),
+            Some("internal_namespace")
+        );
+    }
+
+    // C. K9 Deny / Ask paths share the process-wide rules registry. The
+    // shared mutex below serialises across ALL mcp::tools::* inline test
+    // modules, not just this one — see `crate::mcp::SHARED_PERMISSION_RULES_GUARD`.
+    fn lock_rules() -> std::sync::MutexGuard<'static, ()> {
+        crate::mcp::SHARED_PERMISSION_RULES_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// RAII guard holding BOTH the rules and the permissions-mode locks,
+    /// resetting both on drop (panic-safe). See delete.rs companion.
+    struct RulesGuard {
+        _rules: std::sync::MutexGuard<'static, ()>,
+        _mode: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for RulesGuard {
+        fn drop(&mut self) {
+            crate::permissions::clear_active_permission_rules_for_test();
+            crate::config::clear_permissions_mode_override_for_test();
+        }
+    }
+    fn rules_scope() -> RulesGuard {
+        let mode = crate::config::lock_permissions_mode_for_test();
+        let rules = lock_rules();
+        crate::permissions::clear_active_permission_rules_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Advisory,
+        );
+        RulesGuard {
+            _rules: rules,
+            _mode: mode,
+        }
+    }
+
+    #[test]
+    fn k9_deny_rule_short_circuits_store() {
+        use crate::permissions::{PermissionRule, RuleDecision, set_active_permission_rules};
+        let _g = rules_scope();
+        // Use a unique namespace so other tests aren't accidentally caught
+        // even if rule cleanup somehow lagged.
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "k9-deny-store".to_string(),
+            op: "memory_store".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Deny,
+            reason: Some("blocked".to_string()),
+        }]);
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("denied");
+        params["namespace"] = json!("k9-deny-store");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(err.contains("denied"), "got: {err}");
+    }
+
+    #[test]
+    fn k9_ask_rule_returns_ask_envelope_for_store() {
+        use crate::permissions::{PermissionRule, RuleDecision, set_active_permission_rules};
+        let _g = rules_scope();
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "k9-ask-store".to_string(),
+            op: "memory_store".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Ask,
+            reason: Some("operator approval".to_string()),
+        }]);
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("ask");
+        params["namespace"] = json!("k9-ask-store");
+        let out = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("ask returns Ok");
+        assert_eq!(out["status"].as_str(), Some("ask"));
+        assert_eq!(out["action"].as_str(), Some("store"));
+    }
+
+    // Autonomy hook happy path — wiremock stands in for Ollama so we
+    // can drive auto_tag + detect_contradiction success / error paths
+    // synchronously. Reuses the same wiremock pattern as `src/llm.rs`
+    // test_is_available_returns_true.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn autonomy_hook_executes_with_llm_success() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // /api/tags 200 OK (constructor health check)
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        // /api/generate — auto_tag returns 3 newline-separated tags;
+        // detect_contradiction returns "no".
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"response": "alpha\nbeta\ngamma"})),
+            )
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let resp = tokio::task::spawn_blocking(move || {
+            let llm = crate::llm::OllamaClient::new_with_url(&uri, "test-model")
+                .expect("client constructs against mock");
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": "autonomy",
+                    "content": "This content is long enough to clear the AUTONOMY_MIN_CONTENT_LEN gate, yes.",
+                    "namespace": "auto-ns",
+                }),
+                None,
+                Some(&llm),
+                None,
+                &ttl,
+                true,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("store ok");
+        // auto_tag results are reflected in the response
+        let tags = resp["auto_tags"].as_array().expect("auto_tags array");
+        assert!(!tags.is_empty(), "auto_tags must be non-empty on success");
+    }
+
+    // Autonomy hook with LLM that fails on /api/generate — drives the
+    // tracing::warn!("auto_tag hook failed ...") branch.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn autonomy_hook_swallows_llm_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let resp = tokio::task::spawn_blocking(move || {
+            let llm = crate::llm::OllamaClient::new_with_url(&uri, "test-model")
+                .expect("client constructs against mock");
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": "autonomy-fail",
+                    "content": "This content is long enough to clear AUTONOMY_MIN_CONTENT_LEN gate.",
+                    "namespace": "auto-fail",
+                }),
+                None,
+                Some(&llm),
+                None,
+                &ttl,
+                true,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("store ok despite hook failure");
+        // No auto_tags emitted (LLM call failed) — store still committed
+        assert!(resp.get("auto_tags").is_none());
+        assert!(resp["id"].is_string());
+    }
+
+    // Forward-URL branch: drive the response-error path (lines 103-113)
+    // using wiremock — server returns 503, exercising !status.is_success
+    // and the format-and-return path.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn federation_forward_url_propagates_server_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/memories"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("upstream unavailable"))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let err = tokio::task::spawn_blocking(move || {
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            handle_store(
+                &conn,
+                &db_path,
+                &base_params("fwd-503"),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                Some(&uri),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(
+            err.contains("503") || err.contains("returned"),
+            "expected upstream-error message, got: {err}"
+        );
+    }
+
+    // Forward-URL branch: server returns 200 with unparseable body —
+    // exercises the JSON parse error path (line 113).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn federation_forward_url_propagates_parse_error() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/memories"))
+            .respond_with(ResponseTemplate::new(201).set_body_string("not json at all"))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let err = tokio::task::spawn_blocking(move || {
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            handle_store(
+                &conn,
+                &db_path,
+                &base_params("fwd-parse"),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                Some(&uri),
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(err.contains("parse"), "expected parse error, got: {err}");
+    }
+
+    // Forward-URL branch: server responds 200 with valid JSON — the
+    // happy round-trip path (exercises the Ok branch of serde_json::from_str).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn federation_forward_url_happy_returns_body() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/memories"))
+            .respond_with(
+                ResponseTemplate::new(201)
+                    .set_body_json(json!({"id": "ok-id", "tier": "mid", "title": "fwd-happy"})),
+            )
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let resp = tokio::task::spawn_blocking(move || {
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            handle_store(
+                &conn,
+                &db_path,
+                &base_params("fwd-happy"),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                Some(&uri),
+            )
+        })
+        .await
+        .unwrap()
+        .expect("forward ok");
+        assert_eq!(resp["id"].as_str(), Some("ok-id"));
+    }
+
+    // Forward-URL branch: when federation_forward_url is Some, the
+    // function takes the forward_store_to_http path. We point it at a
+    // non-existent URL — should yield a forward error, exercising the
+    // branch entry.
+    #[test]
+    fn federation_forward_url_branch_takes_http_path() {
+        let conn = fresh_conn();
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let err = handle_store(
+            &conn,
+            &db_path,
+            &base_params("fwd"),
+            None,
+            None,
+            None,
+            &ttl,
+            false,
+            None,
+            Some("http://127.0.0.1:1"), // unreachable
+        )
+        .unwrap_err();
+        assert!(err.contains("federation_forward"));
+    }
+
+    // Helper: install a governance policy on `ns` gating writes at
+    // the given level. Owner is the standard's `metadata.agent_id`.
+    fn install_store_policy(
+        conn: &rusqlite::Connection,
+        ns: &str,
+        write_level: crate::models::GovernanceLevel,
+        approver: crate::models::ApproverType,
+        owner: &str,
+    ) {
+        use crate::models::{GovernanceLevel, GovernancePolicy, default_metadata};
+        let policy = GovernancePolicy {
+            write: write_level,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Any,
+            approver,
+            inherit: true,
+            max_reflection_depth: None,
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String(owner.to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = crate::models::Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: crate::models::Tier::Long,
+            namespace: format!("_standards-{ns}"),
+            title: format!("std-{ns}"),
+            content: "policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 0,
+        };
+        let sid = db::insert(conn, &standard).expect("insert standard");
+        db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");
+    }
+
+    // Governance Deny path (lines 335-336): Owner-level write by a
+    // non-owner. Requires Enforce mode (Advisory just logs allow).
+    #[test]
+    fn governance_deny_blocks_store() {
+        let _gate = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let conn = fresh_conn();
+        let ns = "gov-deny-store";
+        install_store_policy(
+            &conn,
+            ns,
+            crate::models::GovernanceLevel::Owner,
+            crate::models::ApproverType::Human,
+            "ai:alice",
+        );
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("denied");
+        params["namespace"] = json!(ns);
+        params["agent_id"] = json!("ai:eve");
+        let err = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("governance") || err.contains("denied") || err.contains("owner"),
+            "got: {err}"
+        );
+        crate::config::clear_permissions_mode_override_for_test();
+    }
+
+    // Governance Pending path (lines 338-352): Approve policy returns
+    // a pending envelope. Requires Enforce mode.
+    #[test]
+    fn governance_pending_returns_pending_envelope_for_store() {
+        let _gate = crate::config::lock_permissions_mode_for_test();
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let conn = fresh_conn();
+        let ns = "gov-pending-store";
+        install_store_policy(
+            &conn,
+            ns,
+            crate::models::GovernanceLevel::Approve,
+            crate::models::ApproverType::Human,
+            "ai:alice",
+        );
+        let db_path = db_path();
+        let ttl = ResolvedTtl::default();
+        let mut params = base_params("needs-approval");
+        params["namespace"] = json!(ns);
+        params["agent_id"] = json!("ai:bob");
+        let out = handle_store(
+            &conn, &db_path, &params, None, None, None, &ttl, false, None, None,
+        )
+        .expect("pending returns Ok");
+        assert_eq!(out["status"].as_str(), Some("pending"));
+        assert_eq!(out["action"].as_str(), Some("store"));
+        assert!(out["pending_id"].as_str().is_some());
+        crate::config::clear_permissions_mode_override_for_test();
+    }
+
+    // confirmed_contradictions populated in response (line 615+) —
+    // exercises the autonomy hook detect_contradiction Ok(true) path
+    // and the response-serialization branch. Uses wiremock to drive
+    // the LLM to return "yes" for contradiction.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn autonomy_hook_confirmed_contradictions_reach_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        // auto_tag uses /api/generate; detect_contradiction goes via
+        // OllamaClient::generate which posts to /api/chat. Mock both
+        // so the second hook fires Ok(true).
+        Mock::given(method("POST"))
+            .and(path("/api/generate"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"response": "alpha\nbeta"})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"message": {"content": "yes"}, "done": true})),
+            )
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let resp = tokio::task::spawn_blocking(move || {
+            let llm = crate::llm::OllamaClient::new_with_url(&uri, "test-model")
+                .expect("client constructs against mock");
+            let conn = fresh_conn();
+            let db_path = db_path();
+            let ttl = ResolvedTtl::default();
+            // Seed a memory with the same title so find_contradictions
+            // returns it as a candidate. We use 'merge' on_conflict to
+            // avoid the Error-mode dedup short-circuit.
+            let seed_title = "contradicted";
+            let _ = handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "The earlier body asserting one position with substantial words.",
+                    "namespace": "ctr-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                None,
+                None,
+                &ttl,
+                false,
+                None,
+                None,
+            )
+            .expect("seed");
+            // Now store a candidate with a different content; autonomy
+            // hooks will compare against the existing similar-title rows.
+            handle_store(
+                &conn,
+                &db_path,
+                &json!({
+                    "title": seed_title,
+                    "content": "An alternate body that contradicts the earlier seeded position entirely.",
+                    "namespace": "ctr-ns",
+                    "on_conflict": "version",
+                    "agent_id": "ai:alice",
+                }),
+                None,
+                Some(&llm),
+                None,
+                &ttl,
+                true,
+                None,
+                None,
+            )
+        })
+        .await
+        .unwrap()
+        .expect("store ok");
+        // confirmed_contradictions array should appear in the response
+        // when detect_contradiction returned true for at least one
+        // candidate.
+        assert!(
+            resp.get("confirmed_contradictions").is_some(),
+            "expected confirmed_contradictions field, got: {resp}"
+        );
+    }
+}
