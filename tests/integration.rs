@@ -8043,9 +8043,16 @@ fn free_port() -> u16 {
     port
 }
 
-/// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~5s.
+/// Wait for the `/api/v1/health` endpoint to respond 200 — up to ~10s.
+///
+/// Extended from 5s to 10s in the v0.7.0 v0.7.1-fold (2026-05-13) after
+/// the §16 12-gate sweep and L1 wave coordinator both observed
+/// `http_notify_fans_out_to_peers_so_target_inbox_sees_it` flaking on
+/// "leader serve never came up" under high parallel test load. Combined
+/// with `spawn_leader`'s bind-retry the cross-binary readiness race
+/// becomes recoverable rather than fatal.
 fn wait_for_health(port: u16) -> bool {
-    for _ in 0..50 {
+    for _ in 0..100 {
         std::thread::sleep(std::time::Duration::from_millis(100));
         if let Ok(out) = std::process::Command::new("curl")
             .args([
@@ -9401,40 +9408,59 @@ fn http_archive_by_ids_end_to_end_moves_row_from_active_to_archive() {
 
 /// Spawn a leader serve daemon with `--quorum-writes W --quorum-peers url…`.
 /// Extends `DaemonGuard` without modifying the existing helper.
+///
+/// Retries up to 3 times on "leader never came up" — the only known
+/// failure mode is a cross-binary port grab between `free_port`'s
+/// listener-drop and the child's bind (§16 12-gate sweep + L1 wave
+/// observation, 2026-05-13, v0.7.1-fold). Each retry gets a fresh
+/// port + DB path so a leaked listener from a stuck child can't
+/// chain-fail subsequent attempts.
 fn spawn_leader(quorum_writes: usize, peer_urls: &[String]) -> DaemonGuard {
     let bin = env!("CARGO_BIN_EXE_ai-memory");
-    let dir = std::env::temp_dir();
-    let db = dir.join(format!(
-        "ai-memory-http-parity-leader-{}.db",
-        uuid::Uuid::new_v4()
-    ));
-    let port = free_port();
-    let mut args: Vec<String> = vec![
-        "--db".into(),
-        db.to_str().unwrap().into(),
-        "serve".into(),
-        "--port".into(),
-        port.to_string(),
-    ];
-    if quorum_writes > 0 && !peer_urls.is_empty() {
-        args.push("--quorum-writes".into());
-        args.push(quorum_writes.to_string());
-        args.push("--quorum-peers".into());
-        args.push(peer_urls.join(","));
-        // 15s ack window keeps tests green under parallel `cargo test`
-        // load (SQLite Mutex contention on peer serialises incoming
-        // sync_push POSTs under a burst).
-        args.push("--quorum-timeout-ms".into());
-        args.push("15000".into());
+    for attempt in 1..=3u8 {
+        let dir = std::env::temp_dir();
+        let db = dir.join(format!(
+            "ai-memory-http-parity-leader-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let port = free_port();
+        let mut args: Vec<String> = vec![
+            "--db".into(),
+            db.to_str().unwrap().into(),
+            "serve".into(),
+            "--port".into(),
+            port.to_string(),
+        ];
+        if quorum_writes > 0 && !peer_urls.is_empty() {
+            args.push("--quorum-writes".into());
+            args.push(quorum_writes.to_string());
+            args.push("--quorum-peers".into());
+            args.push(peer_urls.join(","));
+            // 15s ack window keeps tests green under parallel `cargo test`
+            // load (SQLite Mutex contention on peer serialises incoming
+            // sync_push POSTs under a burst).
+            args.push("--quorum-timeout-ms".into());
+            args.push("15000".into());
+        }
+        let mut child = cmd(bin)
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        if wait_for_health(port) {
+            return DaemonGuard { child, port, db };
+        }
+        // Kill the stuck child and try again. The most common cause is a
+        // cross-binary port grab between free_port and the child's bind.
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_file(&db);
+        eprintln!(
+            "spawn_leader attempt {attempt}/3 failed on port {port}; retrying with fresh port"
+        );
     }
-    let child = cmd(bin)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    assert!(wait_for_health(port), "leader serve never came up");
-    DaemonGuard { child, port, db }
+    panic!("leader serve never came up after 3 attempts");
 }
 
 /// Poll GET `/api/v1/memories` on `peer_port` filtered by `namespace`
