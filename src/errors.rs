@@ -34,6 +34,19 @@ pub enum MemoryError {
         cap: u32,
         namespace: String,
     },
+    /// v0.7.0 L1-2 (issue #659) — emitted by the `memory_link` write path
+    /// when adding a `reflects_on` edge would close a cycle in the
+    /// reflection graph. Carries `source`, `target`, and the reconstructed
+    /// `cycle_path` (ordered `source → … → source`) for the audit row and
+    /// the operator-readable error message.
+    ///
+    /// Wire shape (HTTP / MCP): surfaced as a `String` error at the MCP
+    /// layer with code `REFLECTION_CYCLE_DETECTED`.
+    ReflectionCycleDetected {
+        source: String,
+        target: String,
+        cycle_path: Vec<String>,
+    },
 }
 
 impl MemoryError {
@@ -44,6 +57,7 @@ impl MemoryError {
             Self::DatabaseError(_) => "DATABASE_ERROR",
             Self::Conflict(_) => "CONFLICT",
             Self::ReflectionDepthExceeded { .. } => "REFLECTION_DEPTH_EXCEEDED",
+            Self::ReflectionCycleDetected { .. } => "REFLECTION_CYCLE_DETECTED",
         }
     }
 
@@ -55,7 +69,9 @@ impl MemoryError {
             // The substrate refusal is a policy-conflict (caller asked
             // for an action the configured cap forbids); CONFLICT matches
             // the rest of governance-style refusals.
-            Self::Conflict(_) | Self::ReflectionDepthExceeded { .. } => StatusCode::CONFLICT,
+            Self::Conflict(_)
+            | Self::ReflectionDepthExceeded { .. }
+            | Self::ReflectionCycleDetected { .. } => StatusCode::CONFLICT,
         }
     }
 
@@ -72,6 +88,14 @@ impl MemoryError {
             } => format!(
                 "reflection depth {attempted} would exceed namespace \
                  max_reflection_depth {cap} (namespace='{namespace}')"
+            ),
+            Self::ReflectionCycleDetected {
+                source,
+                target,
+                cycle_path,
+            } => format!(
+                "adding reflects_on edge {source} → {target} would create a cycle: {}",
+                cycle_path.join(" → ")
             ),
         }
     }

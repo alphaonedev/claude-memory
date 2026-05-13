@@ -51,6 +51,8 @@ pub mod hnsw;
 // module without touching call sites in `handlers.rs` etc.
 pub mod hooks;
 pub mod identity;
+// v0.7.0 L1-2 — knowledge-graph substrate helpers (anti-cycle check).
+pub mod kg;
 pub mod llm;
 pub mod log_paths;
 pub mod logging;
