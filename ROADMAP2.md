@@ -703,6 +703,10 @@ Note: this section names commercial deployment surfaces in generic terms ("comme
 - **Cross-encoder reranker default-on** — closes the published reranker-on quality range. HF-Hub model auto-fetch on first use; **fail loud (`mode: "degraded"`)** when model not available, no silent lexical fallback.
 - **Streaming tool responses** — for long-running MCP tools (recall over very large stores, federation broadcasts).
 
+#### Operator-controlled telemetry — v0.7.0 commitment carried forward
+
+`ai-memory` does not phone home. No outbound network call is initiated by the binary except to destinations the operator has explicitly configured (federation peers on the mTLS allowlist, optional HuggingFace embedder fetch, optional Ollama LLM endpoint). All tracing spans go to operator-configured sinks only: stderr by default, opt-in rolling file appender via `[logging]` in `config.toml`, and an OTLP exporter shipping at v1.0 per §7.6. Span content is operation metadata only — `agent_id`, namespace, duration, result — never memory content. `AI_MEMORY_ANONYMIZE=1` redacts the agent_id in externally-visible spans. Full policy: [`docs/telemetry.md`](docs/telemetry.md).
+
 **Audit absorbs:**
 - G3 — HNSW persistence to disk (sqlite-vec migration or on-disk index). Removes O(N) cold-start.
 - G7 step 2 — BertModel pool sized to physical CPU count (prerequisite for default-on reranker; otherwise Mutex serialization makes default-on a regression).
@@ -815,6 +819,11 @@ Plus per-release:
 | Changelog | github.com/alphaonedev/ai-memory-mcp/blob/main/CHANGELOG.md | per release |
 | Roadmap (this doc) | github.com/alphaonedev/ai-memory-mcp/blob/main/ROADMAP2.md | live |
 | Memory Portability Spec | memory.dev/spec/v1 (or equivalent) | v0.6.3.1 launch |
+| Production Deployment Guide | github.com/alphaonedev/ai-memory-mcp/blob/main/docs/production-deployment.md | v0.7.0 (gap A1, issue #692) |
+| Security Policy | github.com/alphaonedev/ai-memory-mcp/blob/main/SECURITY.md | v0.7.0 (gap E2, issue #692) |
+| Telemetry & Observability Policy | github.com/alphaonedev/ai-memory-mcp/blob/main/docs/telemetry.md | v0.7.0 (gap E3, issue #692) |
+| Adoption Metrics Dashboard | alphaonedev.github.io/ai-memory-mcp/adoption.html | v0.7.0 (gap F2, issue #692; auto-update via `scripts/update-adoption-metrics.sh`) |
+| Competitive Benchmarks | github.com/alphaonedev/ai-memory-mcp/tree/main/benchmarks/competitive-benchmarks | v0.7.0 launch (gap F1, issue #692; scaffolding shipped, full run at launch) |
 
 ---
 
