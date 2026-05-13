@@ -13671,7 +13671,9 @@ mod tests {
             );
             return;
         };
-        let cache = AppState::precompute_family_embeddings(Some(&embedder));
+        let cache = AppState::precompute_family_embeddings(Some(
+            &embedder as &dyn crate::embeddings::Embed,
+        ));
         assert_eq!(
             cache.len(),
             8,

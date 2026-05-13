@@ -3,7 +3,7 @@
 
 //! MCP `memory_consolidate` handler.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
 use crate::models::Tier;
@@ -15,7 +15,7 @@ pub(super) fn handle_consolidate(
     db_path: &Path,
     params: &Value,
     llm: Option<&OllamaClient>,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
     mcp_client: Option<&str>,
 ) -> Result<Value, String> {

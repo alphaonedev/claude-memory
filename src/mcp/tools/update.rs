@@ -3,7 +3,7 @@
 
 //! MCP `memory_update` handler.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
 use crate::models::Tier;
 use crate::{db, validate};
@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 pub(super) fn handle_update(
     conn: &rusqlite::Connection,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
 ) -> Result<Value, String> {
     let id = params["id"].as_str().ok_or("id is required")?;

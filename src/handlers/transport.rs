@@ -15,7 +15,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::config::{ResolvedTtl, TierConfig};
 use crate::db;
-use crate::embeddings::Embedder;
+use crate::embeddings::{Embed, Embedder};
 use crate::hnsw::VectorIndex;
 use crate::profile::Family;
 
@@ -301,7 +301,7 @@ impl AppState {
     /// fault-tolerant. The returned vector is intended to be wrapped
     /// in `Arc::new(...)` and stored in [`AppState::family_embeddings`].
     #[must_use]
-    pub fn precompute_family_embeddings(embedder: Option<&Embedder>) -> Vec<(Family, Vec<f32>)> {
+    pub fn precompute_family_embeddings(embedder: Option<&dyn Embed>) -> Vec<(Family, Vec<f32>)> {
         let Some(embedder) = embedder else {
             return Vec::new();
         };

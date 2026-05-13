@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::config::{AppConfig, FeatureTier, TierConfig};
 use crate::db;
-use crate::embeddings::Embedder;
+use crate::embeddings::{Embed, Embedder};
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
 use crate::reranker::{BatchedReranker, CrossEncoder};
@@ -491,7 +491,7 @@ fn handle_request(
     conn: &rusqlite::Connection,
     db_path: &Path,
     req: &RpcRequest,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     llm: Option<&OllamaClient>,
     reranker: Option<&BatchedReranker>,
     tier_config: &TierConfig,
@@ -1299,7 +1299,7 @@ pub fn run_mcp_server(
             &conn,
             db_path,
             &req,
-            embedder.as_ref(),
+            embedder.as_ref().map(|e| e as &dyn Embed),
             llm.as_deref(),
             reranker.as_ref(),
             &tier_config,

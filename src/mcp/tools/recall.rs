@@ -3,7 +3,7 @@
 
 //! MCP `memory_recall` handler and namespace-chain helpers.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
 use crate::models::{CandidateCounts, Memory, RecallMeta, RecallTelemetry};
 use crate::reranker::BatchedReranker;
@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 pub async fn handle_recall_with_pre_recall_hook(
     conn: &rusqlite::Connection,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
     reranker: Option<&BatchedReranker>,
     archive_on_gc: bool,
@@ -117,7 +117,7 @@ pub async fn handle_recall_with_pre_recall_hook(
 pub fn handle_recall(
     conn: &rusqlite::Connection,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
     reranker: Option<&BatchedReranker>,
     archive_on_gc: bool,

@@ -4,7 +4,7 @@
 //! MCP `memory_reflect` handler.
 
 use crate::db;
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
 use crate::models::{GovernedAction, Tier};
 use serde_json::{Value, json};
@@ -28,7 +28,7 @@ pub(super) fn handle_reflect(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     vector_index: Option<&VectorIndex>,
     mcp_client: Option<&str>,
 ) -> Result<Value, String> {

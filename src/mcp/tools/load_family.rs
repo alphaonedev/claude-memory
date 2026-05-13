@@ -3,7 +3,7 @@
 
 //! MCP `memory_load_family` and `memory_smart_load` handlers and routing helpers.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::{Embed, Embedder};
 use crate::models::Memory;
 use crate::{db, validate};
 use serde_json::{Value, json};
@@ -144,7 +144,7 @@ pub fn handle_load_family(conn: &rusqlite::Connection, params: &Value) -> Result
 pub fn handle_smart_load(
     conn: &rusqlite::Connection,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
 ) -> Result<Value, String> {
     let intent_raw = params["intent"].as_str().ok_or("intent is required")?;
     let intent = intent_raw.trim();
@@ -264,7 +264,10 @@ fn forward_to_load_family(
 /// with a call into `state.best_family_match(intent)`. Until then, the
 /// descriptors are embedded inline on every call — accurate but not
 /// the production caching shape.
-fn best_family_via_embedder(emb: &Embedder, intent: &str) -> Option<(crate::profile::Family, f32)> {
+fn best_family_via_embedder(
+    emb: &dyn Embed,
+    intent: &str,
+) -> Option<(crate::profile::Family, f32)> {
     use crate::profile::Family;
 
     let intent_vec = emb.embed(intent).ok()?;

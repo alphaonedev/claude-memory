@@ -1978,7 +1978,12 @@ pub async fn bootstrap_serve(
             let computed = tokio::task::spawn_blocking(move || {
                 // No lock held during embed calls — pairs are accumulated
                 // into a local Vec returned to the async caller below.
-                AppState::precompute_family_embeddings(embedder_for_task.as_ref().as_ref())
+                AppState::precompute_family_embeddings(
+                    embedder_for_task
+                        .as_ref()
+                        .as_ref()
+                        .map(|e| e as &dyn crate::embeddings::Embed),
+                )
             })
             .await
             .unwrap_or_else(|e| {

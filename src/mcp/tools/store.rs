@@ -3,7 +3,7 @@
 
 //! MCP `memory_store` handler and HTTP federation forward helpers.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
 use crate::llm::OllamaClient;
 use crate::models::{Memory, Tier};
@@ -150,7 +150,7 @@ pub(super) fn handle_store(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
     llm: Option<&OllamaClient>,
     vector_index: Option<&VectorIndex>,
     resolved_ttl: &crate::config::ResolvedTtl,

@@ -104,6 +104,48 @@ impl std::fmt::Display for EmbedStatus {
 /// constant alongside the F10 HTTP threshold.
 pub const EMBED_MAX_BYTES: usize = 64 * 1024;
 
+/// v0.7.0 L0.7 — minimal dyn-compatible trait that abstracts "produces
+/// embedding vectors" away from the concrete [`Embedder`] enum.
+///
+/// Introduced to unblock Tier B coverage closure on the MCP tool
+/// handlers (`reflect`, `check_duplicate`, `store`, `recall`, etc.):
+/// before this trait existed, those handlers took `Option<&Embedder>`,
+/// which forced every test exercising the `Some(...)` arm to construct
+/// a real candle/Ollama embedder — banned by the test playbook §4
+/// "real LLM never in cargo test". With `dyn Embed` the production
+/// [`Embedder`] AND the test-only `MockEmbedder` (in
+/// [`test_support`]) both satisfy the same handler signature, so unit
+/// tests can substitute the mock and cover the embedder-bearing
+/// branches without a network or model load.
+///
+/// Implementations are required to be `Send + Sync` so the trait
+/// object is safe to hand across `tokio::task::spawn_blocking`
+/// boundaries (as the daemon's B3 family-embedding precompute does).
+///
+/// Bug memory: `_v070_grand_slam/layer_0_7/bugs_surfaced/8f3443c5`.
+pub trait Embed: Send + Sync {
+    /// Produce a single embedding vector for `text`.
+    ///
+    /// # Errors
+    ///
+    /// Implementor-specific. The production [`Embedder`] returns
+    /// [`anyhow::Error`] from `candle` / `tokenizers` / `OllamaClient`
+    /// for I/O, tokenisation, or model-forward failures. The
+    /// `MockEmbedder` never errors.
+    fn embed(&self, text: &str) -> Result<Vec<f32>>;
+
+    /// Produce embedding vectors for a batch of texts. Default
+    /// implementation calls [`Embed::embed`] in a loop; implementors
+    /// may override to do native batching.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the first per-text error from [`Embed::embed`].
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        texts.iter().map(|t| self.embed(t)).collect()
+    }
+}
+
 /// Semantic embedding engine supporting multiple backends.
 ///
 /// - **Local** (candle): all-MiniLM-L6-v2, 384-dim. Used at the semantic tier.
@@ -397,6 +439,22 @@ impl Embedder {
                 dir.display()
             )
         }
+    }
+}
+
+/// v0.7.0 L0.7 — [`Embed`] trait impl that delegates to the inherent
+/// [`Embedder::embed`] / [`Embedder::embed_batch`] methods. The
+/// inherent methods stay on [`Embedder`] verbatim so existing callers
+/// that hold a concrete `&Embedder` keep their fast path; the trait
+/// impl is purely additive and enables `dyn Embed` substitution for
+/// handler signatures (see [`Embed`] docs).
+impl Embed for Embedder {
+    fn embed(&self, text: &str) -> Result<Vec<f32>> {
+        Self::embed(self, text)
+    }
+
+    fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+        Self::embed_batch(self, texts)
     }
 }
 
@@ -829,6 +887,20 @@ pub mod test_support {
                 Self::Local => "mock-all-MiniLM-L6-v2 (384-dim, local)",
                 Self::Ollama => "mock-nomic-embed-text-v1.5 (768-dim, Ollama)",
             }
+        }
+    }
+
+    /// v0.7.0 L0.7 — [`Embed`] trait impl so unit tests can substitute
+    /// the mock for the real [`Embedder`] at handler call sites that
+    /// accept `Option<&dyn Embed>`. Delegates to the inherent
+    /// implementation. Bug `8f3443c5`.
+    impl Embed for MockEmbedder {
+        fn embed(&self, text: &str) -> Result<Vec<f32>> {
+            Self::embed(self, text)
+        }
+
+        fn embed_batch(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Self::embed_batch(self, texts)
         }
     }
 }

@@ -3,13 +3,13 @@
 
 //! MCP `memory_check_duplicate` handler.
 
-use crate::embeddings::Embedder;
+use crate::embeddings::Embed;
 use crate::{db, validate};
 use serde_json::{Value, json};
 pub(super) fn handle_check_duplicate(
     conn: &rusqlite::Connection,
     params: &Value,
-    embedder: Option<&Embedder>,
+    embedder: Option<&dyn Embed>,
 ) -> Result<Value, String> {
     let title = params["title"].as_str().ok_or("title is required")?;
     let content = params["content"].as_str().ok_or("content is required")?;
