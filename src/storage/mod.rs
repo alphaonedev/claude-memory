@@ -5753,6 +5753,155 @@ pub fn doctor_max_sync_skew_secs(conn: &Connection) -> Result<Option<i64>> {
     Ok(max_skew)
 }
 
+// ---------------------------------------------------------------------------
+// L1-4 — Reflection-depth telemetry for `ai-memory doctor`.
+// ---------------------------------------------------------------------------
+
+/// One namespace's reflection-depth distribution row returned by
+/// [`doctor_reflection_depth_distribution`].
+///
+/// The four depth buckets mirror the default `max_reflection_depth=3`
+/// cap: depth 0 (direct memories), depth 1, depth 2, depth 3+. Depth
+/// 3+ is collapsed into a single counter because depths beyond the cap
+/// are impossible to store under standard policy; the bucket exists so
+/// future schemas with raised caps still produce a non-zero column.
+pub struct ReflectionDepthRow {
+    pub namespace: String,
+    pub depth0: i64,
+    pub depth1: i64,
+    pub depth2: i64,
+    pub depth3_plus: i64,
+    pub avg_depth: f64,
+    pub max_depth: i64,
+    pub total: i64,
+}
+
+/// Depth distribution across all namespaces that hold at least one
+/// memory with `reflection_depth > 0`, plus the `_global_` aggregate.
+///
+/// Uses a single GROUP BY pass so the query is a single indexed scan
+/// over `memories.reflection_depth`. A fresh DB (all rows at depth 0)
+/// returns an empty `Vec` — the caller (doctor) renders that as
+/// "no reflections observed".
+///
+/// # Errors
+///
+/// Returns `Err` only on hard SQLite failures (e.g. the `memories`
+/// table does not exist yet — pre-migration schemas).
+pub fn doctor_reflection_depth_distribution(conn: &Connection) -> Result<Vec<ReflectionDepthRow>> {
+    // Aggregate per namespace, only namespaces that contain at least
+    // one reflected memory (depth > 0). The doctor renders a global
+    // summary from the returned rows; the SQL avoids a second pass by
+    // letting the caller roll up the namespace rows.
+    let mut stmt = conn.prepare(
+        "SELECT
+             namespace,
+             SUM(CASE WHEN reflection_depth = 0 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN reflection_depth = 1 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN reflection_depth = 2 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN reflection_depth >= 3 THEN 1 ELSE 0 END),
+             AVG(CAST(reflection_depth AS REAL)),
+             MAX(reflection_depth),
+             COUNT(*)
+         FROM memories
+         GROUP BY namespace
+         HAVING MAX(reflection_depth) > 0
+         ORDER BY namespace",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(ReflectionDepthRow {
+            namespace: r.get(0)?,
+            depth0: r.get(1)?,
+            depth1: r.get(2)?,
+            depth2: r.get(3)?,
+            depth3_plus: r.get(4)?,
+            avg_depth: r.get(5)?,
+            max_depth: r.get(6)?,
+            total: r.get(7)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// Count of `reflection.depth_exceeded` audit events in `signed_events`
+/// within a given look-back window.
+///
+/// `since_rfc3339` is an RFC 3339 timestamp; only events with
+/// `timestamp >= since_rfc3339` are counted. Pass the epoch
+/// (`"1970-01-01T00:00:00Z"`) to count all-time.
+///
+/// Returns `0` when the `signed_events` table does not exist (pre-H5
+/// schemas) rather than propagating the error, matching the pattern
+/// in other doctor helpers.
+///
+/// # Errors
+///
+/// Returns `Err` only on hard query failures (table exists but query
+/// is malformed — should not happen in practice).
+pub fn doctor_reflection_depth_exceeded_count(
+    conn: &Connection,
+    since_rfc3339: &str,
+) -> Result<i64> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM signed_events
+             WHERE event_type = 'reflection.depth_exceeded'
+               AND timestamp >= ?1",
+            params![since_rfc3339],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(n)
+}
+
+/// Reflection totals per namespace: memories created in the last 24h,
+/// 7d, and all-time that have `reflection_depth > 0`.
+///
+/// Returns one tuple `(ns, last_24h, last_7d, all_time)` per
+/// namespace that has at least one reflected memory. Namespaces with
+/// no reflections are omitted; the caller renders "no reflections" for
+/// the global summary.
+///
+/// # Errors
+///
+/// Returns `Err` on hard SQLite failures.
+pub fn doctor_reflection_totals_by_namespace(
+    conn: &Connection,
+) -> Result<Vec<(String, i64, i64, i64)>> {
+    let now = Utc::now();
+    let cutoff_24h = (now - chrono::Duration::hours(24)).to_rfc3339();
+    let cutoff_7d = (now - chrono::Duration::days(7)).to_rfc3339();
+
+    let mut stmt = conn.prepare(
+        "SELECT
+             namespace,
+             SUM(CASE WHEN created_at >= ?1 THEN 1 ELSE 0 END),
+             SUM(CASE WHEN created_at >= ?2 THEN 1 ELSE 0 END),
+             COUNT(*)
+         FROM memories
+         WHERE reflection_depth > 0
+         GROUP BY namespace
+         ORDER BY namespace",
+    )?;
+    let rows = stmt.query_map(params![cutoff_24h, cutoff_7d], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, i64>(2)?,
+            r.get::<_, i64>(3)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
