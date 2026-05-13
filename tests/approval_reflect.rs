@@ -82,15 +82,10 @@ fn reflect_input(source_ids: Vec<String>, namespace: Option<&str>, title: &str) 
 /// Uses a `serde_json::Value` for the governance blob so the test can
 /// include keys unknown to the `GovernancePolicy` struct (such as
 /// `require_approval_above_depth`).
-// Carry-forward to v0.7.1: by-value `governance` parameter was flagged
-// `clippy::needless_pass_by_value`. Helper is consumed once per test and
-// rewriting to `&Value` would require touching every call site for no
-// semantic gain. Tracked as part of the v0.7.1 test-helper cleanup.
-#[allow(clippy::needless_pass_by_value)]
 fn seed_governance_json(
     conn: &rusqlite::Connection,
     namespace: &str,
-    governance: serde_json::Value,
+    governance: &serde_json::Value,
 ) {
     let now = Utc::now().to_rfc3339();
     let metadata = serde_json::json!({
@@ -151,7 +146,7 @@ fn resolve_require_approval_above_depth_returns_none_when_key_absent() {
     seed_governance_json(
         &conn,
         "no-key-ns",
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "promote": "any",
             "delete": "owner",
@@ -173,7 +168,7 @@ fn resolve_require_approval_above_depth_returns_value_when_set() {
     seed_governance_json(
         &conn,
         "threshold-ns",
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 1_u32
         }),
@@ -188,7 +183,7 @@ fn resolve_require_approval_above_depth_returns_zero_when_set_to_zero() {
     seed_governance_json(
         &conn,
         "zero-threshold-ns",
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 0_u32
         }),
@@ -213,7 +208,7 @@ fn depth_2_reflect_in_threshold_1_namespace_queues_pending_not_reflection() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 1_u32
         }),
@@ -283,7 +278,7 @@ fn depth_1_reflect_in_threshold_1_namespace_proceeds_without_pending() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 1_u32
         }),
@@ -334,7 +329,7 @@ fn no_approval_gate_when_require_approval_above_depth_is_absent() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "max_reflection_depth": 3
         }),
@@ -375,7 +370,7 @@ fn threshold_zero_gates_even_depth_1_reflections() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 0_u32
         }),
@@ -429,7 +424,7 @@ fn approver_resolves_allows_subsequent_reflect() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 1_u32
         }),
@@ -485,7 +480,7 @@ fn approver_rejects_marks_pending_row_rejected() {
     seed_governance_json(
         &conn,
         ns,
-        serde_json::json!({
+        &serde_json::json!({
             "write": "any",
             "require_approval_above_depth": 1_u32
         }),
