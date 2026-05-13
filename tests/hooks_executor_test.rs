@@ -645,6 +645,66 @@ fn registry_default_is_empty() {
     assert_eq!(reg.len(), 0);
 }
 
+/// `ExecutorError::Display` `ChildExit` arm with `code = None`
+/// (signaled child) must render `<signaled>`. Closes line 222.
+#[test]
+fn executor_error_display_child_exit_signaled() {
+    use ai_memory::hooks::ExecutorError;
+    let err = ExecutorError::ChildExit {
+        code: None,
+        stderr: "crashed".to_string(),
+    };
+    let s = err.to_string();
+    assert!(
+        s.contains("<signaled>"),
+        "display should render <signaled>: {s}"
+    );
+    assert!(s.contains("crashed"));
+}
+
+/// `ExecutorError::source()` returns `Some` for Spawn / Io variants
+/// and `None` for the others. Closes lines 243-246, 248.
+#[test]
+fn executor_error_source_chain() {
+    use ai_memory::hooks::ExecutorError;
+    use std::error::Error;
+    let io_err = ExecutorError::Io(std::io::Error::new(std::io::ErrorKind::Other, "boom"));
+    assert!(
+        io_err.source().is_some(),
+        "Io variant must surface inner source"
+    );
+
+    let timeout = ExecutorError::Timeout { ms: 100 };
+    assert!(timeout.source().is_none(), "Timeout has no inner source");
+
+    let decode = ExecutorError::Decode {
+        reason: "bad".into(),
+    };
+    assert!(decode.source().is_none(), "Decode has no inner source");
+
+    let daemon_unav = ExecutorError::DaemonUnavailable { attempts: 5 };
+    assert!(daemon_unav.source().is_none());
+
+    let child_exit = ExecutorError::ChildExit {
+        code: Some(1),
+        stderr: "x".into(),
+    };
+    assert!(child_exit.source().is_none());
+}
+
+/// `From<io::Error>` for `ExecutorError` round-trip pin. Closes
+/// lines 251-254.
+#[test]
+fn executor_error_from_io_error() {
+    use ai_memory::hooks::ExecutorError;
+    let io_err = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "pipe");
+    let ee: ExecutorError = io_err.into();
+    match ee {
+        ExecutorError::Io(_) => {}
+        other => panic!("From<io::Error> should produce Io variant, got {other:?}"),
+    }
+}
+
 /// Daemon-mode hook that times out while a `stderr` diagnostic is
 /// buffered. Exercises lines 626-637 of executor.rs (stderr-tail
 /// snapshot at timeout) — the path that surfaces the child's last
