@@ -17,21 +17,11 @@
 //! - Schema v30: migration idempotent (opening DB twice never errors).
 //! - skills-ref CLI validator: OPTIONAL — skipped when not installed.
 
-#![allow(
-    clippy::too_many_lines,
-    clippy::doc_markdown,
-    // L1 wave merge follow-up: test scaffolding cleanliness lints with
-    // no behavioural impact. Test was authored before the broader
-    // pedantic-clippy bar on grand-slam — punt the deep cleanup to a
-    // follow-up rather than rewriting the test bodies here.
-    clippy::items_after_statements,
-    clippy::cast_possible_wrap
-)]
-
 use std::path::PathBuf;
 
 use ai_memory::db;
 use ai_memory::parsing::skill_md;
+use sha2::Digest as _;
 
 // ---------------------------------------------------------------------------
 // Test DB helper
@@ -101,17 +91,19 @@ fn register_valid_skill_and_list() {
     let inline = "---\nnamespace: test-ns\nname: hello-world\ndescription: A hello skill.\n---\n\nDo things.\n";
     let manifest = skill_md::parse(inline).expect("parse");
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64;
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    )
+    .expect("epoch seconds fit in i64");
     let id = uuid::Uuid::new_v4().to_string();
 
     let body_bytes = manifest.body.as_bytes();
     let body_blob = zstd::encode_all(body_bytes, 3).expect("compress");
 
     // Compute digest.
-    use sha2::Digest as _;
     let canonical_fm = serde_json::json!({
         "namespace": manifest.namespace,
         "name": manifest.name,
@@ -196,7 +188,6 @@ fn resource_digest_verified() {
     ).unwrap();
 
     let res_content = b"#!/bin/bash\necho hello\n";
-    use sha2::Digest as _;
     let mut h = sha2::Sha256::new();
     h.update(res_content);
     let res_digest: Vec<u8> = h.finalize().to_vec();
@@ -310,7 +301,6 @@ fn export_roundtrip_identical_digest() {
     let body_blob = zstd::encode_all(body_bytes, 3).unwrap();
     let now = 0i64;
 
-    use sha2::Digest as _;
     let canonical_fm = serde_json::json!({
         "namespace": "ns",
         "name": "roundtrip-skill",
