@@ -938,6 +938,31 @@ fn handle_request(
                         }),
                     )
                 }
+                // B4 (R2-LOW) — MCP-spec error envelope.
+                //
+                // Per MCP 2025-03-26 §"Tool result", handler-level errors
+                // are returned to the client as a successful JSON-RPC
+                // `result` carrying `isError: true` and a `content`
+                // array of text blocks — NOT as a JSON-RPC `error`
+                // object (`code` / `message` / `data`). The JSON-RPC
+                // error channel is reserved for protocol-layer
+                // failures (parse error, method-not-found,
+                // invalid-params at the framing layer) so tool
+                // semantics ride a uniform wire shape regardless of
+                // which tool ran.
+                //
+                // This means the typed `MemoryError` variants in
+                // `crate::errors` necessarily collapse to a plain
+                // string here. The richer typing surfaces through the
+                // HTTP transport (which DOES preserve error code +
+                // structured `data` per `errors::ApiError`); MCP
+                // clients that want the typed shape should use
+                // `memory_capabilities` to discover the HTTP endpoint
+                // and call it directly.
+                //
+                // This collapse is intentional and load-bearing for
+                // MCP-spec compliance — do not "fix" it by routing
+                // handler errors to `err_response`.
                 Err(e) => ok_response(
                     id,
                     json!({
@@ -3921,6 +3946,43 @@ mod tests {
             .to_string();
         let val: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(val["count"], 0);
+    }
+
+    /// B4 (R2-LOW) — `handle_session_start` MUST call
+    /// `validate::validate_namespace` so a space-containing
+    /// `namespace` argument is rejected at the MCP entry point
+    /// before reaching the storage layer.
+    ///
+    /// The handler-level error envelope is the MCP-spec text shape:
+    /// `result.isError = true` + `content[0].text` carries the
+    /// validator's message (per the B4 doc comment on the dispatch
+    /// `Err` arm in this module).
+    #[test]
+    fn handle_session_start_rejects_invalid_namespace() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_session_start",
+            // Space is unconditionally rejected by `validate_namespace`.
+            json!({"namespace": "foo bar", "format": "json"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        // No protocol-level error (handler validates → ok_response
+        // with isError=true).
+        assert!(resp.error.is_none(), "must not surface as RPC error");
+        let result = resp.result.expect("ok_response present");
+        assert_eq!(
+            result.get("isError").and_then(|v| v.as_bool()),
+            Some(true),
+            "invalid namespace must return isError=true, got {result}"
+        );
+        let text = result["content"][0]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            text.to_lowercase().contains("namespace"),
+            "error message should mention namespace, got: {text}"
+        );
     }
 
     #[test]

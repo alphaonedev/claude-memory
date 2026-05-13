@@ -57,7 +57,10 @@ pub fn tier_color(tier: &str, text: &str) -> String {
 
 /// Priority as a colored bar: ████░░░░░░
 pub fn priority_bar(p: i32) -> String {
-    let filled = usize::try_from(p.clamp(1, 10)).expect("i32 as usize");
+    // B4 (R2-LOW) — clamp range is 1..=10 so try_from is infallible;
+    // use `unwrap_or` to align with the campaign's no-panic discipline
+    // (defensive against future refactors that drop the `clamp` call).
+    let filled = usize::try_from(p.clamp(1, 10)).unwrap_or(1);
     let empty = 10 - filled;
     let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
     if p >= 8 {

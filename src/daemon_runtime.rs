@@ -2170,7 +2170,11 @@ pub async fn serve(db_path: PathBuf, args: ServeArgs, app_config: &AppConfig) ->
     // F12 keypair-autogen result captured by `ensure_and_load_daemon_keypair`
     // earlier in this fn.
     let banner_inputs = crate::cli::serve_banner::BannerInputs {
-        configured_permissions_mode: app_config.permissions.as_ref().map(|p| p.mode),
+        // B4 (S5-M3) — `.and_then` (not `.map`) so a partial
+        // `[permissions]` block without `mode = ` collapses to `None`
+        // and the banner's migration WARN fires, matching
+        // `AppConfig::effective_permissions_mode` semantics.
+        configured_permissions_mode: app_config.permissions.as_ref().and_then(|p| p.mode),
         auto_generated_keypair_path: bootstrap.daemon_keypair_outcome.as_ref().and_then(
             |o| match o {
                 crate::identity::keypair::EnsureOutcome::Generated { pub_path } => {

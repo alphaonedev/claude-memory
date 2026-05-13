@@ -5,6 +5,7 @@
 
 use crate::db;
 use crate::llm::OllamaClient;
+use crate::validate;
 use serde_json::{Value, json};
 pub(crate) fn handle_session_start(
     conn: &rusqlite::Connection,
@@ -12,6 +13,16 @@ pub(crate) fn handle_session_start(
     llm: Option<&OllamaClient>,
 ) -> Result<Value, String> {
     let namespace = params["namespace"].as_str();
+    // B4 (R2-LOW) — every MCP entry point that accepts a `namespace`
+    // arg must call `validate::validate_namespace` so a payload like
+    // `{"namespace": "foo bar"}` is rejected with a typed error
+    // instead of silently flowing through to `db::list` (where it
+    // may interact with FTS5 escape semantics or downstream filters
+    // in surprising ways). Skip when omitted — the handler defaults
+    // to "all namespaces" in that case.
+    if let Some(ns) = namespace {
+        validate::validate_namespace(ns).map_err(|e| e.to_string())?;
+    }
     let limit = usize::try_from(params["limit"].as_u64().unwrap_or(10)).unwrap_or(usize::MAX);
 
     let results = db::list(

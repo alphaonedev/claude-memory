@@ -33,9 +33,10 @@ pub(super) fn handle_update(
             .filter_map(|v| v.as_str().map(String::from))
             .collect()
     });
+    // B4 (R2-LOW) — clamp instead of panic. Validation below enforces 1-10.
     let priority = params["priority"]
         .as_i64()
-        .map(|p| i32::try_from(p).expect("i64 as i32"));
+        .map(|p| i32::try_from(p).unwrap_or(i32::MAX));
     let confidence = params["confidence"].as_f64();
     let expires_at = params["expires_at"].as_str();
 

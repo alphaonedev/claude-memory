@@ -2056,10 +2056,23 @@ impl PermissionsMode {
 /// rule.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PermissionsConfig {
-    /// Enforcement mode. Defaults to [`PermissionsMode::Advisory`] when
-    /// omitted from the config file.
-    #[serde(default)]
-    pub mode: PermissionsMode,
+    /// Enforcement mode. `None` when the operator declared a
+    /// `[permissions]` block but omitted `mode = ` — this is the
+    /// "partial config" case that B4 (S5-M3) closes: such a block
+    /// MUST NOT silently fall back to the serde-derived
+    /// `PermissionsMode::default` (`advisory`), because the v0.7.0
+    /// secure default is `enforce`. The
+    /// [`AppConfig::effective_permissions_mode`] resolver maps
+    /// `Some(cfg { mode: None })` to the secure default + a
+    /// migration warning, so an operator who half-typed
+    /// `[permissions]` and forgot the mode line still ships
+    /// `enforce`, not the v0.6.x advisory posture.
+    ///
+    /// Serializes as omitted when `None` so a round-tripped config
+    /// without an explicit `mode` keeps the partial-config shape
+    /// for the next loader.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<PermissionsMode>,
     /// v0.7.0 K9 — declarative permission rules. Each entry is a
     /// `(namespace_pattern, op, agent_pattern, decision)` tuple
     /// consulted by [`crate::permissions::Permissions::evaluate`]
@@ -2757,7 +2770,15 @@ impl AppConfig {
                 }
             }
         }
-        let configured = self.permissions.as_ref().map(|p| p.mode);
+        // B4 (S5-M3) — both "block absent entirely" and "block present
+        // but `mode =` omitted" must reach the secure default. The
+        // `Option<PermissionsMode>` shape lets us collapse both to
+        // `None` for the resolver so neither path silently inherits
+        // the serde-derived `Advisory`. The migration WARN that
+        // `resolve_v07_default_mode` emits when configured is `None`
+        // is surfaced by the daemon's startup banner
+        // (see `crate::cli::serve_banner::compose_banner`).
+        let configured = self.permissions.as_ref().and_then(|p| p.mode);
         let (mode, _warn) = crate::permissions::resolve_v07_default_mode(configured);
         mode
     }

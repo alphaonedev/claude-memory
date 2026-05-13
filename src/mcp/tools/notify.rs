@@ -17,8 +17,12 @@ pub(crate) fn handle_notify(
         .ok_or("target_agent_id is required")?;
     let title = params["title"].as_str().ok_or("title is required")?;
     let payload = params["payload"].as_str().ok_or("payload is required")?;
+    // B4 (R2-LOW) — clamp instead of panic on out-of-range JSON; the
+    // `.clamp(1, 10)` below enforces the semantic priority range, but
+    // an i64 like `9_999_999_999` would have aborted the stdio MCP
+    // server before the clamp ran.
     let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5))
-        .expect("i64 as i32")
+        .unwrap_or(i32::MAX)
         .clamp(1, 10);
     let tier_str = params["tier"].as_str().unwrap_or("mid");
     let tier = Tier::from_str(tier_str).ok_or(format!("invalid tier: {tier_str}"))?;

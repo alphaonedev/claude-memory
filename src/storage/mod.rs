@@ -4223,7 +4223,12 @@ pub fn recall_hybrid_with_telemetry(
             } else {
                 0.0
             };
-            let content_len = f64::from(i32::try_from(mem.content.len()).expect("usize as i64"));
+            // B4 (R2-LOW) — clamp to i32::MAX instead of panicking when
+            // a memory's content is >2GB. The lerp below treats anything
+            // ≥5000 chars as the long-tail bucket regardless, so the
+            // clamp does not change scoring; it only closes a panic
+            // window a hostile import could otherwise reach.
+            let content_len = f64::from(i32::try_from(mem.content.len()).unwrap_or(i32::MAX));
             // Lerp semantic_weight from 0.50 (≤500 chars) to 0.15 (≥5000 chars)
             let semantic_weight = if content_len <= 500.0 {
                 0.50

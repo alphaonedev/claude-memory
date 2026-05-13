@@ -179,7 +179,11 @@ pub(super) fn handle_store(
     } else {
         default_on_conflict_for_client(mcp_client)
     };
-    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).expect("i64 as i32");
+    // B4 (R2-LOW) — clamp to i32 range instead of panicking on out-of-range
+    // JSON. A maliciously-crafted `"priority": 9999999999` would have crashed
+    // the stdio MCP server pre-fix. `validate_priority` below enforces the
+    // semantic 1-10 range, so the clamp is purely a panic guard.
+    let priority = i32::try_from(params["priority"].as_i64().unwrap_or(5)).unwrap_or(i32::MAX);
     let confidence = params["confidence"].as_f64().unwrap_or(1.0);
     let tags: Vec<String> = params["tags"]
         .as_array()
