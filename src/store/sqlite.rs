@@ -261,10 +261,16 @@ impl MemoryStore for SqliteStore {
             .map_err(box_err)?;
         let rows = stmt
             .query_map(rusqlite::params![namespace], |row| {
+                let relation_str: String = row.get(2)?;
                 Ok(MemoryLink {
                     source_id: row.get(0)?,
                     target_id: row.get(1)?,
-                    relation: row.get(2)?,
+                    // v0.7.0 fix campaign R1-M4 — parse closed-set
+                    // relation. Unknown values fall back to the default
+                    // (`related_to`) so the read path never errors; the
+                    // SQL CHECK on the write side prevents new bad rows.
+                    relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
+                        .unwrap_or_default(),
                     created_at: row.get(3)?,
                     valid_from: row.get::<_, Option<String>>(4)?,
                     valid_until: row.get::<_, Option<String>>(5)?,

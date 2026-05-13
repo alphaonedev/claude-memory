@@ -67,11 +67,115 @@ impl std::fmt::Display for AttestLevel {
     }
 }
 
+/// v0.7.0 fix campaign R1-M4 — typed relation closed-set for
+/// `memory_links.relation`. Paired with the SQL-side CHECK constraint
+/// added by the same R1-M4 migration: defense-in-depth so direct-SQL
+/// writers can no longer slip an unknown relation past the Rust
+/// validator.
+///
+/// `#[serde(rename_all = "snake_case")]` keeps the wire shape and the
+/// `memory_links.relation` TEXT column byte-identical to the values
+/// the v0.6.x codebase already writes (`"related_to"`, `"supersedes"`,
+/// `"contradicts"`, `"derived_from"`, `"reflects_on"`). The
+/// [`MemoryLinkRelation::from_str`] / [`MemoryLinkRelation::as_str`]
+/// helpers exist because the column is read as a `String` in many
+/// call sites that are not deserialising through serde (e.g.
+/// `rusqlite::Row::get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryLinkRelation {
+    /// Generic association. Default for `LinkBody::resolved` and the
+    /// `INSERT` default in the SQL schema.
+    RelatedTo,
+    /// Source supersedes target (newer / authoritative version).
+    Supersedes,
+    /// Source contradicts target (incompatible claims).
+    Contradicts,
+    /// Source is derived from target (consolidation provenance).
+    DerivedFrom,
+    /// Source is a reflection on target (recursive-learning provenance,
+    /// v0.7.0 Task 1/8).
+    ReflectsOn,
+}
+
+impl MemoryLinkRelation {
+    /// Parse the string form stored in `memory_links.relation`.
+    ///
+    /// Returns `None` for unknown values so callers can decide whether
+    /// to reject with a typed error or fall back to a default. The
+    /// canonical strings are the SQL-side CHECK constraint membership
+    /// list — keep this list in sync with the migration.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "related_to" => Some(Self::RelatedTo),
+            "supersedes" => Some(Self::Supersedes),
+            "contradicts" => Some(Self::Contradicts),
+            "derived_from" => Some(Self::DerivedFrom),
+            "reflects_on" => Some(Self::ReflectsOn),
+            _ => None,
+        }
+    }
+
+    /// Canonical wire string for this variant. Mirrors the `serde`
+    /// rename_all and the literals every existing call site already
+    /// writes to the DB.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::RelatedTo => "related_to",
+            Self::Supersedes => "supersedes",
+            Self::Contradicts => "contradicts",
+            Self::DerivedFrom => "derived_from",
+            Self::ReflectsOn => "reflects_on",
+        }
+    }
+
+    /// Canonical default — matches the `DEFAULT 'related_to'` clause
+    /// on `memory_links.relation` in the schema and the fallback in
+    /// `LinkBody::resolved`.
+    #[must_use]
+    pub const fn default_relation() -> Self {
+        Self::RelatedTo
+    }
+}
+
+impl std::fmt::Display for MemoryLinkRelation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Default for MemoryLinkRelation {
+    fn default() -> Self {
+        Self::default_relation()
+    }
+}
+
+impl std::str::FromStr for MemoryLinkRelation {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::from_str(s).ok_or_else(|| {
+            format!(
+                "invalid memory_link relation '{s}' (expected one of: related_to, \
+                 supersedes, contradicts, derived_from, reflects_on)"
+            )
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryLink {
     pub source_id: String,
     pub target_id: String,
-    pub relation: String, // "related_to", "supersedes", "contradicts", "derived_from", "reflects_on"
+    /// v0.7.0 fix campaign R1-M4 — typed closed set. Round-trips with
+    /// the `memory_links.relation` TEXT column via
+    /// `MemoryLinkRelation::as_str` (write) / `from_str` (read). The
+    /// SQL CHECK constraint added in migration 0023 enforces the same
+    /// membership at the storage layer so direct-SQL writers cannot
+    /// bypass the Rust validator.
+    pub relation: MemoryLinkRelation,
     pub created_at: String,
     /// v0.7 H3 — optional 64-byte Ed25519 signature carried over the
     /// federation wire. `None` for legacy peers (pre-v0.7) that do not

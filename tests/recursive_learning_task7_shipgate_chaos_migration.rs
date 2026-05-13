@@ -799,7 +799,7 @@ async fn federation_apply_remote_link_round_trips_reflects_on_edge() {
     let link = MemoryLink {
         source_id: refl_id.clone(),
         target_id: src_id.clone(),
-        relation: "reflects_on".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::ReflectsOn,
         created_at: now,
         signature: None,
         observed_by: Some("peer-ai".to_string()),

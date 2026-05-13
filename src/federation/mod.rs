@@ -581,7 +581,7 @@ mod tests {
         MemoryLink {
             source_id: "mem-a".to_string(),
             target_id: "mem-b".to_string(),
-            relation: "related_to".to_string(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
             created_at: chrono::Utc::now().to_rfc3339(),
             signature: None,
             observed_by: None,

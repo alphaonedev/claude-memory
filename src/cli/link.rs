@@ -197,9 +197,8 @@ mod tests {
         let conn = db::open(&db).unwrap();
         let links = db::get_links(&conn, &winner).unwrap();
         assert!(
-            links
-                .iter()
-                .any(|l| l.target_id == loser && l.relation == "supersedes"),
+            links.iter().any(|l| l.target_id == loser
+                && l.relation == crate::models::MemoryLinkRelation::Supersedes),
             "expected supersedes link from winner to loser"
         );
     }

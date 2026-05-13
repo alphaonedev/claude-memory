@@ -385,7 +385,9 @@ fn make_link(source_id: &str, target_id: &str, relation: &str) -> MemoryLink {
     MemoryLink {
         source_id: source_id.to_string(),
         target_id: target_id.to_string(),
-        relation: relation.to_string(),
+        // v0.7.0 fix campaign R1-M4 — typed relation closed-set.
+        relation: ai_memory::models::MemoryLinkRelation::from_str(relation)
+            .expect("test fixture relation must be one of the closed-set variants"),
         created_at: chrono::Utc::now().to_rfc3339(),
         signature: None,
         observed_by: None,
@@ -414,7 +416,11 @@ async fn contract_links_crud_roundtrip(store: &dyn MemoryStore) {
         .expect("list_links scoped");
     let matches: Vec<&MemoryLink> = listed
         .iter()
-        .filter(|l| l.source_id == id_a && l.target_id == id_b && l.relation == "related_to")
+        .filter(|l| {
+            l.source_id == id_a
+                && l.target_id == id_b
+                && l.relation == ai_memory::models::MemoryLinkRelation::RelatedTo
+        })
         .collect();
     assert_eq!(matches.len(), 1, "exactly one matching link expected");
 
@@ -426,7 +432,11 @@ async fn contract_links_crud_roundtrip(store: &dyn MemoryStore) {
         .expect("list_links scoped 2");
     let matches_again: Vec<&MemoryLink> = listed_again
         .iter()
-        .filter(|l| l.source_id == id_a && l.target_id == id_b && l.relation == "related_to")
+        .filter(|l| {
+            l.source_id == id_a
+                && l.target_id == id_b
+                && l.relation == ai_memory::models::MemoryLinkRelation::RelatedTo
+        })
         .collect();
     assert_eq!(
         matches_again.len(),

@@ -141,10 +141,16 @@ mod tests {
     /// column set mirrors the SCHEMA defaults at the top of `db.rs`.
     fn insert_test_memory(conn: &Connection, id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
+        // v0.7.0 fix campaign R1-M2 — the substrate's CHECK trigger now
+        // refuses tier values outside {short, mid, long}. The legacy
+        // fixture wrote `'short_term'` (a label that pre-dates the
+        // closed-set enum) and was silently accepted; the trigger now
+        // catches it. Use the canonical literal that
+        // `models::Tier::Short.as_str()` returns.
         conn.execute(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, created_at, updated_at
-             ) VALUES (?1, 'short_term', 'team/eng', ?2, 'body', ?3, ?3)",
+             ) VALUES (?1, 'short', 'team/eng', ?2, 'body', ?3, ?3)",
             params![id, format!("title-{id}"), now],
         )
         .unwrap();

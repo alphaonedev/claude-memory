@@ -61,7 +61,16 @@ fn fingerprint_links(links: &[MemoryLink]) -> String {
     use std::hash::{Hash, Hasher};
     let mut tuples: Vec<(String, String, String)> = links
         .iter()
-        .map(|l| (l.source_id.clone(), l.target_id.clone(), l.relation.clone()))
+        // v0.7.0 fix campaign R1-M4 — relation is now `Copy` enum;
+        // project to its canonical wire string for the fingerprint
+        // tuple shape used in the rest of this file.
+        .map(|l| {
+            (
+                l.source_id.clone(),
+                l.target_id.clone(),
+                l.relation.as_str().to_string(),
+            )
+        })
         .collect();
     tuples.sort();
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -75,7 +84,9 @@ fn link(src: &str, dst: &str, rel: &str) -> MemoryLink {
     MemoryLink {
         source_id: src.to_string(),
         target_id: dst.to_string(),
-        relation: rel.to_string(),
+        // v0.7.0 fix campaign R1-M4 — typed relation closed-set.
+        relation: ai_memory::models::MemoryLinkRelation::from_str(rel)
+            .expect("test fixture relation must be one of the closed-set variants"),
         created_at: now_rfc(),
         signature: None,
         observed_by: None,

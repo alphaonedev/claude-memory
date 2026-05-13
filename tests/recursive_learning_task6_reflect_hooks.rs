@@ -265,7 +265,9 @@ fn pre_reflect_deny_veto_refuses_reflection_and_writes_nothing() {
     // No reflects_on edges from the source either.
     let links = db::get_links(&conn, &src_id).unwrap();
     assert!(
-        links.iter().all(|l| l.relation != "reflects_on"),
+        links
+            .iter()
+            .all(|l| l.relation != ai_memory::models::MemoryLinkRelation::ReflectsOn),
         "no reflects_on edges must survive a veto"
     );
 }
@@ -318,7 +320,9 @@ fn post_reflect_fires_after_commit_so_new_row_is_visible() {
     assert_eq!(new_mem.reflection_depth, 1);
     let links = db::get_links(&conn, &outcome.id).unwrap();
     assert!(
-        links.iter().any(|l| l.relation == "reflects_on"),
+        links
+            .iter()
+            .any(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn),
         "reflects_on edge must exist"
     );
 }

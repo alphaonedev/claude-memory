@@ -110,7 +110,7 @@ fn decide_attest_level(
                     let signable = sign::SignableLink {
                         src_id: &link.source_id,
                         dst_id: &link.target_id,
-                        relation: &link.relation,
+                        relation: link.relation.as_str(),
                         observed_by: Some(observed_by),
                         valid_from: link.valid_from.as_deref(),
                         valid_until: link.valid_until.as_deref(),
@@ -134,7 +134,9 @@ fn build_link(
     MemoryLink {
         source_id: h.src_id.clone(),
         target_id: h.dst_id.clone(),
-        relation: relation.to_string(),
+        // v0.7.0 fix campaign R1-M4 — typed relation.
+        relation: ai_memory::models::MemoryLinkRelation::from_str(relation)
+            .expect("test fixture relation must be one of the closed-set variants"),
         created_at: Utc::now().to_rfc3339(),
         signature: None,
         observed_by: observed_by.map(str::to_string),
@@ -173,7 +175,7 @@ fn happy_path_peer_attested() {
     let signable = sign::SignableLink {
         src_id: &link.source_id,
         dst_id: &link.target_id,
-        relation: &link.relation,
+        relation: link.relation.as_str(),
         observed_by: Some(&h.alice.agent_id),
         valid_from: Some(&valid_from),
         valid_until: None,
@@ -209,7 +211,7 @@ fn tampered_signature_byte_is_rejected() {
     let signable = sign::SignableLink {
         src_id: &link.source_id,
         dst_id: &link.target_id,
-        relation: &link.relation,
+        relation: link.relation.as_str(),
         observed_by: Some(&h.alice.agent_id),
         valid_from: Some(&valid_from),
         valid_until: None,
@@ -275,7 +277,7 @@ fn no_public_key_for_observed_by_lands_as_unsigned() {
     let signable = sign::SignableLink {
         src_id: &link.source_id,
         dst_id: &link.target_id,
-        relation: &link.relation,
+        relation: link.relation.as_str(),
         observed_by: Some(&h.alice.agent_id),
         valid_from: Some(&valid_from),
         valid_until: None,

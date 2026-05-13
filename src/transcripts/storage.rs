@@ -617,10 +617,14 @@ mod tests {
 
     fn insert_memory(conn: &Connection, id: &str, expires_at: Option<&str>) {
         let now = Utc::now().to_rfc3339();
+        // v0.7.0 fix campaign R1-M2 — substrate CHECK trigger now
+        // enforces tier ∈ {short, mid, long}. Pre-fix this fixture
+        // wrote `'short_term'`; that string was always semantically
+        // wrong (`Tier::Short.as_str()` == "short").
         conn.execute(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, expires_at, created_at, updated_at
-             ) VALUES (?1, 'short_term', 'ns', ?2, 'body', ?3, ?4, ?4)",
+             ) VALUES (?1, 'short', 'ns', ?2, 'body', ?3, ?4, ?4)",
             rusqlite::params![id, format!("title-{id}"), expires_at, now],
         )
         .expect("insert test memory");

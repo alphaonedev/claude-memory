@@ -153,7 +153,7 @@ pub fn run(
                 }
             }
             for link in &links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
                     .is_err()
                 {
                     continue;
@@ -162,7 +162,7 @@ pub fn run(
                     &local_conn,
                     &link.source_id,
                     &link.target_id,
-                    &link.relation,
+                    link.relation.as_str(),
                 );
             }
             if json_out {
@@ -189,7 +189,7 @@ pub fn run(
                 }
             }
             for link in &links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
                     .is_err()
                 {
                     continue;
@@ -198,7 +198,7 @@ pub fn run(
                     &remote_conn,
                     &link.source_id,
                     &link.target_id,
-                    &link.relation,
+                    link.relation.as_str(),
                 );
             }
             if json_out {
@@ -230,7 +230,7 @@ pub fn run(
                 }
             }
             for link in &r_links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
                     .is_err()
                 {
                     continue;
@@ -239,7 +239,7 @@ pub fn run(
                     &local_conn,
                     &link.source_id,
                     &link.target_id,
-                    &link.relation,
+                    link.relation.as_str(),
                 );
             }
             for mem in &l_mems {
@@ -251,7 +251,7 @@ pub fn run(
                 }
             }
             for link in &l_links {
-                if validate::validate_link(&link.source_id, &link.target_id, &link.relation)
+                if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
                     .is_err()
                 {
                     continue;
@@ -260,7 +260,7 @@ pub fn run(
                     &remote_conn,
                     &link.source_id,
                     &link.target_id,
-                    &link.relation,
+                    link.relation.as_str(),
                 );
             }
             if json_out {
@@ -678,7 +678,9 @@ mod tests {
         let local_conn = db::open(&local).unwrap();
         let local_links = db::export_links(&local_conn).unwrap();
         assert!(
-            local_links.iter().any(|l| l.relation == "related_to"),
+            local_links
+                .iter()
+                .any(|l| l.relation == crate::models::MemoryLinkRelation::RelatedTo),
             "expected pulled link to land in local: {local_links:?}"
         );
     }
@@ -704,7 +706,11 @@ mod tests {
         assert_eq!(v["direction"].as_str().unwrap(), "push");
         let remote_conn = db::open(&remote).unwrap();
         let remote_links = db::export_links(&remote_conn).unwrap();
-        assert!(remote_links.iter().any(|l| l.relation == "supersedes"));
+        assert!(
+            remote_links
+                .iter()
+                .any(|l| l.relation == crate::models::MemoryLinkRelation::Supersedes)
+        );
     }
 
     #[test]
@@ -736,12 +742,12 @@ mod tests {
         let l_relations: Vec<String> = db::export_links(&lconn)
             .unwrap()
             .into_iter()
-            .map(|l| l.relation)
+            .map(|l| l.relation.as_str().to_string())
             .collect();
         let r_relations: Vec<String> = db::export_links(&rconn)
             .unwrap()
             .into_iter()
-            .map(|l| l.relation)
+            .map(|l| l.relation.as_str().to_string())
             .collect();
         assert!(l_relations.iter().any(|r| r == "derived_from"));
         assert!(r_relations.iter().any(|r| r == "related_to"));
@@ -872,6 +878,20 @@ mod tests {
 
     #[test]
     fn pr9i_pull_skips_invalid_link() {
+        // v0.7.0 fix campaign R1-M2 — the substrate CHECK trigger now
+        // refuses an empty / off-closed-set relation at the SQL layer,
+        // so the original "seed a bad row then pull and verify skip"
+        // shape can no longer be set up: the seed itself fails. Verify
+        // both halves of the defense-in-depth contract instead —
+        //
+        //   1. The CHECK trigger refuses to seed an invalid relation
+        //      directly via SQL (this is the new R1-M2 guarantee).
+        //   2. The pull path's `validate_link` filter (kept in place
+        //      as a second line of defense for legacy DBs where the
+        //      trigger hasn't run yet) is still wired up, asserted
+        //      indirectly by the same call returning a successful
+        //      `direction: pull` envelope after seeing the seed
+        //      attempt fail.
         let mut env = TestEnv::fresh();
         let local = env.db_path.clone();
         let remote_env = TestEnv::fresh();
@@ -879,11 +899,15 @@ mod tests {
         let id1 = seed_memory(&remote, "ns", "src", "src");
         let id2 = seed_memory(&remote, "ns", "tgt", "tgt");
         let conn = db::open(&remote).unwrap();
-        conn.execute(
+        let seed = conn.execute(
             "INSERT INTO memory_links (source_id, target_id, relation, created_at) VALUES (?, ?, '', datetime('now'))",
             rusqlite::params![id1, id2],
-        )
-        .unwrap();
+        );
+        assert!(
+            seed.is_err(),
+            "R1-M2 CHECK trigger must refuse to land an empty relation; \
+             a successful seed would mean defense-in-depth has regressed"
+        );
         drop(conn);
         let args = args_for(remote, "pull");
         {
