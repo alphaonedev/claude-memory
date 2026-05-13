@@ -597,6 +597,10 @@ impl MemoryStore for SqliteStore {
             super::GovernedAction::Store => crate::models::GovernedAction::Store,
             super::GovernedAction::Delete => crate::models::GovernedAction::Delete,
             super::GovernedAction::Promote => crate::models::GovernedAction::Promote,
+            // v0.7.0 L1-8: Reflect is gated by require_approval_above_depth
+            // in the MCP handler; map to Store-level for conservative
+            // fallback enforcement if called through this path.
+            super::GovernedAction::Reflect => crate::models::GovernedAction::Reflect,
         };
         let conn = self.state.lock().await;
         db::enforce_governance(
