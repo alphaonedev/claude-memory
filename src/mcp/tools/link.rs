@@ -6,6 +6,10 @@
 use crate::{db, validate};
 use serde_json::{Value, json};
 use std::path::Path;
+
+/// Relation string for the recursive-learning reflection edge.
+const REFLECTS_ON: &str = "reflects_on";
+
 pub(super) fn handle_link(
     conn: &rusqlite::Connection,
     db_path: &Path,
@@ -58,6 +62,66 @@ pub(super) fn handle_link(
                     "target_id": target_id,
                 }));
             }
+        }
+    }
+
+    // v0.7.0 L1-2 (#659) — anti-cycle guard for `reflects_on` edges.
+    //
+    // Adding a `reflects_on` edge that closes a cycle in the reflection
+    // graph is a logical contradiction (A derived from B which was derived
+    // from A) and is refused here before any quota is charged.  The cycle
+    // check walks backward from `target_id` via existing `reflects_on`
+    // edges, bounded by `max_reflection_depth` so it can't spin forever
+    // on a pathological graph.  On hit, a refusal row is appended to
+    // `signed_events` (audit-chain obligation) before returning the error.
+    if relation == REFLECTS_ON {
+        use crate::kg::cycle_check::would_create_reflection_cycle;
+        use crate::models::GovernancePolicy;
+
+        let source_ns = match db::get(conn, source_id) {
+            Ok(Some(m)) => m.namespace,
+            _ => "global".to_string(),
+        };
+        let policy = db::resolve_governance_policy(conn, &source_ns)
+            .unwrap_or_else(GovernancePolicy::default);
+        let max_depth = policy.effective_max_reflection_depth();
+
+        let check = would_create_reflection_cycle(conn, source_id, target_id, max_depth);
+        if check.would_cycle {
+            // Append refusal to signed_events (best-effort; log on failure).
+            let refusal_payload = serde_json::json!({
+                "event": "reflects_on.cycle_refused",
+                "source_id": source_id,
+                "target_id": target_id,
+                "cycle_path": check.cycle_path,
+            });
+            let cbor_bytes = refusal_payload.to_string().into_bytes();
+            let audit_event = crate::signed_events::SignedEvent {
+                id: uuid::Uuid::new_v4().to_string(),
+                agent_id: params["agent_id"]
+                    .as_str()
+                    .unwrap_or("anonymous")
+                    .to_string(),
+                event_type: "reflects_on.cycle_refused".to_string(),
+                payload_hash: crate::signed_events::payload_hash(&cbor_bytes),
+                signature: None,
+                attest_level: "unsigned".to_string(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+            };
+            if let Err(e) = crate::signed_events::append_signed_event(conn, &audit_event) {
+                tracing::warn!(
+                    target: "signed_events",
+                    source_id, target_id,
+                    "failed to append reflects_on.cycle_refused audit row: {e}"
+                );
+            }
+
+            let err = crate::errors::MemoryError::ReflectionCycleDetected {
+                source: source_id.to_string(),
+                target: target_id.to_string(),
+                cycle_path: check.cycle_path,
+            };
+            return Err(err.message());
         }
     }
 
