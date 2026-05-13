@@ -3003,7 +3003,7 @@ impl PostgresStore {
                 let signable = crate::identity::sign::SignableLink {
                     src_id: &link.source_id,
                     dst_id: &link.target_id,
-                    relation: &link.relation,
+                    relation: link.relation.as_str(),
                     observed_by: Some(kp.agent_id.as_str()),
                     valid_from: Some(valid_from_str.as_str()),
                     valid_until: valid_until_str.as_deref(),
@@ -3046,7 +3046,7 @@ impl PostgresStore {
         )
         .bind(&link.source_id)
         .bind(&link.target_id)
-        .bind(&link.relation)
+        .bind(link.relation.as_str())
         .bind(created_at_dt)
         .bind(valid_from_dt)
         .bind(valid_until_dt)
@@ -3058,8 +3058,13 @@ impl PostgresStore {
         .map_err(|e| to_store_err("insert memory_link", e))?;
 
         if matches!(self.kg_backend, KgBackend::Age) {
-            project_link_into_age(&mut tx, &link.source_id, &link.target_id, &link.relation)
-                .await?;
+            project_link_into_age(
+                &mut tx,
+                &link.source_id,
+                &link.target_id,
+                link.relation.as_str(),
+            )
+            .await?;
         }
 
         tx.commit()
@@ -4801,6 +4806,9 @@ impl MemoryStore for PostgresStore {
                 let signature: Option<Vec<u8>> = r
                     .try_get::<Option<Vec<u8>>, _>("signature")
                     .map_err(|e| to_store_err("read signature", e))?;
+                let relation_str: String = r
+                    .try_get::<String, _>("relation")
+                    .map_err(|e| to_store_err("read relation", e))?;
                 Ok(MemoryLink {
                     source_id: r
                         .try_get::<String, _>("source_id")
@@ -4808,9 +4816,12 @@ impl MemoryStore for PostgresStore {
                     target_id: r
                         .try_get::<String, _>("target_id")
                         .map_err(|e| to_store_err("read target_id", e))?,
-                    relation: r
-                        .try_get::<String, _>("relation")
-                        .map_err(|e| to_store_err("read relation", e))?,
+                    // v0.7.0 fix campaign R1-M4 — parse closed-set
+                    // relation. Unknown values fall back to default so
+                    // the read path never errors; the SQL CHECK on the
+                    // write side keeps new rows in the closed set.
+                    relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
+                        .unwrap_or_default(),
                     created_at: created_at.to_rfc3339(),
                     signature,
                     observed_by,
@@ -4992,7 +5003,7 @@ impl MemoryStore for PostgresStore {
         )
         .bind(&link.source_id)
         .bind(&link.target_id)
-        .bind(&link.relation)
+        .bind(link.relation.as_str())
         .bind(created_at)
         .bind(valid_from)
         .bind(valid_until)
@@ -5004,8 +5015,13 @@ impl MemoryStore for PostgresStore {
         .map_err(|e| to_store_err("apply_remote_link", e))?;
 
         if matches!(self.kg_backend, KgBackend::Age) {
-            project_link_into_age(&mut tx, &link.source_id, &link.target_id, &link.relation)
-                .await?;
+            project_link_into_age(
+                &mut tx,
+                &link.source_id,
+                &link.target_id,
+                link.relation.as_str(),
+            )
+            .await?;
         }
 
         tx.commit()

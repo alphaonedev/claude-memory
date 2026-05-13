@@ -124,7 +124,7 @@ fn memorylink_serde_roundtrip_preserves_reflects_on() {
     let link = MemoryLink {
         source_id: "reflection-row-id".to_string(),
         target_id: "source-being-reflected-on".to_string(),
-        relation: "reflects_on".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::ReflectsOn,
         created_at: Utc::now().to_rfc3339(),
         signature: None,
         observed_by: None,
@@ -133,7 +133,10 @@ fn memorylink_serde_roundtrip_preserves_reflects_on() {
     };
     let wire = serde_json::to_string(&link).expect("serialize MemoryLink");
     let back: MemoryLink = serde_json::from_str(&wire).expect("deserialize MemoryLink");
-    assert_eq!(back.relation, "reflects_on");
+    assert_eq!(
+        back.relation,
+        ai_memory::models::MemoryLinkRelation::ReflectsOn
+    );
     assert_eq!(back.source_id, "reflection-row-id");
     assert_eq!(back.target_id, "source-being-reflected-on");
 }
@@ -162,9 +165,11 @@ fn sqlite_create_link_and_get_links_roundtrip_reflects_on() {
 
     let links = db::get_links(&conn, &reflection_id).expect("get_links reflection");
     assert!(
-        links.iter().any(|l| l.relation == "reflects_on"
-            && l.source_id == reflection_id
-            && l.target_id == source_id),
+        links.iter().any(
+            |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                && l.source_id == reflection_id
+                && l.target_id == source_id
+        ),
         "round-trip must surface a `reflects_on` edge from reflection to source; got {links:?}"
     );
 
@@ -172,9 +177,10 @@ fn sqlite_create_link_and_get_links_roundtrip_reflects_on() {
     // symmetric — returns rows where the id is on either side).
     let inbound = db::get_links(&conn, &source_id).expect("get_links source");
     assert!(
-        inbound
-            .iter()
-            .any(|l| l.relation == "reflects_on" && l.target_id == source_id),
+        inbound.iter().any(
+            |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                && l.target_id == source_id
+        ),
         "source memory's get_links must include the inbound `reflects_on` edge; got {inbound:?}"
     );
 }
@@ -261,7 +267,7 @@ async fn postgres_link_listlinks_roundtrips_reflects_on() {
     let link = MemoryLink {
         source_id: reflection_id.clone(),
         target_id: source_id.clone(),
-        relation: "reflects_on".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::ReflectsOn,
         created_at: Utc::now().to_rfc3339(),
         signature: None,
         observed_by: None,
@@ -281,9 +287,11 @@ async fn postgres_link_listlinks_roundtrips_reflects_on() {
         .await
         .expect("list_links must succeed");
     assert!(
-        links.iter().any(|l| l.relation == "reflects_on"
-            && l.source_id == reflection_id
-            && l.target_id == source_id),
+        links.iter().any(
+            |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                && l.source_id == reflection_id
+                && l.target_id == source_id
+        ),
         "Postgres list_links must round-trip the `reflects_on` edge; got {links:?}"
     );
 

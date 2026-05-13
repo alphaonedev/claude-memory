@@ -251,7 +251,10 @@ pub async fn migrate(
         match to.list_links(link_filter).await {
             Ok(rows) => rows
                 .into_iter()
-                .map(|l| (l.source_id, l.target_id, l.relation))
+                // v0.7.0 fix campaign R1-M4 — relation is now an enum.
+                // Project to its canonical wire string so the BTreeSet
+                // key shape is unchanged from pre-typed-relation.
+                .map(|l| (l.source_id, l.target_id, l.relation.as_str().to_string()))
                 .collect(),
             Err(e) => {
                 report
@@ -270,7 +273,9 @@ pub async fn migrate(
         let key = (
             link.source_id.clone(),
             link.target_id.clone(),
-            link.relation.clone(),
+            // v0.7.0 fix campaign R1-M4 — relation is `Copy`; project
+            // to its canonical wire string for the BTreeSet lookup.
+            link.relation.as_str().to_string(),
         );
         let already_present = dst_pre.contains(&key);
         match to.link(&ctx, link).await {

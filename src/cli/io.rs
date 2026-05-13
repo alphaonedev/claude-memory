@@ -126,10 +126,17 @@ pub(crate) fn import_from_str(
         }
     }
     for link in links {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+        if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
+            .is_err()
+        {
             continue;
         }
-        let _ = db::create_link(&conn, &link.source_id, &link.target_id, &link.relation);
+        let _ = db::create_link(
+            &conn,
+            &link.source_id,
+            &link.target_id,
+            link.relation.as_str(),
+        );
     }
     if json_out {
         writeln!(
@@ -388,7 +395,9 @@ mod tests {
         let id1 = seed_memory(&db, "ns", "a", "content-a");
         let id2 = seed_memory(&db, "ns", "b", "content-b");
         let conn = db::open(&db).unwrap();
-        db::create_link(&conn, &id1, &id2, "relates").unwrap();
+        // v0.7.0 fix campaign R1-M2/M4 — relation must be in the
+        // closed-set; pre-fix value `"relates"` was silently accepted.
+        db::create_link(&conn, &id1, &id2, "related_to").unwrap();
         drop(conn);
         {
             let mut out = env.output();

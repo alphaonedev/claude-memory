@@ -180,7 +180,7 @@ fn happy_path_single_source_at_depth_zero_yields_depth_one() {
     let links = db::get_links(&conn, &outcome.id).unwrap();
     let edge = links
         .iter()
-        .find(|l| l.relation == "reflects_on")
+        .find(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn)
         .expect("reflects_on edge must exist");
     assert_eq!(edge.source_id, outcome.id);
     assert_eq!(edge.target_id, src_id);
@@ -211,13 +211,18 @@ fn multiple_sources_mixed_depths_take_max_plus_one() {
 
     // Three `reflects_on` links, one per source.
     let links = db::get_links(&conn, &outcome.id).unwrap();
-    let reflects_on_count = links.iter().filter(|l| l.relation == "reflects_on").count();
+    let reflects_on_count = links
+        .iter()
+        .filter(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn)
+        .count();
     assert_eq!(reflects_on_count, 3, "one reflects_on edge per source");
     for src_id in &[aid, bid, cid] {
         assert!(
-            links.iter().any(|l| l.relation == "reflects_on"
-                && l.source_id == outcome.id
-                && &l.target_id == src_id),
+            links.iter().any(
+                |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                    && l.source_id == outcome.id
+                    && &l.target_id == src_id
+            ),
             "missing reflects_on edge to {src_id}"
         );
     }
@@ -379,7 +384,9 @@ fn missing_source_id_returns_not_found_error() {
     assert_eq!(all[0].id, real_id);
     let links = db::get_links(&conn, &real_id).unwrap();
     assert!(
-        links.iter().all(|l| l.relation != "reflects_on"),
+        links
+            .iter()
+            .all(|l| l.relation != ai_memory::models::MemoryLinkRelation::ReflectsOn),
         "no reflects_on edge must survive a failed reflect"
     );
 }
@@ -444,9 +451,11 @@ fn cross_namespace_reflection_is_allowed() {
     assert_eq!(new_mem.namespace, "alice-private");
     let links = db::get_links(&conn, &outcome.id).unwrap();
     assert!(
-        links.iter().any(|l| l.relation == "reflects_on"
-            && l.source_id == outcome.id
-            && l.target_id == team_id),
+        links.iter().any(
+            |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                && l.source_id == outcome.id
+                && l.target_id == team_id
+        ),
         "cross-namespace reflects_on edge must land"
     );
 }
@@ -603,9 +612,11 @@ async fn postgres_reflect_roundtrips_memory_and_reflects_on_edge() {
         .await
         .expect("list_links must succeed");
     assert!(
-        links.iter().any(|l| l.relation == "reflects_on"
-            && l.source_id == outcome.id
-            && l.target_id == src_id),
+        links.iter().any(
+            |l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn
+                && l.source_id == outcome.id
+                && l.target_id == src_id
+        ),
         "postgres reflects_on edge must round-trip; got {links:?}"
     );
 

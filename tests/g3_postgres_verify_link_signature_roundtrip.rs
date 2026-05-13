@@ -239,7 +239,7 @@ async fn seed_signed_link_with_nanosecond_valid_from(
     let link = ai_memory::models::MemoryLink {
         source_id: src_id.to_string(),
         target_id: dst_id.to_string(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: valid_from_ns.clone(),
         valid_from: Some(valid_from_ns),
         valid_until: None,

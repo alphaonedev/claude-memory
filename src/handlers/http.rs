@@ -3012,8 +3012,13 @@ pub async fn detect_contradictions(
         let mut existing_links: Vec<serde_json::Value> = Vec::new();
         if let Ok(all_links) = app.store.list_links(q.namespace.as_deref()).await {
             for link in all_links {
-                if link.relation.contains("contradict")
-                    && candidate_ids.contains(&link.source_id)
+                // v0.7.0 fix campaign R1-M4 — relation is now typed.
+                // Historic substring match tightened to a precise
+                // variant compare.
+                if matches!(
+                    link.relation,
+                    crate::models::MemoryLinkRelation::Contradicts
+                ) && candidate_ids.contains(&link.source_id)
                     && candidate_ids.contains(&link.target_id)
                 {
                     existing_links.push(json!({
@@ -3132,8 +3137,13 @@ pub async fn detect_contradictions(
     for id in &candidate_ids {
         if let Ok(links) = db::get_links(&lock.0, id) {
             for link in links {
-                if link.relation.contains("contradict")
-                    && candidate_ids.contains(&link.source_id)
+                // v0.7.0 fix campaign R1-M4 — relation is now typed.
+                // The historic substring match on "contradict" is
+                // tightened to a precise variant compare.
+                if matches!(
+                    link.relation,
+                    crate::models::MemoryLinkRelation::Contradicts
+                ) && candidate_ids.contains(&link.source_id)
                     && candidate_ids.contains(&link.target_id)
                 {
                     existing_links.push(json!({
@@ -4875,10 +4885,17 @@ pub async fn create_link(
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let now = Utc::now().to_rfc3339();
+        // v0.7.0 fix campaign R1-M4 — wrap the wire String relation
+        // into the typed `MemoryLinkRelation`. `validate_link` (above)
+        // already vetted the relation against the closed set, so a
+        // parse failure here would be a bug; fall back to the default
+        // rather than 500 the request.
+        let relation_typed =
+            crate::models::MemoryLinkRelation::from_str(&relation).unwrap_or_default();
         let link = MemoryLink {
             source_id: source_id.clone(),
             target_id: target_id.clone(),
-            relation: relation.clone(),
+            relation: relation_typed,
             created_at: now,
             valid_from: None,
             valid_until: None,
@@ -4973,10 +4990,15 @@ pub async fn create_link(
         Ok(attest_level) => {
             // v0.6.2 (#325): propagate link to peers.
             if let Some(fed) = app.federation.as_ref() {
+                // v0.7.0 fix campaign R1-M4 — `validate_link` already
+                // gated `relation` against the closed set; the parse
+                // here cannot fail in practice.
+                let relation_typed =
+                    crate::models::MemoryLinkRelation::from_str(&relation).unwrap_or_default();
                 let link = crate::models::MemoryLink {
                     source_id: source_id.clone(),
                     target_id: target_id.clone(),
-                    relation: relation.clone(),
+                    relation: relation_typed,
                     created_at: chrono::Utc::now().to_rfc3339(),
                     // H3 wire fields are populated by `export_links`
                     // on the next bulk re-sync; the immediate fanout
@@ -5268,7 +5290,9 @@ pub async fn import_memories(
             }
         }
         for link in body.links.unwrap_or_default() {
-            if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+            if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
+                .is_err()
+            {
                 continue;
             }
             let _ = app.store.link(&ctx, &link).await;
@@ -5295,10 +5319,17 @@ pub async fn import_memories(
         }
     }
     for link in body.links.unwrap_or_default() {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+        if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
+            .is_err()
+        {
             continue;
         }
-        let _ = db::create_link(&lock.0, &link.source_id, &link.target_id, &link.relation);
+        let _ = db::create_link(
+            &lock.0,
+            &link.source_id,
+            &link.target_id,
+            link.relation.as_str(),
+        );
     }
     Json(json!({"imported": imported, "errors": errors})).into_response()
 }

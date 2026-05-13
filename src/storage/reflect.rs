@@ -15,7 +15,7 @@ use rusqlite::Connection;
 
 use crate::models::{GovernancePolicy, Memory, Tier};
 
-use super::{create_link, get, insert, resolve_governance_policy};
+use super::{ConflictMode, create_link, get, insert_with_conflict, resolve_governance_policy};
 
 /// Typed substrate-level error surface for [`reflect`]. Kept distinct
 /// from [`crate::errors::MemoryError`] so the SQLite substrate layer
@@ -460,8 +460,21 @@ pub fn reflect_with_hooks(
         .map_err(|e| ReflectError::Database(e.to_string()))?;
 
     let txn_result = (|| -> std::result::Result<String, ReflectError> {
-        let actual_id =
-            insert(conn, &new_mem).map_err(|e| ReflectError::Database(e.to_string()))?;
+        // v0.7.0 fix campaign R1-M3 (#690) — substrate-side reflections
+        // must NOT silently merge into an existing (title, namespace).
+        // If a row with the same title is already present in the
+        // reflection's namespace, the caller asked us to land a
+        // duplicate; that's a deduplication risk we surface as a
+        // validation error rather than smashing the existing row.
+        let actual_id = insert_with_conflict(conn, &new_mem, ConflictMode::Error).map_err(|e| {
+            if e.downcast_ref::<crate::storage::ConflictError>().is_some() {
+                ReflectError::Validation(format!(
+                    "reflection title collides with an existing memory in the same namespace: {e}"
+                ))
+            } else {
+                ReflectError::Database(e.to_string())
+            }
+        })?;
         // Self-link rejection lives in `validate_link`; a self-link
         // (source id appearing in the source list) would only happen
         // via caller error, but we still surface it as a validation

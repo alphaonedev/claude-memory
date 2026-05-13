@@ -2022,7 +2022,10 @@ mod tests {
         let links = db::get_links(&lock.0, &m1).unwrap();
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].target_id, m2);
-        assert_eq!(links[0].relation, "related_to");
+        assert_eq!(
+            links[0].relation,
+            crate::models::MemoryLinkRelation::RelatedTo
+        );
     }
 
     #[tokio::test]
@@ -2765,22 +2768,22 @@ mod tests {
 
     #[tokio::test]
     async fn link_rejects_unknown_relation() {
-        // v0.7.0 Wave-3 Cont 5 (commit cb92998): `validate_relation`
-        // now accepts any `[a-z0-9_]+` identifier so S82/S65 chain
-        // markers and arbitrary AGE-style edge labels round-trip
-        // through `POST /api/v1/links`. What used to be "unknown
-        // relation -> 400" is therefore a SUCCESS path — a caller can
-        // legitimately use an arbitrary lowercase relation name on the
-        // wire and have the link committed.
+        // v0.7.0 Wave-3 Cont 5 (commit cb92998) relaxed
+        // `validate_relation` to accept any `[a-z0-9_]+` identifier so
+        // S82/S65 chain markers and arbitrary AGE-style edge labels
+        // round-tripped through `POST /api/v1/links`.
         //
-        // The original test name + presence are preserved so existing
-        // CI tooling that greps for the symbol keeps working; the body
-        // is rewritten to assert the new contract (201 Created on a
-        // lowercase identifier the canonical-set check would have
-        // rejected pre-cb92998). The companion test
-        // `link_rejects_malformed_relation` below preserves coverage
-        // of the genuine bad-input rejection path that this test used
-        // to anchor.
+        // v0.7.0 fix campaign R1-M2/M4 (#690) reverses that posture at
+        // the SQL substrate: the CHECK trigger refuses any relation
+        // outside the closed set `{related_to, supersedes, contradicts,
+        // derived_from, reflects_on}` — defense-in-depth matching the
+        // new typed `MemoryLinkRelation` enum. The Rust validator stays
+        // permissive (to avoid double-failing wire-shape callers with
+        // a 400 + 500), but the substrate refuses the write at INSERT
+        // time. From the HTTP caller's perspective the result is a 500
+        // when the validator says OK but the trigger fires — the test
+        // pins that outcome so a future loosening of the trigger
+        // surfaces here.
         let state = test_state();
         let src = insert_test_memory(&state, "ns-link-relation", "src").await;
         let tgt = insert_test_memory(&state, "ns-link-relation", "tgt").await;
@@ -2791,8 +2794,9 @@ mod tests {
         let body = serde_json::json!({
             "source_id": src,
             "target_id": tgt,
-            // Previously rejected as "not in VALID_RELATIONS"; now
-            // accepted because it matches the `[a-z0-9_]+` arm.
+            // Passes `validate_relation` (lowercase identifier shape)
+            // but is NOT in the closed set, so the substrate CHECK
+            // trigger refuses the INSERT.
             "relation": "invalid_relation"
         });
         let resp = app
@@ -2806,12 +2810,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::CREATED);
-        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
-            .await
-            .unwrap();
-        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["linked"], true);
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "off-closed-set relation must hit the R1-M2 substrate guard"
+        );
     }
 
     #[tokio::test]

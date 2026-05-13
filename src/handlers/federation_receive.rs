@@ -262,7 +262,9 @@ async fn sync_push_via_store(app: AppState, _headers: HeaderMap, body: SyncPushB
     // Unknown observed_by = accept-and-flag as unsigned. Successful =
     // peer_attested. Mirrors the sqlite-backed handler's H3 contract.
     for link in &body.links {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+        if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
+            .is_err()
+        {
             skipped += 1;
             continue;
         }
@@ -277,7 +279,7 @@ async fn sync_push_via_store(app: AppState, _headers: HeaderMap, body: SyncPushB
                         let signable = crate::identity::sign::SignableLink {
                             src_id: &link.source_id,
                             dst_id: &link.target_id,
-                            relation: &link.relation,
+                            relation: link.relation.as_str(),
                             observed_by: Some(observed_by),
                             valid_from: link.valid_from.as_deref(),
                             valid_until: link.valid_until.as_deref(),
@@ -606,7 +608,9 @@ pub async fn sync_push(
     // `peer_attested`.
     let mut links_applied = 0usize;
     for link in &body.links {
-        if validate::validate_link(&link.source_id, &link.target_id, &link.relation).is_err() {
+        if validate::validate_link(&link.source_id, &link.target_id, link.relation.as_str())
+            .is_err()
+        {
             skipped += 1;
             continue;
         }
@@ -623,7 +627,7 @@ pub async fn sync_push(
                         let signable = crate::identity::sign::SignableLink {
                             src_id: &link.source_id,
                             dst_id: &link.target_id,
-                            relation: &link.relation,
+                            relation: link.relation.as_str(),
                             observed_by: Some(observed_by),
                             valid_from: link.valid_from.as_deref(),
                             valid_until: link.valid_until.as_deref(),

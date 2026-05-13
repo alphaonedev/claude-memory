@@ -514,7 +514,7 @@ fn peer_attested_inbound_link_verifies() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("bob".to_string()),
@@ -582,7 +582,7 @@ fn inbound_link_with_no_enrolled_pubkey_lands_unsigned() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("carol".to_string()),

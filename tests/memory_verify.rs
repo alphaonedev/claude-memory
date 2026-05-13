@@ -316,7 +316,7 @@ fn peer_attested_link_verifies_and_reports_peer_attested() {
     let inbound = MemoryLink {
         source_id: f.src_id.clone(),
         target_id: f.dst_id.clone(),
-        relation: "related_to".to_string(),
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: Utc::now().to_rfc3339(),
         signature: Some(sig),
         observed_by: Some("bob".to_string()),

@@ -209,7 +209,8 @@ async fn g4_unsigned_link_trait_projects_into_age() {
     let link = MemoryLink {
         source_id: mem_a.id.clone(),
         target_id: mem_b.id.clone(),
-        relation: "related_to".to_string(),
+        // v0.7.0 fix campaign R1-M4 — typed relation.
+        relation: ai_memory::models::MemoryLinkRelation::RelatedTo,
         created_at: chrono::Utc::now().to_rfc3339(),
         valid_from: None,
         valid_until: None,

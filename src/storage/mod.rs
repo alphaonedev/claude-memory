@@ -240,6 +240,163 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     Ok(actual_id)
 }
 
+/// v0.7.0 fix campaign R1-M3 (#690) — substrate-side `on_conflict`
+/// policy for [`insert_with_conflict`].
+///
+/// Before this enum existed, every call into [`insert`] silently
+/// merged on `(title, namespace)` collision. The G6 work in v0.6.3.1
+/// closed the silent-merge gap at the MCP / HTTP **handler** layer
+/// (see `mcp::tools::store` and `handlers::http::create_link`), but
+/// substrate-internal writers — `storage::reflect`, the curator
+/// consolidation surface, and the federation `sync_push` link loop —
+/// kept calling [`insert`] directly and inheriting the silent-merge
+/// behaviour. R1-M3 surfaces the same three policies the handler
+/// layer already exposes on a typed enum so substrate callers can
+/// opt into the right semantics explicitly.
+///
+/// Policies:
+///
+/// * [`ConflictMode::Error`] — refuse the write when a `(title,
+///   namespace)` row already exists, returning a typed error. Used
+///   by `storage::reflect` so a duplicate reflection cannot silently
+///   replace an earlier one.
+///
+/// * [`ConflictMode::Merge`] — current silent-merge behaviour (the
+///   v0.6.3 default). [`insert`] continues to call into the merge
+///   path verbatim for backward compatibility.
+///
+/// * [`ConflictMode::Version`] — append a monotonic suffix to the
+///   title until a free `(title, namespace)` slot is found, then
+///   insert a new row. Mirrors the `on_conflict='version'` handler
+///   policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConflictMode {
+    /// Refuse the write with a typed `(title, namespace)` collision
+    /// error. The existing row is left untouched.
+    Error,
+    /// Silently merge on `(title, namespace)` collision (the legacy
+    /// v0.6.3 substrate default). The existing row's content / tags /
+    /// metadata.agent_id / reflection_depth are merged with the
+    /// incoming row per the SQL in [`insert`].
+    Merge,
+    /// Append `(2)`, `(3)`, … to the title until a free slot is found,
+    /// then insert a new row. Both old and new rows persist.
+    Version,
+}
+
+/// Typed error returned by [`insert_with_conflict`] under
+/// [`ConflictMode::Error`] when a `(title, namespace)` row already
+/// exists. Carries the existing row's id so callers can surface a
+/// well-shaped diagnostic instead of leaking a generic SQL string.
+#[derive(Debug)]
+pub struct ConflictError {
+    pub existing_id: String,
+    pub title: String,
+    pub namespace: String,
+}
+
+impl std::fmt::Display for ConflictError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "CONFLICT: memory with title '{}' already exists in namespace '{}' \
+             (existing id: {})",
+            self.title, self.namespace, self.existing_id
+        )
+    }
+}
+
+impl std::error::Error for ConflictError {}
+
+/// v0.7.0 fix campaign R1-M3 (#690) — insert a memory under an
+/// explicit [`ConflictMode`].
+///
+/// This is the substrate primitive every direct-DB writer that cares
+/// about collision semantics should reach for. Callers that want the
+/// legacy silent-merge behaviour (most of the existing surface) keep
+/// calling [`insert`] — it is now thin glue around
+/// `insert_with_conflict(.., ConflictMode::Merge)` so backward compat
+/// is preserved without invasive churn.
+///
+/// # Errors
+///
+/// * Bubbles up rusqlite errors from the underlying INSERT.
+/// * Under [`ConflictMode::Error`], returns a typed [`ConflictError`]
+///   when `(mem.title, mem.namespace)` already exists. The existing
+///   row is left untouched.
+/// * Under [`ConflictMode::Version`], returns an error when no free
+///   `title (N)` slot is found within the safety cap (see
+///   [`next_versioned_title`]).
+pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode) -> Result<String> {
+    match mode {
+        ConflictMode::Merge => insert(conn, mem),
+        ConflictMode::Error => {
+            // Existence check + INSERT must be atomic against
+            // concurrent writers. We rely on the (title, namespace)
+            // UNIQUE index — issue a plain INSERT WITHOUT the upsert
+            // tail, let SQLite enforce the constraint, and translate
+            // the constraint violation into a typed error.
+            //
+            // The SELECT before INSERT is intentionally kept as an
+            // up-front read so the typed error message can carry the
+            // existing row's id. Two queries open a TOCTOU window
+            // (another writer slots in between SELECT and INSERT and
+            // we return Error pointing at the *wrong* existing id) —
+            // but the constraint violation on the subsequent INSERT
+            // still fires loud, and the caller's retry sees the new
+            // state. Reading the id is best-effort context for the
+            // diagnostic.
+            if let Some(existing_id) = find_by_title_namespace(conn, &mem.title, &mem.namespace)? {
+                return Err(ConflictError {
+                    existing_id,
+                    title: mem.title.clone(),
+                    namespace: mem.namespace.clone(),
+                }
+                .into());
+            }
+            let tags_json = serde_json::to_string(&mem.tags)?;
+            let metadata_json = serde_json::to_string(&mem.metadata)?;
+            let actual_id: String = conn.query_row(
+                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+                 RETURNING id",
+                params![
+                    mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
+                    tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
+                    mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
+                    metadata_json, mem.reflection_depth,
+                ],
+                |r| r.get(0),
+            ).map_err(|e| {
+                // Translate a UNIQUE constraint violation that
+                // raced past the SELECT into the typed error so
+                // callers see the same shape on TOCTOU as on the
+                // happy path.
+                let msg = e.to_string();
+                if msg.contains("UNIQUE constraint failed") {
+                    anyhow::Error::new(ConflictError {
+                        existing_id: String::new(),
+                        title: mem.title.clone(),
+                        namespace: mem.namespace.clone(),
+                    })
+                } else {
+                    e.into()
+                }
+            })?;
+            Ok(actual_id)
+        }
+        ConflictMode::Version => {
+            let resolved_title = next_versioned_title(conn, &mem.title, &mem.namespace)?;
+            let mut versioned = mem.clone();
+            versioned.title = resolved_title;
+            // The chosen title is fresh — fall into the plain insert
+            // path (which still calls into the upsert SQL, but the
+            // upsert branch is unreachable for a fresh title).
+            insert(conn, &versioned)
+        }
+    }
+}
+
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Memory>> {
     let mut stmt = conn.prepare("SELECT * FROM memories WHERE id = ?1")?;
     let mut rows = stmt.query_map(params![id], row_to_memory)?;
@@ -1459,7 +1616,7 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
         params![
             link.source_id,
             link.target_id,
-            link.relation,
+            link.relation.as_str(),
             created_at,
             valid_from,
             link.valid_until,
@@ -1477,10 +1634,18 @@ pub fn get_links(conn: &Connection, id: &str) -> Result<Vec<MemoryLink>> {
          WHERE source_id = ?1 OR target_id = ?1",
     )?;
     let rows = stmt.query_map(params![id], |row| {
+        let relation_str: String = row.get(2)?;
         Ok(MemoryLink {
             source_id: row.get(0)?,
             target_id: row.get(1)?,
-            relation: row.get(2)?,
+            // v0.7.0 fix campaign R1-M4 — parse the TEXT column into the
+            // typed `MemoryLinkRelation` closed set. Unknown values (only
+            // possible from pre-CHECK rows or a buggy direct-SQL writer)
+            // fall back to the canonical default so the read-side never
+            // panics; the SQL CHECK on the write side prevents new bad
+            // rows from landing.
+            relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
+                .unwrap_or_default(),
             created_at: row.get(3)?,
             // get_links is a local read-only view; the H3 wire-extra
             // fields stay None here. Federation export uses
@@ -3590,10 +3755,13 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
          JOIN memories mt ON mt.id = ml.target_id AND (mt.expires_at IS NULL OR mt.expires_at > ?1)",
     )?;
     let rows = stmt.query_map(params![now], |row| {
+        let relation_str: String = row.get(2)?;
         Ok(MemoryLink {
             source_id: row.get(0)?,
             target_id: row.get(1)?,
-            relation: row.get(2)?,
+            // v0.7.0 fix campaign R1-M4 — see `get_links` for rationale.
+            relation: crate::models::MemoryLinkRelation::from_str(&relation_str)
+                .unwrap_or_default(),
             created_at: row.get(3)?,
             signature: row.get::<_, Option<Vec<u8>>>(4)?,
             observed_by: row.get::<_, Option<String>>(5)?,
@@ -6221,7 +6389,10 @@ mod tests {
         create_link(&conn, &id1, &id2, "related_to").unwrap();
         let links = get_links(&conn, &id1).unwrap();
         assert_eq!(links.len(), 1);
-        assert_eq!(links[0].relation, "related_to");
+        assert_eq!(
+            links[0].relation,
+            crate::models::MemoryLinkRelation::RelatedTo
+        );
     }
 
     #[test]
@@ -8130,8 +8301,20 @@ mod tests {
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
-        insert_link_at(&conn, &src.id, &t1.id, "rel", "2026-01-01T00:00:00+00:00");
-        insert_link_at(&conn, &src.id, &t2.id, "rel", "2026-03-01T00:00:00+00:00");
+        insert_link_at(
+            &conn,
+            &src.id,
+            &t1.id,
+            "related_to",
+            "2026-01-01T00:00:00+00:00",
+        );
+        insert_link_at(
+            &conn,
+            &src.id,
+            &t2.id,
+            "related_to",
+            "2026-03-01T00:00:00+00:00",
+        );
 
         let events = kg_timeline(
             &conn,
@@ -8165,8 +8348,20 @@ mod tests {
         insert(&conn, &src).unwrap();
         insert(&conn, &t1).unwrap();
         insert(&conn, &t2).unwrap();
-        insert_link_at(&conn, &src.id, &t1.id, "rel", "2026-01-01T00:00:00+00:00");
-        insert_link_at(&conn, &src.id, &t2.id, "rel", "2026-03-01T00:00:00+00:00");
+        insert_link_at(
+            &conn,
+            &src.id,
+            &t1.id,
+            "related_to",
+            "2026-01-01T00:00:00+00:00",
+        );
+        insert_link_at(
+            &conn,
+            &src.id,
+            &t2.id,
+            "related_to",
+            "2026-03-01T00:00:00+00:00",
+        );
 
         let events = kg_timeline(
             &conn,
@@ -8192,13 +8387,21 @@ mod tests {
         // Direct insert with NULL valid_from to simulate an external
         // writer that bypassed `create_link`.
         let now = chrono::Utc::now().to_rfc3339();
+        // v0.7.0 fix campaign R1-M2 — direct-SQL writer must use a
+        // value in the closed-set; the trigger now refuses 'rel'.
         conn.execute(
             "INSERT INTO memory_links (source_id, target_id, relation, created_at, valid_from) \
-             VALUES (?1, ?2, 'rel', ?3, NULL)",
+             VALUES (?1, ?2, 'related_to', ?3, NULL)",
             params![&src.id, &t1.id, &now],
         )
         .unwrap();
-        insert_link_at(&conn, &src.id, &t2.id, "rel", "2026-01-01T00:00:00+00:00");
+        insert_link_at(
+            &conn,
+            &src.id,
+            &t2.id,
+            "supersedes",
+            "2026-01-01T00:00:00+00:00",
+        );
 
         let events = kg_timeline(&conn, &src.id, None, None, None).unwrap();
         assert_eq!(events.len(), 1);
@@ -8220,7 +8423,7 @@ mod tests {
             &conn,
             &other.id,
             &entity.id,
-            "rel",
+            "related_to",
             "2026-01-01T00:00:00+00:00",
         );
         let events = kg_timeline(&conn, &entity.id, None, None, None).unwrap();
@@ -8239,7 +8442,7 @@ mod tests {
                 &conn,
                 &src.id,
                 &t.id,
-                "rel",
+                "related_to",
                 &format!("2026-01-0{}T00:00:00+00:00", i + 1),
             );
         }
@@ -9661,5 +9864,206 @@ mod tests {
         let conn = test_db();
         let expired = sweep_pending_action_timeouts(&conn, 60).unwrap();
         assert!(expired.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 fix campaign R1-M2 / R1-M3 / R1-M4 (#690)
+    //
+    // Substrate-side defense-in-depth: SQL CHECK triggers + typed
+    // `MemoryLinkRelation` + `ConflictMode`-aware insert primitive.
+    // The tests below pin the contract the brief calls out by name so
+    // a future regression surfaces here, not in a downstream consumer.
+    // -----------------------------------------------------------------
+
+    /// R1-M2 — direct-SQL INSERT with a tier outside the closed set is
+    /// refused by the trigger.
+    #[test]
+    fn test_memories_tier_check_rejects_invalid() {
+        let conn = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let err = conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, metadata) \
+             VALUES (?1, 'long-term', 'ns-ck', 'bad-tier', 'x', '[]', 5, 1.0, 'test', 0, ?2, ?2, '{}')",
+            params!["m-bad-tier", now],
+        ).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("memories.tier must be one of"),
+            "expected R1-M2 tier check, got: {msg}"
+        );
+    }
+
+    /// R1-M2 — direct-SQL INSERT with priority out of `[1, 10]` is
+    /// refused by the trigger.
+    #[test]
+    fn test_memories_priority_check_rejects_oob() {
+        let conn = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let err = conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, metadata) \
+             VALUES (?1, 'mid', 'ns-ck', 'bad-prio', 'x', '[]', 11, 1.0, 'test', 0, ?2, ?2, '{}')",
+            params!["m-bad-prio", now],
+        ).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("memories.priority must be between 1 and 10"),
+            "expected R1-M2 priority check, got: {err}"
+        );
+        // Lower bound mirror: priority = 0 is also out-of-band.
+        let err_low = conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, metadata) \
+             VALUES (?1, 'mid', 'ns-ck', 'bad-prio-low', 'x', '[]', 0, 1.0, 'test', 0, ?2, ?2, '{}')",
+            params!["m-bad-prio-low", now],
+        ).unwrap_err();
+        assert!(err_low.to_string().contains("priority"));
+    }
+
+    /// R1-M2 — confidence outside `[0.0, 1.0]` is refused by the trigger.
+    #[test]
+    fn test_memories_confidence_check_rejects_oob() {
+        let conn = test_db();
+        let now = chrono::Utc::now().to_rfc3339();
+        let err = conn.execute(
+            "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, metadata) \
+             VALUES (?1, 'mid', 'ns-ck', 'bad-conf', 'x', '[]', 5, 1.5, 'test', 0, ?2, ?2, '{}')",
+            params!["m-bad-conf", now],
+        ).unwrap_err();
+        assert!(
+            err.to_string().contains("memories.confidence"),
+            "expected R1-M2 confidence check, got: {err}"
+        );
+    }
+
+    /// R1-M2 — direct-SQL link INSERT with an off-closed-set relation
+    /// is refused by the trigger.
+    #[test]
+    fn test_memory_links_relation_check_rejects_unknown() {
+        let conn = test_db();
+        let src = insert(&conn, &make_memory("rel-src", "ns-ck", Tier::Mid, 5)).unwrap();
+        let tgt = insert(&conn, &make_memory("rel-tgt", "ns-ck", Tier::Mid, 5)).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        let err = conn
+            .execute(
+                "INSERT INTO memory_links (source_id, target_id, relation, created_at, valid_from) \
+             VALUES (?1, ?2, 'follows', ?3, ?3)",
+                params![src, tgt, now],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("memory_links.relation must be one of"),
+            "expected R1-M2 relation check, got: {err}"
+        );
+    }
+
+    /// R1-M2 — direct-SQL link INSERT with an unknown `attest_level` is
+    /// refused; legacy `NULL` stays allowed.
+    #[test]
+    fn test_memory_links_attest_level_check_rejects_unknown() {
+        let conn = test_db();
+        let src = insert(&conn, &make_memory("att-src", "ns-ck", Tier::Mid, 5)).unwrap();
+        let tgt = insert(&conn, &make_memory("att-tgt", "ns-ck", Tier::Mid, 5)).unwrap();
+        let now = chrono::Utc::now().to_rfc3339();
+        // NULL attest_level OK (legacy).
+        conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, created_at, valid_from, attest_level) \
+             VALUES (?1, ?2, 'related_to', ?3, ?3, NULL)",
+            params![src, tgt, now],
+        )
+        .expect("NULL attest_level must remain accepted");
+        // Bogus attest_level refused.
+        let err = conn.execute(
+            "INSERT INTO memory_links (source_id, target_id, relation, created_at, valid_from, attest_level) \
+             VALUES (?1, ?2, 'supersedes', ?3, ?3, 'totally-fake')",
+            params![src, tgt, now],
+        ).unwrap_err();
+        assert!(err.to_string().contains("memory_links.attest_level"));
+    }
+
+    /// R1-M3 — `insert_with_conflict(.., ConflictMode::Error)` refuses
+    /// the second write when `(title, namespace)` collides.
+    #[test]
+    fn test_insert_with_conflict_error_mode_refuses_duplicate() {
+        let conn = test_db();
+        let m1 = make_memory("dup-title", "ns-conflict", Tier::Mid, 5);
+        let _id = insert_with_conflict(&conn, &m1, ConflictMode::Error).unwrap();
+        let mut m2 = make_memory("dup-title", "ns-conflict", Tier::Mid, 7);
+        m2.content = "second writer should be refused".to_string();
+        let err = insert_with_conflict(&conn, &m2, ConflictMode::Error).unwrap_err();
+        let conflict = err.downcast_ref::<ConflictError>();
+        assert!(
+            conflict.is_some(),
+            "expected typed ConflictError, got: {err}"
+        );
+        // First writer's content is preserved (no silent overwrite).
+        let row = find_by_title_namespace(&conn, "dup-title", "ns-conflict")
+            .unwrap()
+            .expect("first row still present");
+        let fetched = get(&conn, &row).unwrap().unwrap();
+        assert_ne!(
+            fetched.content, "second writer should be refused",
+            "Error mode must not mutate the existing row"
+        );
+    }
+
+    /// R1-M3 — `insert_with_conflict(.., ConflictMode::Merge)` is
+    /// byte-equivalent to the legacy `insert()` silent-merge path.
+    #[test]
+    fn test_insert_with_conflict_merge_mode_updates() {
+        let conn = test_db();
+        let m1 = make_memory("merge-title", "ns-merge", Tier::Mid, 5);
+        let id_a = insert_with_conflict(&conn, &m1, ConflictMode::Merge).unwrap();
+        let mut m2 = make_memory("merge-title", "ns-merge", Tier::Mid, 7);
+        m2.content = "merged-content".to_string();
+        let id_b = insert_with_conflict(&conn, &m2, ConflictMode::Merge).unwrap();
+        assert_eq!(id_a, id_b, "merge mode returns the existing row id");
+        let fetched = get(&conn, &id_a).unwrap().unwrap();
+        assert_eq!(fetched.content, "merged-content");
+    }
+
+    /// R1-M3 — `insert_with_conflict(.., ConflictMode::Version)` keeps
+    /// both rows; the second writer lands under a versioned title.
+    #[test]
+    fn test_insert_with_conflict_version_keeps_both() {
+        let conn = test_db();
+        let m1 = make_memory("versioned", "ns-v", Tier::Mid, 5);
+        let id_a = insert_with_conflict(&conn, &m1, ConflictMode::Version).unwrap();
+        let mut m2 = make_memory("versioned", "ns-v", Tier::Mid, 5);
+        m2.content = "second version content".to_string();
+        let id_b = insert_with_conflict(&conn, &m2, ConflictMode::Version).unwrap();
+        assert_ne!(id_a, id_b, "version mode produces a distinct row");
+        // Both titles are reachable: original + `(2)` suffix.
+        let original_id = find_by_title_namespace(&conn, "versioned", "ns-v")
+            .unwrap()
+            .expect("original row");
+        let versioned_id = find_by_title_namespace(&conn, "versioned (2)", "ns-v")
+            .unwrap()
+            .expect("versioned row");
+        assert_eq!(original_id, id_a);
+        assert_eq!(versioned_id, id_b);
+    }
+
+    /// R1-M4 — `MemoryLink.relation` round-trips through the typed
+    /// closed set across `create_link` + `get_links`.
+    #[test]
+    fn test_memory_link_relation_round_trips() {
+        let conn = test_db();
+        let src = insert(&conn, &make_memory("rt-src", "ns-rt", Tier::Mid, 5)).unwrap();
+        let tgt = insert(&conn, &make_memory("rt-tgt", "ns-rt", Tier::Mid, 5)).unwrap();
+        create_link(&conn, &src, &tgt, "supersedes").unwrap();
+        let links = get_links(&conn, &src).unwrap();
+        assert_eq!(links.len(), 1);
+        assert_eq!(
+            links[0].relation,
+            crate::models::MemoryLinkRelation::Supersedes,
+            "relation must round-trip as the typed Supersedes variant"
+        );
+        // Cross-check serde wire shape: enum → `"supersedes"` string.
+        let wire = serde_json::to_string(&links[0]).unwrap();
+        assert!(
+            wire.contains("\"relation\":\"supersedes\""),
+            "serde wire form must be the canonical lowercase snake_case \
+             string; got {wire}"
+        );
     }
 }

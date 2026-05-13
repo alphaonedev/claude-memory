@@ -827,7 +827,7 @@ mod tests {
         let post = Link {
             source_id: "src".into(),
             target_id: "tgt".into(),
-            relation: "related_to".into(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
             created_at: "2026-05-05T00:00:00Z".into(),
             signature: None,
             observed_by: None,

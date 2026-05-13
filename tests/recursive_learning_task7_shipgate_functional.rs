@@ -191,7 +191,7 @@ fn lifecycle_three_sources_reflects_with_correct_metadata_and_edges() {
     let links = db::get_links(&conn, &outcome.id).unwrap();
     let reflects: Vec<&_> = links
         .iter()
-        .filter(|l| l.relation == "reflects_on")
+        .filter(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn)
         .collect();
     assert_eq!(reflects.len(), 3, "exactly 3 reflects_on edges must exist");
     let mut targets: Vec<String> = reflects.iter().map(|l| l.target_id.clone()).collect();
@@ -762,11 +762,11 @@ proptest::proptest! {
         let links_shim = db::get_links(&conn, &o_shim.id).unwrap();
         let links_with = db::get_links(&conn, &o_with.id).unwrap();
         proptest::prop_assert_eq!(
-            links_shim.iter().filter(|l| l.relation == "reflects_on").count(),
+            links_shim.iter().filter(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn).count(),
             1,
         );
         proptest::prop_assert_eq!(
-            links_with.iter().filter(|l| l.relation == "reflects_on").count(),
+            links_with.iter().filter(|l| l.relation == ai_memory::models::MemoryLinkRelation::ReflectsOn).count(),
             1,
         );
     }

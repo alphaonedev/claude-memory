@@ -6092,10 +6092,13 @@ mod tests {
     /// doesn't need to import the test-only path.
     fn i4_insert_test_memory(conn: &rusqlite::Connection, id: &str) {
         let now = chrono::Utc::now().to_rfc3339();
+        // v0.7.0 fix campaign R1-M2 — substrate CHECK trigger enforces
+        // tier ∈ {short, mid, long}. The pre-fix label "short_term"
+        // pre-dated the closed-set enum and was silently accepted.
         conn.execute(
             "INSERT INTO memories (
                 id, tier, namespace, title, content, created_at, updated_at
-             ) VALUES (?1, 'short_term', 'team/eng', ?2, 'body', ?3, ?3)",
+             ) VALUES (?1, 'short', 'team/eng', ?2, 'body', ?3, ?3)",
             rusqlite::params![id, format!("title-{id}"), now],
         )
         .unwrap();
