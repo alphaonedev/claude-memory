@@ -137,8 +137,40 @@ fn default_fail_mode() -> FailMode {
 /// would otherwise stall the memory operation that fired it.
 pub const MAX_TIMEOUT_MS: u32 = 30_000;
 
+/// v0.7.0 R3-S3 — default execution mode for a given event.
+///
+/// CLAUDE.md and ROADMAP2 §4.7 both call out that hot-path events
+/// must default to `mode = "daemon"` so a configured-but-unspecified
+/// hook does not pay subprocess spawn cost on every recall / search.
+/// Pre-R3 this was a documentation-only assertion: `HookConfig.mode`
+/// was a required field, so omitting it produced a parse error rather
+/// than the documented daemon default. R3-S3 closes the gap by
+/// making `mode` optional in TOML and selecting daemon-mode for hot-
+/// path events (`post_recall`, `post_search`, `pre_recall_expand`)
+/// when the operator did not supply one.
+///
+/// Non-hot-path events default to `Exec` — the subprocess-per-fire
+/// posture is the historical and lower-risk choice for cold-path
+/// hooks that may not be written defensively against a long-lived
+/// JSON-RPC framed lifecycle.
+#[must_use]
+pub fn default_mode_for_event(event: HookEvent) -> HookMode {
+    match event {
+        HookEvent::PostRecall | HookEvent::PostSearch | HookEvent::PreRecallExpand => {
+            HookMode::Daemon
+        }
+        _ => HookMode::Exec,
+    }
+}
+
 /// One `[[hook]]` block from `hooks.toml`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// v0.7.0 R3-S3 — `mode` is now optional in TOML; missing values are
+/// resolved via [`default_mode_for_event`] (daemon for hot-path
+/// events, exec otherwise). The struct field stays required so the
+/// in-memory representation is unambiguous; only the wire shape is
+/// relaxed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct HookConfig {
     pub event: HookEvent,
     pub command: PathBuf,
@@ -155,6 +187,59 @@ pub struct HookConfig {
     /// chain-level `Deny`.
     #[serde(default = "default_fail_mode")]
     pub fail_mode: FailMode,
+}
+
+/// Wire-shape mirror of [`HookConfig`] used only for TOML
+/// deserialization. `mode` is `Option<HookMode>` so missing values
+/// can be filled in from [`default_mode_for_event`] at parse time
+/// (serde defaults can't see sibling fields). The compiled
+/// representation in [`HookConfig`] is unambiguous — the operator-
+/// facing relaxation lives in this struct only.
+#[derive(Debug, Deserialize)]
+struct HookConfigRaw {
+    event: HookEvent,
+    command: PathBuf,
+    priority: i32,
+    timeout_ms: u32,
+    /// v0.7.0 R3-S3 — optional; falls back to
+    /// [`default_mode_for_event`] when missing.
+    #[serde(default)]
+    mode: Option<HookMode>,
+    enabled: bool,
+    namespace: String,
+    #[serde(default = "default_fail_mode")]
+    fail_mode: FailMode,
+}
+
+impl From<HookConfigRaw> for HookConfig {
+    fn from(raw: HookConfigRaw) -> Self {
+        let mode = raw
+            .mode
+            .unwrap_or_else(|| default_mode_for_event(raw.event));
+        HookConfig {
+            event: raw.event,
+            command: raw.command,
+            priority: raw.priority,
+            timeout_ms: raw.timeout_ms,
+            mode,
+            enabled: raw.enabled,
+            namespace: raw.namespace,
+            fail_mode: raw.fail_mode,
+        }
+    }
+}
+
+/// Adapter shape implementing `Deserialize` via [`HookConfigRaw`].
+/// Kept separate from [`HookConfig`] so the public type stays
+/// derive-`Deserialize`-able (callers that build a `HookConfig`
+/// in-memory and then `serde_json::from_value` still work).
+impl<'de> serde::Deserialize<'de> for HookConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        HookConfigRaw::deserialize(deserializer).map(Into::into)
+    }
 }
 
 /// Top-level TOML shape: `[[hook]]` blocks collect into
@@ -555,6 +640,125 @@ namespace = "*"
     fn empty_file_yields_zero_hooks() {
         let hooks = HookConfig::load_from_str("").expect("parses");
         assert!(hooks.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 R3-S3 — hot-path daemon-mode default
+    // -----------------------------------------------------------------
+
+    /// `test_post_recall_default_mode_is_daemon` — when a `post_recall`
+    /// hook block omits `mode`, the loader fills it in with `Daemon`
+    /// per CLAUDE.md + ROADMAP2 §4.7. Pre-R3 this was a doc-only
+    /// claim: `mode` was a required field, so an unspecified `mode`
+    /// produced a parse error rather than the documented daemon
+    /// default. R3-S3 closes the gap.
+    #[test]
+    fn test_post_recall_default_mode_is_daemon() {
+        let toml_src = r#"
+[[hook]]
+event = "post_recall"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses with no mode field");
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].event, HookEvent::PostRecall);
+        assert_eq!(
+            hooks[0].mode,
+            HookMode::Daemon,
+            "post_recall must default to daemon mode (R3-S3)"
+        );
+    }
+
+    /// `test_post_search_default_mode_is_daemon` — sibling of the
+    /// post_recall test; post_search is the second documented
+    /// hot-path event and must share the daemon default.
+    #[test]
+    fn test_post_search_default_mode_is_daemon() {
+        let toml_src = r#"
+[[hook]]
+event = "post_search"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses with no mode field");
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(
+            hooks[0].mode,
+            HookMode::Daemon,
+            "post_search must default to daemon mode (R3-S3)"
+        );
+    }
+
+    /// `pre_recall_expand` shares the hot-path budget (G10) so it
+    /// must also default to daemon mode.
+    #[test]
+    fn test_pre_recall_expand_default_mode_is_daemon() {
+        let toml_src = r#"
+[[hook]]
+event = "pre_recall_expand"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses with no mode field");
+        assert_eq!(hooks[0].mode, HookMode::Daemon);
+    }
+
+    /// Non-hot-path events keep the historical `Exec` default. R3-S3
+    /// only narrows the daemon-default to events that pay subprocess
+    /// spawn cost on the recall p95 budget; cold-path hooks remain
+    /// `Exec` for compatibility with hook scripts written against the
+    /// per-fire subprocess lifecycle.
+    #[test]
+    fn test_post_store_default_mode_is_exec() {
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses with no mode field");
+        assert_eq!(
+            hooks[0].mode,
+            HookMode::Exec,
+            "cold-path events still default to exec mode (no R3-S3 change)"
+        );
+    }
+
+    /// Explicit `mode` in TOML still wins — the R3-S3 default kicks
+    /// in only when the field is *absent*. This preserves any
+    /// existing operator configuration that opted into a specific
+    /// mode against the new default.
+    #[test]
+    fn test_explicit_mode_overrides_default() {
+        let toml_src = r#"
+[[hook]]
+event = "post_recall"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+mode = "exec"
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses");
+        assert_eq!(
+            hooks[0].mode,
+            HookMode::Exec,
+            "explicit mode = \"exec\" must not be silently flipped to daemon"
+        );
     }
 
     #[test]

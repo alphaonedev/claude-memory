@@ -383,8 +383,14 @@ pub struct RecallMeta {
     pub recall_mode: String,
     /// Which reranker scored the final ordering.
     /// - `"neural"` — BERT cross-encoder (autonomous tier, model loaded).
-    /// - `"lexical"` — Jaccard/TF-IDF/bigram fallback (G8 silent-degrade
-    ///   now visible).
+    /// - `"lexical"` — operator opted for the lexical variant, or the
+    ///   tier never asked for a neural cross-encoder.
+    /// - `"degraded_lexical"` — v0.7.0 R3-S2 — a configured neural
+    ///   cross-encoder failed to initialise or errored mid-flight and
+    ///   the runtime fell back. Distinct from `"lexical"` so clients
+    ///   can detect the silent downgrade *in band* (previously this
+    ///   was only a `tracing::warn!` event, which the G8 closure
+    ///   claim overstated as "fail loud").
     /// - `"none"` — reranking disabled at this tier.
     pub reranker_used: String,
     /// Candidate-pool sizes coming out of each retrieval stage *before*

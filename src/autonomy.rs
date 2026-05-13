@@ -42,7 +42,29 @@ use crate::models::{Memory, Tier};
 /// Minimum Jaccard-keyword overlap required to treat two memories as
 /// "near-duplicates" candidates for a consolidation cluster. Tuned
 /// loosely — actual merge decision is still gated by an LLM pass.
+///
+/// v0.7.0 R3-S2 — Jaccard is now a *cheap pre-filter* (O(N) per pair)
+/// when embeddings are available; cosine on the 384d MiniLM
+/// embeddings is the primary signal at
+/// [`CONSOLIDATE_COSINE_THRESHOLD`]. The Jaccard threshold is
+/// retained as the keyword-tier fall-back when no embeddings are
+/// present (so consolidation still works on a keyword-only
+/// deployment) and as a pre-filter to skip the embedding lookup on
+/// obviously-unrelated pairs.
 pub const CONSOLIDATE_JACCARD_THRESHOLD: f64 = 0.55;
+
+/// v0.7.0 R3-S2 — cosine similarity threshold (on 384d L2-normalised
+/// MiniLM embeddings) above which two memories cluster for
+/// consolidation. Default `0.75` per playbook §2.7 + ROADMAP2 §5.2:
+/// it captures rephrasings and semantically near-equivalent content
+/// without merging merely topically-adjacent memories.
+///
+/// Applied as the primary signal whenever both memories carry an
+/// embedding row in the DB (`db::get_embedding` returns `Some`).
+/// Jaccard is the cheap pre-filter (skips the embedding lookup) and
+/// the fall-back signal when embeddings are missing
+/// (keyword-tier deployments).
+pub const CONSOLIDATE_COSINE_THRESHOLD: f64 = 0.75;
 
 /// Cap on the number of memories in a single consolidation cluster —
 /// prevents pathological mega-merges that would destroy provenance.
@@ -156,7 +178,7 @@ pub fn run_autonomy_passes(
     let mut report = AutonomyPassReport::default();
 
     // Pass 1 — consolidation.
-    let clusters = find_consolidation_clusters(candidates);
+    let clusters = find_consolidation_clusters(conn, candidates);
     report.clusters_formed = clusters.len();
     for cluster in clusters {
         match consolidate_cluster(conn, llm, &cluster, dry_run) {
@@ -217,7 +239,27 @@ pub fn run_autonomy_passes(
     report
 }
 
-fn find_consolidation_clusters(candidates: &[Memory]) -> Vec<Vec<Memory>> {
+/// v0.7.0 R3-S2 — Two-stage clustering per playbook §2.7 /
+/// ROADMAP2 §5.2:
+///
+///   1. **Jaccard pre-filter** (cheap, O(N) per pair) — pairs that
+///      fail [`CONSOLIDATE_JACCARD_THRESHOLD`] are dropped without
+///      paying the embedding lookup. This keeps the pass fast on the
+///      typical workload (most pairs are obviously unrelated).
+///   2. **Cosine primary** — pairs that survive Jaccard are scored
+///      against [`CONSOLIDATE_COSINE_THRESHOLD`] on their 384d
+///      MiniLM embeddings (`db::get_embedding`). Above-threshold
+///      pairs join the cluster.
+///
+/// When *either* memory in a pair has no embedding row (e.g.,
+/// keyword-tier deployment that never ran the embedder), the cosine
+/// stage is skipped for that pair and the Jaccard signal alone
+/// decides — preserving v0.6.x behaviour on keyword deployments
+/// while making cosine the primary signal anywhere the embedder is
+/// available. The function never errors on a DB read miss; it
+/// silently degrades to Jaccard so a partial-coverage corpus (some
+/// embedded, some not) still clusters productively.
+fn find_consolidation_clusters(conn: &Connection, candidates: &[Memory]) -> Vec<Vec<Memory>> {
     // Group by namespace first — we never merge across namespaces.
     let mut by_ns: std::collections::HashMap<&str, Vec<&Memory>> = std::collections::HashMap::new();
     for m in candidates {
@@ -236,6 +278,11 @@ fn find_consolidation_clusters(candidates: &[Memory]) -> Vec<Vec<Memory>> {
             }
             let mut cluster = vec![group[i].clone()];
             used[i] = true;
+            // Cache the seed memory's embedding (looked up once per
+            // outer-loop iteration). `None` means "embedding missing
+            // for this memory" — we fall back to Jaccard-only on the
+            // inner pairs.
+            let seed_emb = db::get_embedding(conn, &group[i].id).ok().flatten();
             for j in (i + 1)..group.len() {
                 if used[j] {
                     continue;
@@ -243,9 +290,25 @@ fn find_consolidation_clusters(candidates: &[Memory]) -> Vec<Vec<Memory>> {
                 if cluster.len() >= CONSOLIDATE_MAX_CLUSTER_SIZE {
                     break;
                 }
-                if jaccard_similarity(&group[i].content, &group[j].content)
-                    >= CONSOLIDATE_JACCARD_THRESHOLD
-                {
+                // Stage 1 — Jaccard pre-filter (cheap).
+                let j_sim = jaccard_similarity(&group[i].content, &group[j].content);
+                if j_sim < CONSOLIDATE_JACCARD_THRESHOLD {
+                    continue;
+                }
+                // Stage 2 — cosine primary, when embeddings exist
+                // for both sides of the pair.
+                let pair_emb = db::get_embedding(conn, &group[j].id).ok().flatten();
+                let matches_cluster = match (seed_emb.as_ref(), pair_emb.as_ref()) {
+                    (Some(a), Some(b)) => {
+                        let cos = f64::from(crate::embeddings::Embedder::cosine_similarity(a, b));
+                        cos >= CONSOLIDATE_COSINE_THRESHOLD
+                    }
+                    // At least one side has no embedding — fall back
+                    // to Jaccard-only (already passed the pre-filter
+                    // above so the pair clusters).
+                    _ => true,
+                };
+                if matches_cluster {
                     cluster.push(group[j].clone());
                     used[j] = true;
                 }
@@ -765,7 +828,8 @@ mod tests {
             "the quick brown fox jumps over lazy dog",
             Tier::Mid,
         );
-        let clusters = find_consolidation_clusters(&[a, b, c]);
+        let (_tmp, conn) = setup_conn();
+        let clusters = find_consolidation_clusters(&conn, &[a, b, c]);
         // ns1 should cluster a+b; ns2 has only one memory so no cluster.
         assert_eq!(clusters.len(), 1);
         assert_eq!(clusters[0].len(), 2);
@@ -775,8 +839,130 @@ mod tests {
     fn consolidation_skips_reserved_namespace() {
         let a = sample_mem("a", "_curator/reports", "A", "content aaaa bbbb", Tier::Mid);
         let b = sample_mem("b", "_curator/reports", "B", "content aaaa bbbb", Tier::Mid);
-        let clusters = find_consolidation_clusters(&[a, b]);
+        let (_tmp, conn) = setup_conn();
+        let clusters = find_consolidation_clusters(&conn, &[a, b]);
         assert!(clusters.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 R3-S2 — consolidation clustering uses cosine as primary
+    // when embeddings are present; falls back to Jaccard otherwise.
+    // -----------------------------------------------------------------
+
+    /// Build a synthetic L2-normalized embedding from a small seed
+    /// vector. Used to drive the cosine cluster path without
+    /// requiring an actual embedder load.
+    fn synth_emb(values: &[f32]) -> Vec<f32> {
+        let norm: f32 = values.iter().map(|v| v * v).sum::<f32>().sqrt();
+        if norm < 1e-12 {
+            return values.to_vec();
+        }
+        values.iter().map(|v| v / norm).collect()
+    }
+
+    /// `test_consolidation_uses_cosine_when_embeddings_present` —
+    /// two memories whose contents look *jaccard-similar* but whose
+    /// embeddings are deliberately *cosine-DISsimilar* must NOT
+    /// cluster. This proves cosine is the primary signal and Jaccard
+    /// alone no longer drives consolidation when embeddings exist.
+    #[test]
+    fn test_consolidation_uses_cosine_when_embeddings_present() {
+        let (_tmp, conn) = setup_conn();
+        // Same lexical content (Jaccard ≈ 1.0) so the pre-filter
+        // would pass — but we attach orthogonal embeddings so cosine
+        // is ~0, well below the 0.75 threshold.
+        let a = sample_mem(
+            "a",
+            "ns1",
+            "A",
+            "the quick brown fox jumps over lazy dog",
+            Tier::Mid,
+        );
+        let b = sample_mem(
+            "b",
+            "ns1",
+            "B",
+            "the quick brown fox jumps over lazy dog",
+            Tier::Mid,
+        );
+
+        db::insert(&conn, &a).unwrap();
+        db::insert(&conn, &b).unwrap();
+        // Orthogonal 4-d embeddings: cosine sim = 0.
+        db::set_embedding(&conn, &a.id, &synth_emb(&[1.0, 0.0, 0.0, 0.0])).unwrap();
+        db::set_embedding(&conn, &b.id, &synth_emb(&[0.0, 1.0, 0.0, 0.0])).unwrap();
+
+        let clusters = find_consolidation_clusters(&conn, &[a, b]);
+        assert!(
+            clusters.is_empty(),
+            "cosine-dissimilar embeddings must defeat the Jaccard-only cluster (cosine is primary)",
+        );
+
+        // Symmetry: cosine-SIMilar embeddings on the same Jaccard
+        // pair MUST cluster. Reuse fresh memories to avoid the
+        // UPSERT collision.
+        let c = sample_mem(
+            "c",
+            "ns2",
+            "C",
+            "the quick brown fox jumps over lazy dog",
+            Tier::Mid,
+        );
+        let d = sample_mem(
+            "d",
+            "ns2",
+            "D",
+            "the quick brown fox jumps over lazy dog",
+            Tier::Mid,
+        );
+        db::insert(&conn, &c).unwrap();
+        db::insert(&conn, &d).unwrap();
+        // Nearly-identical embeddings: cosine sim ≈ 1.0.
+        db::set_embedding(&conn, &c.id, &synth_emb(&[1.0, 0.0, 0.0, 0.0])).unwrap();
+        db::set_embedding(&conn, &d.id, &synth_emb(&[0.99, 0.1, 0.0, 0.0])).unwrap();
+
+        let clusters2 = find_consolidation_clusters(&conn, &[c, d]);
+        assert_eq!(
+            clusters2.len(),
+            1,
+            "cosine-similar embeddings on a Jaccard-similar pair must cluster"
+        );
+        assert_eq!(clusters2[0].len(), 2);
+    }
+
+    /// `test_consolidation_falls_back_to_jaccard_no_embeddings` —
+    /// keyword-tier corpus (no embeddings persisted) still clusters
+    /// via Jaccard alone. This preserves v0.6.x consolidation
+    /// behaviour on deployments that never run the embedder.
+    #[test]
+    fn test_consolidation_falls_back_to_jaccard_no_embeddings() {
+        let (_tmp, conn) = setup_conn();
+        let a = sample_mem(
+            "a",
+            "ns",
+            "A",
+            "kubernetes rolling canary deploy strategy keyword keyword",
+            Tier::Long,
+        );
+        let b = sample_mem(
+            "b",
+            "ns",
+            "B",
+            "kubernetes rolling canary deploy strategy keyword keyword",
+            Tier::Long,
+        );
+        // Insert WITHOUT attaching embeddings — get_embedding returns
+        // None, the cosine stage is skipped, Jaccard alone decides.
+        db::insert(&conn, &a).unwrap();
+        db::insert(&conn, &b).unwrap();
+
+        let clusters = find_consolidation_clusters(&conn, &[a, b]);
+        assert_eq!(
+            clusters.len(),
+            1,
+            "keyword-tier corpus (no embeddings) must still cluster via Jaccard"
+        );
+        assert_eq!(clusters[0].len(), 2);
     }
 
     #[test]
@@ -1564,7 +1750,8 @@ mod tests {
                 Tier::Long,
             ));
         }
-        let clusters = find_consolidation_clusters(&candidates);
+        let (_tmp, conn) = setup_conn();
+        let clusters = find_consolidation_clusters(&conn, &candidates);
         assert!(!clusters.is_empty());
         for c in &clusters {
             assert!(

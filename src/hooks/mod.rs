@@ -35,7 +35,9 @@ pub mod timeouts;
 // attached payload structs to every variant. The re-export keeps
 // G1's `use crate::hooks::HookEvent` (and the
 // `crate::hooks::config::HookEvent` compatibility alias) resolving.
-pub use chain::{AskUserPrompt, ChainResult, HookChain, fire_on_index_eviction};
+pub use chain::{
+    AskUserPrompt, ChainResult, HookChain, fire_on_index_eviction, spawn_eviction_observer,
+};
 pub use config::{FailMode, HookConfig, HookMode, HooksConfigError};
 pub use events::{EvictionEvent, HookEvent};
 // G4 — full HookDecision contract. G3 shipped a local `Allow +

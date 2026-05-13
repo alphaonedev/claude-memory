@@ -250,8 +250,20 @@ pub fn handle_recall(
     // present in the response — clients that don't read it ignore unknown
     // fields per JSON-RPC convention. Closes audit gaps G2/G8/G11 by
     // making silent-degrade paths visible at request time.
+    // v0.7.0 R3-S2 — distinguish *originally lexical* from
+    // *degraded lexical* so the recall response surfaces an in-band
+    // signal when the operator's configured neural cross-encoder
+    // failed to load and fell back. Pre-R3 this was a tracing-event-
+    // only signal; the G8 closure claim required a per-call field
+    // and now has one. Wire shape:
+    //   - "neural"          — configured + loaded
+    //   - "lexical"         — operator chose lexical or never asked
+    //                         for a neural cross-encoder
+    //   - "degraded_lexical"— configured neural, runtime fell back
+    //   - "none"            — no reranker plumbed at all
     let reranker_used = match reranker {
         Some(ce) if ce.is_neural() => "neural",
+        Some(ce) if ce.is_degraded_lexical() => "degraded_lexical",
         Some(_) => "lexical",
         None => "none",
     };

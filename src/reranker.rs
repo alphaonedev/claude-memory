@@ -39,7 +39,22 @@ const CROSS_ENCODER_HIDDEN_DIM: usize = 384;
 /// Cross-encoder for (query, document) relevance scoring.
 pub enum CrossEncoder {
     /// Lightweight lexical cross-encoder using term overlap signals.
-    Lexical,
+    ///
+    /// `degraded` is `true` when this variant exists because a
+    /// configured neural cross-encoder failed to initialise (HF Hub
+    /// unreachable, model checksum mismatch, etc.) and the runtime
+    /// fell back. `false` is the originally-configured lexical tier
+    /// (operator opted in to keyword-tier or smart-tier without
+    /// cross-encoder reranking).
+    ///
+    /// v0.7.0 R3-S2 — the distinction surfaces in the recall
+    /// response's `meta.reranker_used` field as
+    /// `"degraded_lexical"` vs `"lexical"`, so an in-band signal
+    /// tells clients (MCP + HTTP) when their reranker downgraded.
+    /// The original G8 fix landed `tracing::warn!` only; G8 closure
+    /// per the playbook required an in-response field, which the
+    /// prior implementation overstated.
+    Lexical { degraded: bool },
     /// Neural BERT-based cross-encoder (ms-marco-MiniLM-L-6-v2).
     Neural {
         model: Arc<Mutex<BertModel>>,
@@ -52,13 +67,24 @@ pub enum CrossEncoder {
 
 impl CrossEncoder {
     /// Create a new lexical cross-encoder (no model download required).
+    ///
+    /// This is the "originally lexical" path — the operator either
+    /// chose keyword-/semantic-tier (no cross-encoder reranking) or
+    /// explicitly opted into the lexical variant. Use
+    /// [`Self::new_neural`] to attempt the neural path with
+    /// fall-back-to-lexical semantics.
     pub fn new() -> Self {
-        Self::Lexical
+        Self::Lexical { degraded: false }
     }
 
     /// Create a neural cross-encoder by downloading ms-marco-MiniLM-L-6-v2.
     ///
-    /// Falls back to lexical if download or loading fails.
+    /// Falls back to lexical if download or loading fails. The
+    /// fallback is marked `degraded: true` so the recall response
+    /// surfaces `reranker_used = "degraded_lexical"` per R3-S2 — an
+    /// in-band signal that v0.7.0 promises but pre-R3 only emitted
+    /// as a `tracing::warn!` (a tracing-event-only fallback is not
+    /// the same as a per-response field operators can branch on).
     ///
     /// v0.6.3.1 (P3, G8): when the neural path fails (e.g. HF Hub
     /// unreachable, model checksum mismatch), emit a structured tracing
@@ -77,7 +103,7 @@ impl CrossEncoder {
                     "cross-encoder fell back to lexical: neural init failed"
                 );
                 eprintln!("ai-memory: neural cross-encoder failed ({e}), using lexical fallback");
-                Self::Lexical
+                Self::Lexical { degraded: true }
             }
         }
     }
@@ -150,7 +176,7 @@ impl CrossEncoder {
     /// Returns a relevance score in `0.0..=1.0`.
     pub fn score(&self, query: &str, title: &str, content: &str) -> f32 {
         match self {
-            Self::Lexical => lexical_score(query, title, content),
+            Self::Lexical { .. } => lexical_score(query, title, content),
             Self::Neural {
                 model,
                 tokenizer,
@@ -237,6 +263,20 @@ impl CrossEncoder {
         matches!(self, Self::Neural { .. })
     }
 
+    /// v0.7.0 R3-S2 — whether this cross-encoder is a *degraded*
+    /// lexical fallback (i.e., a neural variant was attempted at
+    /// startup or mid-flight and the runtime fell back). `false` for
+    /// `Neural` and for the originally-configured `Lexical` (operator
+    /// opted into keyword-/semantic-tier without cross-encoder
+    /// reranking). The recall response surfaces this distinction as
+    /// `meta.reranker_used = "degraded_lexical"` so clients can
+    /// detect the silent downgrade in-band — closing the G8 closure
+    /// claim that tracing-event-only signalling had overstated.
+    #[must_use]
+    pub fn is_degraded_lexical(&self) -> bool {
+        matches!(self, Self::Lexical { degraded: true })
+    }
+
     /// Rerank a set of candidates by blending their original scores with
     /// cross-encoder scores.
     ///
@@ -283,7 +323,7 @@ impl CrossEncoder {
         }
 
         match self {
-            Self::Lexical => queries
+            Self::Lexical { .. } => queries
                 .into_iter()
                 .map(|(q, cands)| self.rerank(&q, cands))
                 .collect(),
@@ -303,7 +343,11 @@ impl CrossEncoder {
                         return queries
                             .into_iter()
                             .map(|(q, cands)| {
-                                let lex = Self::Lexical;
+                                // The fall-back here is a *runtime* degrade
+                                // (the model lock poisoned mid-flight), so
+                                // surface it as degraded lexical to mirror
+                                // R3-S2 reranker_mode semantics.
+                                let lex = Self::Lexical { degraded: true };
                                 lex.rerank(&q, cands)
                             })
                             .collect();
@@ -352,7 +396,10 @@ impl CrossEncoder {
                         queries
                             .into_iter()
                             .map(|(q, cands)| {
-                                let lex = Self::Lexical;
+                                // Runtime degrade (forward-pass failure) —
+                                // mark the variant degraded so the recall
+                                // response can surface `degraded_lexical`.
+                                let lex = Self::Lexical { degraded: true };
                                 lex.rerank(&q, cands)
                             })
                             .collect()
@@ -753,6 +800,14 @@ impl BatchedReranker {
     /// for capability reporting.
     pub fn is_neural(&self) -> bool {
         self.encoder.is_neural()
+    }
+
+    /// v0.7.0 R3-S2 — shortcut for `self.encoder().is_degraded_lexical()`.
+    /// The recall path reads this to drive the in-band `reranker_used`
+    /// signal exposed via `RecallMeta`.
+    #[must_use]
+    pub fn is_degraded_lexical(&self) -> bool {
+        self.encoder.is_degraded_lexical()
     }
 }
 

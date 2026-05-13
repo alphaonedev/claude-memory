@@ -521,46 +521,51 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// G8 — on_index_eviction fire helper
+// G8 / R3-S1 — on_index_eviction fire helper + observer-channel sink
 // ---------------------------------------------------------------------------
 //
 // `OnIndexEviction` is the only event whose canonical fire site
 // (`src/hnsw.rs:insert` — the `MAX_ENTRIES`-triggered drain) sits
 // below the hooks layer in the dependency graph. `VectorIndex`
 // owns no `ExecutorRegistry` handle and threading one through
-// the `&mut HnswMap` Mutex would touch every caller in `db.rs`.
+// the inner Mutex would touch every caller in the storage layer
+// and serialize hook execution behind the hot-path lock.
 //
-// The G8 prompt covers this exact case: "If no eviction logic
-// exists yet, just add the variant + a stub fire site behind
-// `#[cfg(test)]` and a TODO comment pointing at the next
-// iteration." The eviction logic *does* exist, but the wire-in
-// is the same shape — a thin helper that callers above the
-// hnsw layer can invoke once the registry is in scope.
+// v0.7.0 R3-S1 closes the prior G8 "fire helper exists but not
+// wired" gap with approach (b) from the original TODO: a
+// channel-sink between `VectorIndex` and the hooks layer.
+// `VectorIndex::set_eviction_sink` takes the send-half of an
+// unbounded mpsc channel; the eviction path inside
+// `VectorIndex::insert` pushes one [`EvictionEvent`] per evicted
+// id (`Sender::send` is non-blocking on an unbounded channel).
+// A background observer task owns the recv-half and fires
+// `fire_on_index_eviction` off the hot path. The `Sender` push
+// itself is a no-op when no sink is wired (CLI / test builds
+// without a hooks pipeline) so eviction throughput is unaffected
+// in those configurations.
 //
-// G9+ will plumb the registry into `VectorIndex::insert` (or
-// replace the `tracing::warn!` on the eviction edge with a
-// channel sink the hooks layer drains). Until then the helper
-// below is the public-API shape every fire site will use.
+// The observer task is `mode = "daemon"` semantics by construction:
+// the eviction-trigger thread never blocks on hook execution, the
+// recv-half is drained on a dedicated tokio task off the hot path,
+// and slow hooks back-pressure only on themselves (the channel is
+// unbounded).
 
 /// Fire the `on_index_eviction` chain for `payload`.
 ///
-/// This is the public wire-in point for G8. The HNSW eviction
-/// logic in `src/hnsw.rs:insert` carries a `TODO(v0.7-g8 next-iter)`
-/// pointing at this helper; callers above the hnsw layer (the DB
-/// layer once it grows registry awareness) invoke this once they
-/// observe an eviction. The test in `tests/hooks_executor_test.rs`
-/// exercises the wire shape end-to-end through a real subprocess
-/// hook so the executor + chain plumbing is covered today.
+/// Production callers reach this through the eviction-observer
+/// task spawned by [`spawn_eviction_observer`]; the helper is
+/// also called directly from `tests/hooks_executor_test.rs` to
+/// exercise the wire shape end-to-end through a real subprocess
+/// hook.
 ///
 /// # Why a free function and not a method on `HookChain`
 ///
 /// `HookChain::fire` already covers the generic event path. This
-/// helper exists so the call site (the hnsw layer once it's
-/// registry-aware) can pass a typed [`EvictionEvent`] instead of
-/// a `serde_json::Value` and have the JSON projection happen here
-/// — keeping the hnsw layer free of any `serde_json` import. It
-/// also gives us a single grep target for "where does the eviction
-/// hook fire?" once the next iteration finishes the wire-in.
+/// helper exists so callers can pass a typed [`EvictionEvent`]
+/// instead of a `serde_json::Value` and have the JSON projection
+/// happen here — keeping the hnsw layer free of any `serde_json`
+/// import. It also gives us a single grep target for "where does
+/// the eviction hook fire?".
 pub async fn fire_on_index_eviction(
     chain: &HookChain,
     registry: &mut ExecutorRegistry,
@@ -570,6 +575,64 @@ pub async fn fire_on_index_eviction(
     chain
         .fire(HookEvent::OnIndexEviction, value, registry)
         .await
+}
+
+/// v0.7.0 R3-S1 — Spawn the eviction observer that bridges the
+/// `VectorIndex` eviction-edge channel to the `on_index_eviction`
+/// hook chain. Returns the send-half of an unbounded mpsc channel
+/// caller must hand to [`crate::hnsw::VectorIndex::set_eviction_sink`].
+///
+/// The observer task takes ownership of `chain` (cloned via `Arc`)
+/// and the `registry`; both are kept alive for the lifetime of the
+/// recv-half. When the last `Sender` clone drops (typically when the
+/// daemon shuts down and `VectorIndex` is dropped), the channel
+/// closes and the observer task exits cleanly.
+///
+/// This is the canonical "daemon-mode" wire-in for the eviction
+/// hook: the hot-path eviction edge never blocks waiting for hook
+/// execution; the observer task drains the queue at its own pace.
+///
+/// # Hot-path posture
+///
+/// The send side (`Sender::send` on an unbounded channel) never
+/// blocks. A back-logged hook (slow subprocess, daemon hook
+/// stalled) accumulates events in the channel but does NOT slow
+/// `VectorIndex::insert`. This is the intended trade-off — eviction
+/// is rare (only fires past the 100k cap) and operators care more
+/// about not coupling recall latency to hook subscriber health than
+/// about bounded queue memory.
+pub fn spawn_eviction_observer(
+    chain: Arc<HookChain>,
+    mut registry: ExecutorRegistry,
+) -> std::sync::mpsc::Sender<EvictionEvent> {
+    let (tx, rx) = std::sync::mpsc::channel::<EvictionEvent>();
+    // We keep the recv side on a std mpsc (so the hot-path producer
+    // can be sync-only). A tiny bridge converts std-recv -> async by
+    // delegating the blocking recv to a `spawn_blocking` task; each
+    // observed payload re-enters the async chain via
+    // `fire_on_index_eviction`. This is the canonical pattern for
+    // adapting a sync producer to an async consumer in tokio.
+    let rx = std::sync::Mutex::new(rx);
+    let rx = Arc::new(rx);
+    tokio::spawn(async move {
+        loop {
+            let rx_clone = Arc::clone(&rx);
+            let next = tokio::task::spawn_blocking(move || {
+                let guard = rx_clone.lock().expect("eviction observer rx mutex");
+                guard.recv()
+            })
+            .await;
+            match next {
+                Ok(Ok(payload)) => {
+                    let _ = fire_on_index_eviction(&chain, &mut registry, payload).await;
+                }
+                // Either the JoinHandle errored (panic) or the
+                // sender side dropped — both terminate the observer.
+                Ok(Err(_)) | Err(_) => break,
+            }
+        }
+    });
+    tx
 }
 
 // ---------------------------------------------------------------------------
