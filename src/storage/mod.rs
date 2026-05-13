@@ -9090,7 +9090,7 @@ mod tests {
         let link = MemoryLink {
             source_id: s.id.clone(),
             target_id: t.id.clone(),
-            relation: "related_to".to_string(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
             created_at: chrono::Utc::now().to_rfc3339(),
             valid_from: None,
             valid_until: None,
@@ -9106,7 +9106,7 @@ mod tests {
         let link2 = MemoryLink {
             source_id: t.id.clone(),
             target_id: s.id.clone(),
-            relation: "related_to".to_string(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
             created_at: chrono::Utc::now().to_rfc3339(),
             valid_from: None,
             valid_until: None,
@@ -9146,7 +9146,7 @@ mod tests {
         let cycle_link = MemoryLink {
             source_id: b.id.clone(),
             target_id: a.id.clone(),
-            relation: "reflects_on".to_string(),
+            relation: crate::models::MemoryLinkRelation::ReflectsOn,
             created_at: chrono::Utc::now().to_rfc3339(),
             valid_from: None,
             valid_until: None,

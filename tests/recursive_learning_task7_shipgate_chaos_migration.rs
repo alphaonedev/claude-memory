@@ -1,6 +1,15 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+// v0.7.0 fix-campaign CF-3 (#690): the SQLite store + Postgres parity
+// sub-tests below transitively touch `ai_memory::store::*`, which is
+// gated behind `#[cfg(feature = "sal")]` in src/lib.rs. Without the
+// matching gate here the file fails to compile under the default
+// (non-sal) `cargo test` profile. The cfg gate makes the entire file
+// a no-op when `sal` is disabled — preserving the test's behaviour
+// under the standard `--features sal,sal-postgres` run while keeping
+// the no-feature build green.
+#![cfg(feature = "sal")]
 // clippy allows (test scaffolding): pedantic lints with no behavioral impact.
 #![allow(
     clippy::doc_markdown,

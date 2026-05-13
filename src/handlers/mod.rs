@@ -2147,9 +2147,11 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let lock = state.lock().await;
         let links_from_b = db::get_links(&lock.0, &b_id).unwrap();
-        let landed = links_from_b
-            .iter()
-            .any(|l| l.source_id == b_id && l.target_id == a_id && l.relation == "reflects_on");
+        let landed = links_from_b.iter().any(|l| {
+            l.source_id == b_id
+                && l.target_id == a_id
+                && l.relation == crate::models::MemoryLinkRelation::ReflectsOn
+        });
         assert!(
             !landed,
             "cycle-closing reflects_on must NOT land via sync_push"

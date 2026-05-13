@@ -799,16 +799,38 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // missing the new `correlation_id` column — we ALTER it
             // in here from Rust because SQLite has no `ADD COLUMN IF
             // NOT EXISTS`.
-            conn.execute_batch(MIGRATION_V27_SQLITE)?;
-            let has_correlation = conn
-                .prepare("SELECT correlation_id FROM subscription_events LIMIT 0")
-                .is_ok();
-            if !has_correlation {
-                conn.execute(
-                    "ALTER TABLE subscription_events ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''",
+            //
+            // v0.7.0 fix-campaign CF-1 (bug dbc594f4-…): the ALTER
+            // MUST run BEFORE `execute_batch(MIGRATION_V27_SQLITE)` —
+            // the SQL file's `CREATE INDEX …(correlation_id)` would
+            // otherwise fail with "no such column: correlation_id" on
+            // a hand-rolled v26 `subscription_events` table that
+            // predates the K6 column. The probe + ALTER is a no-op
+            // on the fresh-install path (table doesn't exist yet, so
+            // the prepare returns an error and `has_correlation`
+            // stays `false`, but the ALTER then errors with "no such
+            // table" — we therefore gate the ALTER on the table
+            // EXISTING, not just the column being absent).
+            let table_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'subscription_events')",
                     [],
-                )?;
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if table_exists {
+                let has_correlation = conn
+                    .prepare("SELECT correlation_id FROM subscription_events LIMIT 0")
+                    .is_ok();
+                if !has_correlation {
+                    conn.execute(
+                        "ALTER TABLE subscription_events ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''",
+                        [],
+                    )?;
+                }
             }
+            conn.execute_batch(MIGRATION_V27_SQLITE)?;
         }
         if version < 28 {
             // v0.7.0 K8 — per-agent quotas (memories/day, storage
@@ -1483,21 +1505,21 @@ mod tests {
     }
 
     #[test]
-    fn historical_replay_v27_alter_for_existing_subscription_events_table_documents_bug() {
-        // BUG SURFACED (memory id dbc594f4-0d38-4f03-892e-a9fd8dacdcdc,
-        // 2026-05-13): the v27 arm runs the SQL file (which contains
-        // `CREATE INDEX ... ON subscription_events(correlation_id)`)
-        // BEFORE the column-existence probe + ALTER TABLE adds
-        // correlation_id. For deployments that hand-rolled
-        // subscription_events at v26 (without correlation_id), this
-        // surfaces as: "no such column: correlation_id" during the
-        // CREATE INDEX from the SQL file.
+    fn historical_replay_v27_alter_runs_before_index_on_existing_subscription_events_table() {
+        // REGRESSION (bug memory dbc594f4-0d38-4f03-892e-a9fd8dacdcdc,
+        // discovered 2026-05-13, fixed in fix-campaign CF-1 #690):
+        // when migrating a deployment whose `subscription_events`
+        // table predated the K6 correlation_id column, the v27 arm
+        // used to run `execute_batch(MIGRATION_V27_SQLITE)` (which
+        // includes `CREATE INDEX ... ON subscription_events(correlation_id)`)
+        // BEFORE the ALTER TABLE that adds the column — surfacing as
+        // "no such column: correlation_id".
         //
-        // Per L0.7-2 discipline (no production semantic edits, only
-        // coverage-related test work), we DO NOT fix this here — the
-        // bug is recorded in _v070_grand_slam/layer_0_7/bugs_surfaced.
-        // This test asserts the current (buggy) behaviour so a future
-        // fix flips the assertion and proves the code path repaired.
+        // Post-fix, the ALTER must run FIRST, then the SQL file's
+        // CREATE INDEX succeeds. This test pins that order: a
+        // hand-rolled v26 `subscription_events` table without
+        // correlation_id must migrate cleanly to CURRENT_SCHEMA_VERSION
+        // with the column + index both present.
         let conn = Connection::open_in_memory().expect("in-memory db");
         conn.execute_batch(SCHEMA).unwrap();
         conn.execute("DELETE FROM schema_version", []).unwrap();
@@ -1517,19 +1539,18 @@ mod tests {
         conn.execute("INSERT INTO schema_version VALUES (26)", [])
             .unwrap();
 
-        // Current behaviour: errors because CREATE INDEX runs before ALTER.
-        let res = super::migrate(&conn);
+        // Post-fix behaviour: ALTER runs first, CREATE INDEX succeeds.
+        super::migrate(&conn).expect("v27 migration on hand-rolled v26 table must succeed");
+
+        // The correlation_id column is now present on the legacy table.
         assert!(
-            res.is_err(),
-            "v27 migration on hand-rolled v26 table is currently buggy — flip this \
-             assertion to expect Ok(()) once the production order is fixed"
+            column_exists(&conn, "subscription_events", "correlation_id"),
+            "ALTER must add correlation_id before the SQL file's CREATE INDEX runs"
         );
-        let err = res.unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.contains("correlation_id"),
-            "expected error to mention correlation_id, got: {msg}"
-        );
+        // And the index landed.
+        assert!(index_exists(&conn, "idx_subscription_events_correlation"));
+        // Final state at CURRENT_SCHEMA_VERSION.
+        assert_eq!(current_version(&conn), CURRENT_SCHEMA_VERSION);
     }
 
     #[test]
