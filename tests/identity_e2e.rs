@@ -271,11 +271,15 @@ fn self_signed_link_persists_signature_column() {
 // re-deriving canonical CBOR from the same `SignableLink` and hashing
 // it must match the audit row's `payload_hash`.
 //
-// Production `db::create_link_signed` does not yet auto-append — that
-// wiring is deferred to a later track per H5's module docs. Here we
-// construct the audit row the way the future call-site will, exercising
-// the same SHA-256 helper + the same canonical CBOR encoder, so the
-// invariant is regression-locked at the substrate boundary.
+// As of v0.7.0 fix-campaign S4-INFO2 (#690), `db::create_link_signed`
+// auto-appends a `memory_link.created` audit row whose `payload_hash`
+// already binds the canonical CBOR — exactly the auditor invariant
+// this test was originally protecting. We still construct an explicit
+// row below to verify the helper API surface and to keep the
+// regression assert pinned at the substrate boundary; the test now
+// expects TWO rows (auto-emit + explicit append), and asserts both
+// carry the same `expected_hash` so the binding holds for either
+// emit-path a downstream auditor encounters.
 #[test]
 fn signed_events_payload_hash_matches_canonical_cbor() {
     let _g = ENV_GUARD
@@ -337,21 +341,31 @@ fn signed_events_payload_hash_matches_canonical_cbor() {
 
     // Read it back through the public listing API and assert the
     // hash + signature bind to the same bytes a verifier would re-derive.
+    //
+    // Two rows are present post-S4-INFO2: the auto-emit from
+    // create_link_signed + the explicit append above. Both must carry
+    // the same payload_hash because they describe the same logical
+    // event; the binding invariant the test protects holds for either.
     let listed = signed_events::list_signed_events(&f.conn, Some(&alice.agent_id), 10, 0)
         .expect("list audit rows");
-    assert_eq!(listed.len(), 1, "exactly one audit row appended");
-    let row = &listed[0];
     assert_eq!(
-        row.payload_hash, expected_hash,
-        "audit payload_hash must equal SHA-256(canonical_cbor(signable))"
+        listed.len(),
+        2,
+        "auto-emit + explicit append yield two audit rows"
     );
-    assert_eq!(
-        row.signature.as_deref(),
-        Some(sig_on_row.as_slice()),
-        "audit signature blob must mirror memory_links.signature"
-    );
-    assert_eq!(row.attest_level, "self_signed");
-    assert_eq!(row.agent_id, alice.agent_id);
+    for row in &listed {
+        assert_eq!(
+            row.payload_hash, expected_hash,
+            "every audit row's payload_hash must equal SHA-256(canonical_cbor(signable))"
+        );
+        assert_eq!(
+            row.signature.as_deref(),
+            Some(sig_on_row.as_slice()),
+            "every audit row's signature blob must mirror memory_links.signature"
+        );
+        assert_eq!(row.attest_level, "self_signed");
+        assert_eq!(row.agent_id, alice.agent_id);
+    }
 }
 
 // ---------------------------------------------------------------------------
