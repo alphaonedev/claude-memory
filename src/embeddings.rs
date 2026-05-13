@@ -786,6 +786,76 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------
+    // L0.7-6 Tier E — EmbedStatus + EmbeddingFormatError surfaces.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn embed_status_as_str_each_variant() {
+        assert_eq!(EmbedStatus::Indexed.as_str(), "indexed");
+        assert_eq!(
+            EmbedStatus::Skipped("too big".to_string()).as_str(),
+            "skipped"
+        );
+        assert_eq!(
+            EmbedStatus::Failed("ollama down".to_string()).as_str(),
+            "failed"
+        );
+    }
+
+    #[test]
+    fn embed_status_is_degraded_only_for_non_indexed() {
+        assert!(!EmbedStatus::Indexed.is_degraded());
+        assert!(EmbedStatus::Skipped("x".to_string()).is_degraded());
+        assert!(EmbedStatus::Failed("x".to_string()).is_degraded());
+    }
+
+    #[test]
+    fn embed_status_reason_helper() {
+        assert_eq!(EmbedStatus::Indexed.reason(), "");
+        assert_eq!(EmbedStatus::Skipped("r1".to_string()).reason(), "r1");
+        assert_eq!(EmbedStatus::Failed("r2".to_string()).reason(), "r2");
+    }
+
+    #[test]
+    fn embed_status_display_includes_reason() {
+        assert_eq!(format!("{}", EmbedStatus::Indexed), "indexed");
+        assert_eq!(
+            format!("{}", EmbedStatus::Skipped("oversize".to_string())),
+            "skipped: oversize"
+        );
+        assert_eq!(
+            format!("{}", EmbedStatus::Failed("timeout".to_string())),
+            "failed: timeout"
+        );
+    }
+
+    #[test]
+    fn embedding_format_error_display_each_variant() {
+        let unk = EmbeddingFormatError::UnknownHeader(0xab);
+        assert!(unk.to_string().contains("0xab"));
+        let be = EmbeddingFormatError::BigEndianUnsupported;
+        assert!(be.to_string().contains("big-endian"));
+        let ml = EmbeddingFormatError::MalformedLength(7);
+        assert!(ml.to_string().contains("7"));
+    }
+
+    #[test]
+    fn embedding_format_error_is_std_error() {
+        // Pin the std::error::Error implementation so anyhow `?` chains
+        // continue to work with this typed error at every call site.
+        let e: Box<dyn std::error::Error> = Box::new(EmbeddingFormatError::BigEndianUnsupported);
+        // Sources is None by default; the trait is implemented purely
+        // for the marker.
+        assert!(e.source().is_none());
+    }
+
+    #[test]
+    fn decode_embedding_blob_empty_returns_empty_vec() {
+        let v = decode_embedding_blob(&[]).expect("empty decodes to empty");
+        assert!(v.is_empty());
+    }
+
     #[test]
     fn test_fuse_is_l2_normalized() {
         // The current fuse() contract returns an UN-normalized vector

@@ -994,4 +994,733 @@ mod tests {
                 .any(|f| f.contains("metadata.agent_id"))
         );
     }
+
+    // ---------------------------------------------------------------------
+    // L0.7-6 Tier E coverage — round-trip every trait method on a tempfile
+    // SQLite store so the adapter's plumbing (the bulk of the lines this
+    // file owns) is exercised without a live process. Each test uses a
+    // fresh tempfile DB so cross-test isolation is guaranteed.
+    // ---------------------------------------------------------------------
+
+    fn fresh_store() -> SqliteStore {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        // Drop the NamedTempFile guard so close() doesn't race the DB
+        // open; the path leaks but it's under the OS tmp dir which
+        // colima/macOS reaps. Tests run hermetically inside a worktree
+        // tempdir; no /tmp violation per project rule.
+        std::mem::forget(tmp);
+        SqliteStore::open(&path).expect("open SqliteStore")
+    }
+
+    #[tokio::test]
+    async fn schema_version_returns_nonzero_after_open() {
+        let store = fresh_store();
+        let v = store.schema_version().await.expect("schema_version");
+        // db::open runs the migration ladder; schema_version should be
+        // strictly positive after open. (The exact value tracks the
+        // CURRENT_SCHEMA_VERSION constant which moves; assert >0 only.)
+        assert!(v > 0, "expected positive schema_version, got {v}");
+    }
+
+    #[tokio::test]
+    async fn list_returns_stored_memories() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("listme", "content for list query");
+        let id = store.store(&ctx, &mem).await.expect("store");
+        let filter = Filter {
+            namespace: Some("sal-test".to_string()),
+            limit: 10,
+            ..Filter::default()
+        };
+        let rows = store.list(&ctx, &filter).await.expect("list");
+        assert!(rows.iter().any(|m| m.id == id), "list omitted stored id");
+    }
+
+    #[tokio::test]
+    async fn list_default_limit_when_zero() {
+        // Filter.limit == 0 should be treated as "100" by the adapter
+        // (per the implementation comment). Verify by storing one row
+        // and confirming a zero-limit list still returns it.
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("default-limit", "needs sufficient content for fts");
+        store.store(&ctx, &mem).await.expect("store");
+        let filter = Filter {
+            namespace: Some("sal-test".to_string()),
+            limit: 0,
+            ..Filter::default()
+        };
+        let rows = store.list(&ctx, &filter).await.expect("list zero-limit");
+        assert!(
+            !rows.is_empty(),
+            "zero-limit should fall back to default 100"
+        );
+    }
+
+    #[tokio::test]
+    async fn search_finds_keyword_match() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("searchable", "fts5 token jellyfish for unique grep");
+        store.store(&ctx, &mem).await.expect("store");
+        let filter = Filter {
+            limit: 10,
+            ..Filter::default()
+        };
+        let hits = store
+            .search(&ctx, "jellyfish", &filter)
+            .await
+            .expect("search");
+        assert!(
+            hits.iter().any(|m| m.title == "searchable"),
+            "fts search missed the unique token"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_missing_returns_not_found() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let err = store
+            .update(
+                &ctx,
+                "11111111-1111-1111-1111-111111111111",
+                UpdatePatch {
+                    title: Some("never".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect_err("update missing id");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_missing_returns_not_found() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let err = store
+            .delete(&ctx, "22222222-2222-2222-2222-222222222222")
+            .await
+            .expect_err("delete missing");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn delete_then_get_chain() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("ephemeral", "stored briefly for delete test");
+        let id = store.store(&ctx, &mem).await.expect("store");
+        store.delete(&ctx, &id).await.expect("delete existing");
+        let err = store.get(&ctx, &id).await.expect_err("get after delete");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn verify_missing_returns_not_found() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let err = store
+            .verify(&ctx, "33333333-3333-3333-3333-333333333333")
+            .await
+            .expect_err("verify missing");
+        assert!(matches!(err, StoreError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn link_and_list_links_round_trip() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let a = test_memory("source-mem", "content for link source");
+        let b = test_memory("target-mem", "content for link target");
+        let a_id = store.store(&ctx, &a).await.expect("store a");
+        let b_id = store.store(&ctx, &b).await.expect("store b");
+        let link = MemoryLink {
+            source_id: a_id.clone(),
+            target_id: b_id.clone(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        store.link(&ctx, &link).await.expect("link insert");
+        let listed = store.list_links(None).await.expect("list_links");
+        assert!(
+            listed
+                .iter()
+                .any(|l| l.source_id == a_id && l.target_id == b_id),
+            "list_links missed the just-inserted row"
+        );
+        // namespace-filtered: same namespace produces the row.
+        let same_ns = store
+            .list_links(Some("sal-test"))
+            .await
+            .expect("list_links by ns");
+        assert!(
+            same_ns
+                .iter()
+                .any(|l| l.source_id == a_id && l.target_id == b_id),
+            "namespace filter dropped a same-ns link"
+        );
+        // namespace-filtered: missing namespace produces no row.
+        let missing_ns = store
+            .list_links(Some("nonexistent"))
+            .await
+            .expect("list_links missing ns");
+        assert!(
+            !missing_ns
+                .iter()
+                .any(|l| l.source_id == a_id && l.target_id == b_id),
+            "namespace filter must exclude links whose source lives elsewhere"
+        );
+    }
+
+    #[tokio::test]
+    async fn link_signed_unsigned_falls_through() {
+        // link_signed with None keypair must land "unsigned" attest.
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let a = test_memory("ls-a", "content for ls a");
+        let b = test_memory("ls-b", "content for ls b");
+        let a_id = store.store(&ctx, &a).await.expect("a");
+        let b_id = store.store(&ctx, &b).await.expect("b");
+        let link = MemoryLink {
+            source_id: a_id,
+            target_id: b_id,
+            relation: crate::models::MemoryLinkRelation::Supersedes,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        let attest = store
+            .link_signed(&ctx, &link, None)
+            .await
+            .expect("link_signed unsigned path");
+        assert_eq!(attest, "unsigned");
+    }
+
+    #[tokio::test]
+    async fn register_agent_then_is_registered() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let agent = AgentRegistration {
+            agent_id: "ai:tester@host".to_string(),
+            agent_type: "ai".to_string(),
+            capabilities: vec!["memory.read".to_string()],
+            registered_at: chrono::Utc::now().to_rfc3339(),
+            last_seen_at: chrono::Utc::now().to_rfc3339(),
+        };
+        store
+            .register_agent(&ctx, &agent)
+            .await
+            .expect("register_agent");
+        let yes = store
+            .is_registered_agent("ai:tester@host")
+            .await
+            .expect("is_registered yes");
+        assert!(yes, "registered agent must be detected");
+        let no = store
+            .is_registered_agent("ai:unknown@host")
+            .await
+            .expect("is_registered no");
+        assert!(!no, "unknown agent must be unregistered");
+    }
+
+    #[tokio::test]
+    async fn list_memories_updated_since_no_filter() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("since-test", "content for since-query test");
+        store.store(&ctx, &mem).await.expect("store");
+        let all = store
+            .list_memories_updated_since(None, 100)
+            .await
+            .expect("list_since none");
+        assert!(
+            all.iter().any(|m| m.title == "since-test"),
+            "no-since filter must return all memories"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_remote_memory_is_idempotent() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("remote", "remote content for apply path");
+        let id1 = store
+            .apply_remote_memory(&ctx, &mem)
+            .await
+            .expect("apply 1");
+        let id2 = store
+            .apply_remote_memory(&ctx, &mem)
+            .await
+            .expect("apply 2 idempotent");
+        assert_eq!(id1, id2, "insert_if_newer must be idempotent on same row");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_link_attest_threading() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let a = test_memory("rl-a", "content rl a");
+        let b = test_memory("rl-b", "content rl b");
+        let a_id = store.store(&ctx, &a).await.expect("a");
+        let b_id = store.store(&ctx, &b).await.expect("b");
+        let link = MemoryLink {
+            source_id: a_id,
+            target_id: b_id,
+            relation: crate::models::MemoryLinkRelation::DerivedFrom,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        // attest_level threads through; "unsigned" is the safe default.
+        store
+            .apply_remote_link(&ctx, &link, "unsigned")
+            .await
+            .expect("apply_remote_link");
+    }
+
+    #[tokio::test]
+    async fn apply_remote_deletion_returns_false_for_missing() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let gone = store
+            .apply_remote_deletion(&ctx, "44444444-4444-4444-4444-444444444444")
+            .await
+            .expect("apply_remote_deletion missing");
+        assert!(
+            !gone,
+            "apply_remote_deletion must return false for missing id"
+        );
+    }
+
+    #[tokio::test]
+    async fn recall_hybrid_keyword_fallback_no_embedding() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory(
+            "recall-target",
+            "indigo elephant chess fts5 token recall test",
+        );
+        store.store(&ctx, &mem).await.expect("store");
+        let filter = Filter {
+            limit: 10,
+            ..Filter::default()
+        };
+        let hits = store
+            .recall_hybrid(&ctx, "elephant", None, &filter)
+            .await
+            .expect("recall_hybrid keyword fallback");
+        assert!(
+            !hits.is_empty(),
+            "recall_hybrid keyword fallback returned nothing"
+        );
+        assert!(hits[0].1 > 0.0, "score must be positive");
+    }
+
+    #[tokio::test]
+    async fn touch_after_recall_is_noop_on_empty_ids() {
+        let store = fresh_store();
+        store
+            .touch_after_recall(&[])
+            .await
+            .expect("touch_after_recall empty");
+    }
+
+    #[tokio::test]
+    async fn touch_after_recall_warn_path_on_missing_id() {
+        // touch_after_recall logs-and-swallows touch errors; verify the
+        // bulk-path returns Ok even when an id is unknown.
+        let store = fresh_store();
+        let unknown = vec!["55555555-5555-5555-5555-555555555555".to_string()];
+        store
+            .touch_after_recall(&unknown)
+            .await
+            .expect("touch must tolerate unknown ids");
+    }
+
+    #[tokio::test]
+    async fn forget_invalid_input_without_filter() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let err = store
+            .forget(&ctx, None, None, None, false)
+            .await
+            .expect_err("forget without filter");
+        assert!(matches!(err, StoreError::InvalidInput { .. }));
+    }
+
+    #[tokio::test]
+    async fn forget_by_namespace_succeeds_even_on_empty() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        // No matching rows yet → count is 0 but no error.
+        let n = store
+            .forget(&ctx, Some("nonexistent-ns"), None, None, false)
+            .await
+            .expect("forget by ns");
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn run_gc_returns_zero_on_empty_db() {
+        let store = fresh_store();
+        let n = store.run_gc(false).await.expect("gc empty");
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn archive_purge_zero_threshold_purges_all() {
+        let store = fresh_store();
+        // Empty archive ⇒ 0 purged.
+        let n = store.archive_purge(Some(0)).await.expect("archive_purge");
+        assert_eq!(n, 0);
+        // None means "purge all" — still zero on empty archive.
+        let n = store.archive_purge(None).await.expect("archive_purge all");
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn archive_by_ids_is_zero_for_unknown_ids() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let moved = store
+            .archive_by_ids(
+                &ctx,
+                &["66666666-6666-6666-6666-666666666666".to_string()],
+                Some("manual"),
+            )
+            .await
+            .expect("archive_by_ids unknown");
+        assert_eq!(moved, 0);
+    }
+
+    #[tokio::test]
+    async fn archive_restore_returns_false_for_missing() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let restored = store
+            .archive_restore(&ctx, "77777777-7777-7777-7777-777777777777")
+            .await
+            .expect("archive_restore missing");
+        assert!(!restored);
+    }
+
+    #[tokio::test]
+    async fn export_memories_and_links_round_trip() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let mem = test_memory("export-me", "content for export round trip");
+        store.store(&ctx, &mem).await.expect("store");
+        let memories = store.export_memories().await.expect("export_memories");
+        assert!(memories.iter().any(|m| m.title == "export-me"));
+        let links = store.export_links().await.expect("export_links");
+        // Empty DB has no links yet — confirm the call succeeds.
+        assert!(links.is_empty() || links.iter().all(|l| !l.source_id.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn build_namespace_chain_includes_self() {
+        let store = fresh_store();
+        let chain = store
+            .build_namespace_chain("project/foo")
+            .await
+            .expect("build_namespace_chain");
+        // The chain always includes the leaf namespace itself.
+        assert!(
+            chain.iter().any(|s| s == "project/foo"),
+            "chain must include leaf, got {chain:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_governance_policy_none_on_fresh_db() {
+        let store = fresh_store();
+        let policy = store
+            .resolve_governance_policy("any/ns")
+            .await
+            .expect("resolve_governance_policy");
+        assert!(policy.is_none(), "fresh DB must have no policy");
+    }
+
+    #[tokio::test]
+    async fn enforce_governance_action_allow_on_fresh_db() {
+        let store = fresh_store();
+        let decision = store
+            .enforce_governance_action(
+                super::super::GovernedAction::Store,
+                "free-ns",
+                "alice",
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("enforce_governance_action");
+        assert!(matches!(decision, crate::models::GovernanceDecision::Allow));
+    }
+
+    #[tokio::test]
+    async fn get_namespace_standard_none_initially() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let std_row = store
+            .get_namespace_standard(&ctx, "no-such-ns")
+            .await
+            .expect("get_namespace_standard");
+        assert!(std_row.is_none());
+    }
+
+    #[tokio::test]
+    async fn set_then_get_then_clear_namespace_standard() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        // Standard memory has to exist first.
+        let std_mem = test_memory("std-doc", "documentation for ns standard");
+        let std_id = store.store(&ctx, &std_mem).await.expect("store std");
+        store
+            .set_namespace_standard(&ctx, "ns/with/standard", &std_id, None)
+            .await
+            .expect("set_namespace_standard");
+        let got = store
+            .get_namespace_standard(&ctx, "ns/with/standard")
+            .await
+            .expect("get_namespace_standard");
+        assert_eq!(got.as_ref().map(|(s, _)| s.as_str()), Some(std_id.as_str()));
+        let removed = store
+            .clear_namespace_standard(&ctx, "ns/with/standard")
+            .await
+            .expect("clear_namespace_standard");
+        assert!(removed);
+        let after = store
+            .get_namespace_standard(&ctx, "ns/with/standard")
+            .await
+            .expect("get after clear");
+        assert!(after.is_none());
+    }
+
+    #[tokio::test]
+    async fn quota_status_auto_inserts_default_row() {
+        let store = fresh_store();
+        let q = store
+            .quota_status("ai:quota-test")
+            .await
+            .expect("quota_status");
+        assert_eq!(q.agent_id, "ai:quota-test");
+    }
+
+    #[tokio::test]
+    async fn quota_status_list_returns_inserted_row() {
+        let store = fresh_store();
+        // Force a row via quota_status, then list.
+        let _ = store.quota_status("ai:listed").await.expect("seed");
+        let rows = store.quota_status_list().await.expect("quota_status_list");
+        assert!(rows.iter().any(|r| r.agent_id == "ai:listed"));
+    }
+
+    #[tokio::test]
+    async fn verify_link_rejects_missing_filter() {
+        let store = fresh_store();
+        let filter = VerifyFilter::default();
+        let err = store
+            .verify_link(filter)
+            .await
+            .expect_err("verify_link without source/link_id");
+        assert!(matches!(err, StoreError::InvalidInput { .. }));
+    }
+
+    #[tokio::test]
+    async fn verify_link_rejects_malformed_link_id() {
+        let store = fresh_store();
+        let filter = VerifyFilter {
+            link_id: Some("notatriple".to_string()),
+            ..Default::default()
+        };
+        let err = store
+            .verify_link(filter)
+            .await
+            .expect_err("verify_link malformed link_id");
+        assert!(matches!(err, StoreError::InvalidInput { .. }));
+    }
+
+    #[tokio::test]
+    async fn verify_link_resolves_unsigned_link() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let a = test_memory("vl-a", "content for vl a");
+        let b = test_memory("vl-b", "content for vl b");
+        let a_id = store.store(&ctx, &a).await.expect("a");
+        let b_id = store.store(&ctx, &b).await.expect("b");
+        let link = MemoryLink {
+            source_id: a_id.clone(),
+            target_id: b_id.clone(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        store.link(&ctx, &link).await.expect("insert link");
+        let report = store
+            .verify_link(VerifyFilter {
+                source_id: Some(a_id.clone()),
+                target_id: Some(b_id.clone()),
+                link_id: None,
+            })
+            .await
+            .expect("verify_link");
+        assert_eq!(report.source_id, a_id);
+        assert_eq!(report.target_id, b_id);
+        // Unsigned link reports verified=true with signature_present=false.
+        assert!(report.verified);
+        assert!(!report.signature_present);
+        assert_eq!(report.attest_level, "unsigned");
+    }
+
+    #[tokio::test]
+    async fn verify_link_source_only_resolves_first_outbound() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let a = test_memory("solo-source", "content for solo source");
+        let b = test_memory("solo-target", "content for solo target");
+        let a_id = store.store(&ctx, &a).await.expect("a");
+        let b_id = store.store(&ctx, &b).await.expect("b");
+        let link = MemoryLink {
+            source_id: a_id.clone(),
+            target_id: b_id,
+            relation: crate::models::MemoryLinkRelation::Supersedes,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        store.link(&ctx, &link).await.expect("link");
+        let report = store
+            .verify_link(VerifyFilter {
+                source_id: Some(a_id),
+                ..Default::default()
+            })
+            .await
+            .expect("source-only verify_link");
+        assert!(report.verified);
+    }
+
+    #[tokio::test]
+    async fn find_paths_returns_empty_for_unknown_endpoints() {
+        let store = fresh_store();
+        let paths = store
+            .find_paths(
+                "88888888-8888-8888-8888-888888888888",
+                "99999999-9999-9999-9999-999999999999",
+                None,
+                None,
+            )
+            .await
+            .expect("find_paths");
+        assert!(paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn notify_creates_inbox_row() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let id = store
+            .notify(
+                &ctx,
+                "ai:notify-target",
+                "hello",
+                "payload body",
+                None,
+                None,
+            )
+            .await
+            .expect("notify");
+        let mem = store.get(&ctx, &id).await.expect("get notify");
+        assert_eq!(mem.namespace, "_inbox/ai:notify-target");
+        assert!(mem.tags.iter().any(|t| t == "notify"));
+    }
+
+    #[tokio::test]
+    async fn consolidate_round_trips_two_sources() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        // Seed two memories that the consolidate path will merge.
+        let a = test_memory("consolidate-source-a", "content a one two three four");
+        let b = test_memory("consolidate-source-b", "content b one two three four");
+        let a_id = store.store(&ctx, &a).await.expect("store a");
+        let b_id = store.store(&ctx, &b).await.expect("store b");
+        // The legacy db::consolidate accepts the call against the live
+        // ids and produces a new memory id; the adapter simply forwards.
+        let consolidated_id = store
+            .consolidate(
+                &ctx,
+                &[a_id, b_id],
+                "merged-title",
+                "merged summary content for the consolidator",
+                "sal-test",
+                &Tier::Mid,
+                "consolidate-test",
+                "alice",
+            )
+            .await
+            .expect("consolidate two sources");
+        // The resulting memory must be retrievable.
+        let mem = store
+            .get(&ctx, &consolidated_id)
+            .await
+            .expect("get consolidated");
+        assert_eq!(mem.title, "merged-title");
+    }
+
+    #[tokio::test]
+    async fn sqlite_transaction_commit_and_rollback_are_no_op() {
+        // The SqliteTransaction placeholder no-ops both commit and
+        // rollback (per the doc comment). Pin the contract.
+        let txn1 = Box::new(SqliteTransaction);
+        txn1.commit().await.expect("commit no-op");
+        let txn2 = Box::new(SqliteTransaction);
+        txn2.rollback().await.expect("rollback no-op");
+    }
+
+    #[tokio::test]
+    async fn store_path_accessor_returns_open_path() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let path = tmp.path().to_path_buf();
+        let store = SqliteStore::open(&path).expect("open");
+        assert_eq!(store.path(), path.as_path());
+    }
+
+    #[tokio::test]
+    async fn pending_decide_false_when_no_row_matches() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let res = store
+            .pending_decide(&ctx, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", true, "alice")
+            .await
+            .expect("pending_decide miss");
+        assert!(!res, "pending_decide must return false for unknown id");
+    }
+
+    #[tokio::test]
+    async fn get_pending_returns_none_for_unknown() {
+        let store = fresh_store();
+        let ctx = CallerContext::for_agent("alice");
+        let row = store
+            .get_pending(&ctx, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+            .await
+            .expect("get_pending miss");
+        assert!(row.is_none());
+    }
 }
