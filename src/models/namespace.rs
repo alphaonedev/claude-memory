@@ -123,6 +123,10 @@ pub enum GovernedAction {
     Store,
     Delete,
     Promote,
+    /// v0.7.0 L1-8: `memory_reflect` approval gate. Queued when
+    /// `GovernancePolicy::require_approval_above_depth` is set and the
+    /// proposed reflection depth exceeds the threshold.
+    Reflect,
 }
 
 impl GovernedAction {
@@ -132,6 +136,7 @@ impl GovernedAction {
             Self::Store => "store",
             Self::Delete => "delete",
             Self::Promote => "promote",
+            Self::Reflect => "reflect",
         }
     }
 }

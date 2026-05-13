@@ -5101,6 +5101,61 @@ pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<G
     None
 }
 
+/// v0.7.0 L1-8 — read `governance.require_approval_above_depth` from the
+/// namespace's most-specific governance metadata blob, leaf-first.
+///
+/// This is intentionally a free function (not a field on
+/// [`GovernancePolicy`]) to avoid introducing a new required struct field
+/// that would need updating at every `GovernancePolicy { … }` literal
+/// in the codebase. The existing `GovernancePolicy` struct represents
+/// the resolved enforcement policy; this field is a pre-write interception
+/// threshold that lives beside it, not inside it.
+///
+/// Returns `None` when:
+/// - no namespace standard is configured at any level of the chain, OR
+/// - the standard's `metadata.governance` blob is absent or null, OR
+/// - the blob does not contain a `require_approval_above_depth` key, OR
+/// - the key is present but `null`.
+///
+/// Returns `Some(threshold)` when the key is a non-null unsigned integer.
+/// Callers in `memory_reflect` compare `proposed_depth > threshold` and
+/// queue a `pending_actions` row when the condition is true.
+pub fn resolve_require_approval_above_depth(conn: &Connection, namespace: &str) -> Option<u32> {
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        let standard_id = match get_namespace_standard(conn, &level) {
+            Ok(Some(id)) => id,
+            _ => continue,
+        };
+        let mem = match get(conn, &standard_id) {
+            Ok(Some(m)) => m,
+            _ => continue,
+        };
+        // Governance blob must exist and not be null.
+        let gov = match mem.metadata.get("governance") {
+            Some(g) if !g.is_null() => g,
+            _ => continue,
+        };
+        // The field is optional inside the blob — `None` means skip this
+        // level and keep walking (inherit semantics: an ancestor that sets
+        // the field governs if the leaf does not override it).
+        if let Some(threshold) = gov.get("require_approval_above_depth") {
+            if let Some(n) = threshold.as_u64() {
+                return Some(n as u32);
+            }
+            // Key present but null → no gate at this level; keep walking.
+        }
+        // Policy found at this level but no require_approval_above_depth
+        // key → no gate; stop walking (same leaf-first-wins semantics as
+        // the main resolve_governance_policy walker: a leaf policy that
+        // doesn't set the field takes precedence over a parent that does).
+        if GovernancePolicy::from_metadata(&mem.metadata).is_some() {
+            return None;
+        }
+    }
+    None
+}
+
 /// Return true if `agent_id` matches a registered agent in `_agents`.
 pub fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
     let title = format!("agent:{agent_id}");
@@ -5248,6 +5303,12 @@ pub fn enforce_governance(
         GovernedAction::Store => &policy.write,
         GovernedAction::Delete => &policy.delete,
         GovernedAction::Promote => &policy.promote,
+        // v0.7.0 L1-8: Reflect is gated by the L1-8 approval mechanism
+        // (`require_approval_above_depth`) in the MCP handler rather than
+        // the standard `enforce_governance` pipeline. Map to `write`
+        // as the conservative fallback so the arm compiles; in practice
+        // no current callsite passes `GovernedAction::Reflect` here.
+        GovernedAction::Reflect => &policy.write,
     };
     let ns_owner = if matches!(action, GovernedAction::Store) {
         namespace_owner(conn, namespace)
@@ -5443,6 +5504,13 @@ pub fn get_pending_action(conn: &Connection, id: &str) -> Result<Option<PendingA
 /// transition. Does NOT execute the action itself — the caller replays
 /// the payload on approval (the db layer doesn't know how to execute
 /// cross-interface write semantics).
+///
+/// v0.7.0 S5-M2 — on a successful deny transition this function appends a
+/// `pending_action.denied` row to `signed_events` so the audit chain
+/// captures every governance refusal alongside the approval and timeout
+/// events. The emit is best-effort: failure is logged but does NOT roll
+/// back the decision write (operators inspecting the audit chain see a
+/// gap rather than losing the underlying decision).
 pub fn decide_pending_action(
     conn: &Connection,
     id: &str,
@@ -5456,7 +5524,154 @@ pub fn decide_pending_action(
          WHERE id = ?4 AND status = 'pending'",
         params![new_status, decided_by, now, id],
     )?;
+    // S5-M2: emit a `pending_action.denied` audit row when the transition
+    // landed and the decision is a deny. Approve emits later (after
+    // execution) so the audit row captures the post-execute state — see
+    // `execute_pending_action`.
+    if updated > 0 && !approve {
+        if let Ok(Some(pa)) = get_pending_action(conn, id) {
+            emit_pending_action_event(conn, &pa, "pending_action.denied", Some(decided_by));
+        }
+    }
     Ok(updated > 0)
+}
+
+/// v0.7.0 S5-M1/M2 — append a `pending_action.<state>` row to
+/// `signed_events` so the audit chain captures every governance
+/// decision transition (approve / deny / timeout).
+///
+/// `event_type` is one of:
+/// - `"pending_action.approved"` (emitted from `execute_pending_action`
+///   after a successful execute)
+/// - `"pending_action.denied"` (emitted from `decide_pending_action`
+///   on a deny transition)
+/// - `"pending_action.timed_out"` (emitted from
+///   `sweep_pending_action_timeouts` per expired row)
+///
+/// The CBOR payload encodes `(pending_id, action_type, namespace,
+/// requested_by, decided_by, status, timestamp)` so a downstream
+/// auditor can replay decision provenance without re-reading the
+/// (mutable) `pending_actions` table.
+///
+/// Best-effort: any encode / append failure is logged at WARN; the
+/// caller's primary mutation MUST NOT roll back on audit failure.
+/// Mirrors the same posture as `memory_link.invalidated` emit (the
+/// audit chain is allowed to gap, the underlying write is not).
+fn emit_pending_action_event(
+    conn: &Connection,
+    pa: &PendingAction,
+    event_type: &str,
+    decided_by_override: Option<&str>,
+) {
+    // Build the canonical CBOR payload. We sort keys via a BTreeMap so
+    // the encoding is stable across releases — the SHA-256 over these
+    // bytes is the audit chain's commitment to the decision shape.
+    // Mirrors the encoding pattern used by `identity::sign::canonical_cbor`
+    // (ciborium + BTreeMap-ordered keys) so the audit chain stays
+    // canonicalized across emit sites.
+    use std::collections::BTreeMap;
+    let decided_by = decided_by_override
+        .map(str::to_string)
+        .or_else(|| pa.decided_by.clone())
+        .unwrap_or_default();
+    let timestamp = Utc::now().to_rfc3339();
+    let mut map: BTreeMap<&str, ciborium::Value> = BTreeMap::new();
+    map.insert("pending_id", ciborium::Value::Text(pa.id.clone()));
+    map.insert("action_type", ciborium::Value::Text(pa.action_type.clone()));
+    map.insert("namespace", ciborium::Value::Text(pa.namespace.clone()));
+    map.insert(
+        "requested_by",
+        ciborium::Value::Text(pa.requested_by.clone()),
+    );
+    map.insert("decided_by", ciborium::Value::Text(decided_by.clone()));
+    map.insert("status", ciborium::Value::Text(pa.status.clone()));
+    map.insert("timestamp", ciborium::Value::Text(timestamp.clone()));
+    let entries: Vec<(ciborium::Value, ciborium::Value)> = map
+        .into_iter()
+        .map(|(k, v)| (ciborium::Value::Text(k.to_string()), v))
+        .collect();
+    let value = ciborium::Value::Map(entries);
+    let mut cbor: Vec<u8> = Vec::with_capacity(128);
+    if let Err(e) = ciborium::ser::into_writer(&value, &mut cbor) {
+        tracing::warn!(
+            target: "signed_events",
+            pending_id = %pa.id,
+            event_type,
+            "failed to encode canonical CBOR for pending_action event: {e}"
+        );
+        return;
+    }
+
+    // Audit row's `agent_id` field: the decision actor (decider) for
+    // approve / deny, the requester for the requester-less timeout
+    // path (no human/agent decided — the sweeper transitioned the
+    // row, so the "actor" is the originating requester).
+    let agent_id = if event_type == "pending_action.timed_out" {
+        pa.requested_by.clone()
+    } else {
+        decided_by
+    };
+
+    let event = crate::signed_events::SignedEvent {
+        id: uuid::Uuid::new_v4().to_string(),
+        agent_id,
+        event_type: event_type.to_string(),
+        payload_hash: crate::signed_events::payload_hash(&cbor),
+        signature: None,
+        attest_level: "unsigned".to_string(),
+        timestamp,
+    };
+    if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
+        tracing::warn!(
+            target: "signed_events",
+            pending_id = %pa.id,
+            event_type,
+            "failed to append pending_action audit row: {e}"
+        );
+    }
+}
+
+/// v0.7.0 S5-H4 — extract `metadata.agent_id` from a pending-action
+/// store/reflect payload and verify it matches `pa.requested_by`.
+///
+/// The S5 audit caught an approver-on-behalf laundering hole: a caller
+/// could queue a `pending_action` with `requested_by = "alice"` but
+/// embed a payload whose `metadata.agent_id = "bob"`, and on execute
+/// the new memory would land attributed to bob — the approver, not the
+/// requester, was attributing the write. This helper closes the gap by
+/// requiring the payload's claimed agent to equal the pending row's
+/// `requested_by`. If the payload omits an agent_id, we treat that as
+/// a match (older callers may not have populated the field; the
+/// substrate still records `pa.requested_by` as the canonical attributor
+/// and the memory's `metadata.agent_id` gets stamped from there).
+///
+/// The check fires only on payload shapes that carry an agent_id —
+/// today: `store` (full Memory JSON) and `reflect` (the L1-8 payload
+/// that includes `agent_id`). `delete` / `promote` payloads do not
+/// carry an agent_id (the action is attributed to `pa.requested_by`
+/// directly), so this function returns `Ok(())` on those.
+fn verify_payload_agent_id(pa: &PendingAction) -> Result<()> {
+    let payload_agent_id = pa
+        .payload
+        .get("agent_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            pa.payload
+                .get("metadata")
+                .and_then(|m| m.get("agent_id"))
+                .and_then(serde_json::Value::as_str)
+        });
+    if let Some(claimed) = payload_agent_id
+        && claimed != pa.requested_by
+    {
+        anyhow::bail!(
+            "approver-on-behalf laundering refused: payload agent_id '{claimed}' != requested_by '{requester}' (pending_id={pid})",
+            claimed = claimed,
+            requester = pa.requested_by,
+            pid = pa.id,
+        );
+    }
+    Ok(())
 }
 
 /// Task 1.10 — outcome of an approver-aware approve call.
@@ -5573,6 +5788,27 @@ pub fn approve_with_approver_type(
 /// Task 1.10 — Execute an approved pending action's payload. Callers invoke
 /// this after `approve_with_approver_type` returns `Approved`. Returns the
 /// affected memory id (new id for store, existing id for delete/promote).
+///
+/// v0.7.0 S5-H1 — adds a `"reflect"` arm so an approved deep-reflection
+/// queued by the L1-8 MCP gate (see `mcp::tools::reflect`) actually lands
+/// instead of erroring out as "unknown action_type". The arm reconstructs
+/// the original [`ReflectInput`] from the queued payload and replays it
+/// through [`reflect`], inheriting the same depth-cap / source-resolution
+/// checks the direct write path runs.
+///
+/// v0.7.0 S5-H4 — every arm runs [`verify_payload_agent_id`] BEFORE the
+/// side-effecting mutation so an approver cannot launder a payload whose
+/// embedded `agent_id` disagrees with the original requester (the
+/// `pending_actions.requested_by` column). The refusal is a hard
+/// `MemoryError::Validation`-shaped anyhow bail; on refusal we emit a
+/// `pending_action.refused_agent_id_mismatch` audit row so the laundering
+/// attempt is captured by the signed_events chain.
+///
+/// v0.7.0 S5-M1 — on a successful execute the function appends a
+/// `pending_action.approved` row to `signed_events` (the deny + timeout
+/// emits live in `decide_pending_action` and
+/// `sweep_pending_action_timeouts` respectively, so the three governance
+/// transitions are audit-complete together).
 pub fn execute_pending_action(conn: &Connection, pending_id: &str) -> Result<Option<String>> {
     let Some(pa) = get_pending_action(conn, pending_id)? else {
         anyhow::bail!("pending action not found: {pending_id}");
@@ -5580,7 +5816,15 @@ pub fn execute_pending_action(conn: &Connection, pending_id: &str) -> Result<Opt
     if pa.status != "approved" {
         anyhow::bail!("cannot execute non-approved action (status={})", pa.status);
     }
-    match pa.action_type.as_str() {
+    // S5-H4: refuse approver-on-behalf laundering BEFORE the side-effecting
+    // write. Emit an audit row on refusal so the laundering attempt is
+    // captured by the signed_events chain even when the substrate
+    // bails the execute.
+    if let Err(e) = verify_payload_agent_id(&pa) {
+        emit_pending_action_event(conn, &pa, "pending_action.refused_agent_id_mismatch", None);
+        return Err(e);
+    }
+    let memory_id = match pa.action_type.as_str() {
         "store" => {
             let mut mem: Memory = serde_json::from_value(pa.payload.clone())
                 .map_err(|e| anyhow::anyhow!("invalid store payload: {e}"))?;
@@ -5591,14 +5835,14 @@ pub fn execute_pending_action(conn: &Connection, pending_id: &str) -> Result<Opt
             mem.updated_at = now;
             mem.access_count = 0;
             let actual_id = insert(conn, &mem)?;
-            Ok(Some(actual_id))
+            Some(actual_id)
         }
         "delete" => {
             if let Some(mid) = pa.memory_id.clone() {
                 delete(conn, &mid)?;
-                Ok(Some(mid))
+                Some(mid)
             } else {
-                Ok(None)
+                None
             }
         }
         "promote" => {
@@ -5606,29 +5850,155 @@ pub fn execute_pending_action(conn: &Connection, pending_id: &str) -> Result<Opt
                 if let Some(to_ns) = pa.payload.get("to_namespace").and_then(|v| v.as_str()) {
                     // Vertical promotion to ancestor.
                     let clone_id = promote_to_namespace(conn, &mid, to_ns)?;
-                    return Ok(Some(clone_id));
+                    Some(clone_id)
+                } else {
+                    // Tier bump to long + clear expiry.
+                    let (_found, _changed) = update(
+                        conn,
+                        &mid,
+                        None,
+                        None,
+                        Some(&Tier::Long),
+                        None,
+                        None,
+                        None,
+                        None,
+                        Some(""),
+                        None,
+                    )?;
+                    Some(mid)
                 }
-                // Tier bump to long + clear expiry.
-                let (_found, _changed) = update(
-                    conn,
-                    &mid,
-                    None,
-                    None,
-                    Some(&Tier::Long),
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(""),
-                    None,
-                )?;
-                Ok(Some(mid))
             } else {
-                Ok(None)
+                None
             }
         }
+        "reflect" => execute_reflect_from_payload(conn, &pa)?,
         other => anyhow::bail!("unknown action_type: {other}"),
+    };
+    // S5-M1: emit the approve audit row after the side-effecting write
+    // succeeded so the audit chain reflects the post-execute state. The
+    // emit is best-effort (warn-only) so an audit-side failure does not
+    // roll back the governance decision.
+    emit_pending_action_event(
+        conn,
+        &pa,
+        "pending_action.approved",
+        pa.decided_by.as_deref(),
+    );
+    Ok(memory_id)
+}
+
+/// v0.7.0 S5-H1 — replay an approved reflect pending action through
+/// [`reflect`]. Factored out of [`execute_pending_action`] so the arm
+/// stays focused on payload deserialization + the substrate call, and
+/// so the unit test (`test_execute_reflect_arm_succeeds_round_trip`)
+/// can exercise the helper without duplicating the wrapper logic.
+///
+/// Payload shape (mirrors what `mcp::tools::reflect` queued in L1-8):
+///
+/// ```json
+/// {
+///   "source_ids": ["…", "…"],
+///   "title": "…",
+///   "content": "…",
+///   "namespace": "…",
+///   "tier": "mid",
+///   "tags": ["…"],
+///   "priority": 5,
+///   "confidence": 1.0,
+///   "agent_id": "…",
+///   "proposed_depth": 3,
+///   "metadata": { … }
+/// }
+/// ```
+///
+/// All fields are optional except `source_ids`, `title`, and `content`
+/// (the substrate validator rejects empty values, so missing keys
+/// surface as a `Validation` error rather than a panic).
+fn execute_reflect_from_payload(conn: &Connection, pa: &PendingAction) -> Result<Option<String>> {
+    let payload = &pa.payload;
+    let source_ids: Vec<String> = payload
+        .get("source_ids")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if source_ids.is_empty() {
+        anyhow::bail!("invalid reflect payload: source_ids missing or empty");
     }
+    let title = payload
+        .get("title")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid reflect payload: title missing"))?
+        .to_string();
+    let content = payload
+        .get("content")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow::anyhow!("invalid reflect payload: content missing"))?
+        .to_string();
+    let namespace = payload
+        .get("namespace")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| Some(pa.namespace.clone()));
+    let tier = payload
+        .get("tier")
+        .and_then(|v| v.as_str())
+        .and_then(Tier::from_str)
+        .unwrap_or(Tier::Mid);
+    let tags: Vec<String> = payload
+        .get("tags")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let priority = i32::try_from(
+        payload
+            .get("priority")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(5),
+    )
+    .unwrap_or(5);
+    let confidence = payload
+        .get("confidence")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(1.0);
+    // Use the queued payload's agent_id when present (already verified
+    // to match `pa.requested_by` by `verify_payload_agent_id`), else
+    // fall back to `pa.requested_by` — the substrate stamps the value
+    // onto `metadata.agent_id` so attribution stays consistent.
+    let agent_id = payload
+        .get("agent_id")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| pa.requested_by.clone());
+    let metadata = payload
+        .get("metadata")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let input = crate::storage::reflect::ReflectInput {
+        source_ids,
+        title,
+        content,
+        namespace,
+        tier,
+        tags,
+        priority,
+        confidence,
+        source: "claude".to_string(),
+        agent_id,
+        metadata,
+    };
+    let outcome = crate::storage::reflect::reflect(conn, &input)
+        .map_err(|e| anyhow::anyhow!("reflect execute failed: {e}"))?;
+    Ok(Some(outcome.id))
 }
 
 /// Check if a memory ID is a namespace standard (used by consolidate to warn).
@@ -5811,6 +6181,16 @@ pub fn sweep_pending_action_timeouts(
         }
     }
     tx_savepoint.commit()?;
+    // v0.7.0 S5-M2 — emit a `pending_action.timed_out` audit row per
+    // expired pending row so the audit chain captures the timeout
+    // transition alongside approve / deny. Best-effort: a missing
+    // pending row or audit failure is logged at WARN; the sweep
+    // itself has already committed.
+    for (id, _) in &rows {
+        if let Ok(Some(pa)) = get_pending_action(conn, id) {
+            emit_pending_action_event(conn, &pa, "pending_action.timed_out", None);
+        }
+    }
     Ok(rows)
 }
 
@@ -10489,5 +10869,215 @@ mod tests {
             "serde wire form must be the canonical lowercase snake_case \
              string; got {wire}"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // v0.7.0 S5 verdict — approval exec fixes:
+    //   S5-H1 reflect arm, S5-H4 agent_id verify,
+    //   S5-M1/M2 signed_events emit on approve/deny/timeout.
+    // ---------------------------------------------------------------
+
+    /// Helper — count signed_events rows matching `event_type`. Used by
+    /// the audit-emit tests below so they don't have to scrape the table
+    /// in raw SQL each time.
+    fn count_signed_events(conn: &Connection, event_type: &str) -> usize {
+        crate::signed_events::list_signed_events(conn, None, 1000, 0)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|e| e.event_type == event_type)
+            .count()
+    }
+
+    /// S5-H1 — an approved `reflect` pending action MUST execute through
+    /// `db::reflect` and persist a new reflection memory whose
+    /// `metadata.reflection_metadata.sources` matches the queued
+    /// `source_ids`. Pre-fix this would error with
+    /// "unknown action_type: reflect" and the queued row would never land.
+    #[test]
+    fn test_execute_reflect_arm_succeeds_round_trip() {
+        let conn = test_db();
+        // Seed two source memories the reflection will reflect on.
+        let src1 = make_memory("src-1", "ns/reflect", Tier::Mid, 5);
+        let src2 = make_memory("src-2", "ns/reflect", Tier::Mid, 5);
+        let src1_id = insert(&conn, &src1).unwrap();
+        let src2_id = insert(&conn, &src2).unwrap();
+
+        // Queue an approved reflect pending action with the L1-8 payload shape.
+        let payload = serde_json::json!({
+            "source_ids": [src1_id, src2_id],
+            "title": "reflective synthesis",
+            "content": "deep observation across sources",
+            "namespace": "ns/reflect",
+            "tier": "mid",
+            "tags": ["reflective"],
+            "priority": 6,
+            "confidence": 0.9,
+            "agent_id": "alice",
+            "proposed_depth": 1,
+        });
+        let pending_id = queue_pending_action(
+            &conn,
+            crate::models::GovernedAction::Reflect,
+            "ns/reflect",
+            None,
+            "alice",
+            &payload,
+        )
+        .unwrap();
+        // Approve so execute_pending_action accepts the row.
+        assert!(decide_pending_action(&conn, &pending_id, true, "approver").unwrap());
+
+        let result = execute_pending_action(&conn, &pending_id).expect("reflect execute ok");
+        let new_id = result.expect("reflect must return the new reflection id");
+        let mem = get(&conn, &new_id)
+            .unwrap()
+            .expect("reflection memory landed");
+        assert_eq!(mem.title, "reflective synthesis");
+        assert_eq!(mem.namespace, "ns/reflect");
+        assert_eq!(mem.reflection_depth, 1, "depth = max(source depths) + 1");
+        // The substrate stamps `metadata.agent_id` from the input.agent_id field.
+        assert_eq!(mem.metadata["agent_id"], "alice");
+    }
+
+    /// S5-H4 — a queued payload whose `agent_id` does NOT match
+    /// `pa.requested_by` is approver-on-behalf laundering. Execute MUST
+    /// refuse, MUST NOT insert the memory, AND MUST emit a
+    /// `pending_action.refused_agent_id_mismatch` audit row so the
+    /// attempt is captured by the signed_events chain.
+    #[test]
+    fn test_execute_refuses_payload_agent_id_mismatch() {
+        let conn = test_db();
+        let mut mem = make_memory("laundered store", "ns/launder", Tier::Mid, 5);
+        // Requester is "alice", but the payload claims agent_id "bob" —
+        // pre-fix this would land a memory attributed to "bob" even
+        // though the original requester was "alice".
+        mem.metadata = serde_json::json!({"agent_id": "bob"});
+        let payload = serde_json::to_value(&mem).unwrap();
+        let pending_id = queue_pending_action(
+            &conn,
+            crate::models::GovernedAction::Store,
+            "ns/launder",
+            None,
+            "alice",
+            &payload,
+        )
+        .unwrap();
+        assert!(decide_pending_action(&conn, &pending_id, true, "approver").unwrap());
+
+        let err = execute_pending_action(&conn, &pending_id)
+            .expect_err("execute MUST refuse laundered agent_id");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("approver-on-behalf laundering refused"),
+            "expected laundering-refusal message, got: {msg}"
+        );
+        // No memory landed.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE namespace = 'ns/launder'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0, "refused execute must not insert a memory");
+        // Audit row captured.
+        assert_eq!(
+            count_signed_events(&conn, "pending_action.refused_agent_id_mismatch"),
+            1,
+            "refusal must append a signed_events row"
+        );
+        // No approve audit emitted on refused path.
+        assert_eq!(count_signed_events(&conn, "pending_action.approved"), 0);
+    }
+
+    /// S5-M1 — a successful approve+execute MUST append a
+    /// `pending_action.approved` row to `signed_events`. Pre-fix the
+    /// audit chain had no record of the approval transition.
+    #[test]
+    fn test_approve_emits_signed_event() {
+        let conn = test_db();
+        let mem = make_memory("approved store", "ns/approve", Tier::Mid, 5);
+        let payload = serde_json::to_value(&mem).unwrap();
+        let pending_id = queue_pending_action(
+            &conn,
+            crate::models::GovernedAction::Store,
+            "ns/approve",
+            None,
+            mem.metadata["agent_id"].as_str().unwrap_or("alice"),
+            &payload,
+        )
+        .unwrap();
+        // Requester field is the same as the payload metadata.agent_id
+        // (default fixture leaves it as `{}`), so to keep the verifier
+        // happy we re-fetch and assert the queue happened. Then approve.
+        assert!(decide_pending_action(&conn, &pending_id, true, "approver").unwrap());
+        let _ = execute_pending_action(&conn, &pending_id).expect("execute ok");
+        assert_eq!(
+            count_signed_events(&conn, "pending_action.approved"),
+            1,
+            "approve+execute must append one audit row"
+        );
+        // Deny / timeout MUST NOT have been emitted.
+        assert_eq!(count_signed_events(&conn, "pending_action.denied"), 0);
+        assert_eq!(count_signed_events(&conn, "pending_action.timed_out"), 0);
+    }
+
+    /// S5-M2 — a deny transition (decide_pending_action with approve=false)
+    /// MUST append a `pending_action.denied` row to `signed_events`.
+    /// Pre-fix the deny path was silent in the audit chain.
+    #[test]
+    fn test_deny_emits_signed_event() {
+        let conn = test_db();
+        let payload = serde_json::json!({"title": "to-deny", "content": "x"});
+        let pending_id = queue_pending_action(
+            &conn,
+            crate::models::GovernedAction::Store,
+            "ns/deny",
+            None,
+            "alice",
+            &payload,
+        )
+        .unwrap();
+        let transitioned = decide_pending_action(&conn, &pending_id, false, "approver").unwrap();
+        assert!(transitioned, "deny transition must succeed on pending row");
+        assert_eq!(
+            count_signed_events(&conn, "pending_action.denied"),
+            1,
+            "deny must append one audit row"
+        );
+        // Approve / timeout MUST NOT have been emitted.
+        assert_eq!(count_signed_events(&conn, "pending_action.approved"), 0);
+        assert_eq!(count_signed_events(&conn, "pending_action.timed_out"), 0);
+    }
+
+    /// S5-M2 — the timeout sweeper MUST append one
+    /// `pending_action.timed_out` row per expired pending row.
+    /// Pre-fix the sweep transitioned rows silently, leaving the audit
+    /// chain blind to the auto-expiration.
+    #[test]
+    fn test_timeout_sweeper_emits_signed_event() {
+        let conn = test_db();
+        // Two stale pending rows + one fresh row. Only the stale rows
+        // expire under a 1-hour global default; the fresh row stays.
+        insert_stale_pending(&conn, "stale-a", "ns/x", 7_200, None);
+        insert_stale_pending(&conn, "stale-b", "ns/y", 7_200, None);
+        insert_stale_pending(&conn, "fresh-c", "ns/z", 30, None);
+
+        let expired = sweep_pending_action_timeouts(&conn, 3_600).unwrap();
+        assert_eq!(expired.len(), 2, "two stale rows must expire");
+        assert_eq!(
+            count_signed_events(&conn, "pending_action.timed_out"),
+            2,
+            "one audit row per expired pending row"
+        );
+        // The fresh row is still pending; no audit emit for it.
+        let fresh_status: String = conn
+            .query_row(
+                "SELECT status FROM pending_actions WHERE id = 'fresh-c'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fresh_status, "pending");
     }
 }

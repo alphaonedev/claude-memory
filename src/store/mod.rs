@@ -1115,6 +1115,8 @@ pub enum GovernedAction {
     Store,
     Delete,
     Promote,
+    /// v0.7.0 L1-8: `memory_reflect` approval gate.
+    Reflect,
 }
 
 impl GovernedAction {
@@ -1126,6 +1128,7 @@ impl GovernedAction {
             Self::Store => "store",
             Self::Delete => "delete",
             Self::Promote => "promote",
+            Self::Reflect => "reflect",
         }
     }
 }
@@ -1136,6 +1139,7 @@ impl From<crate::models::GovernedAction> for GovernedAction {
             crate::models::GovernedAction::Store => Self::Store,
             crate::models::GovernedAction::Delete => Self::Delete,
             crate::models::GovernedAction::Promote => Self::Promote,
+            crate::models::GovernedAction::Reflect => Self::Reflect,
         }
     }
 }
