@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 29).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 30).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -146,7 +146,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       rows. ALTER TABLE emitted from Rust (SQLite has no `ADD COLUMN
 //       IF NOT EXISTS`); fresh-schema installs pick it up inline from
 //       the `SCHEMA` constant above.
-const CURRENT_SCHEMA_VERSION: i64 = 29;
+// v30 = v0.7.0 (issue #691) — `governance_rules` table backing the
+//       substrate-level agent-action rules engine. Seed rules R001-R004
+//       land at `enabled=0`; operator activates with `ai-memory rules
+//       enable <id> --sign`. CREATE TABLE IF NOT EXISTS + INSERT OR
+//       IGNORE on seed — fully idempotent.
+const CURRENT_SCHEMA_VERSION: i64 = 30;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -224,6 +229,16 @@ const MIGRATION_V27_SQLITE: &str =
 // call returns a `QUOTA_EXCEEDED` diagnostic naming the limit hit.
 const MIGRATION_V28_SQLITE: &str =
     include_str!("../../migrations/sqlite/0022_v07_agent_quotas.sql");
+// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+// `governance_rules` table holds typed rules (kind / matcher / severity)
+// evaluated by `check_agent_action`. Seed rules R001-R004 land at
+// `enabled=0` (per design revision 2026-05-13) so the test fleet does
+// not break on macOS `/private/tmp` realpath. Operator activates with
+// `ai-memory rules enable <id> --sign` after running the test-fleet
+// audit. CREATE TABLE IF NOT EXISTS + INSERT OR IGNORE — fully
+// idempotent.
+const MIGRATION_V30_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0024_v07_governance_rules.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -855,6 +870,14 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 )?;
             }
         }
+        if version < 30 {
+            // v0.7.0 (issue #691) — `governance_rules` table backing the
+            // substrate-level agent-action rules engine. CREATE TABLE IF
+            // NOT EXISTS + INSERT OR IGNORE on the four seed rows; seed
+            // rows land at `enabled=0` per design revision 2026-05-13
+            // (operator activates after test-fleet audit).
+            conn.execute_batch(MIGRATION_V30_SQLITE)?;
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -929,12 +952,12 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
-        // The module docstring advertises 29; bumping the constant
+        // The module docstring advertises 30; bumping the constant
         // without updating the docstring is a documented foot-gun.
         // We pin the relationship so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 29,
-            "module docstring advertises 29; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 30,
+            "module docstring advertises 30; bump the docstring when this number changes"
         );
     }
 

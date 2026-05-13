@@ -1208,6 +1208,40 @@ pub fn tool_definitions() -> Value {
                         "agent_id": {"type": "string", "description": "Optional — restrict to one agent. When omitted, returns every quota row."}
                     }
                 }
+            },
+            {
+                "name": "memory_check_agent_action",
+                "description": "Substrate-rule-bound, harness-mediated check of a proposed agent action (Bash / FilesystemWrite / NetworkRequest / ProcessSpawn / Custom) against the governance_rules table. Returns Allow / Refuse / Warn (issue #691).",
+                "docs": "v0.7.0 (issue #691) — substrate-level agent-action rules engine. Read-only check of one proposed action against every enabled rule of matching kind. The harness's PreToolUse hook (type=mcp_tool) calls this on every Bash/Write/Edit dispatch and honors the decision. This is the read-side MCP surface; rule MUTATION over MCP is explicitly disabled (return governance.not_available_over_mcp) — use the CLI `ai-memory rules` with --sign or the HTTP admin endpoints with X-AI-Memory-Operator-Signature header.",
+                "inputSchema": {
+                    "type": "object",
+                    "required": ["kind"],
+                    "properties": {
+                        "kind": {"type": "string", "enum": ["bash", "filesystem_write", "network_request", "process_spawn", "custom"]},
+                        "command": {"type": "string", "description": "Required when kind=bash."},
+                        "cwd": {"type": "string", "description": "Optional cwd for kind=bash."},
+                        "path": {"type": "string", "description": "Required when kind=filesystem_write."},
+                        "byte_estimate": {"type": "integer", "description": "Optional bytes-to-write hint."},
+                        "host": {"type": "string", "description": "Required when kind=network_request."},
+                        "scheme": {"type": "string", "description": "Optional scheme; defaults to https."},
+                        "binary": {"type": "string", "description": "Required when kind=process_spawn."},
+                        "args": {"type": "array", "items": {"type": "string"}, "description": "Optional argv tail for process_spawn."},
+                        "custom_kind": {"type": "string", "description": "Required when kind=custom."},
+                        "agent_id": {"type": "string", "description": "Optional caller id (audit-row provenance)."}
+                    }
+                }
+            },
+            {
+                "name": "memory_rule_list",
+                "description": "List substrate-level agent-action rules. Read-only (issue #691).",
+                "docs": "v0.7.0 (issue #691) — list every rule in the governance_rules table. Optional `kind` filter and `enabled_only` flag. Rule mutation is operator-only (CLI/HTTP with signed operator key); MCP cannot add/remove/enable/disable rules per design revision 2026-05-13.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "kind": {"type": "string", "description": "Optional — restrict to one AgentAction kind."},
+                        "enabled_only": {"type": "boolean", "description": "Optional — when true, skip disabled rules. Default false."}
+                    }
+                }
             }
         ]
     })

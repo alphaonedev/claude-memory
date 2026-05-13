@@ -141,8 +141,37 @@ pub fn handle_capabilities_with_conn_v3(
     // B4 — present only when we know the harness; otherwise omit so
     // unaware callers and HTTP callers see no schema drift.
     let deferred = harness.map(crate::harness::Harness::supports_deferred_registration);
-    serde_json::to_value(caps.to_v3(summary, describe, tools, permitted, deferred))
-        .map_err(|e| e.to_string())
+    let mut value = serde_json::to_value(caps.to_v3(summary, describe, tools, permitted, deferred))
+        .map_err(|e| e.to_string())?;
+    // v0.7.0 (issue #691) — substrate-level agent-action rules engine
+    // surface. Stamps two top-level keys onto the `governance` object
+    // in the v3 capabilities payload. Operator UI can inspect these
+    // without inferring from tool registration order.
+    //
+    // `agent_action_check` is the honest enforcement label:
+    //   "substrate-authoritative-for-internal-ops" — substrate
+    //   gates are mechanical at the K9 write path; agent-external
+    //   ops are harness-mediated (PreToolUse hook calls
+    //   memory_check_agent_action).
+    //
+    // `rules_immutable_seed` reflects the seed-rules-at-enabled=0
+    // posture per design revision 2026-05-13.
+    if let Some(obj) = value.as_object_mut() {
+        let gov = obj
+            .entry("governance".to_string())
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(gov_obj) = gov.as_object_mut() {
+            gov_obj.insert(
+                "agent_action_check".to_string(),
+                serde_json::Value::String("substrate-authoritative-for-internal-ops".to_string()),
+            );
+            gov_obj.insert(
+                "rules_immutable_seed".to_string(),
+                serde_json::Value::Bool(true),
+            );
+        }
+    }
+    Ok(value)
 }
 
 /// Build the runtime-overlaid [`Capabilities`] document. Shared between

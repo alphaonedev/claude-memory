@@ -65,6 +65,7 @@ use crate::cli::link::{LinkArgs, ResolveArgs};
 use crate::cli::logs::LogsArgs;
 use crate::cli::promote::PromoteArgs;
 use crate::cli::recall::RecallArgs;
+use crate::cli::rules::RulesArgs;
 use crate::cli::search::SearchArgs;
 use crate::cli::store::StoreArgs;
 use crate::cli::sync::{SyncArgs, SyncDaemonArgs};
@@ -229,6 +230,14 @@ pub enum Command {
     /// key storage (TPM/HSM/Secure Enclave) is out of OSS scope and
     /// lives in the AgenticMem commercial layer.
     Identity(IdentityArgs),
+    /// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+    /// CRUD over the `governance_rules` table consulted by
+    /// `check_agent_action`. Mutation verbs (add/enable/disable/remove)
+    /// require the operator's Ed25519 keypair on disk at
+    /// `<key-dir>/operator.priv` (mode 0600); without `--sign` they
+    /// refuse with `governance.no_operator_key`. Read verbs (list /
+    /// check) are unprivileged.
+    Rules(RulesArgs),
     /// List / approve / reject governance-pending actions (Task 1.9)
     Pending(PendingArgs),
     /// v0.6.0.0: snapshot the `SQLite` database to a timestamped backup
@@ -870,6 +879,17 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             cli::identity::run(a, j, &mut out)
+        }
+        Command::Rules(a) => {
+            // v0.7.0 (issue #691) — substrate-level agent-action rules
+            // engine. Mutation verbs require the operator key on disk;
+            // read verbs (list / check) work without it.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::rules::run(&db_path, a, j, &mut out)
         }
         Command::Pending(a) => {
             let stdout = std::io::stdout();

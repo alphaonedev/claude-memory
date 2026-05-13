@@ -37,6 +37,18 @@ use crate::config::{PermissionsMode, active_permissions_mode};
 use crate::hooks::decision::HookDecision;
 use crate::hooks::events::MemoryDelta;
 
+// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+// The K9 pipeline below gates substrate-INTERNAL ops (memory_store,
+// memory_link, ...). `agent_action` adds the parallel engine for
+// agent-EXTERNAL actions (Bash, FilesystemWrite, NetworkRequest,
+// ProcessSpawn, Custom). `rules_store` is the typed CRUD over the
+// `governance_rules` table. Both ship callable but un-wired: storage
+// write paths do NOT consult `check_agent_action` in this commit;
+// the seed rules R001-R004 land at `enabled=0` awaiting operator
+// activation via `ai-memory rules enable <id> --sign`.
+pub mod agent_action;
+pub mod rules_store;
+
 // ---------------------------------------------------------------------------
 // Op tag — the five gated operations
 // ---------------------------------------------------------------------------

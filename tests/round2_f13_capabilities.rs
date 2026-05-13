@@ -82,12 +82,12 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     // v0.7.0 Task 4/8 added `memory_reflect` to Family::Power, bumping
     // the substantive total from 50 to 51.
     assert!(
-        summary.contains("52 of 52 memory tools"),
-        "summary must report 52 of 52 memory tools; got: {summary}"
+        summary.contains("54 of 54 memory tools"),
+        "summary must report 54 of 54 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 52 memory tools"),
-        "describe_to_user must report all 52 memory tools; got: {describe}"
+        describe.contains("all 54 memory tools"),
+        "describe_to_user must report all 54 memory tools; got: {describe}"
     );
 }
 
@@ -101,8 +101,8 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     // `memory_reflect` to Family::Power, bumping the substantive total
     // from 50 to 51.
     assert!(
-        summary.contains("7 of 52 memory tools"),
-        "summary must report 7 of 52 memory tools; got: {summary}"
+        summary.contains("7 of 54 memory tools"),
+        "summary must report 7 of 54 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

@@ -41,6 +41,13 @@ pub(super) mod quota_status;
 pub(super) mod pending;
 pub(super) mod archive;
 pub(super) mod session_start;
+// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+// Two read-only MCP tools: `memory_check_agent_action` (the
+// PreToolUse hook target) and `memory_rule_list` (operator dashboard
+// surface). Mutation tools are explicitly NOT registered over MCP
+// per design revision 2026-05-13 — operator uses CLI or HTTP.
+pub(super) mod check_agent_action;
+pub(super) mod rule_list;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
@@ -109,4 +116,6 @@ pub(super) use self::{
     archive::handle_archive_stats,
     archive::handle_gc,
     session_start::handle_session_start,
+    check_agent_action::handle_check_agent_action,
+    rule_list::handle_rule_list,
 };

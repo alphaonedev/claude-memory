@@ -311,6 +311,9 @@ mod pending;
 mod promote;
 #[path = "tools/quota_status.rs"]
 mod quota_status;
+// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+#[path = "tools/check_agent_action.rs"]
+mod check_agent_action;
 #[path = "tools/recall.rs"]
 mod recall;
 #[path = "tools/reflect.rs"]
@@ -319,6 +322,8 @@ mod reflect;
 mod reflection_origin;
 #[path = "tools/replay.rs"]
 mod replay;
+#[path = "tools/rule_list.rs"]
+mod rule_list;
 #[path = "tools/search.rs"]
 mod search;
 #[path = "tools/session_start.rs"]
@@ -351,12 +356,26 @@ pub(crate) use namespace::{
 pub(crate) use notify::{handle_inbox, handle_notify};
 pub use pending::{handle_pending_approve, handle_pending_reject};
 pub use quota_status::handle_quota_status;
+// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
+pub use check_agent_action::handle_check_agent_action;
 pub use recall::handle_recall;
 pub use recall::handle_recall_with_pre_recall_hook;
 pub use replay::handle_replay;
+pub use rule_list::handle_rule_list;
 pub(crate) use session_start::handle_session_start;
 pub(crate) use subscribe::handle_unsubscribe;
 pub use verify::handle_verify;
+
+/// v0.7.0 (issue #691) — accessor for the stable
+/// `governance.not_available_over_mcp` error string. Consumed by
+/// `tests/governance_immutability.rs` to pin the wire vocabulary
+/// across versions. A future PR that wires the mutation refusal
+/// dispatch can re-use this constant directly rather than copy-
+/// pasting the message.
+#[must_use]
+pub fn tools_check_agent_action_mutation_disabled_error() -> &'static str {
+    check_agent_action::MCP_MUTATION_DISABLED_ERROR
+}
 
 // ---------------------------------------------------------------------------
 // Internal use — functions called from handle_request below.
@@ -883,6 +902,11 @@ fn handle_request(
                 "memory_subscription_replay" => handle_subscription_replay(conn, arguments),
                 "memory_subscription_dlq_list" => handle_subscription_dlq_list(conn, arguments),
                 "memory_quota_status" => handle_quota_status(conn, arguments),
+                // v0.7.0 (issue #691) — substrate-level agent-action
+                // rules engine. Read-only over MCP; mutation lives
+                // on CLI / HTTP.
+                "memory_check_agent_action" => handle_check_agent_action(conn, arguments),
+                "memory_rule_list" => handle_rule_list(conn, arguments),
                 // v0.7.0 L2-2 (S6-M1) — cross-peer reflection provenance.
                 "memory_reflection_origin" => handle_reflection_origin(conn, arguments),
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
@@ -1361,9 +1385,12 @@ mod tests {
         // v0.7 K8 adds memory_quota_status (Family::Power) → 51.
         // v0.7.0 Task 4/8 adds memory_reflect (Family::Power) → 52.
         // v0.7.0 L2-2 adds memory_reflection_origin (Family::Power) → 53.
+        // v0.7.0 (issue #691) adds memory_check_agent_action +
+        // memory_rule_list (Family::Power) → 55. Mutation tools are
+        // explicitly NOT registered over MCP.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 53);
+        assert_eq!(tools.len(), 55);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1418,14 +1445,15 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            53,
+            55,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
              v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list (2) + \
              v0.7 J7 memory_find_paths (1) + v0.7 K8 memory_quota_status (1) + \
              v0.7.0 Task 4/8 memory_reflect (1) + \
-             v0.7.0 L2-2 memory_reflection_origin (1) = 53"
+             v0.7.0 L2-2 memory_reflection_origin (1) + \
+             v0.7.0 (issue #691) memory_check_agent_action + memory_rule_list (2) = 55"
         );
     }
 
@@ -2398,6 +2426,21 @@ mod tests {
             // omission returns every quota row.
             ToolCase {
                 name: "memory_quota_status",
+                valid_args: json!({}),
+                required_arg: None,
+            },
+            // v0.7.0 (issue #691) — substrate-level agent-action rules
+            // engine. Read-only check; happy path on `bash` kind with
+            // a literal command (empty rule table → Allow).
+            ToolCase {
+                name: "memory_check_agent_action",
+                valid_args: json!({"kind": "bash", "command": "echo hello"}),
+                required_arg: Some("kind"),
+            },
+            // v0.7.0 (issue #691) — rule list. No required args; empty
+            // governance_rules table returns count=0.
+            ToolCase {
+                name: "memory_rule_list",
                 valid_args: json!({}),
                 required_arg: None,
             },

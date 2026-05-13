@@ -54,7 +54,7 @@ use std::time::Instant;
 pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 
 /// Upper bound of the DB-schema range this binary supports. Mirrors
-/// `db::CURRENT_SCHEMA_VERSION` (29 in v0.7.0 — v21 from K2's
+/// `db::CURRENT_SCHEMA_VERSION` (30 in v0.7.0 — v21 from K2's
 /// `pending_actions` timeout-sweeper columns, v22 from I1's
 /// `memory_transcripts` BLOB store, v23 from H2's
 /// `memory_links.attest_level` column for outbound link signing, v24
@@ -67,13 +67,14 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// ACK/retry semantics, and the dead-letter queue, v28 from K8's
 /// `agent_quotas` table backing the per-agent rate-limit + storage-cap
 /// substrate (memories/day, storage bytes, links/day, with daily reset
-/// at UTC midnight) — all part of the attested-cortex epic, and v29
+/// at UTC midnight) — all part of the attested-cortex epic, v29
 /// from Task 1/8's `memories.reflection_depth` column backing the
-/// substrate-native recursive-learning mission). When a DB's
-/// `schema_version` exceeds this, the binary is too old for a newer
-/// DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487 PR
-/// #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 29;
+/// substrate-native recursive-learning mission, and v30 from issue
+/// #691's `governance_rules` table backing the substrate-level
+/// agent-action rules engine. When a DB's `schema_version` exceeds
+/// this, the binary is too old for a newer DB and we surface a
+/// warning. v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 30;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

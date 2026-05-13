@@ -166,12 +166,13 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          time); got {v}"
     );
     assert_eq!(
-        v, 29,
+        v, 30,
         "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (29 at v0.7.0 — recursive-learning Task 1/8 bumped from 28 \
-         to 29 to add `memories.reflection_depth`). A drift here means \
-         either the binary's migrate ladder skipped a step or the new \
-         SAL `schema_version()` lookup is reading from the wrong source."
+         (30 at v0.7.0 — issue #691 bumped from 29 to 30 to add the \
+         `governance_rules` table backing the substrate-level \
+         agent-action rules engine). A drift here means either the \
+         binary's migrate ladder skipped a step or the new SAL \
+         `schema_version()` lookup is reading from the wrong source."
     );
 
     // 4) The wire-format discriminator stays alongside but distinct

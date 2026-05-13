@@ -177,15 +177,15 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // visible memory tools = 7 (the bootstrap is plumbing, not a
     // memory tool). Total memory tools = 51 - 1 = 50.
     assert!(
-        summary.starts_with("7 of 52 memory tools"),
-        "core profile summary should open with \"7 of 52 memory tools\" (Round-2 F13; \
-         v0.7.0 L2-2 added memory_reflection_origin to Family::Power, bumping the \
-         substantive total from 51 to 52); got: {summary}"
+        summary.starts_with("7 of 54 memory tools"),
+        "core profile summary should open with \"7 of 54 memory tools\" (Round-2 F13; \
+         v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list \
+         to Family::Power, bumping the substantive total from 52 to 54); got: {summary}"
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("45 are listed in this manifest"),
-        "core profile must report 45 unloaded (52 - 7); got: {summary}"
+        summary.contains("47 are listed in this manifest"),
+        "core profile must report 47 unloaded (54 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -222,9 +222,10 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
     // `memory_reflect` to Family::Power, bumping the substantive
     // total from 50 to 51.
     assert!(
-        summary.starts_with("52 of 52 memory tools"),
-        "full profile summary should open with \"52 of 52 memory tools\" (Round-2 F13; \
-         v0.7.0 L2-2 added memory_reflection_origin); got: {summary}"
+        summary.starts_with("54 of 54 memory tools"),
+        "full profile summary should open with \"54 of 54 memory tools\" (Round-2 F13; \
+         v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list); \
+         got: {summary}"
     );
     assert!(summary.contains("(full)"));
     assert!(
@@ -250,13 +251,13 @@ fn cap_v3_summary_graph_profile_counts() {
     // Graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18
     // memory tools. Total = 50 (51 - bootstrap).
     assert!(
-        summary.starts_with("18 of 52 memory tools"),
+        summary.starts_with("18 of 54 memory tools"),
         "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18 memory tools \
-         (Round-2 F13: bootstrap excluded; v0.7.0 L2-2 added memory_reflection_origin to \
-         Family::Power, bumping the substantive total from 51 to 52); got: {summary}"
+         (Round-2 F13: bootstrap excluded; v0.7.0 issue #691 added two power tools \
+         bumping the substantive total from 52 to 54); got: {summary}"
     );
     assert!(summary.contains("(graph)"));
-    assert!(summary.contains("34 are listed in this manifest"));
+    assert!(summary.contains("36 are listed in this manifest"));
 }
 
 // ---------------------------------------------------------------------------
@@ -363,9 +364,10 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
     // gained `memory_smart_load`), and to 51 in v0.7 K8 (Family::Power
     // gained `memory_quota_status`).
     assert!(
-        describe.contains("45 more"),
-        "core profile must report 45 unloaded (52 - 7); v0.7.0 L2-2 \
-         added memory_reflection_origin bumping the substantive total to 52; got: {describe}"
+        describe.contains("47 more"),
+        "core profile must report 47 unloaded (54 - 7); v0.7.0 issue #691 \
+         added memory_check_agent_action + memory_rule_list bumping the substantive \
+         total to 54; got: {describe}"
     );
     // Sample of unloaded tools is plain (no memory_ prefix). The first
     // four unloaded under core are lifecycle's update/delete/forget/gc.
@@ -416,7 +418,7 @@ fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     // 50 to 51 in v0.7.0 recursive-learning Task 4/8 (Family::Power
     // gained `memory_reflect`).
     assert!(
-        describe.starts_with("I can directly use all 52 memory tools right now ("),
+        describe.starts_with("I can directly use all 54 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -439,7 +441,7 @@ fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     );
     // Preview is the first 5 of the 18 loaded — the first 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
-    assert!(describe.contains("34 more"));
+    assert!(describe.contains("36 more"));
 }
 
 // ---------------------------------------------------------------------------
@@ -627,13 +629,14 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
         .expect("top-level tools must be present and an array under v3");
     assert_eq!(
         tools.len(),
-        53,
-        "v3 must surface all 53 tools regardless of profile (v0.7.0 I4 added \
+        55,
+        "v3 must surface all 55 tools regardless of profile (v0.7.0 I4 added \
          memory_replay; v0.7 H4 added memory_verify; v0.7 B1 added \
          memory_load_family; v0.7 B2 added memory_smart_load; v0.7 K7 added \
          memory_subscription_replay + memory_subscription_dlq_list; v0.7 J7 \
          added memory_find_paths; v0.7 K8 added memory_quota_status; v0.7.0 \
-         Task 4/8 added memory_reflect; v0.7.0 L2-2 added memory_reflection_origin); \
+         Task 4/8 added memory_reflect; v0.7.0 L2-2 added memory_reflection_origin; \
+         v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list); \
          got {}",
         tools.len()
     );

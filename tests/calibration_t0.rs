@@ -83,8 +83,11 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // v0.7.0 L2-2 (S6-M1) — Family::Power gained
     // `memory_reflection_origin` (53 total). Not loaded under core, so
     // the "more" bucket grows from 44 to 45.
+    // v0.7.0 (issue #691) — Family::Power gained
+    // `memory_check_agent_action` + `memory_rule_list` (not loaded
+    // under core), so the "more" count grows from 45 to 47.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 45 more \
+                    (store, recall, list, get, search, ...). 47 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -122,7 +125,11 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
     // `memory_reflection_origin` → 52 visible (the "all 52" form
     // excludes the always-on `memory_capabilities` bootstrap from the
     // 53-tool total).
-    let expected = "I can directly use all 52 memory tools right now \
+    // v0.7.0 (issue #691) — `memory_check_agent_action` +
+    // `memory_rule_list` added to Family::Power → 54 visible (the
+    // "all 54" form excludes the always-on `memory_capabilities`
+    // bootstrap from the 55-tool total).
+    let expected = "I can directly use all 54 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -158,8 +165,11 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
     // v0.7.0 L2-2 (S6-M1) — Family::Power gained
     // `memory_reflection_origin` (not loaded under graph), so the
     // "more" count grows from 33 to 34.
+    // v0.7.0 (issue #691) — `memory_check_agent_action` +
+    // `memory_rule_list` added to Family::Power (not loaded under
+    // graph), so the "more" count grows from 34 to 36.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 34 more \
+                    (store, recall, list, get, search, ...). 36 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";

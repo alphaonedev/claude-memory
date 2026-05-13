@@ -37,6 +37,10 @@ pub mod link;
 pub mod logs;
 pub mod promote;
 pub mod recall;
+/// v0.7.0 (issue #691) — `ai-memory rules` subcommand. CRUD for the
+/// substrate-level agent-action rules engine. Mutation verbs (add /
+/// enable / disable / remove) require the operator keypair on disk.
+pub mod rules;
 #[cfg(feature = "sal")]
 pub mod schema_init;
 pub mod search;

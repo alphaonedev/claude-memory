@@ -168,7 +168,14 @@ impl Family {
             | "memory_subscription_dlq_list"
             | "memory_quota_status"
             | "memory_reflect"
-            | "memory_reflection_origin" => Some(Self::Power),
+            | "memory_reflection_origin"
+            // v0.7.0 (issue #691) — substrate-level agent-action rules
+            // engine. Both tools live in Family::Power (governance /
+            // operator-facing, not data-plane). Mutation tools are
+            // explicitly NOT registered over MCP per design revision
+            // 2026-05-13 — operator uses CLI / HTTP with signed key.
+            | "memory_check_agent_action"
+            | "memory_rule_list" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -232,8 +239,10 @@ impl Family {
             Self::Governance => 8,
             // Power: 6 baseline + 2 (v0.7 K7) + 1 (v0.7 K8 quota_status) +
             // 1 (v0.7.0 Task 4/8 — memory_reflect substrate primitive) +
-            // 1 (v0.7.0 L2-2 / S6-M1 — memory_reflection_origin) = 11.
-            Self::Power => 11,
+            // 1 (v0.7.0 L2-2 / S6-M1 — memory_reflection_origin) +
+            // 2 (v0.7.0 issue #691 — memory_check_agent_action +
+            // memory_rule_list, substrate-level agent-action rules) = 13.
+            Self::Power => 13,
             Self::Archive => 4,
             Self::Other => 2,
         }
@@ -331,6 +340,11 @@ impl Family {
                 // inspector. Returns peer_origin / signing_agent /
                 // original_depth / local_depth_at_arrival for a row.
                 "memory_reflection_origin",
+                // v0.7.0 (issue #691) — substrate-level agent-action
+                // rules engine. Read-side surface; mutation tools are
+                // NOT registered over MCP (operator uses CLI / HTTP).
+                "memory_check_agent_action",
+                "memory_rule_list",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -617,14 +631,15 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 53,
+            total, 55,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
              + `memory_subscription_dlq_list` + v0.7 J7 `memory_find_paths` \
              + v0.7 K8 `memory_quota_status` + v0.7.0 Task 4/8 \
-             `memory_reflect` + v0.7.0 L2-2 `memory_reflection_origin` = 53. \
-             If this drifts, update \
+             `memory_reflect` + v0.7.0 L2-2 `memory_reflection_origin` + \
+             v0.7.0 issue #691 `memory_check_agent_action` + \
+             `memory_rule_list` = 55. If this drifts, update \
              Family::expected_tool_count and the family map docs together."
         );
     }
@@ -704,23 +719,27 @@ mod tests {
         // v0.7 K8 — Power got memory_quota_status (+1 → 9).
         // v0.7.0 Task 4/8 — Power got memory_reflect (+1 → 10).
         // v0.7.0 L2-2 — Power got memory_reflection_origin (+1 → 11).
-        assert_eq!(p.expected_tool_count(), 7 + 11);
+        // v0.7.0 issue #691 — Power got memory_check_agent_action +
+        // memory_rule_list (+2 → 13).
+        assert_eq!(p.expected_tool_count(), 7 + 13);
     }
 
     #[test]
     fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7.0 L2-2 (post-Task 4/8) — full surface = 43 baseline +
+        // v0.7.0 issue #691 (post-L2-2) — full surface = 43 baseline +
         // memory_replay (I4) + memory_verify (H4) + memory_load_family (B1)
         // + memory_smart_load (B2) + memory_subscription_replay (K7) +
         // memory_subscription_dlq_list (K7) + memory_find_paths (J7) +
         // memory_quota_status (K8) + memory_reflect (Task 4/8) +
-        // memory_reflection_origin (L2-2) = 53.
-        assert_eq!(p.expected_tool_count(), 53);
+        // memory_reflection_origin (L2-2) + memory_check_agent_action +
+        // memory_rule_list (#691) = 55.
+        assert_eq!(p.expected_tool_count(), 55);
 
-        // The K7+K8 + Task 4/8 + L2-2 additions live in Family::Power
-        // (operator/governance), so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 11);
+        // The K7+K8 + Task 4/8 + L2-2 + #691 additions live in
+        // Family::Power (operator/governance), so the `power` profile
+        // picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 13);
     }
 
     // ---------- Profile::parse ----------
