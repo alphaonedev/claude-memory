@@ -20,6 +20,17 @@ use crate::reranker::{BatchedReranker, CrossEncoder};
 
 pub(super) mod registry;
 
+// L0.7-3 Tier B chunk-A — shared test-only mutex serialising tests
+// across submodules that mutate the process-wide permission rules
+// registry. The registry is a static RwLock<Vec<PermissionRule>> in
+// `crate::governance`; tests that install rules must hold this mutex
+// for the duration of the call so concurrent tests don't see each
+// other's rules. The wrapping `RulesScope` helper inside each tool's
+// test module clears the registry on drop (even on panic) so any
+// trailing rule never leaks into the next test.
+#[cfg(test)]
+pub(super) static SHARED_PERMISSION_RULES_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Re-export registry items at the crate::mcp:: path so external callers
 // (handlers.rs, sizes.rs, main.rs, etc.) continue to resolve them without
 // any call-site changes. Items that were `pub` in the original mcp.rs stay
