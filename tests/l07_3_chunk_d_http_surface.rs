@@ -382,10 +382,12 @@ async fn http_create_memory_invalid_agent_id_returns_400() {
     });
     let (status, payload) = post_json(&router, "/api/v1/memories", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(payload
-        .get("error")
-        .and_then(|v| v.as_str())
-        .is_some_and(|e| e.contains("agent_id")));
+    assert!(
+        payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|e| e.contains("agent_id"))
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -586,8 +588,7 @@ async fn http_search_invalid_agent_id_400() {
 #[tokio::test]
 async fn http_search_invalid_as_agent_400() {
     let (router, _f) = build_router_fixture();
-    let (status, _payload) =
-        get_uri(&router, "/api/v1/search?q=x&as_agent=BAD%20NAMESPACE").await;
+    let (status, _payload) = get_uri(&router, "/api/v1/search?q=x&as_agent=BAD%20NAMESPACE").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -744,18 +745,15 @@ async fn http_detect_contradictions_happy() {
     let (router, _f) = build_router_fixture();
     let _ = create_basic(&router, "chunk-d/contra", "topic-a").await;
     let _ = create_basic(&router, "chunk-d/contra", "topic-b").await;
-    let (status, _payload) = get_uri(&router, "/api/v1/contradictions?namespace=chunk-d/contra").await;
+    let (status, _payload) =
+        get_uri(&router, "/api/v1/contradictions?namespace=chunk-d/contra").await;
     assert_eq!(status, StatusCode::OK);
 }
 
 #[tokio::test]
 async fn http_detect_contradictions_invalid_agent_id_400() {
     let (router, _f) = build_router_fixture();
-    let (status, _payload) = get_uri(
-        &router,
-        "/api/v1/contradictions?agent_id=has%20space",
-    )
-    .await;
+    let (status, _payload) = get_uri(&router, "/api/v1/contradictions?agent_id=has%20space").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
@@ -904,7 +902,11 @@ async fn http_delete_link_unknown_returns_404_or_ok() {
         .unwrap();
     let resp = router.clone().oneshot(req).await.unwrap();
     let status = resp.status();
-    assert!(status == StatusCode::NOT_FOUND || status == StatusCode::OK || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::NOT_FOUND
+            || status == StatusCode::OK
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1189,7 +1191,11 @@ async fn http_bulk_create_happy() {
         },
     ]);
     let (status, _payload) = post_json(&router, "/api/v1/memories/bulk", body).await;
-    assert!(status == StatusCode::CREATED || status == StatusCode::MULTI_STATUS || status == StatusCode::OK);
+    assert!(
+        status == StatusCode::CREATED
+            || status == StatusCode::MULTI_STATUS
+            || status == StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -1198,7 +1204,11 @@ async fn http_bulk_create_empty_list_returns_ok() {
     let body = json!([]);
     let (status, _payload) = post_json(&router, "/api/v1/memories/bulk", body).await;
     // Empty list is allowed — it's a no-op.
-    assert!(status == StatusCode::OK || status == StatusCode::CREATED || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::OK
+            || status == StatusCode::CREATED
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -1234,7 +1244,12 @@ async fn http_bulk_create_with_invalid_member_records_error() {
         },
     ]);
     let (status, _payload) = post_json(&router, "/api/v1/memories/bulk", body).await;
-    assert!(status == StatusCode::OK || status == StatusCode::CREATED || status == StatusCode::MULTI_STATUS || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::OK
+            || status == StatusCode::CREATED
+            || status == StatusCode::MULTI_STATUS
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1675,10 +1690,12 @@ async fn http_subscribe_no_secret_no_global_hmac_400() {
     });
     let (status, payload) = post_json(&router, "/api/v1/subscriptions", body).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(payload
-        .get("error")
-        .and_then(|v| v.as_str())
-        .is_some_and(|e| e.to_lowercase().contains("hmac")));
+    assert!(
+        payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .is_some_and(|e| e.to_lowercase().contains("hmac"))
+    );
 }
 
 #[tokio::test]
@@ -1783,7 +1800,11 @@ async fn http_unsubscribe_by_id_when_missing_404_or_ok() {
     let (router, _f) = build_router_fixture();
     let (status, _payload) = delete_uri(&router, "/api/v1/subscriptions?id=missing-id").await;
     // The MCP handler may return 400 or OK with `removed=false`.
-    assert!(status == StatusCode::OK || status == StatusCode::BAD_REQUEST || status == StatusCode::NOT_FOUND);
+    assert!(
+        status == StatusCode::OK
+            || status == StatusCode::BAD_REQUEST
+            || status == StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test]
@@ -1828,7 +1849,11 @@ async fn http_notify_happy_path() {
         "agent_id": "ai:sender",
     });
     let (status, _payload) = post_json(&router, "/api/v1/notify", body).await;
-    assert!(status == StatusCode::CREATED || status == StatusCode::OK || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED
+            || status == StatusCode::OK
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -1950,7 +1975,8 @@ async fn http_set_namespace_standard_with_governance_happy() {
 async fn http_set_namespace_standard_empty_body() {
     let (router, _f) = build_router_fixture();
     let body = json!({});
-    let (status, _payload) = post_json(&router, "/api/v1/namespaces/chunkempty/standard", body).await;
+    let (status, _payload) =
+        post_json(&router, "/api/v1/namespaces/chunkempty/standard", body).await;
     assert!(
         status == StatusCode::CREATED
             || status == StatusCode::OK
@@ -1981,7 +2007,11 @@ async fn http_set_namespace_standard_qs_form() {
         "governance": {"approver_type": "human"},
     });
     let (status, _payload) = post_json(&router, "/api/v1/namespaces", body).await;
-    assert!(status == StatusCode::CREATED || status == StatusCode::OK || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED
+            || status == StatusCode::OK
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -2011,7 +2041,11 @@ async fn http_set_namespace_standard_nested_shape() {
         }
     });
     let (status, _payload) = post_json(&router, "/api/v1/namespaces", body).await;
-    assert!(status == StatusCode::CREATED || status == StatusCode::OK || status == StatusCode::BAD_REQUEST);
+    assert!(
+        status == StatusCode::CREATED
+            || status == StatusCode::OK
+            || status == StatusCode::BAD_REQUEST
+    );
 }
 
 #[tokio::test]
@@ -2238,9 +2272,7 @@ async fn http_sync_push_memory_oversize_rejected() {
 #[tokio::test]
 async fn http_sync_push_deletions_oversize_rejected() {
     let (router, _f) = build_router_fixture();
-    let dels: Vec<Value> = (0..1500)
-        .map(|i| json!(format!("{:032x}", i)))
-        .collect();
+    let dels: Vec<Value> = (0..1500).map(|i| json!(format!("{:032x}", i))).collect();
     let body = json!({
         "sender_agent_id": "ai:peer-del-flood",
         "memories": [],
