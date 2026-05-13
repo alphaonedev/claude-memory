@@ -176,7 +176,14 @@ CREATE TABLE IF NOT EXISTS memory_links (
     -- "peer_attested". NULL is treated as "unsigned" by readers for
     -- back-compat with v0.6.3 rows written before this column existed.
     attest_level TEXT,
-    PRIMARY KEY (source_id, target_id, relation)
+    PRIMARY KEY (source_id, target_id, relation),
+    -- v0.7.0 v0.7.1-fold (#687/#688, schema v32 postgres / v33 sqlite) —
+    -- closed taxonomy CHECK constraint on `relation`. Mirrors
+    -- `crate::validate::VALID_RELATIONS` exactly. The constraint name is
+    -- pinned so the migration (`migrations/postgres/0014_v07_memory_links_relation_check.sql`)
+    -- can probe pg_constraint for it via `IF NOT EXISTS` semantics.
+    CONSTRAINT memory_links_relation_check
+        CHECK (relation IN ('related_to', 'supersedes', 'contradicts', 'derived_from', 'reflects_on'))
 );
 
 CREATE INDEX IF NOT EXISTS memory_links_source_idx ON memory_links (source_id);

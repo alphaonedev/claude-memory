@@ -72,6 +72,15 @@ const INIT_SCHEMA: &str = include_str!("postgres_schema.sql");
 const MIGRATION_V31_REFLECTION_DEPTH: &str =
     include_str!("../../migrations/postgres/0013_v0700_reflection_depth.sql");
 
+/// v0.7.0 v0.7.1-fold (#687/#688) — SQL-side CHECK constraint on
+/// `memory_links.relation`. Postgres supports `ALTER TABLE ADD
+/// CONSTRAINT` for CHECK clauses directly, so the migration is a
+/// one-liner gated behind a `pg_constraint` probe (idempotent).
+/// Mirrors the SQLite full-table-rebuild migration that lands the
+/// same constraint on the SQLite backend.
+const MIGRATION_V32_LINK_RELATION_CHECK: &str =
+    include_str!("../../migrations/postgres/0014_v07_memory_links_relation_check.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -115,7 +124,15 @@ const MIGRATION_V31_REFLECTION_DEPTH: &str =
 //       Postgres 14+; the base schema in `postgres_schema.sql` carries
 //       the column inline so fresh installs land it without the
 //       migration step running.
-const CURRENT_SCHEMA_VERSION: i32 = 31;
+// v32 = v0.7.0 v0.7.1-fold (#687/#688) — SQL-side CHECK constraint
+//       on `memory_links.relation` (closed taxonomy:
+//       related_to/supersedes/contradicts/derived_from/reflects_on).
+//       Mirrors SQLite schema v33 (#687 + #688) but uses Postgres's
+//       native `ALTER TABLE ADD CONSTRAINT` rather than the SQLite
+//       full-table-rebuild dance. Idempotent via pg_constraint probe.
+//       Fresh installs inherit the constraint inline from
+//       `postgres_schema.sql`.
+const CURRENT_SCHEMA_VERSION: i32 = 32;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -507,6 +524,9 @@ impl PostgresStore {
         if current_version < 31 {
             self.migrate_v31().await?;
         }
+        if current_version < 32 {
+            self.migrate_v32().await?;
+        }
 
         Ok(())
     }
@@ -628,6 +648,44 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v31 applied (memories.reflection_depth column)"
+        );
+        Ok(())
+    }
+
+    /// v32 — SQL-side CHECK constraint on `memory_links.relation`
+    /// (v0.7.0 v0.7.1-fold, #687/#688).
+    ///
+    /// Mirrors SQLite schema v33. Postgres's `ALTER TABLE ADD
+    /// CONSTRAINT` supports CHECK clauses directly, so this is a
+    /// one-statement DDL gated behind a `pg_constraint` probe for
+    /// idempotency. Fresh installs inherit the constraint inline from
+    /// `postgres_schema.sql`; this migration only fires on a pre-v32
+    /// Postgres deployment that already has `memory_links` rows in it.
+    ///
+    /// The migration body lives in
+    /// `migrations/postgres/0014_v07_memory_links_relation_check.sql`
+    /// so operators can inspect / replay the DDL outside the daemon.
+    async fn migrate_v32(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v32 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V32_LINK_RELATION_CHECK)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v32 memory_links.relation CHECK", e))?;
+
+        record_schema_version(&mut tx, 32).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v32 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v32 applied (memory_links.relation CHECK constraint)"
         );
         Ok(())
     }
@@ -8281,11 +8339,13 @@ mod tests {
         // analogue because the SQLite metadata column has no JSON
         // type-checking primitive equivalent to `jsonb_typeof`). v31
         // mirrors SQLite v29 (`memories.reflection_depth`, v0.7.0
-        // Task 1/8 — recursive learning). A future bump on either side
+        // Task 1/8 — recursive learning). v32 mirrors SQLite v33 — the
+        // v0.7.1-fold (#687/#688) SQL-side CHECK constraint on
+        // `memory_links.relation`. A future bump on either side
         // without the corresponding port re-trips this assertion before
         // the migration runner gets a chance to write a partial schema
         // to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 31);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 32);
     }
 
     #[tokio::test]

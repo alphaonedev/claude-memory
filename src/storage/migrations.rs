@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 32).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 33).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -49,11 +49,26 @@ CREATE INDEX IF NOT EXISTS idx_memories_expires ON memories(expires_at);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_title_ns ON memories(title, namespace);
 
 CREATE TABLE IF NOT EXISTS memory_links (
-    source_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    target_id   TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
-    relation    TEXT NOT NULL DEFAULT 'related_to',
-    created_at  TEXT NOT NULL,
-    PRIMARY KEY (source_id, target_id, relation)
+    source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    target_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    relation     TEXT NOT NULL DEFAULT 'related_to',
+    created_at   TEXT NOT NULL,
+    -- v15 temporal trio (added historically via ALTER); included in the
+    -- bootstrap SCHEMA so test fixtures that stamp `version >= v15`
+    -- match real-DB shape post-migration ladder.
+    valid_from   TEXT,
+    valid_until  TEXT,
+    observed_by  TEXT,
+    -- v17-era signature column (Ed25519 attestation, added historically
+    -- via ALTER).
+    signature    BLOB,
+    -- v23 attest_level column (added historically via ALTER).
+    attest_level TEXT,
+    PRIMARY KEY (source_id, target_id, relation),
+    -- v33 (v0.7.0 v0.7.1-fold) — SQL-side CHECK constraint promoting the
+    -- v23 RAISE-trigger validation to a column-level invariant. Closed
+    -- taxonomy mirrors `crate::validate::VALID_RELATIONS`.
+    CHECK (relation IN ('related_to', 'supersedes', 'contradicts', 'derived_from', 'reflects_on'))
 );
 
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
@@ -176,7 +191,19 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       Reverse migration drops both tables; MCP skill tools disappear
 //       from the registry automatically. Originally authored as v30 on
 //       l1/agent-skills; renumbered to v32 during the L1 wave merge.
-const CURRENT_SCHEMA_VERSION: i64 = 32;
+// v33 = v0.7.0 v0.7.1-fold (#687/#688) — promote
+//       `memory_links.relation` validation from v23 RAISE triggers to a
+//       SQL-side CHECK constraint baked into the column definition.
+//       Decision memory `65ba07f6`; backlog memory `7b279df3`. Folds
+//       the v0.7.1 hardening carry-forward into v0.7.0 per the
+//       2026-05-13 operator directive. SQLite has no `ALTER TABLE ADD
+//       CONSTRAINT CHECK` for an existing column, so the migration is
+//       a full-table-rebuild: CREATE TABLE memory_links_new (with
+//       CHECK clause) → INSERT SELECT → DROP indexes/triggers/old
+//       table → RENAME → recreate indexes + attest_level triggers.
+//       The v23 relation triggers are dropped and not recreated; the
+//       column-level CHECK supersedes them.
+const CURRENT_SCHEMA_VERSION: i64 = 33;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -282,6 +309,14 @@ const MIGRATION_V31_SQLITE: &str = include_str!("../../migrations/sqlite/0025_v0
 // 0023_v07_agent_skills.sql → 0026_v07_agent_skills.sql.
 const MIGRATION_V32_SQLITE: &str =
     include_str!("../../migrations/sqlite/0026_v07_agent_skills.sql");
+// v0.7.0 v0.7.1-fold (#687/#688) — full-table-rebuild promoting the
+// `memory_links.relation` RAISE triggers from migration 0023 to a real
+// SQL-side CHECK constraint. The SQL is purely declarative
+// (CREATE/INSERT/DROP/RENAME); no Rust shim required beyond the
+// `execute_batch` call below. Replay-safe because the new table name
+// is `memory_links_new` only for the duration of the batch.
+const MIGRATION_V33_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0027_v07_memory_links_relation_check.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -945,6 +980,25 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // so this step is fully idempotent on a partially-migrated DB.
             conn.execute_batch(MIGRATION_V32_SQLITE)?;
         }
+        if version < 33 {
+            // v0.7.0 v0.7.1-fold (#687/#688) — full-table-rebuild
+            // promoting the `memory_links.relation` RAISE triggers from
+            // migration 0023 to a SQL-side CHECK constraint. The
+            // rebuild does CREATE TABLE memory_links_new → INSERT SELECT
+            // FROM memory_links → DROP old triggers/indexes/table →
+            // RENAME → recreate indexes + attest_level triggers. The
+            // CHECK clause replaces the v23 relation triggers byte-for-
+            // byte (closed taxonomy:
+            // related_to/supersedes/contradicts/derived_from/reflects_on).
+            //
+            // Pre-existing rows that violate the new CHECK clause will
+            // fail the INSERT SELECT step. The v23 triggers have been
+            // blocking bad relation writes since v0.7.0 went live, so a
+            // violating row can only have been hand-edited via direct
+            // SQL pre-v23 (extremely rare). If an operator hits this,
+            // they clean up offending rows then re-run the migration.
+            conn.execute_batch(MIGRATION_V33_SQLITE)?;
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -1019,12 +1073,12 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
-        // The module docstring advertises 32; bumping the constant
+        // The module docstring advertises 33; bumping the constant
         // without updating the docstring is a documented foot-gun.
         // We pin the relationship so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 32,
-            "module docstring advertises 32; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 33,
+            "module docstring advertises 33; bump the docstring when this number changes"
         );
     }
 

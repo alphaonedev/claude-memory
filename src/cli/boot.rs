@@ -54,7 +54,7 @@ use std::time::Instant;
 pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 
 /// Upper bound of the DB-schema range this binary supports. Mirrors
-/// `db::CURRENT_SCHEMA_VERSION` (32 in v0.7.0 — v21 from K2's
+/// `db::CURRENT_SCHEMA_VERSION` (33 in v0.7.0 — v21 from K2's
 /// `pending_actions` timeout-sweeper columns, v22 from I1's
 /// `memory_transcripts` BLOB store, v23 from H2's
 /// `memory_links.attest_level` column for outbound link signing, v24
@@ -73,12 +73,17 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// `governance_rules` table backing the substrate-level agent-action
 /// rules engine, v31 from L1-1's `memories.memory_kind TEXT NOT
 /// NULL DEFAULT 'observation'` column backing the typed
-/// `MemoryKind::Reflection` enum, and v32 from L1-5's `skills` +
+/// `MemoryKind::Reflection` enum, v32 from L1-5's `skills` +
 /// `skill_resources` tables backing the Agent Skills ingestion
-/// substrate (Pillar 1.5). When a DB's `schema_version` exceeds
-/// this, the binary is too old for a newer DB and we surface a warning.
-/// v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 32;
+/// substrate (Pillar 1.5), and v33 from the v0.7.1-fold (#687/#688)
+/// SQL-side CHECK constraint on `memory_links.relation` that promotes
+/// the v23 RAISE triggers to a declared column-level CHECK clause
+/// (closed taxonomy:
+/// related_to/supersedes/contradicts/derived_from/reflects_on). When
+/// a DB's `schema_version` exceeds this, the binary is too old for a
+/// newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue #487
+/// PR #497 req #72).
+pub const MAX_SUPPORTED_SCHEMA: u32 = 33;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the
