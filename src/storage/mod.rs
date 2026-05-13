@@ -4703,6 +4703,61 @@ pub fn resolve_governance_policy(conn: &Connection, namespace: &str) -> Option<G
     None
 }
 
+/// v0.7.0 L1-8 — read `governance.require_approval_above_depth` from the
+/// namespace's most-specific governance metadata blob, leaf-first.
+///
+/// This is intentionally a free function (not a field on
+/// [`GovernancePolicy`]) to avoid introducing a new required struct field
+/// that would need updating at every `GovernancePolicy { … }` literal
+/// in the codebase. The existing `GovernancePolicy` struct represents
+/// the resolved enforcement policy; this field is a pre-write interception
+/// threshold that lives beside it, not inside it.
+///
+/// Returns `None` when:
+/// - no namespace standard is configured at any level of the chain, OR
+/// - the standard's `metadata.governance` blob is absent or null, OR
+/// - the blob does not contain a `require_approval_above_depth` key, OR
+/// - the key is present but `null`.
+///
+/// Returns `Some(threshold)` when the key is a non-null unsigned integer.
+/// Callers in `memory_reflect` compare `proposed_depth > threshold` and
+/// queue a `pending_actions` row when the condition is true.
+pub fn resolve_require_approval_above_depth(conn: &Connection, namespace: &str) -> Option<u32> {
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        let standard_id = match get_namespace_standard(conn, &level) {
+            Ok(Some(id)) => id,
+            _ => continue,
+        };
+        let mem = match get(conn, &standard_id) {
+            Ok(Some(m)) => m,
+            _ => continue,
+        };
+        // Governance blob must exist and not be null.
+        let gov = match mem.metadata.get("governance") {
+            Some(g) if !g.is_null() => g,
+            _ => continue,
+        };
+        // The field is optional inside the blob — `None` means skip this
+        // level and keep walking (inherit semantics: an ancestor that sets
+        // the field governs if the leaf does not override it).
+        if let Some(threshold) = gov.get("require_approval_above_depth") {
+            if let Some(n) = threshold.as_u64() {
+                return Some(n as u32);
+            }
+            // Key present but null → no gate at this level; keep walking.
+        }
+        // Policy found at this level but no require_approval_above_depth
+        // key → no gate; stop walking (same leaf-first-wins semantics as
+        // the main resolve_governance_policy walker: a leaf policy that
+        // doesn't set the field takes precedence over a parent that does).
+        if GovernancePolicy::from_metadata(&mem.metadata).is_some() {
+            return None;
+        }
+    }
+    None
+}
+
 /// Return true if `agent_id` matches a registered agent in `_agents`.
 pub fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
     let title = format!("agent:{agent_id}");
@@ -4850,6 +4905,12 @@ pub fn enforce_governance(
         GovernedAction::Store => &policy.write,
         GovernedAction::Delete => &policy.delete,
         GovernedAction::Promote => &policy.promote,
+        // v0.7.0 L1-8: Reflect is gated by the L1-8 approval mechanism
+        // (`require_approval_above_depth`) in the MCP handler rather than
+        // the standard `enforce_governance` pipeline. Map to `write`
+        // as the conservative fallback so the arm compiles; in practice
+        // no current callsite passes `GovernedAction::Reflect` here.
+        GovernedAction::Reflect => &policy.write,
     };
     let ns_owner = if matches!(action, GovernedAction::Store) {
         namespace_owner(conn, namespace)

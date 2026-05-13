@@ -6,7 +6,7 @@
 use crate::db;
 use crate::embeddings::Embedder;
 use crate::hnsw::VectorIndex;
-use crate::models::Tier;
+use crate::models::{GovernedAction, Tier};
 use serde_json::{Value, json};
 use std::path::Path;
 
@@ -95,6 +95,86 @@ pub(super) fn handle_reflect(
         agent_id,
         metadata,
     };
+
+    // ─── L1-8: require_approval_above_depth gate ────────────────────
+    // Evaluated BEFORE the substrate write so we can intercept deep
+    // reflections and queue a pending_actions row without writing a
+    // partial reflection.  The gate fires only when the resolved
+    // namespace chain carries a non-None `require_approval_above_depth`
+    // threshold AND the proposed depth exceeds it.
+    //
+    // Implementation note: computing `new_depth` here mirrors step 3 of
+    // `db::reflect_with_hooks` — we load the source memories to find the
+    // max existing depth, add 1, then compare against the threshold.
+    // This is intentionally a thin MCP-layer pre-check; the substrate
+    // still enforces `max_reflection_depth` independently on the write
+    // path, so the two gates compose: approval-above-depth fires first,
+    // the substrate depth-cap fires second on the actual write.
+    {
+        let target_namespace = input.namespace.clone().or_else(|| {
+            // Mirror the substrate default: first source's namespace.
+            input
+                .source_ids
+                .first()
+                .and_then(|id| db::get(conn, id).ok().flatten())
+                .map(|m| m.namespace)
+        });
+
+        if let Some(ref ns) = target_namespace {
+            // L1-8: read the approval threshold directly from the
+            // namespace's governance metadata blob — avoids adding a
+            // new field to the GovernancePolicy struct (which would
+            // require updating every GovernancePolicy { … } literal).
+            if let Some(threshold) = db::resolve_require_approval_above_depth(conn, ns) {
+                // Compute proposed depth: max(source depths) + 1.
+                let max_src_depth = input
+                    .source_ids
+                    .iter()
+                    .filter_map(|id| db::get(conn, id).ok().flatten())
+                    .map(|m| m.reflection_depth)
+                    .max()
+                    .unwrap_or(0);
+                #[allow(clippy::cast_sign_loss)]
+                let new_depth_u32: u32 = max_src_depth.max(0).saturating_add(1) as u32;
+
+                if new_depth_u32 > threshold {
+                    // Serialise enough of the input to reconstruct the
+                    // call when the approver resolves the pending row.
+                    let payload = json!({
+                        "source_ids": input.source_ids,
+                        "title": input.title,
+                        "content": input.content,
+                        "namespace": ns,
+                        "tier": input.tier.as_str(),
+                        "tags": input.tags,
+                        "priority": input.priority,
+                        "confidence": input.confidence,
+                        "agent_id": input.agent_id,
+                        "proposed_depth": new_depth_u32,
+                    });
+                    let pending_id = db::queue_pending_action(
+                        conn,
+                        GovernedAction::Reflect,
+                        ns,
+                        None,
+                        &input.agent_id,
+                        &payload,
+                    )
+                    .map_err(|e| e.to_string())?;
+                    crate::subscriptions::dispatch_approval_requested(conn, &pending_id, db_path);
+                    return Ok(json!({
+                        "status": "pending",
+                        "pending_id": pending_id,
+                        "reason": "governance requires approval for reflections above depth threshold",
+                        "action": "reflect",
+                        "namespace": ns,
+                        "proposed_depth": new_depth_u32,
+                        "require_approval_above_depth": threshold,
+                    }));
+                }
+            }
+        }
+    }
 
     // ─── Substrate write ────────────────────────────────────────────
     // Error mapping is deliberate: `DepthExceeded` is left as a distinct

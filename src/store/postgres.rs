@@ -6365,6 +6365,9 @@ impl MemoryStore for PostgresStore {
             super::GovernedAction::Store => &policy.write,
             super::GovernedAction::Delete => &policy.delete,
             super::GovernedAction::Promote => &policy.promote,
+            // v0.7.0 L1-8: Reflect is gated by require_approval_above_depth
+            // in the MCP handler; conservative fallback maps to write level.
+            super::GovernedAction::Reflect => &policy.write,
         };
 
         // v0.7.0 Wave-3 Continuation 4 (Bucket C / S60+S80) — resolve
@@ -6467,6 +6470,8 @@ impl MemoryStore for PostgresStore {
                 super::GovernedAction::Store => "store",
                 super::GovernedAction::Delete => "delete",
                 super::GovernedAction::Promote => "promote",
+                // v0.7.0 L1-8: Reflect action type for pending_actions row.
+                super::GovernedAction::Reflect => "reflect",
             };
             sqlx::query(
                 "INSERT INTO pending_actions \
