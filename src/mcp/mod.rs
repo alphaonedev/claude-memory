@@ -7134,4 +7134,921 @@ mod tests {
         assert_eq!(payload["namespace"], "team/r-defgate");
         assert_eq!(payload["proposed_depth"], 1);
     }
+
+    // -----------------------------------------------------------------
+    // L0.7-3 Tier B Chunk B — KG surface + verify >=95% coverage
+    // -----------------------------------------------------------------
+    //
+    // The handlers below already have *integration* tests under
+    // `tests/memory_verify.rs` and `tests/memory_find_paths.rs`, but
+    // `cargo llvm-cov --lib` only picks up the in-lib `mod tests`
+    // surface. The tests below add the missing in-lib coverage for the
+    // seven Chunk B modules (kg_query, kg_timeline, kg_invalidate,
+    // find_paths, entity_get_by_alias, get_taxonomy, verify) without
+    // touching production code.
+
+    // --- B. Input validation -----------------------------------------
+
+    /// kg_invalidate.rs:16 — `source_id is required` (covers the early
+    /// missing-`source_id` arm).
+    #[test]
+    fn handle_kg_invalidate_missing_source_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_kg_invalidate",
+            json!({"target_id": "11111111-1111-1111-1111-111111111111", "relation": "related_to"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source_id"), "got {text}");
+    }
+
+    /// kg_invalidate.rs:21 — `validate::validate_link` must reject a
+    /// source_id containing a control character (the validator's
+    /// `is_clean_string` gate). Other shape rules (uuid form etc.)
+    /// are not enforced here, so we drive a control-char rejection.
+    #[test]
+    fn handle_kg_invalidate_malformed_source_id_rejected() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_kg_invalidate",
+            json!({
+                // Embedded NUL byte → fails `is_clean_string`.
+                "source_id": "abc\u{0000}def",
+                "target_id": "11111111-1111-1111-1111-111111111111",
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// kg_invalidate.rs:53 — when the source memory has been deleted
+    /// but the link row survives, the dispatch helper falls through
+    /// to the `_ => ("global".to_string(), None)` arm. We construct
+    /// that orphan-link state by inserting two memories + a link,
+    /// then turning OFF foreign keys before deleting the source so
+    /// the ON DELETE CASCADE does not also drop the link row. The
+    /// invalidate then hits `Some(res)` (link still present) AND
+    /// `db::get(conn, source_id)` returns `Ok(None)` (source memory
+    /// gone) — the orphan path.
+    #[test]
+    fn handle_kg_invalidate_orphan_link_uses_global_namespace_fallback() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-orphan".into(),
+            title: "orphan-src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "orphan-tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+        db::create_link(&conn, &src_id, &tgt_id, "related_to").unwrap();
+
+        // Drop the source memory while leaving the link row in place.
+        // memory_links has `ON DELETE CASCADE` on source_id; we must
+        // disable foreign keys to leave the link orphaned.
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute(
+            "DELETE FROM memories WHERE id = ?1",
+            rusqlite::params![&src_id],
+        )
+        .unwrap();
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+
+        let req = make_tools_call(
+            "memory_kg_invalidate",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "unexpected err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        // The invalidate still succeeds (link row exists) even though
+        // the source memory was deleted — that's the orphan path.
+        assert_eq!(val["found"], true);
+    }
+
+    // --- kg_timeline ---
+
+    /// kg_timeline.rs:28 — `until` value with a malformed RFC3339
+    /// string returns the validation error (covers the `Some(u)`
+    /// branch in the second `if let`).
+    #[test]
+    fn handle_kg_timeline_invalid_until_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_kg_timeline",
+            json!({
+                "source_id": "00000000-0000-0000-0000-000000000000",
+                "until": "not-a-timestamp",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// kg_timeline.rs:14 — `source_id is required`. Pins the missing
+    /// arm at the entry of the handler.
+    #[test]
+    fn handle_kg_timeline_missing_source_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_kg_timeline", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source_id"), "got {text}");
+    }
+
+    // --- find_paths ---
+
+    /// find_paths.rs:22 — `source_id is required` arm. The integration
+    /// suite covers happy paths via `tests/memory_find_paths.rs`; this
+    /// test pins the missing-`source_id` branch in --lib coverage.
+    #[test]
+    fn handle_find_paths_missing_source_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({"target_id": "11111111-1111-1111-1111-111111111111"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("source_id"), "got {text}");
+    }
+
+    /// find_paths.rs:25 — `target_id is required` arm.
+    #[test]
+    fn handle_find_paths_missing_target_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({"source_id": "00000000-0000-0000-0000-000000000000"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("target_id"), "got {text}");
+    }
+
+    /// find_paths.rs:26-27 — validate_id rejects IDs containing a
+    /// control character (the validator's `is_clean_string` gate).
+    #[test]
+    fn handle_find_paths_invalid_source_id_rejected() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({
+                // Embedded NUL byte → fails `is_clean_string`.
+                "source_id": "abc\u{0000}def",
+                "target_id": "11111111-1111-1111-1111-111111111111",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// find_paths.rs:29-34 + 41-54 — happy path with max_depth +
+    /// max_results passed; exercises the `.as_u64()` + `usize::try_from`
+    /// arms for both options.
+    #[test]
+    fn handle_find_paths_happy_path_with_explicit_depth_and_limit() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Two-hop linear chain: a -> b -> c.
+        let mk = |title: &str| Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-fp".into(),
+            title: title.into(),
+            content: "x".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let a = db::insert(&conn, &mk("a")).unwrap();
+        let b = db::insert(&conn, &mk("b")).unwrap();
+        let c = db::insert(&conn, &mk("c")).unwrap();
+        db::create_link(&conn, &a, &b, "related_to").unwrap();
+        db::create_link(&conn, &b, &c, "related_to").unwrap();
+
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({
+                "source_id": a,
+                "target_id": c,
+                "max_depth": 5_u64,
+                "max_results": 10_u64,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert!(val["count"].as_u64().unwrap() >= 1, "got {val}");
+        let paths = val["paths"].as_array().unwrap();
+        assert!(!paths.is_empty());
+    }
+
+    /// find_paths.rs:49-54 — `db::find_paths` Err branch is reached
+    /// when `max_depth = 0` (storage layer rejects with explicit
+    /// `max_depth must be >= 1`).
+    #[test]
+    fn handle_find_paths_zero_depth_surfaces_db_error_verbatim() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({
+                "source_id": "00000000-0000-0000-0000-000000000000",
+                "target_id": "11111111-1111-1111-1111-111111111111",
+                "max_depth": 0_u64,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("max_depth"), "got {text}");
+    }
+
+    /// find_paths.rs:49-54 — depth above `FIND_PATHS_MAX_DEPTH` surfaces
+    /// the depth-budget error verbatim through the map_err closure.
+    /// Covers the `.map_err(|e| e.to_string())?` closure body.
+    #[test]
+    fn handle_find_paths_excessive_depth_surfaces_max_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({
+                "source_id": "00000000-0000-0000-0000-000000000000",
+                "target_id": "11111111-1111-1111-1111-111111111111",
+                "max_depth": 1_000_000_u64,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("max_depth") || text.contains("FIND_PATHS_MAX_DEPTH"),
+            "got {text}"
+        );
+    }
+
+    /// find_paths.rs:39 + db dispatch — include_invalidated=true
+    /// happy path (covers the `as_bool().unwrap_or(false)` truthy arm
+    /// and the db-side include_invalidated branch wiring).
+    #[test]
+    fn handle_find_paths_include_invalidated_true_round_trip() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Self-path short-circuit means same source/target returns a
+        // 1-element path regardless of the invalidated edge filter.
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-fp-inv".into(),
+            title: "solo".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let id = db::insert(&conn, &mem).unwrap();
+        let req = make_tools_call(
+            "memory_find_paths",
+            json!({
+                "source_id": id,
+                "target_id": id,
+                "include_invalidated": true,
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert!(val["count"].as_u64().unwrap() >= 1);
+    }
+
+    // --- entity_get_by_alias ---
+
+    /// entity_get_by_alias.rs:12 — `alias is required` arm.
+    #[test]
+    fn handle_entity_get_by_alias_missing_alias_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_entity_get_by_alias", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("alias"), "got {text}");
+    }
+
+    /// entity_get_by_alias.rs:18 — namespace validator rejects bad
+    /// namespace before the storage lookup.
+    #[test]
+    fn handle_entity_get_by_alias_invalid_namespace_rejected() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_entity_get_by_alias",
+            json!({"alias": "any", "namespace": "BAD NS"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// entity_get_by_alias.rs:22-28 — registered alias resolves and
+    /// returns the `Some(rec)` envelope (entity_id, canonical_name,
+    /// namespace, aliases). This drives the `Some(rec)` arm that was
+    /// previously uncovered by --lib tests.
+    #[test]
+    fn handle_entity_get_by_alias_registered_alias_resolves() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Register an entity via the public MCP tool, then look it up
+        // by one of its aliases.
+        let reg = make_tools_call(
+            "memory_entity_register",
+            json!({
+                "canonical_name": "Acme Inc",
+                "namespace": "w12-entities",
+                "aliases": ["Acme", "ACME"],
+            }),
+        );
+        let reg_resp = invoke_handle_request(&conn, &reg);
+        assert!(
+            reg_resp.error.is_none(),
+            "entity_register err: {:?}",
+            reg_resp.error
+        );
+
+        let req = make_tools_call(
+            "memory_entity_get_by_alias",
+            json!({"alias": "Acme", "namespace": "w12-entities"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["found"], true, "got {val}");
+        assert_eq!(val["canonical_name"], "Acme Inc");
+        assert_eq!(val["namespace"], "w12-entities");
+        assert!(val["aliases"].is_array());
+    }
+
+    /// entity_get_by_alias.rs:13-16 — whitespace-only namespace
+    /// triggers the `filter` arm and treats namespace as None (covers
+    /// the `s.is_empty()` filter branch). The namespace-validator
+    /// `if let Some(ns)` arm is NOT entered, so this succeeds.
+    #[test]
+    fn handle_entity_get_by_alias_whitespace_only_namespace_treated_as_none() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_entity_get_by_alias",
+            json!({"alias": "x", "namespace": "   "}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+    }
+
+    // --- verify -------------------------------------------------------
+
+    /// verify.rs:62-66 — missing both `source_id` and `target_id`
+    /// returns the explicit-args error string.
+    #[test]
+    fn handle_verify_missing_required_args_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_verify", json!({}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("link_id") || text.contains("source_id"),
+            "got {text}"
+        );
+    }
+
+    /// verify.rs:62-66 — only `source_id` given, missing `target_id`.
+    #[test]
+    fn handle_verify_source_id_without_target_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_verify",
+            json!({"source_id": "00000000-0000-0000-0000-000000000000"}),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// verify.rs:52-57 — `link_id` malformed (no `--rel-->`) returns
+    /// the parse-error string.
+    #[test]
+    fn handle_verify_malformed_link_id_returns_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call("memory_verify", json!({"link_id": "totally-bad-shape"}));
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("link_id"), "got {text}");
+    }
+
+    /// verify.rs:77 — `validate::validate_link` rejects a malformed
+    /// source/target/relation triple before the DB lookup.
+    #[test]
+    fn handle_verify_invalid_link_rejected_by_validator() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": "not a uuid",
+                "target_id": "11111111-1111-1111-1111-111111111111",
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+    }
+
+    /// verify.rs:79-81 — `get_link_for_verify` returns Ok(None) when
+    /// the requested triple does not exist: handler emits a "link not
+    /// found" error string.
+    #[test]
+    fn handle_verify_missing_link_returns_not_found_error() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        // Seed two memories so validate_link's UUID checks pass but
+        // no link row exists.
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vfn".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        let result = resp.result.unwrap();
+        assert_eq!(result["isError"], true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("link not found"), "got {text}");
+    }
+
+    /// verify.rs:106 + 151-173 — unsigned link (no signature blob)
+    /// returns `signature_verified=false`, `attest_level="unsigned"`,
+    /// `signed_by`/`signed_at` both null. Drives the
+    /// `(None, _) | (_, None)` arm and the not-verified `signed_by`/
+    /// `signed_at` else-branches.
+    #[test]
+    fn handle_verify_unsigned_link_reports_unsigned_and_null_fields() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vu".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+
+        // H2 outbound with `keypair=None` lands an unsigned row —
+        // identical wire shape to the existing tests/memory_verify.rs
+        // fixture but reachable from the in-lib coverage harness.
+        let attest = db::create_link_signed(&conn, &src_id, &tgt_id, "related_to", None)
+            .expect("create_link_signed (unsigned)");
+        assert_eq!(attest, "unsigned");
+
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["signature_verified"], false);
+        assert_eq!(val["attest_level"], "unsigned");
+        assert!(val["signed_by"].is_null());
+        assert!(val["signed_at"].is_null());
+    }
+
+    /// verify.rs:52-57 — composite `link_id` form parses and resolves
+    /// the same row as the explicit-arg form. Drives the
+    /// `parse_link_id(lid)` Ok branch.
+    #[test]
+    fn handle_verify_link_id_composite_form_resolves_same_row() {
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vc".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+        db::create_link_signed(&conn, &src_id, &tgt_id, "related_to", None)
+            .expect("create_link_signed");
+
+        let composite = format!("{src_id}--related_to-->{tgt_id}");
+        let req = make_tools_call("memory_verify", json!({"link_id": composite}));
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["signature_verified"], false);
+        assert_eq!(val["attest_level"], "unsigned");
+    }
+
+    /// Single-process gate against parallel `env::set_var` racing on
+    /// `AI_MEMORY_KEY_DIR`. The H4 verify tests below acquire the
+    /// keypair module's `pub(crate)` lock so they serialise with both
+    /// the keypair-module tests AND each other. Mirrors the pattern in
+    /// `tests/memory_verify.rs::ENV_GUARD`.
+    fn verify_key_env_guard() -> &'static std::sync::Mutex<()> {
+        crate::identity::keypair::key_dir_env_lock()
+    }
+
+    /// verify.rs:140-145 — signature present + observed_by present
+    /// but the pubkey is NOT enrolled on this host. Surfaces the
+    /// `None pubkey` arm: `signature_verified=false`, attest_level
+    /// echoes the stored column value (here: "self_signed").
+    ///
+    /// We construct this state by signing the link with a keypair
+    /// whose public key is NOT saved under `AI_MEMORY_KEY_DIR`, so
+    /// the verify-time lookup fails.
+    #[test]
+    fn handle_verify_signed_link_without_local_pubkey_reports_stored_attest_and_unverified() {
+        // PoisonError-tolerant lock — a panic in a sibling test
+        // mustn't cascade-fail this one.
+        let _g = verify_key_env_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("AI_MEMORY_KEY_DIR").ok();
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        // SAFETY: lock acquired above; env writes are serialised.
+        unsafe {
+            std::env::set_var("AI_MEMORY_KEY_DIR", tmp.path());
+        }
+
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vnk".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+
+        // Generate alice's keypair entirely in memory — we never
+        // save the public key under AI_MEMORY_KEY_DIR, so the
+        // verify-time lookup returns None even though the link row
+        // landed with attest_level="self_signed".
+        let alice = crate::identity::keypair::generate("alice").unwrap();
+        let attest = db::create_link_signed(&conn, &src_id, &tgt_id, "related_to", Some(&alice))
+            .expect("create_link_signed");
+        assert_eq!(attest, "self_signed");
+
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["signature_verified"], false);
+        // Stored attest column = "self_signed"; handler echoes it
+        // through the None-pubkey arm.
+        assert_eq!(val["attest_level"], "self_signed");
+
+        // SAFETY: lock still held; restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("AI_MEMORY_KEY_DIR", v),
+                None => std::env::remove_var("AI_MEMORY_KEY_DIR"),
+            }
+        }
+    }
+
+    /// verify.rs:117-135 — happy path: signature present, observed_by
+    /// present, pubkey enrolled → `signature_verified=true`,
+    /// attest_level=self_signed, signed_by + signed_at populated.
+    ///
+    /// Drives the `Some(pubkey)` arm + the `ok=true` branch + the
+    /// `stored_attest=SelfSigned` arm + the verified `signed_by`/
+    /// `signed_at` populate-from-record branches.
+    #[test]
+    fn handle_verify_self_signed_link_verifies_and_populates_signed_fields() {
+        let _g = verify_key_env_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("AI_MEMORY_KEY_DIR").ok();
+        let key_tmp = tempfile::TempDir::new().expect("key tempdir");
+        // SAFETY: lock acquired above; env writes serialised.
+        unsafe {
+            std::env::set_var("AI_MEMORY_KEY_DIR", key_tmp.path());
+        }
+
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vss".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+
+        // Generate alice's keypair under the key dir so the verify-
+        // time lookup succeeds.
+        let alice = crate::identity::keypair::generate("alice").unwrap();
+        crate::identity::keypair::save(&alice, key_tmp.path()).unwrap();
+        let attest = db::create_link_signed(&conn, &src_id, &tgt_id, "related_to", Some(&alice))
+            .expect("create_link_signed");
+        assert_eq!(attest, "self_signed");
+
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["signature_verified"], true, "got {val}");
+        assert_eq!(val["attest_level"], "self_signed");
+        assert_eq!(val["signed_by"], "alice");
+        assert!(
+            val["signed_at"].is_string(),
+            "signed_at must be RFC3339 string, got {:?}",
+            val["signed_at"]
+        );
+
+        // SAFETY: restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("AI_MEMORY_KEY_DIR", v),
+                None => std::env::remove_var("AI_MEMORY_KEY_DIR"),
+            }
+        }
+    }
+
+    /// verify.rs:118-119 + 136-137 — sig present, observed_by present,
+    /// pubkey enrolled → verify FAILS (e.g. tampered signature byte).
+    /// Drives the `ok=false` arm: `signature_verified=false`,
+    /// `attest_level="unsigned"` (the explicit downgrade on a failed
+    /// re-verify regardless of stored column).
+    #[test]
+    fn handle_verify_tampered_signature_returns_false_and_unsigned() {
+        let _g = verify_key_env_guard()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("AI_MEMORY_KEY_DIR").ok();
+        let key_tmp = tempfile::TempDir::new().expect("key tempdir");
+        // SAFETY: lock acquired above; env writes serialised.
+        unsafe {
+            std::env::set_var("AI_MEMORY_KEY_DIR", key_tmp.path());
+        }
+
+        let conn = db::open(std::path::Path::new(":memory:")).unwrap();
+        let src = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: "w12-vts".into(),
+            title: "src".into(),
+            content: "c".into(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".into(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+        };
+        let mut tgt = src.clone();
+        tgt.id = uuid::Uuid::new_v4().to_string();
+        tgt.title = "tgt".into();
+        let src_id = db::insert(&conn, &src).unwrap();
+        let tgt_id = db::insert(&conn, &tgt).unwrap();
+
+        let alice = crate::identity::keypair::generate("alice").unwrap();
+        crate::identity::keypair::save(&alice, key_tmp.path()).unwrap();
+        db::create_link_signed(&conn, &src_id, &tgt_id, "related_to", Some(&alice))
+            .expect("create_link_signed");
+
+        // Tamper byte 0 of the stored signature.
+        let original_sig: Vec<u8> = conn
+            .query_row(
+                "SELECT signature FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                rusqlite::params![&src_id, &tgt_id],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .expect("read signature");
+        assert_eq!(original_sig.len(), 64);
+        let mut tampered = original_sig.clone();
+        tampered[0] ^= 0xFF;
+        conn.execute(
+            "UPDATE memory_links SET signature = ?3 \
+             WHERE source_id = ?1 AND target_id = ?2",
+            rusqlite::params![&src_id, &tgt_id, &tampered],
+        )
+        .unwrap();
+
+        let req = make_tools_call(
+            "memory_verify",
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "relation": "related_to",
+            }),
+        );
+        let resp = invoke_handle_request(&conn, &req);
+        assert!(resp.error.is_none(), "err: {:?}", resp.error);
+        let text = resp.result.unwrap()["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let val: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(val["signature_verified"], false, "got {val}");
+        assert_eq!(val["attest_level"], "unsigned");
+        assert!(val["signed_by"].is_null());
+        assert!(val["signed_at"].is_null());
+
+        // SAFETY: restore env.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("AI_MEMORY_KEY_DIR", v),
+                None => std::env::remove_var("AI_MEMORY_KEY_DIR"),
+            }
+        }
+    }
 }

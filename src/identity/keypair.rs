@@ -108,6 +108,19 @@ impl AgentKeypair {
     }
 }
 
+/// Test-only process-wide guard for tests that mutate
+/// `AI_MEMORY_KEY_DIR`. Exposed at `pub(crate)` (visibility only —
+/// no behavioural change) so coverage tests in `src/mcp/mod.rs`
+/// can serialise with the existing race-prone tests in this file.
+///
+/// Without this any other test that reads the env var concurrently
+/// can observe a half-written value, surfacing as flaky assertions.
+#[cfg(test)]
+pub(crate) fn key_dir_env_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// Returns the default key storage directory:
 /// `dirs::config_dir().join("ai-memory/keys/")`.
 ///
@@ -759,13 +772,13 @@ mod tests {
     }
 
     /// Process-wide guard for tests that mutate `AI_MEMORY_KEY_DIR`.
-    /// Without this any other test that reads the env var concurrently
-    /// can observe a half-written value, surfacing as
-    /// `assert_eq!(p, "/tmp/h4-override-test")` failing because another
-    /// thread cleared the var between set + read.
+    /// Delegates to the module-level `pub(crate) key_dir_env_lock` so
+    /// sibling-crate test files (e.g. `src/mcp/mod.rs`'s H4 verify
+    /// coverage tests) can serialise against the keypair-module tests
+    /// that also mutate the env var. Local thin wrapper kept so the
+    /// existing call sites in this file do not change.
     fn key_dir_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        super::key_dir_env_lock()
     }
 
     // ---- Round-2 F12 ensure_keypair --------------------------------------
