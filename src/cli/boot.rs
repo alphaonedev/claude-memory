@@ -1687,4 +1687,151 @@ mod tests {
             "default config must NOT redact: {stdout}"
         );
     }
+
+    // ---------- E1 coverage uplift -----------------------------------
+    // Targets: toon format (emit_toon + status header toon branch),
+    // --no-header + --format json (memories-only JSON path),
+    // resolve_namespace with --cwd override.
+
+    #[test]
+    fn boot_toon_format_emits_compact_body_with_header() {
+        // Drives emit_toon (lines 840-852) + the BootFormat::Toon arm
+        // (lines 609-625).
+        let _g = test_lock();
+        // SAFETY: process-wide env mutation; serialized by `_g`.
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-toon", "toon-row", "x");
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-toon".to_string());
+        args.format = "toon".to_string();
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        // Header should still appear (it's text/toon format).
+        assert!(stdout.contains("# ai-memory boot: ok"));
+        // The body is toon-encoded; the title field should still surface.
+        assert!(stdout.contains("toon-row"));
+    }
+
+    #[test]
+    fn boot_toon_format_no_header_emits_body_only() {
+        // Drives BootFormat::Toon + no_header=true (skips manifest emit).
+        let _g = test_lock();
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-toon-nh", "row-x", "x");
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-toon-nh".to_string());
+        args.format = "toon".to_string();
+        args.no_header = true;
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        assert!(!stdout.contains("# ai-memory boot"));
+        // Body still emits the title.
+        assert!(stdout.contains("row-x"));
+    }
+
+    #[test]
+    fn boot_json_no_header_emits_memories_only() {
+        // Drives the args.no_header arm inside the JSON format branch
+        // (lines 569-576).
+        let _g = test_lock();
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-json-nh", "json-nh-row", "x");
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.namespace = Some("ns-json-nh".to_string());
+        args.format = "json".to_string();
+        args.no_header = true;
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        // Only the `memories` key — no status, no manifest fields.
+        assert!(parsed.get("memories").is_some());
+        assert!(parsed.get("status").is_none());
+        assert!(parsed.get("version").is_none());
+    }
+
+    #[test]
+    fn boot_resolve_namespace_with_cwd_override() {
+        // Hits resolve_namespace's `set_current_dir(cwd)` branch
+        // (line 178). The override doesn't have to land on a git repo —
+        // the resolver swallows the result.
+        let _g = test_lock();
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        let mut env = TestEnv::fresh();
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.cwd = Some(tmp.path().to_path_buf());
+        // namespace is None so resolve_namespace falls into the cwd branch.
+        let saved_cwd = std::env::current_dir().unwrap();
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        // Restore so subsequent tests aren't perturbed.
+        std::env::set_current_dir(&saved_cwd).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        // The header surfaces *some* namespace; we don't pin which.
+        assert!(stdout.contains("# ai-memory boot"));
+    }
+
+    #[test]
+    fn boot_redact_titles_json_output_replaces_titles() {
+        // Drives render_memories_for_emit's redact-clone arm (lines
+        // 646-652) under the JSON format path.
+        let _g = test_lock();
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        seed_memory(&env.db_path, "ns-rj", "private-jt", "x");
+        let db_path = env.db_path.clone();
+        let cfg = config_with_boot(Some(true), Some(true));
+        let mut args = default_args();
+        args.namespace = Some("ns-rj".to_string());
+        args.format = "json".to_string();
+        let mut out = env.output();
+        run(&db_path, &args, &cfg, &mut out).unwrap();
+        let stdout = std::str::from_utf8(&env.stdout).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+        let memories = parsed["memories"].as_array().expect("memories array");
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["title"].as_str().unwrap(), REDACTED_TITLE);
+    }
+
+    #[test]
+    fn boot_format_parse_unknown_value_propagates() {
+        // Drives BootFormat::parse's error arm.
+        let _g = test_lock();
+        unsafe {
+            std::env::remove_var("AI_MEMORY_BOOT_ENABLED");
+        }
+        let mut env = TestEnv::fresh();
+        let db_path = env.db_path.clone();
+        let cfg = default_config();
+        let mut args = default_args();
+        args.format = "xml".to_string();
+        let mut out = env.output();
+        let res = run(&db_path, &args, &cfg, &mut out);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("unknown --format"));
+    }
 }

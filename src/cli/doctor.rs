@@ -2185,4 +2185,148 @@ mod tests {
             "diagnostic should mention case rule; got: {stderr}"
         );
     }
+
+    // ---------- E1 coverage uplift -----------------------------------
+    // Targets: run_hooks (json + human), render_hooks_human (config
+    // present + missing), --tokens --hooks combo.
+
+    fn run_hooks_capture(args: HooksReportArgs) -> (i32, String, String) {
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let exit;
+        {
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            exit = run_hooks(args, &mut out).expect("run_hooks");
+        }
+        (
+            exit,
+            String::from_utf8(stdout).unwrap(),
+            String::from_utf8(stderr).unwrap(),
+        )
+    }
+
+    #[test]
+    fn run_hooks_human_default_no_config_lists_zero() {
+        // Default path: HookConfig::default_path() may or may not exist
+        // on this system, but the loader either returns an empty list
+        // (file absent) or whatever is present. With or without, the
+        // human-mode header line surfaces.
+        let (exit, stdout, _stderr) = run_hooks_capture(HooksReportArgs { json: false });
+        assert_eq!(exit, 0);
+        assert!(stdout.contains("ai-memory doctor --hooks"));
+        assert!(stdout.contains("Hooks loaded:"));
+    }
+
+    #[test]
+    fn run_hooks_json_emits_schema_versioned_payload() {
+        let (exit, stdout, _) = run_hooks_capture(HooksReportArgs { json: true });
+        assert_eq!(exit, 0);
+        let v: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON");
+        assert_eq!(v["schema_version"], "v0.7-hooks-1");
+        assert!(v["hooks_loaded"].is_number());
+        assert!(v["executors"].is_array());
+        assert!(v["timeout_violations"].is_number());
+    }
+
+    #[test]
+    fn run_tokens_with_hooks_flag_appends_block() {
+        // Drives the `args.hooks` arm inside run_tokens (lines 329-331).
+        let args = TokensArgs {
+            json: false,
+            raw_table: false,
+            profile: None,
+            hooks: true,
+        };
+        let (exit, stdout, _stderr) = run_tokens_capture(args);
+        assert_eq!(exit, 0);
+        // Token report + appended hooks block.
+        assert!(stdout.contains("ai-memory doctor --tokens"));
+        assert!(stdout.contains("ai-memory doctor --hooks"));
+    }
+
+    // The `run_hooks` paths that depend on a loaded `hooks.toml` at the
+    // operator's real `~/Library/Application Support/ai-memory/hooks.toml`
+    // would violate the hermetic-test contract. We instead exercise the
+    // inner renderer (`render_hooks_human_with`) directly via the
+    // `HookConfig::load_from_str` API — no env mutation, no disk
+    // writes to user-owned paths.
+
+    #[test]
+    fn render_hooks_human_with_synthetic_hook_renders_row() {
+        // Drives render_hooks_human_with lines 414-444 + 446-454 — the
+        // hooks-present branch.
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/usr/local/bin/echo-something-long"
+mode = "exec"
+namespace = "*"
+priority = 5
+timeout_ms = 1000
+enabled = true
+"#;
+        let hooks = crate::hooks::config::HookConfig::load_from_str(toml_src).expect("parse hooks");
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let synthetic_path = std::path::PathBuf::from("/tmp/synthetic/hooks.toml");
+        {
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            render_hooks_human_with(&mut out, Some(&synthetic_path), &hooks).unwrap();
+        }
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("ai-memory doctor --hooks"));
+        assert!(s.contains("Config path:"));
+        assert!(s.contains("Hooks loaded: 1"));
+        // Row carries the truncated file_name.
+        assert!(s.contains("echo-something-long") || s.contains("event"));
+        assert!(s.contains("Chain class-deadline violations"));
+        assert!(s.contains("note: live metrics land"));
+    }
+
+    #[test]
+    fn render_hooks_human_with_no_hooks_emits_helpful_note() {
+        // Drives render_hooks_human_with's hooks.is_empty() branch
+        // (lines 418-424) + the path-Some line (lines 414-416).
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let synthetic_path = std::path::PathBuf::from("/some/path/hooks.toml");
+        {
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            render_hooks_human_with(&mut out, Some(&synthetic_path), &[]).unwrap();
+        }
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("ai-memory doctor --hooks"));
+        assert!(s.contains("Config path:"));
+        assert!(s.contains("Hooks loaded: 0"));
+        assert!(s.contains("(no hooks configured"));
+    }
+
+    #[test]
+    fn render_hooks_human_with_command_no_filename_falls_back_to_display() {
+        // Drives the `.unwrap_or_else(|| h.command.display().to_string())`
+        // arm (line 438) — fires when command.file_name() returns None.
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/"
+mode = "exec"
+namespace = "*"
+priority = 1
+timeout_ms = 500
+enabled = true
+"#;
+        // `command = "/"` has no `file_name()`; the fallback uses
+        // `display()`.
+        let hooks = crate::hooks::config::HookConfig::load_from_str(toml_src).expect("parse hooks");
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        {
+            let mut out = CliOutput::from_std(&mut stdout, &mut stderr);
+            render_hooks_human_with(&mut out, None, &hooks).unwrap();
+        }
+        let s = String::from_utf8(stdout).unwrap();
+        // No `Config path` line because path is None.
+        assert!(!s.contains("Config path:"));
+        assert!(s.contains("Hooks loaded: 1"));
+    }
 }
