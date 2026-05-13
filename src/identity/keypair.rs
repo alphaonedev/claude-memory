@@ -209,6 +209,24 @@ pub fn save_public_only(keypair: &AgentKeypair, dir: &Path) -> Result<()> {
 /// The public file must exist (errors otherwise). The private file is
 /// optional — if absent the returned `AgentKeypair.private` is `None`
 /// and the caller can verify but not sign.
+///
+/// # v0.7.0 S4-LOW1 — load-time mode-bits enforcement (Unix)
+///
+/// `save` writes the private file with mode `0o600`, but an operator
+/// (or a misconfigured restore-from-backup) can chmod-loosen the
+/// file on disk after the fact. Without a load-time check the
+/// daemon would happily sign with a world-readable key. On Unix we
+/// now stat the `.priv` file before reading and refuse to load
+/// when any group/other bit is set (`mode & 0o077 != 0`).
+///
+/// The error message names the path and the offending mode, and
+/// includes the `chmod` invocation that restores 0600 — so an
+/// operator hitting this in production has a copy-pasteable fix.
+///
+/// On non-Unix targets this check is a no-op (mode bits don't
+/// apply to NTFS ACLs; hardware-backed key storage is the
+/// commercial AgenticMem layer's responsibility — see the
+/// "Hardware-backed key storage" section above).
 pub fn load(agent_id: &str, dir: &Path) -> Result<AgentKeypair> {
     validate::validate_agent_id(agent_id)?;
     let pub_path = dir.join(format!("{agent_id}{PUB_SUFFIX}"));
@@ -232,6 +250,39 @@ pub fn load(agent_id: &str, dir: &Path) -> Result<AgentKeypair> {
     //           dalek 2.x accepts that input or not is version-bound.
     let public = VerifyingKey::from_bytes(&pub_arr)
         .with_context(|| format!("decoding public key {}", pub_path.display()))?;
+
+    // v0.7.0 S4-LOW1 — refuse to load a `.priv` whose Unix mode bits
+    // grant any group/other access. Only fire when the file exists;
+    // a missing `.priv` is a valid public-only load and the mode
+    // check is irrelevant there. Done as a pre-flight before
+    // `fs::read` so we never even map the bytes into memory for a
+    // world-readable key.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match fs::metadata(&priv_path) {
+            Ok(meta) => {
+                let mode = meta.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    bail!(
+                        "private key {} has insecure mode {:o}; refusing to load. \
+                         Restore with: chmod 0600 {}",
+                        priv_path.display(),
+                        mode,
+                        priv_path.display()
+                    );
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                // Public-only load — fall through; the inner match
+                // below will surface the same NotFound path.
+            }
+            Err(e) => {
+                return Err(anyhow!(e))
+                    .with_context(|| format!("stat private key {}", priv_path.display()));
+            }
+        }
+    }
 
     let private = match fs::read(&priv_path) {
         Ok(priv_bytes) => {
@@ -1071,5 +1122,82 @@ mod tests {
         unsafe {
             std::env::remove_var("AI_MEMORY_KEY_DIR");
         }
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 S4-LOW1 — load-time mode-bits enforcement
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn test_keypair_load_refuses_world_readable_priv() {
+        // 0o777 grants rwx to group + world. Loading must refuse.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        let priv_path = dir.path().join("alice.priv");
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o777)).unwrap();
+        let err = load("alice", dir.path()).unwrap_err();
+        // Restore mode so tempdir cleanup works regardless of outcome.
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("insecure mode"),
+            "error must name the failure mode, got: {msg}"
+        );
+        assert!(
+            msg.contains("chmod 0600"),
+            "error must include the fix invocation, got: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_keypair_load_refuses_group_readable_priv() {
+        // 0o640 grants read to group. Loading must refuse — any
+        // group/other bit triggers the check (mode & 0o077 != 0).
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        let priv_path = dir.path().join("alice.priv");
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o640)).unwrap();
+        let err = load("alice", dir.path()).unwrap_err();
+        fs::set_permissions(&priv_path, fs::Permissions::from_mode(0o600)).unwrap();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("insecure mode"), "got: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_keypair_load_accepts_0600() {
+        // The canonical mode `save` writes. Must load cleanly.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        let priv_path = dir.path().join("alice.priv");
+        // `save` already writes 0600; assert explicitly to catch a
+        // future-self regression that loosens the save path.
+        let mode = fs::metadata(&priv_path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "save must write 0600, got {mode:o}");
+
+        let loaded = load("alice", dir.path()).expect("0600 must load");
+        assert!(loaded.can_sign(), "0600 mode must yield a signing keypair");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_keypair_load_missing_priv_skips_mode_check() {
+        // Public-only load (no .priv file) must NOT trip the mode
+        // check. This is the documented "verify but not sign" path
+        // for peer pubkey enrolment.
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        fs::remove_file(dir.path().join("alice.priv")).unwrap();
+        let loaded = load("alice", dir.path()).expect("public-only load must succeed");
+        assert!(!loaded.can_sign());
     }
 }

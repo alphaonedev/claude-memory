@@ -1721,7 +1721,7 @@ pub fn create_link_signed(
             _ => (None, "unsigned", None),
         };
 
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO memory_links \
             (source_id, target_id, relation, created_at, valid_from, signature, attest_level, observed_by) \
          VALUES (?1, ?2, ?3, ?4, ?4, ?5, ?6, ?7)",
@@ -1735,6 +1735,68 @@ pub fn create_link_signed(
             observed_by_col
         ],
     )?;
+
+    // v0.7.0 S4-INFO2 — append a `memory_link.created` row to
+    // `signed_events` so the audit ledger reflects every new link
+    // (signed or unsigned). The `payload_hash` binds to the same
+    // canonical CBOR that the H2 signer hashed (or would have, for
+    // unsigned rows) so an auditor can re-derive the bytes and check
+    // them against the row.
+    //
+    // Best-effort: a failure here logs a warn but does NOT roll back
+    // the link insert. Cratering a legitimate write because the
+    // append-only ledger had a transient SQLite error would punish
+    // the caller for a substrate problem they cannot fix — same
+    // discipline as `invalidate_link`'s `memory_link.invalidated`
+    // emit (see also A2's pattern on `execute_pending_action`).
+    //
+    // We only emit when the INSERT actually wrote a row.
+    // `INSERT OR IGNORE` returns `Ok(0)` on a uniqueness-conflict
+    // replay of an existing `(source_id, target_id, relation)`; in
+    // that case the audit row was already appended on the original
+    // create call, and re-appending would generate a misleading
+    // duplicate-create event.
+    if inserted > 0 {
+        let agent_for_event = observed_by_col
+            .map(str::to_string)
+            .unwrap_or_else(|| "unknown".to_string());
+        let signable = crate::identity::sign::SignableLink {
+            src_id: source_id,
+            dst_id: target_id,
+            relation,
+            observed_by: observed_by_col,
+            valid_from: Some(now.as_str()),
+            valid_until: None,
+        };
+        match crate::identity::sign::canonical_cbor(&signable) {
+            Ok(cbor) => {
+                let event = crate::signed_events::SignedEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: agent_for_event,
+                    event_type: "memory_link.created".to_string(),
+                    payload_hash: crate::signed_events::payload_hash(&cbor),
+                    signature: signature.clone(),
+                    attest_level: attest_level.to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
+                    tracing::warn!(
+                        target: "signed_events",
+                        source_id, target_id, relation,
+                        "failed to append memory_link.created audit row: {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "signed_events",
+                    source_id, target_id, relation,
+                    "failed to encode canonical CBOR for memory_link.created audit: {e}"
+                );
+            }
+        }
+    }
+
     Ok(attest_level)
 }
 
@@ -1838,7 +1900,7 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
         link.created_at.clone()
     };
 
-    conn.execute(
+    let inserted = conn.execute(
         "INSERT OR IGNORE INTO memory_links \
             (source_id, target_id, relation, created_at, valid_from, valid_until, \
              signature, attest_level, observed_by) \
@@ -1855,6 +1917,67 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
             link.observed_by,
         ],
     )?;
+
+    // v0.7.0 S4-INFO2 — append a `memory_link.created` row to
+    // `signed_events` for inbound replicated links too. The audit
+    // ledger should reflect every new link visible locally, not just
+    // outbound writes. `payload_hash` binds to the canonical CBOR
+    // re-derived from the wire-shape link the peer signed, so an
+    // auditor can replay the exact bytes that were verified at
+    // ingress.
+    //
+    // Best-effort: a failure logs a warn but does NOT roll back the
+    // link insert (same discipline as the outbound path above and as
+    // `invalidate_link`'s emit).
+    //
+    // Only emit when the INSERT actually wrote a row (idempotent
+    // sync replays must not generate duplicate-create events).
+    if inserted > 0 {
+        let agent_for_event = link
+            .observed_by
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string());
+        let signable = crate::identity::sign::SignableLink {
+            src_id: link.source_id.as_str(),
+            dst_id: link.target_id.as_str(),
+            relation: link.relation.as_str(),
+            observed_by: link.observed_by.as_deref(),
+            valid_from: Some(valid_from.as_str()),
+            valid_until: link.valid_until.as_deref(),
+        };
+        match crate::identity::sign::canonical_cbor(&signable) {
+            Ok(cbor) => {
+                let event = crate::signed_events::SignedEvent {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: agent_for_event,
+                    event_type: "memory_link.created".to_string(),
+                    payload_hash: crate::signed_events::payload_hash(&cbor),
+                    signature: link.signature.clone(),
+                    attest_level: attest_level.to_string(),
+                    timestamp: Utc::now().to_rfc3339(),
+                };
+                if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
+                    tracing::warn!(
+                        target: "signed_events",
+                        source_id = %link.source_id,
+                        target_id = %link.target_id,
+                        relation = %link.relation,
+                        "failed to append memory_link.created audit row (inbound): {e}"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "signed_events",
+                    source_id = %link.source_id,
+                    target_id = %link.target_id,
+                    relation = %link.relation,
+                    "failed to encode canonical CBOR for inbound memory_link.created audit: {e}"
+                );
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -11079,5 +11202,214 @@ mod tests {
             )
             .unwrap();
         assert_eq!(fresh_status, "pending");
+    }
+
+    // -----------------------------------------------------------------
+    // v0.7.0 S4-INFO2 — `memory_link.created` audit emit
+    // -----------------------------------------------------------------
+
+    /// Count the number of `signed_events` rows for a given event_type
+    /// and substring match on the row's `payload_hash`-bearing row.
+    /// Used by the audit emit tests below.
+    fn count_signed_events_of_type(conn: &Connection, event_type: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM signed_events WHERE event_type = ?1",
+            params![event_type],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_memory_link_created_emits_signed_event_unsigned_path() {
+        // S4-INFO2 — every successful link create appends one
+        // `memory_link.created` row, even on the unsigned path. The
+        // emit's `attest_level` and `signature` columns must mirror
+        // the source row.
+        let conn = test_db();
+        let src = make_memory("s4info2-src-u", "test", Tier::Long, 5);
+        let tgt = make_memory("s4info2-tgt-u", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let before = count_signed_events_of_type(&conn, "memory_link.created");
+        create_link_signed(&conn, &src.id, &tgt.id, "related_to", None).unwrap();
+        let after = count_signed_events_of_type(&conn, "memory_link.created");
+        assert_eq!(after, before + 1, "unsigned create must emit one audit row");
+
+        // Inspect the emitted row's signing-surface columns.
+        let (attest, sig): (String, Option<Vec<u8>>) = conn
+            .query_row(
+                "SELECT attest_level, signature FROM signed_events \
+                 WHERE event_type = 'memory_link.created' \
+                 ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(attest, "unsigned");
+        assert!(sig.is_none(), "unsigned create must emit NULL signature");
+    }
+
+    #[test]
+    fn test_memory_link_created_emits_signed_event_signed_path() {
+        // S4-INFO2 — signed path: the emitted row's payload_hash
+        // must match SHA-256 over the canonical CBOR that the H2
+        // signer just committed to, AND the `signature` must equal
+        // the link row's signature byte-for-byte (auditor cross-check).
+        use crate::identity::{keypair, sign as link_sign};
+
+        let conn = test_db();
+        let src = make_memory("s4info2-src-s", "test", Tier::Long, 5);
+        let tgt = make_memory("s4info2-tgt-s", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let kp = keypair::generate("alice").unwrap();
+        create_link_signed(&conn, &src.id, &tgt.id, "supersedes", Some(&kp)).unwrap();
+
+        // Read back the link row's signature + valid_from so we can
+        // re-derive the canonical CBOR the audit row should commit to.
+        let (link_sig, valid_from): (Vec<u8>, String) = conn
+            .query_row(
+                "SELECT signature, valid_from FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                params![&src.id, &tgt.id],
+                |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap();
+        let signable = link_sign::SignableLink {
+            src_id: &src.id,
+            dst_id: &tgt.id,
+            relation: "supersedes",
+            observed_by: Some(kp.agent_id.as_str()),
+            valid_from: Some(valid_from.as_str()),
+            valid_until: None,
+        };
+        let expected_hash = crate::signed_events::payload_hash(
+            &link_sign::canonical_cbor(&signable).expect("cbor"),
+        );
+
+        let (agent, attest, sig, payload): (String, String, Option<Vec<u8>>, Vec<u8>) = conn
+            .query_row(
+                "SELECT agent_id, attest_level, signature, payload_hash \
+                 FROM signed_events \
+                 WHERE event_type = 'memory_link.created' \
+                 ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(agent, "alice");
+        assert_eq!(attest, "self_signed");
+        assert_eq!(
+            sig.as_deref(),
+            Some(link_sig.as_slice()),
+            "audit row signature must mirror memory_links.signature byte-for-byte"
+        );
+        assert_eq!(
+            payload, expected_hash,
+            "audit row payload_hash must SHA-256 the canonical CBOR H2 signed over"
+        );
+    }
+
+    #[test]
+    fn test_memory_link_created_emit_is_idempotent_on_replay() {
+        // INSERT OR IGNORE collapses duplicate (src,dst,relation)
+        // writes to a no-op at the link layer. The audit emit must
+        // NOT fire on the replay — otherwise an idempotent retry by
+        // a federation peer would inflate the audit row count for
+        // the same logical event.
+        let conn = test_db();
+        let src = make_memory("s4info2-src-d", "test", Tier::Long, 5);
+        let tgt = make_memory("s4info2-tgt-d", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        create_link_signed(&conn, &src.id, &tgt.id, "related_to", None).unwrap();
+        let after_first = count_signed_events_of_type(&conn, "memory_link.created");
+        create_link_signed(&conn, &src.id, &tgt.id, "related_to", None).unwrap();
+        let after_second = count_signed_events_of_type(&conn, "memory_link.created");
+        assert_eq!(
+            after_second, after_first,
+            "duplicate (src,dst,relation) replay must not emit a second audit row"
+        );
+    }
+
+    #[test]
+    fn test_create_link_inbound_emits_signed_event() {
+        // The federation-replicated path must emit too — the audit
+        // ledger reflects every link visible locally.
+        let conn = test_db();
+        let src = make_memory("s4info2-in-src", "test", Tier::Long, 5);
+        let tgt = make_memory("s4info2-in-tgt", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        let now = chrono::Utc::now().to_rfc3339();
+        let link = MemoryLink {
+            source_id: src.id.clone(),
+            target_id: tgt.id.clone(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
+            created_at: now.clone(),
+            signature: None,
+            observed_by: Some("peer-bob".to_string()),
+            valid_from: Some(now.clone()),
+            valid_until: None,
+        };
+        let before = count_signed_events_of_type(&conn, "memory_link.created");
+        create_link_inbound(&conn, &link, "unsigned").unwrap();
+        let after = count_signed_events_of_type(&conn, "memory_link.created");
+        assert_eq!(after, before + 1);
+
+        let agent: String = conn
+            .query_row(
+                "SELECT agent_id FROM signed_events \
+                 WHERE event_type = 'memory_link.created' \
+                 ORDER BY timestamp DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            agent, "peer-bob",
+            "inbound emit must record the peer's claimed observed_by"
+        );
+    }
+
+    #[test]
+    fn test_create_link_signed_emit_failure_does_not_roll_back() {
+        // Drop the signed_events table to simulate a substrate
+        // problem (schema drift, disk error mapped to a SQL
+        // failure). The link create must still commit and the
+        // function must return Ok — the audit emit is best-effort.
+        let conn = test_db();
+        let src = make_memory("s4info2-fail-src", "test", Tier::Long, 5);
+        let tgt = make_memory("s4info2-fail-tgt", "test", Tier::Long, 5);
+        insert(&conn, &src).unwrap();
+        insert(&conn, &tgt).unwrap();
+
+        // Knock out the audit substrate.
+        conn.execute("DROP TABLE signed_events", []).unwrap();
+
+        let result = create_link_signed(&conn, &src.id, &tgt.id, "related_to", None);
+        assert!(
+            result.is_ok(),
+            "audit emit failure must not crater the link create: {result:?}"
+        );
+
+        // The link itself must have persisted.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_links \
+                 WHERE source_id = ?1 AND target_id = ?2",
+                params![&src.id, &tgt.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "link row must have committed despite audit failure"
+        );
     }
 }

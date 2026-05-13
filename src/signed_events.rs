@@ -13,7 +13,7 @@
 //! `payload_hash` captured here is SHA-256 over the same canonical-
 //! CBOR bytes the H2 signer committed to.
 //!
-//! # Append-only invariant
+//! # Append-only invariant (row-level)
 //!
 //! This module exposes ONE writer ([`append_signed_event`]) and
 //! ZERO mutators. There are no `UPDATE signed_events` or `DELETE
@@ -28,6 +28,50 @@
 //! `UPDATE signed_events` / `DELETE FROM signed_events` strings
 //! appear in production code outside doc comments — adding any
 //! such call site will fail the build.
+//!
+//! # What this table does NOT guarantee — cross-row tamper evidence
+//!
+//! **`signed_events` is row-level append-only, NOT cross-row
+//! hash-chained.** Each row commits to the canonical-CBOR bytes of
+//! one event via `payload_hash`, but rows do NOT carry a `prev_hash`
+//! pointer to the previous row, and there is no monotonic sequence
+//! column. An operator (or attacker) with direct SQL access who
+//! `DELETE`s a single row leaves NO evidence of the deletion in
+//! `signed_events` itself — the remaining rows still verify
+//! individually, and a missing UUID cannot be distinguished from
+//! "this event never happened."
+//!
+//! This is a deliberate scope choice. The load-bearing
+//! tamper-evident chain in `ai-memory` lives in [`crate::audit`]
+//! (the JSONL audit log under `<audit_dir>/audit.log`):
+//!
+//! - **Cross-line hash chain.** Each JSONL line carries `prev_hash`
+//!   pointing to the prior line's `self_hash`; `ai-memory audit
+//!   verify` recomputes the chain and exits non-zero on mismatch.
+//! - **Monotonic sequence.** F2 (v0.7.0 round-2) wired the sequence
+//!   counter to survive process restart so SIEMs detect dropped
+//!   lines even before the chain check.
+//! - **Append-only OS hint.** Best-effort `chflags(2)` / `FS_IOC_SETFLAGS`.
+//!
+//! Read [`crate::audit`]'s module-level doc for the full design.
+//!
+//! ## When to use which surface
+//!
+//! | Question | Surface |
+//! |---|---|
+//! | "What did this signed link's bytes look like at write time?" | `signed_events` (row binds canonical CBOR via `payload_hash`) |
+//! | "Was the substrate tampered with between `T0` and `T1`?" | `audit.rs` JSONL (hash chain + sequence) |
+//! | "Did the same key issue the create and the invalidate?" | `signed_events` (signature column on both rows) |
+//! | "Is the audit log truncated?" | `audit.rs` JSONL (sequence gap, chain break) |
+//!
+//! The two surfaces are complementary, not redundant. The narrative
+//! in earlier docs that called `signed_events` an "immutable audit
+//! chain" was loose; the correct phrasing is "row-level append-only
+//! event ledger over identity-bearing writes." If/when the
+//! commercial **AgenticMem™** layer needs cross-row tamper evidence
+//! at the SQL surface, the planned migration adds `prev_hash BLOB`
+//! and `sequence INTEGER` columns (mirror of `audit.rs`'s on-disk
+//! schema). That is a v0.7.x add-on, not a v0.7.0 ship blocker.
 //!
 //! # Out of scope
 //!
