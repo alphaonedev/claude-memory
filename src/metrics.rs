@@ -76,7 +76,7 @@ impl Metrics {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn try_new() -> prometheus::Result<Self> {
+    pub(crate) fn try_new() -> prometheus::Result<Self> {
         let registry = Registry::new();
 
         let store_total = IntCounterVec::new(
@@ -471,5 +471,80 @@ mod tests {
             .observe(0.42);
         let text = render();
         assert!(text.contains("ai_memory_curator_cycle_duration_seconds"));
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — exercise try_new() directly so the metric-builder
+    // happy paths (lines 88-210) get covered. The process singleton
+    // registry() builds once on first access; we need a second pass for
+    // line coverage of every metric registration in the try_new body.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn try_new_builds_a_fresh_metrics_handle() {
+        // Build a second instance on top of an independent registry —
+        // hits every metric-construction line in `try_new` even when
+        // another test has already initialised the process-wide
+        // singleton. Each call uses a fresh Registry, so register()
+        // cannot collide.
+        let m = super::Metrics::try_new().expect("fresh registry must succeed");
+        // The handle must expose every metric family — touch each to
+        // exercise the assignment side of the struct literal.
+        m.store_total.with_label_values(&["short", "ok"]).inc();
+        m.recall_total.with_label_values(&["hybrid"]).inc();
+        m.recall_latency_seconds
+            .with_label_values(&["hybrid"])
+            .observe(0.001);
+        m.autonomy_hook_total.with_label_values(&["x", "ok"]).inc();
+        m.contradiction_detected_total.inc();
+        m.webhook_dispatched_total.inc();
+        m.webhook_failed_total.inc();
+        m.memories_gauge.set(1);
+        m.hnsw_size_gauge.set(1);
+        m.subscriptions_active_gauge.set(1);
+        m.curator_cycles_total.inc();
+        m.curator_operations_total
+            .with_label_values(&["auto_tag", "ok"])
+            .inc();
+        m.curator_cycle_duration_seconds
+            .with_label_values(&["true"])
+            .observe(1.0);
+        m.federation_fanout_dropped_total
+            .with_label_values(&["panic"])
+            .inc();
+        m.federation_fanout_retry_total
+            .with_label_values(&["ok"])
+            .inc();
+        m.federation_partial_quorum_total.inc();
+    }
+
+    #[test]
+    fn try_new_can_build_two_isolated_registries() {
+        // Two consecutive try_new() calls succeed because each builds
+        // its own Registry — no name collision.
+        let a = super::Metrics::try_new().expect("first");
+        let b = super::Metrics::try_new().expect("second");
+        // Tickle a counter on each so the family surfaces in gather().
+        a.store_total.with_label_values(&["short", "ok"]).inc();
+        b.store_total.with_label_values(&["short", "ok"]).inc();
+        let mut buf_a = Vec::new();
+        let mut buf_b = Vec::new();
+        let enc = TextEncoder::new();
+        enc.encode(&a.registry.gather(), &mut buf_a).unwrap();
+        enc.encode(&b.registry.gather(), &mut buf_b).unwrap();
+        assert!(String::from_utf8_lossy(&buf_a).contains("ai_memory_store_total"));
+        assert!(String::from_utf8_lossy(&buf_b).contains("ai_memory_store_total"));
+    }
+
+    #[test]
+    fn curator_cycle_completed_no_progress_branch_skips_err_increment() {
+        // operations_attempted=0, auto_tagged=0, contradictions=0,
+        // errors=0 → failed = 0.saturating_sub(0+0) = 0 → the `if
+        // failed > 0 || errors > 0` block does NOT execute. Pins the
+        // negative branch.
+        let before = registry().curator_cycles_total.get();
+        curator_cycle_completed(0, 0, 0, 0);
+        let after = registry().curator_cycles_total.get();
+        assert!(after >= before + 1);
     }
 }

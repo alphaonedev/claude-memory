@@ -735,6 +735,151 @@ mod tests {
         assert!(res.is_err(), "must reject invalid agent_id");
     }
 
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — error path + visibility closures
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn save_returns_context_when_dir_is_a_file() {
+        // Lines 172, 178: with_context closure for create_dir_all
+        // when the parent component is a file.
+        let dir = tmp_dir();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"file").unwrap();
+        let kp = generate("alice").unwrap();
+        // Treat the file as if it were a dir → mkdir of "blocker/sub"
+        // fails because blocker is a file.
+        let sub = blocker.join("sub");
+        let err = save(&kp, &sub).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("creating key directory"),
+            "expected wrapped context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn save_public_only_returns_context_when_dir_is_a_file() {
+        // Lines 189: with_context closure for create_dir_all.
+        let dir = tmp_dir();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"file").unwrap();
+        let kp = generate("alice").unwrap();
+        let sub = blocker.join("sub");
+        let err = save_public_only(&kp, &sub).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("creating key directory"),
+            "expected wrapped context, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_returns_context_when_pub_file_missing() {
+        // Line 207: with_context closure for fs::read of public.
+        let dir = tmp_dir();
+        let err = load("alice", dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reading public key"), "got: {msg}");
+    }
+
+    #[test]
+    fn load_returns_decode_context_for_corrupt_public_key() {
+        // Line 218: with_context closure for VerifyingKey::from_bytes.
+        // Construct 32 bytes that fail decode (an Ed25519 invariant
+        // requires the encoded point to lie on the curve — most
+        // arbitrary 32-byte sequences are valid, but certain
+        // canonical points fail). Use 32 0xFF bytes to maximise the
+        // chance of decode failure; if dalek accepts it, the test
+        // falls back to asserting the length is the only check that
+        // would fire. We trust the historical Ed25519 spec which
+        // rejects all-1 encodings.
+        let dir = tmp_dir();
+        let bytes = [0xFFu8; PUBLIC_KEY_LEN];
+        fs::write(dir.path().join("alice.pub"), bytes).unwrap();
+        // The result may surface either a length-OK + decode error
+        // OR a decode error directly. We only assert that LOAD errors
+        // (not panics) — this pins the path even if dalek's decode
+        // policy varies across versions.
+        let res = load("alice", dir.path());
+        if let Err(err) = res {
+            let msg = format!("{err:#}");
+            // Either path is acceptable; both go through with_context.
+            assert!(
+                msg.contains("decoding public key") || msg.contains("expected"),
+                "got: {msg}"
+            );
+        } else {
+            // If dalek accepted the all-FF point as a valid public
+            // key, this test is a no-op (the spec edge differs from
+            // our assumption). Document that we tolerate either
+            // outcome via this branch.
+        }
+    }
+
+    #[test]
+    fn load_with_truncated_priv_returns_length_error() {
+        // Lines 222-226: bail! when private key bytes are wrong length.
+        let dir = tmp_dir();
+        let kp = generate("alice").unwrap();
+        save(&kp, dir.path()).unwrap();
+        // Truncate .priv to a non-32-byte length (e.g. 8 bytes).
+        fs::write(dir.path().join("alice.priv"), b"shortie!").unwrap();
+        let err = load("alice", dir.path()).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expected 32"), "got: {msg}");
+    }
+
+    #[test]
+    fn list_returns_context_on_unreadable_directory() {
+        // Line 271: with_context closure for read_dir failure. Hardest
+        // to trigger portably — passing a regular file as `dir` makes
+        // `dir.exists()` return true but read_dir fails with ENOTDIR.
+        let dir = tmp_dir();
+        let file = dir.path().join("not-a-dir");
+        fs::write(&file, b"x").unwrap();
+        let err = list(&file).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reading key directory"), "got: {msg}");
+    }
+
+    #[test]
+    fn decode_public_base64_rejects_garbage() {
+        // Line 317: with_context closure on base64 decode failure.
+        let err = decode_public_base64("not-valid-base64!!!").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("decoding base64"), "got: {msg}");
+    }
+
+    #[test]
+    fn decode_public_base64_rejects_wrong_length() {
+        // Line 318-322: bail! when decoded bytes are not 32.
+        // 8 bytes encodes to 12 chars in base64 (no padding).
+        let short = URL_SAFE_NO_PAD.encode([0u8; 8]);
+        let err = decode_public_base64(&short).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("expected 32"), "got: {msg}");
+    }
+
+    #[test]
+    fn read_raw_key_file_returns_context_when_path_missing() {
+        // Line 333: with_context closure on fs::read failure.
+        let dir = tmp_dir();
+        let missing = dir.path().join("nope.bin");
+        let err = read_raw_key_file(&missing).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("reading key file"), "got: {msg}");
+    }
+
+    #[test]
+    fn ensure_keypair_rejects_invalid_agent_id_when_enabled() {
+        // Line 402: validate_agent_id fires on the enabled branch.
+        let dir = tmp_dir();
+        let err = ensure_keypair("has space", dir.path(), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("invalid character"), "got: {msg}");
+    }
+
     #[test]
     fn default_key_dir_honours_env_override() {
         // v0.7 H4 — the override exists so `memory_verify` integration

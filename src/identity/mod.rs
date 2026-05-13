@@ -428,10 +428,7 @@ mod tests {
             unsafe {
                 std::env::set_var(ENV_ANONYMIZE, v);
             }
-            assert!(
-                anonymize_default_enabled(),
-                "value {v:?} must be truthy"
-            );
+            assert!(anonymize_default_enabled(), "value {v:?} must be truthy");
         }
         // SAFETY: env mutation serialised.
         unsafe {
@@ -447,10 +444,7 @@ mod tests {
             unsafe {
                 std::env::set_var(ENV_ANONYMIZE, v);
             }
-            assert!(
-                !anonymize_default_enabled(),
-                "value {v:?} must be falsy"
-            );
+            assert!(!anonymize_default_enabled(), "value {v:?} must be falsy");
         }
         // SAFETY: env mutation serialised.
         unsafe {
@@ -513,9 +507,7 @@ mod tests {
         }
         let id = resolve_agent_id(None, None).unwrap();
         assert!(
-            id.starts_with("host:")
-                || id.starts_with("anonymous:")
-                || id.starts_with("ai:"),
+            id.starts_with("host:") || id.starts_with("anonymous:") || id.starts_with("ai:"),
             "empty env must fall through to host/anonymous default, got: {id}"
         );
         // SAFETY: env mutation serialised.

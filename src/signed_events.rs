@@ -330,8 +330,7 @@ mod tests {
         // the second INSERT, exercising the .context("append signed_event")
         // error path.
         a.timestamp = Utc::now().to_rfc3339();
-        let err = append_signed_event(&conn, &a)
-            .expect_err("second append with same id must fail");
+        let err = append_signed_event(&conn, &a).expect_err("second append with same id must fail");
         assert!(
             format!("{err:?}").contains("append signed_event")
                 || format!("{err:#}").contains("append signed_event"),

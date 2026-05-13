@@ -600,3 +600,297 @@ fn zstd_decompress(input: &[u8]) -> Result<Vec<u8>> {
     }
     Ok(out)
 }
+
+// -----------------------------------------------------------------
+// L0.7-2 Tier A — transcripts/storage tests
+// All paths exercised over `:memory:` SQLite via `crate::db::open` so
+// the daemon's schema is applied. No /tmp writes.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn fresh_db() -> Connection {
+        crate::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn insert_memory(conn: &Connection, id: &str, expires_at: Option<&str>) {
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO memories (
+                id, tier, namespace, title, content, expires_at, created_at, updated_at
+             ) VALUES (?1, 'short_term', 'ns', ?2, 'body', ?3, ?4, ?4)",
+            rusqlite::params![id, format!("title-{id}"), expires_at, now],
+        )
+        .expect("insert test memory");
+    }
+
+    #[test]
+    fn store_and_fetch_round_trips_content() {
+        let conn = fresh_db();
+        let body = "hello transcripts";
+        let t = store(&conn, "ns-x", body, None).expect("store ok");
+        assert_eq!(t.namespace, "ns-x");
+        assert!(t.compressed_size > 0);
+        assert_eq!(t.original_size, body.len() as i64);
+        let back = fetch(&conn, &t.id).expect("fetch ok").expect("present");
+        assert_eq!(back, body);
+    }
+
+    #[test]
+    fn store_with_ttl_sets_expires_at() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "body", Some(Duration::seconds(120))).expect("store ok");
+        assert!(t.expires_at.is_some());
+    }
+
+    #[test]
+    fn fetch_missing_id_returns_none() {
+        let conn = fresh_db();
+        let r = fetch(&conn, "no-such-id").expect("query ok");
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn fetch_metadata_returns_handle_without_blob() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        let meta = fetch_metadata(&conn, &t.id)
+            .expect("query ok")
+            .expect("present");
+        assert_eq!(meta.id, t.id);
+        assert_eq!(meta.namespace, "ns-x");
+        assert_eq!(meta.original_size, t.original_size);
+    }
+
+    #[test]
+    fn fetch_metadata_missing_returns_none() {
+        let conn = fresh_db();
+        let r = fetch_metadata(&conn, "no-such-id").expect("query ok");
+        assert!(r.is_none());
+    }
+
+    #[test]
+    fn purge_expired_removes_only_past_due_rows() {
+        let conn = fresh_db();
+        // Past: 1 hour ago
+        let _live = store(&conn, "ns-x", "live", None).expect("store live");
+        // Manually set an expires_at in the past on a second row.
+        let past = store(&conn, "ns-x", "past", None).expect("store past");
+        conn.execute(
+            "UPDATE memory_transcripts SET expires_at = '2000-01-01T00:00:00+00:00' WHERE id = ?1",
+            rusqlite::params![past.id],
+        )
+        .unwrap();
+        let n = purge_expired(&conn).expect("purge ok");
+        assert_eq!(n, 1, "exactly one past-expiry row");
+        assert!(fetch(&conn, &past.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn link_and_transcripts_for_memory_round_trip() {
+        let conn = fresh_db();
+        insert_memory(&conn, "m1", None);
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        link_transcript(&conn, "m1", &t.id, Some(0), Some(4)).expect("link ok");
+        let links = transcripts_for_memory(&conn, "m1").expect("query ok");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].memory_id, "m1");
+        assert_eq!(links[0].transcript_id, t.id);
+        assert_eq!(links[0].span_start, Some(0));
+        assert_eq!(links[0].span_end, Some(4));
+    }
+
+    #[test]
+    fn memories_for_transcript_round_trip() {
+        let conn = fresh_db();
+        insert_memory(&conn, "m1", None);
+        insert_memory(&conn, "m2", None);
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        link_transcript(&conn, "m1", &t.id, None, None).expect("link ok");
+        link_transcript(&conn, "m2", &t.id, None, None).expect("link ok");
+        let mems = memories_for_transcript(&conn, &t.id).expect("query ok");
+        assert_eq!(mems.len(), 2);
+        // Ordered by memory_id alphabetically per the SQL spec
+        assert_eq!(mems[0].memory_id, "m1");
+        assert_eq!(mems[1].memory_id, "m2");
+    }
+
+    #[test]
+    fn link_transcript_replaces_on_duplicate_pair() {
+        let conn = fresh_db();
+        insert_memory(&conn, "m1", None);
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        link_transcript(&conn, "m1", &t.id, Some(0), Some(4)).expect("link ok");
+        // Re-link the same pair with different span — INSERT OR REPLACE.
+        link_transcript(&conn, "m1", &t.id, Some(2), Some(10)).expect("relink ok");
+        let links = transcripts_for_memory(&conn, "m1").expect("query ok");
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].span_start, Some(2));
+        assert_eq!(links[0].span_end, Some(10));
+    }
+
+    #[test]
+    fn sweep_archives_aged_rows_with_no_links() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "old", None).expect("store ok");
+        // Backdate created_at far enough that the default TTL fires.
+        conn.execute(
+            "UPDATE memory_transcripts SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?1",
+            rusqlite::params![t.id],
+        )
+        .unwrap();
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        assert!(report.archived >= 1, "expected archive: {report:?}");
+    }
+
+    #[test]
+    fn sweep_prunes_archived_rows_past_grace() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "old", None).expect("store ok");
+        // Mark archived a long time ago so the grace window has elapsed.
+        conn.execute(
+            "UPDATE memory_transcripts SET archived_at = '2000-01-01T00:00:00+00:00' WHERE id = ?1",
+            rusqlite::params![t.id],
+        )
+        .unwrap();
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        assert_eq!(report.pruned, 1, "expected prune: {report:?}");
+        assert!(fetch_metadata(&conn, &t.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn sweep_skips_live_rows() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "fresh body", None).expect("store ok");
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        // Just created — nothing to archive or prune.
+        assert_eq!(report.archived, 0);
+        assert_eq!(report.pruned, 0);
+        assert!(fetch_metadata(&conn, &t.id).unwrap().is_some());
+    }
+
+    #[test]
+    fn sweep_skips_archive_when_memory_still_alive() {
+        // Phase 1 archive requires every linked memory to have expired.
+        // A live memory keeps the transcript alive.
+        let conn = fresh_db();
+        insert_memory(&conn, "m1", None); // expires_at NULL ⇒ live forever
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        link_transcript(&conn, "m1", &t.id, None, None).expect("link ok");
+        // Age the transcript out.
+        conn.execute(
+            "UPDATE memory_transcripts SET created_at = '2000-01-01T00:00:00+00:00' WHERE id = ?1",
+            rusqlite::params![t.id],
+        )
+        .unwrap();
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        // Memory is still live → should_archive returns false → archived 0.
+        assert_eq!(
+            report.archived, 0,
+            "live memory keeps transcript: {report:?}"
+        );
+    }
+
+    #[test]
+    fn sweep_handles_unparseable_archived_at() {
+        // Prune phase walks archived rows and tolerates an unparseable
+        // archived_at by incrementing the errors counter and skipping.
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        conn.execute(
+            "UPDATE memory_transcripts SET archived_at = 'not-a-date' WHERE id = ?1",
+            rusqlite::params![t.id],
+        )
+        .unwrap();
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        assert!(report.errors >= 1, "expected error tally: {report:?}");
+        assert_eq!(report.pruned, 0, "unparseable row must not be pruned");
+    }
+
+    #[test]
+    fn should_archive_returns_false_when_within_ttl() {
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "fresh", None).expect("store ok");
+        // No backdating — created_at is "now". should_archive must
+        // return false on the age cutoff.
+        let cfg = TranscriptsConfig::default();
+        let resolved = cfg.resolve("ns-x");
+        let res = super::should_archive(&conn, &t.id, &t.created_at, Utc::now(), resolved)
+            .expect("should_archive ok");
+        assert!(!res, "fresh row must not be archive-eligible");
+    }
+
+    #[test]
+    fn sweep_archive_phase_tallies_should_archive_failure() {
+        // Lines 430-435: archive_phase increments errors when
+        // should_archive itself returns Err (unparseable created_at on
+        // the row).
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "body", None).expect("store ok");
+        conn.execute(
+            "UPDATE memory_transcripts SET created_at = 'not-a-date' WHERE id = ?1",
+            rusqlite::params![t.id],
+        )
+        .unwrap();
+        let cfg = TranscriptsConfig::default();
+        let report = sweep_transcript_lifecycle(&conn, &cfg).expect("sweep ok");
+        assert!(report.errors >= 1, "expected error tally: {report:?}");
+        assert_eq!(report.archived, 0);
+    }
+
+    #[test]
+    fn should_archive_propagates_unparseable_created_at() {
+        let conn = fresh_db();
+        let cfg = TranscriptsConfig::default();
+        let resolved = cfg.resolve("ns-x");
+        let err =
+            super::should_archive(&conn, "id", "not-a-date", Utc::now(), resolved).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("unparseable created_at"), "got: {msg}");
+    }
+
+    #[test]
+    fn zstd_round_trip_decodes_to_original() {
+        let original = b"some non-trivial bytes \x00\x01\x02 with binary";
+        let blob = super::zstd_compress(original).expect("compress");
+        let back = super::zstd_decompress(&blob).expect("decompress");
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn zstd_decompress_rejects_oversized_blob() {
+        // Build a blob that decompresses to > MAX_DECOMPRESSED_BYTES.
+        // Cheapest path: compress 17 MiB of zeros — zstd compresses
+        // this down to a small blob but decompression must trip the cap.
+        let big = vec![0u8; super::MAX_DECOMPRESSED_BYTES + 1024];
+        let blob = super::zstd_compress(&big).expect("compress");
+        let err = super::zstd_decompress(&blob).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("decompression bomb"), "got: {msg}");
+    }
+
+    #[test]
+    fn fetch_invalid_utf8_blob_returns_error() {
+        // Surgically replace a transcript's content_blob with a valid
+        // zstd-of-invalid-utf8 sequence; fetch must surface a
+        // "did not decode to valid UTF-8" error.
+        let conn = fresh_db();
+        let t = store(&conn, "ns-x", "placeholder", None).expect("store");
+        let bad_blob = super::zstd_compress(&[0xFF, 0xFE, 0xFD]).expect("compress bad utf8");
+        conn.execute(
+            "UPDATE memory_transcripts SET content_blob = ?1 WHERE id = ?2",
+            rusqlite::params![bad_blob, t.id],
+        )
+        .unwrap();
+        let err = fetch(&conn, &t.id).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("UTF-8") || msg.contains("utf"), "got: {msg}");
+    }
+}

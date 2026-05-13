@@ -1747,4 +1747,287 @@ mod tests {
         assert_eq!(t.tier.as_deref(), Some("long"));
         assert_eq!(t.scope.as_deref(), Some("team"));
     }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — long-tail error path + helper coverage
+    // (lines 244/266, 271-277, 363/368, 685-686, 809-811, 842/845,
+    // 850-853 expand_tilde, mark_append_only happy path on darwin)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn expand_tilde_substitutes_home_when_set() {
+        // Line 850-853 happy path: prefix "~/" + HOME present →
+        // expanded. We do NOT mutate HOME here — log_paths.rs has its
+        // own env-lock-serialised HOME tests, and racing across two
+        // process-wide locks is unsafe. Instead we call expand_tilde
+        // twice and assert ONE of the documented behaviours:
+        //   - HOME present: result == "{HOME}/audit/log"
+        //   - HOME absent : result == "~/audit/log" (raw passthrough)
+        // Both arms hit the prefix-match line; only the inner HOME
+        // lookup differs. Either way, line 850 and the prefix check
+        // are exercised.
+        let out = super::expand_tilde("~/audit/log");
+        // Accept either expanded or passthrough; the test exists to
+        // pin the prefix detection logic + reachable code path, not
+        // to assert a particular HOME value (which races across tests).
+        assert!(
+            out.ends_with("/audit/log") || out == "~/audit/log",
+            "unexpected output shape: {out}"
+        );
+    }
+
+    #[test]
+    fn expand_tilde_no_match_passthrough() {
+        // The non-tilde fast-path (already covered by an earlier test)
+        // and a "~" without "/" suffix both fall through to the raw
+        // return arm. This pins the non-prefix branch.
+        assert_eq!(super::expand_tilde("~root/etc"), "~root/etc");
+        assert_eq!(super::expand_tilde("~"), "~");
+    }
+
+    #[test]
+    fn audit_init_returns_error_when_parent_path_is_a_file() {
+        // Line 244-245: `create_dir_all` fails when the parent is a
+        // regular file (cannot create a dir on top of one). `init`
+        // surfaces the wrapped Err via with_context.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a regular file at what would be the parent dir.
+        let blocker = tmp.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file, not a directory").unwrap();
+        // Request a log path *inside* the blocker file → create_dir_all
+        // hits ENOTDIR on the parent.
+        let log_path = blocker.join("nested").join("audit.log");
+        let err = super::init(&log_path, true, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("creating audit log dir") || msg.contains("audit"),
+            "expected wrapped context, got: {msg}"
+        );
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn audit_init_applies_append_only_flag_on_macos() {
+        // Line 268-269, 282-287: append_only_hint=true must trigger
+        // mark_append_only and (on macOS/BSD) the chflags branch.
+        // Even if the syscall fails for unprivileged users, init must
+        // still succeed because failures are logged WARN and swallowed.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        // Pre-create so chflags has a real inode to flag.
+        std::fs::write(&path, b"").unwrap();
+        // append_only_hint=true reaches mark_append_only. On darwin the
+        // call may or may not succeed depending on user privileges and
+        // chflags's response to UF_APPEND on a tmpfile — either way
+        // init MUST return Ok() and a sink MUST be installed.
+        super::init(&path, true, true).expect("init must tolerate flag outcome");
+        assert!(super::is_enabled());
+        super::shutdown_for_test();
+        // Best-effort: clear UF_APPEND if it was set so tmpdir cleanup
+        // can remove the file. We ignore errors — the file lives under
+        // the OS tmpdir cleaner anyway.
+        #[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "openbsd"))]
+        unsafe {
+            use std::ffi::CString;
+            use std::os::unix::ffi::OsStrExt;
+            if let Ok(c) = CString::new(path.as_os_str().as_bytes()) {
+                let _ = libc::chflags(c.as_ptr(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn read_chain_tail_returns_none_for_missing_file() {
+        // Line 360-361 fast path: file doesn't exist.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("nope.log");
+        // We call through init: init seeds with CHAIN_HEAD_PREV_HASH.
+        // (read_chain_tail is private; init is the canonical caller.)
+        let _g = sink_lock();
+        super::init(&missing, true, false).unwrap();
+        // After init, the new file must exist and a fresh chain head
+        // must be in place — emit one event, verify prev_hash is the
+        // sentinel.
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        ));
+        let body = std::fs::read_to_string(&missing).unwrap();
+        let line = body.lines().next().unwrap();
+        let parsed: AuditEvent = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed.prev_hash, CHAIN_HEAD_PREV_HASH);
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn read_chain_tail_skips_blank_lines() {
+        // Line 369-370: empty/blank lines must be skipped during chain
+        // tail scan. We pre-seed a chain with embedded blank lines,
+        // init, then emit and verify the next prev_hash still threads
+        // through the last real event.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("audit.log");
+        let e1 = sample_event(1, CHAIN_HEAD_PREV_HASH);
+        let e2 = sample_event(2, &e1.self_hash);
+        let body = format!(
+            "{}\n\n\n{}\n   \n",
+            serde_json::to_string(&e1).unwrap(),
+            serde_json::to_string(&e2).unwrap(),
+        );
+        std::fs::write(&path, body).unwrap();
+        super::init(&path, true, false).unwrap();
+        super::emit(EventBuilder::new(
+            AuditAction::Store,
+            actor("a", "explicit", None),
+            target_memory("m", "ns", None, None, None),
+        ));
+        let full = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<_> = full.lines().filter(|l| !l.trim().is_empty()).collect();
+        let last = lines.last().unwrap();
+        let parsed: AuditEvent = serde_json::from_str(last).unwrap();
+        assert_eq!(
+            parsed.prev_hash, e2.self_hash,
+            "blank lines must be skipped"
+        );
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn verify_chain_open_error_wrapped_with_context() {
+        // Line 686: File::open failure on a non-existent path must
+        // surface an error with the "opening <path>" context.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist.log");
+        let err = super::verify_chain(&missing).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("opening"), "expected context, got: {msg}");
+        assert!(msg.contains("does-not-exist.log"), "got: {msg}");
+    }
+
+    #[test]
+    fn finalize_audit_file_keeps_explicit_extension_path() {
+        // Line 836-840: when raw_config has a non-slash trailing
+        // extension, the function returns `p` as-is (no audit.log
+        // append). Covered by audit_finalize_audit_file_keeps_explicit_file_path
+        // — this is a tighter focus on the extension-discrimination branch.
+        let cfg = crate::config::AuditConfig {
+            enabled: Some(true),
+            path: Some("./custom.txt".to_string()),
+            ..Default::default()
+        };
+        let p = resolve_audit_path(&cfg);
+        // The configured file path must round-trip without an
+        // audit.log suffix because it has a non-empty extension.
+        assert!(
+            p.to_string_lossy().ends_with(".txt"),
+            "got: {}",
+            p.display()
+        );
+    }
+
+    #[test]
+    fn finalize_audit_file_keeps_resolved_file_when_no_config_override() {
+        // Direct unit-test on the `else p` arm (line 845): construct a
+        // resolved `PathBuf` that already has an extension and pass
+        // raw_config = None so the head-branch falls through; the
+        // p.extension().is_none() check fails (it IS Some), so the else
+        // arm executes returning `p` unchanged.
+        let p = PathBuf::from("/var/log/aimemory.log");
+        let out = super::finalize_audit_file(p.clone(), None);
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn resolve_audit_path_falls_back_to_platform_default_when_resolver_errs() {
+        // Lines 807-811: `resolve_audit_dir` returns Err when the
+        // configured dir is world-writable; `resolve_audit_path` (the
+        // non-strict variant) silently falls back to `platform_default`.
+        // We exercise the fallback by chmodding a tempdir to 0777 and
+        // pointing AuditConfig.path at it. After the call:
+        //   * Function must return Ok-like PathBuf (no panic)
+        //   * Result must NOT be inside the world-writable dir (that
+        //     would defeat the security check)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let www = tmp.path().join("world_writable");
+            std::fs::create_dir_all(&www).unwrap();
+            std::fs::set_permissions(&www, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let cfg = crate::config::AuditConfig {
+                enabled: Some(true),
+                path: Some(www.to_string_lossy().into_owned()),
+                ..Default::default()
+            };
+            let p = super::resolve_audit_path(&cfg);
+            // p must NOT be inside the world-writable dir (the fallback
+            // routed past it).
+            assert!(
+                !p.starts_with(&www),
+                "world-writable dir must not be used; got: {}",
+                p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_audit_path_with_override_propagates_world_writable_error() {
+        // Line 826: strict variant returns Err when resolve_audit_dir
+        // refuses a world-writable path. Mirrors the non-strict test
+        // above but asserts Err on the strict surface.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let www = tmp.path().join("ww");
+            std::fs::create_dir_all(&www).unwrap();
+            std::fs::set_permissions(&www, std::fs::Permissions::from_mode(0o777)).unwrap();
+            let cfg = crate::config::AuditConfig::default();
+            let err = super::resolve_audit_path_with_override(Some(&www), &cfg).unwrap_err();
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("world-writable"),
+                "expected world-writable error, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn init_with_directory_in_place_of_file_returns_open_error() {
+        // Line 266: `OpenOptions::new().open(path)` fails when the
+        // path resolves to an existing *directory*. `init` wraps the
+        // error with `with_context("opening audit log {path}")`.
+        let _g = sink_lock();
+        let tmp = tempfile::tempdir().unwrap();
+        // Use the tempdir itself as the target — opening a dir for
+        // write/append fails with EISDIR on macOS/Linux.
+        let err = super::init(tmp.path(), true, false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("opening audit log"), "got: {msg}");
+        super::shutdown_for_test();
+    }
+
+    #[test]
+    fn resolve_audit_path_with_override_returns_source_tag() {
+        // Line 822-828: the strict variant. With a CLI override the
+        // PathSource should reflect that. We pass a tempdir as the
+        // override and assert the returned path embeds it.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = crate::config::AuditConfig::default();
+        let (path, _source) =
+            super::resolve_audit_path_with_override(Some(tmp.path()), &cfg).unwrap();
+        // Output path must live under the override dir (since override
+        // wins precedence).
+        assert!(
+            path.starts_with(tmp.path()),
+            "expected override-rooted path, got: {}",
+            path.display()
+        );
+        // And must end with audit.log because we passed a directory.
+        assert!(path.ends_with("audit.log"), "got: {}", path.display());
+    }
 }

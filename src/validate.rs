@@ -1160,4 +1160,468 @@ mod tests {
         // behavior: titles containing BOM are accepted.
         assert!(validate_title("foo\u{FEFF}bar").is_ok());
     }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — long-tail error path coverage
+    // (lines 109, 207, 290, 357/358/361, 383, 438, validate_create /
+    // _memory / _update / _consolidate body branches)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn content_with_control_chars_rejected() {
+        // Line 109: content with control char (not \n or \t)
+        let err = validate_content("has\x07bell").unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("invalid characters"), "got: {msg}");
+    }
+
+    #[test]
+    fn content_with_null_byte_rejected() {
+        let err = validate_content("has\0null").unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    #[test]
+    fn source_oversized_rejected() {
+        // Line 207: source longer than MAX_SOURCE_LEN (64)
+        let big = "x".repeat(65);
+        let err = validate_source(&big).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+    }
+
+    #[test]
+    fn governance_approve_with_consensus_zero_rejected() {
+        // Line 290: uses_approve && Consensus(0) — must error in the
+        // post-approver-block sweep. We force consensus(0) into a policy
+        // that also uses Approve at the write level.
+        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy};
+        // Build with Human first so the approver block doesn't itself trip,
+        // then swap to Consensus(0) directly. The Consensus(0) branch in
+        // the approver block (line 276) ALREADY rejects this — the line
+        // 290 branch is the second guard. The two branches are
+        // semantically redundant for `Consensus(0)`; line 290 is reachable
+        // only if approver block were ever loosened. Document the line
+        // as defensive coverage; the existing
+        // test_validate_governance_consensus_zero_rejected hits the
+        // approver-block branch directly.
+        let p = GovernancePolicy {
+            write: GovernanceLevel::Approve,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Consensus(0),
+            inherit: true,
+            max_reflection_depth: None,
+        };
+        assert!(validate_governance_policy(&p).is_err());
+    }
+
+    #[test]
+    fn tag_oversized_rejected_with_preview() {
+        // Lines 357-358: tag length > MAX_TAG_LEN (128), error message
+        // embeds first 20 chars of trimmed tag as preview.
+        let big = "x".repeat(129);
+        let tags = vec![big];
+        let err = validate_tags(&tags).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+        assert!(msg.contains("xxxxxxxxxxxxxxxxxxxx"), "got: {msg}");
+    }
+
+    #[test]
+    fn tag_with_control_chars_rejected() {
+        // Line 361: tag fails is_clean_string
+        let tags = vec!["has\x07bell".to_string()];
+        let err = validate_tags(&tags).unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    #[test]
+    fn expires_at_malformed_rfc3339_rejected() {
+        // Line 383: expires_at not valid RFC3339
+        let err = validate_expires_at(Some("not-a-date")).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("RFC3339"), "got: {msg}");
+        assert!(msg.contains("not-a-date"), "got: {msg}");
+    }
+
+    #[test]
+    fn expires_at_none_is_ok() {
+        // Branch: None arm of validate_expires_at
+        assert!(validate_expires_at(None).is_ok());
+    }
+
+    #[test]
+    fn expires_at_future_is_ok() {
+        // Far-future date — valid format, not in the past
+        let future = "2099-01-01T00:00:00Z";
+        assert!(validate_expires_at(Some(future)).is_ok());
+    }
+
+    #[test]
+    fn expires_at_past_rejected() {
+        // Branch: parsed RFC3339, but earlier than Utc::now()
+        let past = "2000-01-01T00:00:00Z";
+        let err = validate_expires_at(Some(past)).unwrap_err();
+        assert!(format!("{err}").contains("past"));
+    }
+
+    #[test]
+    fn relation_oversized_rejected() {
+        // Line 438: relation longer than MAX_RELATION_LEN (64)
+        let big = "x".repeat(65);
+        let err = validate_relation(&big).unwrap_err();
+        let msg = format!("{err}");
+        assert!(msg.contains("max length"), "got: {msg}");
+    }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — validate_create / validate_memory full body
+    // (lines 486-602: every per-field error branch)
+    // -----------------------------------------------------------------
+
+    fn cm_valid() -> crate::models::CreateMemory {
+        // Construct a valid CreateMemory via serde defaults — deserialise
+        // from minimal JSON so we don't depend on private struct shape.
+        serde_json::from_value(serde_json::json!({
+            "title": "ok title",
+            "content": "ok content body",
+            "namespace": "validate-test",
+            "tags": ["one", "two"],
+            "priority": 5,
+            "confidence": 0.9,
+            "source": "api",
+            "metadata": {"k": "v"},
+        }))
+        .expect("fixture deserialises")
+    }
+
+    #[test]
+    fn validate_create_happy_path() {
+        let m = cm_valid();
+        assert!(validate_create(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_create_propagates_title_error() {
+        let mut m = cm_valid();
+        m.title = String::new();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_content_error() {
+        let mut m = cm_valid();
+        m.content = String::new();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_namespace_error() {
+        let mut m = cm_valid();
+        m.namespace = "has space".to_string();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_source_error() {
+        let mut m = cm_valid();
+        m.source = "bogus".to_string();
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_tags_error() {
+        let mut m = cm_valid();
+        m.tags = vec![String::new()];
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_priority_error() {
+        let mut m = cm_valid();
+        m.priority = 11;
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_confidence_error() {
+        let mut m = cm_valid();
+        m.confidence = 1.5;
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_expires_at_error() {
+        let mut m = cm_valid();
+        m.expires_at = Some("not-a-date".to_string());
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_ttl_error() {
+        let mut m = cm_valid();
+        m.ttl_secs = Some(-1);
+        assert!(validate_create(&m).is_err());
+    }
+
+    #[test]
+    fn validate_create_propagates_metadata_error() {
+        let mut m = cm_valid();
+        m.metadata = serde_json::json!("not-an-object");
+        assert!(validate_create(&m).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_memory body branches (lines 498-528)
+    // -----------------------------------------------------------------
+
+    fn mem_valid() -> crate::models::Memory {
+        crate::models::Memory {
+            id: "mem-1".to_string(),
+            title: "ok title".to_string(),
+            content: "ok content".to_string(),
+            namespace: "validate-test".to_string(),
+            source: "api".to_string(),
+            tags: vec!["one".to_string()],
+            priority: 5,
+            confidence: 1.0,
+            access_count: 0,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            updated_at: "2026-01-01T00:00:00Z".to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn validate_memory_happy_path() {
+        let m = mem_valid();
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_memory_rejects_empty_id() {
+        let mut m = mem_valid();
+        m.id = String::new();
+        assert!(validate_memory(&m).is_err());
+    }
+
+    #[test]
+    fn validate_memory_rejects_negative_access_count() {
+        let mut m = mem_valid();
+        m.access_count = -1;
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("access_count"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_created_at() {
+        let mut m = mem_valid();
+        m.created_at = "not-a-date".to_string();
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("created_at"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_updated_at() {
+        let mut m = mem_valid();
+        m.updated_at = "not-a-date".to_string();
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("updated_at"));
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_last_accessed_at() {
+        let mut m = mem_valid();
+        m.last_accessed_at = Some("not-a-date".to_string());
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("last_accessed_at"));
+    }
+
+    #[test]
+    fn validate_memory_accepts_valid_last_accessed_at() {
+        let mut m = mem_valid();
+        m.last_accessed_at = Some("2026-01-01T00:00:00Z".to_string());
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    #[test]
+    fn validate_memory_rejects_malformed_expires_at() {
+        let mut m = mem_valid();
+        m.expires_at = Some("not-a-date".to_string());
+        let err = validate_memory(&m).unwrap_err();
+        assert!(format!("{err}").contains("expires_at"));
+    }
+
+    #[test]
+    fn validate_memory_accepts_past_expires_at_for_import() {
+        // Importers must be able to bring in historically expired rows.
+        let mut m = mem_valid();
+        m.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+        assert!(validate_memory(&m).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_update body branches (lines 534-559)
+    // -----------------------------------------------------------------
+
+    fn upd() -> crate::models::UpdateMemory {
+        serde_json::from_value(serde_json::json!({})).expect("empty UpdateMemory deserialises")
+    }
+
+    #[test]
+    fn validate_update_empty_is_ok() {
+        assert!(validate_update(&upd()).is_ok());
+    }
+
+    #[test]
+    fn validate_update_propagates_title_error() {
+        let mut u = upd();
+        u.title = Some(String::new());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_content_error() {
+        let mut u = upd();
+        u.content = Some(String::new());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_namespace_error() {
+        let mut u = upd();
+        u.namespace = Some("has space".to_string());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_tags_error() {
+        let mut u = upd();
+        u.tags = Some(vec![String::new()]);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_priority_error() {
+        let mut u = upd();
+        u.priority = Some(11);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_confidence_error() {
+        let mut u = upd();
+        u.confidence = Some(2.0);
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_propagates_expires_at_format_error() {
+        let mut u = upd();
+        u.expires_at = Some("not-a-date".to_string());
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_update_allows_past_expires_at() {
+        // Per the docstring: update path validates format only, not chronology.
+        let mut u = upd();
+        u.expires_at = Some("2000-01-01T00:00:00Z".to_string());
+        assert!(validate_update(&u).is_ok());
+    }
+
+    #[test]
+    fn validate_update_propagates_metadata_error() {
+        let mut u = upd();
+        u.metadata = Some(serde_json::json!("not-an-object"));
+        assert!(validate_update(&u).is_err());
+    }
+
+    #[test]
+    fn validate_expires_at_format_accepts_past_date() {
+        // Direct coverage of the format-only helper.
+        assert!(validate_expires_at_format("2000-01-01T00:00:00Z").is_ok());
+        assert!(validate_expires_at_format("not-a-date").is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_consolidate body branches (lines 588-604)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn consolidate_too_few_ids_rejected() {
+        let err = validate_consolidate(&["only-one".to_string()], "title", "summary content", "ns")
+            .unwrap_err();
+        assert!(format!("{err}").contains("at least 2"));
+    }
+
+    #[test]
+    fn consolidate_too_many_ids_rejected() {
+        let ids: Vec<String> = (0..101).map(|i| format!("id-{i}")).collect();
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("100"));
+    }
+
+    #[test]
+    fn consolidate_duplicate_ids_rejected() {
+        let ids = vec!["a".to_string(), "a".to_string()];
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("duplicate"));
+    }
+
+    #[test]
+    fn consolidate_invalid_id_rejected() {
+        let ids = vec!["valid".to_string(), String::new()];
+        // Empty id fails validate_id
+        let err = validate_consolidate(&ids, "title", "summary content", "ns").unwrap_err();
+        assert!(format!("{err}").contains("id"));
+    }
+
+    #[test]
+    fn consolidate_invalid_title_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "", "summary content", "ns").is_err());
+    }
+
+    #[test]
+    fn consolidate_invalid_summary_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "title", "", "ns").is_err());
+    }
+
+    #[test]
+    fn consolidate_invalid_namespace_rejected() {
+        let ids = vec!["a".to_string(), "b".to_string()];
+        assert!(validate_consolidate(&ids, "title", "summary content", "has space").is_err());
+    }
+
+    #[test]
+    fn consolidate_happy_path() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert!(validate_consolidate(&ids, "title", "summary content", "ns").is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_capabilities — wrapper around validate_tags
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capabilities_delegates_to_tags() {
+        assert!(validate_capabilities(&["read".to_string(), "write".to_string()]).is_ok());
+        assert!(validate_capabilities(&[String::new()]).is_err());
+    }
+
+    #[test]
+    fn id_oversized_rejected() {
+        let big = "a".repeat(129);
+        let err = validate_id(&big).unwrap_err();
+        assert!(format!("{err}").contains("max length"));
+    }
+
+    #[test]
+    fn id_with_control_chars_rejected() {
+        let err = validate_id("has\0null").unwrap_err();
+        assert!(format!("{err}").contains("invalid characters"));
+    }
 }

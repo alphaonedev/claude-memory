@@ -458,3 +458,218 @@ pub struct NamespaceCount {
     pub namespace: String,
     pub count: usize,
 }
+
+// -----------------------------------------------------------------
+// L0.7-2 Tier A — memory.rs unit coverage
+// Covers serde defaults (default_tier/default_namespace/etc.), Tier
+// ↔ string round-trips, Memory::default, Tier::default_ttl_secs,
+// RecallBody::resolved_query precedence.
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tier_round_trips_strings() {
+        for (s, v) in [
+            ("short", Tier::Short),
+            ("mid", Tier::Mid),
+            ("long", Tier::Long),
+        ] {
+            assert_eq!(Tier::from_str(s), Some(v.clone()));
+            assert_eq!(v.as_str(), s);
+            assert_eq!(format!("{v}"), s);
+        }
+    }
+
+    #[test]
+    fn tier_from_str_returns_none_for_unknown() {
+        assert_eq!(Tier::from_str("unknown"), None);
+        assert_eq!(Tier::from_str(""), None);
+        assert_eq!(Tier::from_str("SHORT"), None); // case-sensitive
+    }
+
+    #[test]
+    fn tier_default_ttl_secs_short_is_six_hours() {
+        assert_eq!(Tier::Short.default_ttl_secs(), Some(6 * 3600));
+    }
+
+    #[test]
+    fn tier_default_ttl_secs_mid_is_seven_days() {
+        assert_eq!(Tier::Mid.default_ttl_secs(), Some(7 * 24 * 3600));
+    }
+
+    #[test]
+    fn tier_default_ttl_secs_long_is_none() {
+        assert_eq!(Tier::Long.default_ttl_secs(), None);
+    }
+
+    #[test]
+    fn tier_rank_orders_short_mid_long() {
+        assert!(Tier::Short.rank() < Tier::Mid.rank());
+        assert!(Tier::Mid.rank() < Tier::Long.rank());
+    }
+
+    #[test]
+    fn tier_serializes_to_snake_case() {
+        let v = serde_json::to_value(Tier::Short).unwrap();
+        assert_eq!(v, serde_json::Value::String("short".to_string()));
+        let v = serde_json::to_value(Tier::Mid).unwrap();
+        assert_eq!(v, serde_json::Value::String("mid".to_string()));
+        let v = serde_json::to_value(Tier::Long).unwrap();
+        assert_eq!(v, serde_json::Value::String("long".to_string()));
+    }
+
+    #[test]
+    fn memory_default_uses_mid_tier_and_global_namespace() {
+        let m = Memory::default();
+        assert_eq!(m.tier, Tier::Mid);
+        assert_eq!(m.namespace, "global");
+        assert_eq!(m.priority, 5);
+        assert!((m.confidence - 1.0).abs() < f64::EPSILON);
+        assert_eq!(m.source, "api");
+        assert_eq!(m.access_count, 0);
+        assert_eq!(m.reflection_depth, 0);
+        assert!(m.last_accessed_at.is_none());
+        assert!(m.expires_at.is_none());
+    }
+
+    #[test]
+    fn memory_round_trips_through_serde_with_reflection_depth() {
+        let mut m = Memory::default();
+        m.id = "mem-1".to_string();
+        m.title = "test".to_string();
+        m.content = "body".to_string();
+        m.created_at = "2026-01-01T00:00:00Z".to_string();
+        m.updated_at = "2026-01-01T00:00:00Z".to_string();
+        m.reflection_depth = 3;
+        let s = serde_json::to_string(&m).unwrap();
+        let back: Memory = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.id, "mem-1");
+        assert_eq!(back.reflection_depth, 3);
+    }
+
+    #[test]
+    fn memory_deserialises_pre_v070_payload_without_reflection_depth() {
+        // Pre-v0.7.0 payloads have no reflection_depth field. serde
+        // default must populate it as 0.
+        let json = serde_json::json!({
+            "id": "old-mem",
+            "tier": "mid",
+            "namespace": "ns",
+            "title": "t",
+            "content": "c",
+            "tags": [],
+            "priority": 5,
+            "confidence": 1.0,
+            "source": "api",
+            "access_count": 0,
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-01T00:00:00Z",
+            "metadata": {},
+        });
+        let m: Memory = serde_json::from_value(json).unwrap();
+        assert_eq!(m.reflection_depth, 0);
+    }
+
+    fn cm_minimal() -> serde_json::Value {
+        serde_json::json!({
+            "title": "t",
+            "content": "c",
+        })
+    }
+
+    #[test]
+    fn create_memory_defaults_tier_to_mid() {
+        // Lines 175-177: default_tier returns Tier::Mid via #[serde(default)].
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert_eq!(cm.tier, Tier::Mid);
+    }
+
+    #[test]
+    fn create_memory_defaults_namespace_to_global() {
+        // Lines 178-180.
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert_eq!(cm.namespace, "global");
+    }
+
+    #[test]
+    fn create_memory_defaults_priority_to_5() {
+        // Lines 181-183.
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert_eq!(cm.priority, 5);
+    }
+
+    #[test]
+    fn create_memory_defaults_confidence_to_one() {
+        // Lines 184-186.
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert!((cm.confidence - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn create_memory_defaults_source_to_api() {
+        // Lines 187-189.
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert_eq!(cm.source, "api");
+    }
+
+    #[test]
+    fn create_memory_defaults_metadata_to_empty_object() {
+        let cm: CreateMemory = serde_json::from_value(cm_minimal()).unwrap();
+        assert_eq!(cm.metadata, serde_json::json!({}));
+    }
+
+    #[test]
+    fn recall_body_resolved_query_prefers_context() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({
+            "context": "c-value",
+            "query": "q-value",
+            "q": "qq-value",
+        }))
+        .unwrap();
+        assert_eq!(body.resolved_query(), "c-value");
+    }
+
+    #[test]
+    fn recall_body_resolved_query_falls_back_to_query_then_q() {
+        let body: RecallBody =
+            serde_json::from_value(serde_json::json!({"query": "q-value", "q": "qq"})).unwrap();
+        assert_eq!(body.resolved_query(), "q-value");
+        let body: RecallBody = serde_json::from_value(serde_json::json!({"q": "qq"})).unwrap();
+        assert_eq!(body.resolved_query(), "qq");
+    }
+
+    #[test]
+    fn recall_body_resolved_query_empty_when_all_absent() {
+        let body: RecallBody = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(body.resolved_query(), "");
+    }
+
+    #[test]
+    fn recall_body_resolved_query_trims_whitespace() {
+        let body: RecallBody =
+            serde_json::from_value(serde_json::json!({"context": "  spaced  "})).unwrap();
+        assert_eq!(body.resolved_query(), "spaced");
+    }
+
+    #[test]
+    fn search_query_defaults_limit_to_20() {
+        // default_limit() returns Some(20)
+        let q: SearchQuery = serde_json::from_value(serde_json::json!({"q": "x"})).unwrap();
+        assert_eq!(q.limit, Some(20));
+    }
+
+    #[test]
+    fn recall_query_defaults_limit_to_10() {
+        // default_recall_limit() returns Some(10)
+        let q: RecallQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(q.limit, Some(10));
+    }
+
+    #[test]
+    fn list_query_defaults_limit_to_20() {
+        let q: ListQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(q.limit, Some(20));
+    }
+}

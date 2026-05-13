@@ -785,4 +785,171 @@ mod tests {
         assert_eq!(r.source, PathSource::ConfigToml);
         assert_eq!(r.path, PathBuf::from("/cfg/audit"));
     }
+
+    // -----------------------------------------------------------------
+    // L0.7-2 Tier A — strategic gap closures on the always-compiled paths.
+    // Note: lines 217-228 (linux_xdg_default), 239-262 (windows_default),
+    // 259-262 (Windows HOME fallback), and 463-471 (test cfg arms for
+    // linux/windows assertions) are platform-cfg branches that the
+    // host OS (macOS in this session) does not execute. They are
+    // reachable on Linux/Windows CI but not on darwin runners.
+    // COVERAGE: platform-specific via cfg!() runtime branch — covered
+    //           on Linux/Windows CI but unreachable on macOS.
+    // -----------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn is_writable_dir_returns_false_when_parent_is_readonly() {
+        // Line 279: Err(_) => false arm of is_writable_dir. Make the
+        // tempdir read+exec but not writable, then probe a path
+        // beneath it — File::create fails with EACCES.
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let ro = tmp.path().join("readonly");
+        std::fs::create_dir(&ro).unwrap();
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o555)).unwrap();
+        assert!(!is_writable_dir(&ro));
+        // Restore writable mode so tempdir cleanup can rmdir.
+        std::fs::set_permissions(&ro, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn home_dir_or_dot_falls_back_to_dot_when_no_home() {
+        // Lines 256-262 cover home_dir_or_dot fallbacks. We can hit
+        // the macOS / linux path by ensuring HOME is set, and the
+        // final dot-fallback by unsetting both HOME and USERPROFILE.
+        let _g = env_lock();
+        let home = EnvGuard::capture("HOME");
+        home.unset();
+        let user = EnvGuard::capture("USERPROFILE");
+        user.unset();
+        let p = super::home_dir_or_dot();
+        // Without HOME / USERPROFILE we fall through to ".".
+        assert_eq!(p, PathBuf::from("."));
+    }
+
+    #[test]
+    fn home_dir_or_dot_prefers_home_over_userprofile() {
+        let _g = env_lock();
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-home-precedence");
+        let user = EnvGuard::capture("USERPROFILE");
+        user.set("/test-userprofile");
+        let p = super::home_dir_or_dot();
+        assert_eq!(p, PathBuf::from("/test-home-precedence"));
+    }
+
+    #[test]
+    fn home_dir_or_dot_uses_userprofile_when_home_unset() {
+        let _g = env_lock();
+        let home = EnvGuard::capture("HOME");
+        home.unset();
+        let user = EnvGuard::capture("USERPROFILE");
+        user.set("/test-userprofile-only");
+        let p = super::home_dir_or_dot();
+        assert_eq!(p, PathBuf::from("/test-userprofile-only"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_default_returns_library_logs_path() {
+        // Lines 230-237: macos_default body.
+        let _g = env_lock();
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-home");
+        let log = super::macos_default(DirKind::Log);
+        assert_eq!(log, PathBuf::from("/test-home/Library/Logs/ai-memory"));
+        let audit = super::macos_default(DirKind::Audit);
+        assert_eq!(
+            audit,
+            PathBuf::from("/test-home/Library/Logs/ai-memory/audit")
+        );
+    }
+
+    #[test]
+    fn linux_xdg_default_uses_xdg_state_home_when_set() {
+        // Lines 217-228: linux_xdg_default — always compiled, so we can
+        // unit-test it on any host. XDG_STATE_HOME wins when set
+        // non-empty.
+        let _g = env_lock();
+        let xdg = EnvGuard::capture("XDG_STATE_HOME");
+        xdg.set("/custom-xdg");
+        let p = super::linux_xdg_default(DirKind::Log);
+        assert_eq!(p, PathBuf::from("/custom-xdg/ai-memory/logs"));
+        let pa = super::linux_xdg_default(DirKind::Audit);
+        assert_eq!(pa, PathBuf::from("/custom-xdg/ai-memory/audit"));
+    }
+
+    #[test]
+    fn linux_xdg_default_falls_back_to_home_local_state() {
+        let _g = env_lock();
+        let xdg = EnvGuard::capture("XDG_STATE_HOME");
+        xdg.unset();
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-home-xdg");
+        let p = super::linux_xdg_default(DirKind::Log);
+        assert_eq!(
+            p,
+            PathBuf::from("/test-home-xdg/.local/state/ai-memory/logs")
+        );
+    }
+
+    #[test]
+    fn linux_xdg_default_empty_xdg_falls_back_to_local_state() {
+        let _g = env_lock();
+        let xdg = EnvGuard::capture("XDG_STATE_HOME");
+        xdg.set("");
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-home-empty-xdg");
+        let p = super::linux_xdg_default(DirKind::Log);
+        assert_eq!(
+            p,
+            PathBuf::from("/test-home-empty-xdg/.local/state/ai-memory/logs")
+        );
+    }
+
+    #[test]
+    fn windows_default_uses_localappdata_when_set() {
+        // Lines 239-253: windows_default body. Always compiled, so we
+        // unit-test the function directly on any host. The
+        // LOCALAPPDATA value, when present, is joined with `ai-memory`
+        // and then `kind.suffix()`.
+        let _g = env_lock();
+        let app = EnvGuard::capture("LOCALAPPDATA");
+        app.set("/winapp");
+        let p = super::windows_default(DirKind::Log);
+        assert_eq!(p, PathBuf::from("/winapp/ai-memory/logs"));
+        let pa = super::windows_default(DirKind::Audit);
+        assert_eq!(pa, PathBuf::from("/winapp/ai-memory/audit"));
+    }
+
+    #[test]
+    fn windows_default_falls_back_to_home_appdata_when_localappdata_unset() {
+        let _g = env_lock();
+        let app = EnvGuard::capture("LOCALAPPDATA");
+        app.unset();
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-win-home");
+        let user = EnvGuard::capture("USERPROFILE");
+        user.unset();
+        let p = super::windows_default(DirKind::Log);
+        assert_eq!(
+            p,
+            PathBuf::from("/test-win-home/AppData/Local/ai-memory/logs")
+        );
+    }
+
+    #[test]
+    fn windows_default_empty_localappdata_falls_back_to_home_appdata() {
+        let _g = env_lock();
+        let app = EnvGuard::capture("LOCALAPPDATA");
+        app.set("");
+        let home = EnvGuard::capture("HOME");
+        home.set("/test-win-home-empty");
+        let p = super::windows_default(DirKind::Log);
+        assert_eq!(
+            p,
+            PathBuf::from("/test-win-home-empty/AppData/Local/ai-memory/logs")
+        );
+    }
 }

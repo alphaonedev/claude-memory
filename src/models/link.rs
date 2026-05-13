@@ -345,3 +345,130 @@ pub struct SyncStateEntry {
     pub last_seen_at: String,
     pub last_pulled_at: String,
 }
+
+// -----------------------------------------------------------------
+// L0.7-2 Tier A — LinkBody alias + AttestLevel + VectorClock coverage
+// -----------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_link_body(json: serde_json::Value) -> LinkBody {
+        serde_json::from_value(json).expect("LinkBody deserialises")
+    }
+
+    #[test]
+    fn link_body_resolved_uses_canonical_fields_when_present() {
+        let b = parse_link_body(serde_json::json!({
+            "source_id": "src",
+            "target_id": "tgt",
+            "relation": "supersedes",
+        }));
+        let (s, t, r) = b.resolved();
+        assert_eq!(s, "src");
+        assert_eq!(t, "tgt");
+        assert_eq!(r, "supersedes");
+    }
+
+    #[test]
+    fn link_body_resolved_falls_back_to_from_alias() {
+        // Line 135: from-alias path for source_id
+        let b = parse_link_body(serde_json::json!({
+            "from": "from-id",
+            "to": "to-id",
+            "rel_type": "contradicts",
+        }));
+        let (s, t, r) = b.resolved();
+        assert_eq!(s, "from-id");
+        assert_eq!(t, "to-id");
+        assert_eq!(r, "contradicts");
+    }
+
+    #[test]
+    fn link_body_resolved_defaults_relation_to_related_to() {
+        // Lines 145, 151-153: default_relation invoked when neither
+        // `relation` nor `rel_type` set.
+        let b = parse_link_body(serde_json::json!({
+            "source_id": "a",
+            "target_id": "b",
+        }));
+        let (_s, _t, r) = b.resolved();
+        assert_eq!(r, "related_to");
+    }
+
+    #[test]
+    fn link_body_resolved_empty_payload_returns_empty_strings_and_default() {
+        let b = parse_link_body(serde_json::json!({}));
+        let (s, t, r) = b.resolved();
+        assert_eq!(s, "");
+        assert_eq!(t, "");
+        assert_eq!(r, "related_to");
+    }
+
+    #[test]
+    fn link_body_resolved_canonical_wins_over_alias() {
+        // When BOTH canonical and alias are set, the canonical wins.
+        let b = parse_link_body(serde_json::json!({
+            "source_id": "canonical-src",
+            "from": "alias-src",
+            "target_id": "canonical-tgt",
+            "to": "alias-tgt",
+            "relation": "canonical-rel",
+            "rel_type": "alias-rel",
+        }));
+        let (s, t, r) = b.resolved();
+        assert_eq!(s, "canonical-src");
+        assert_eq!(t, "canonical-tgt");
+        assert_eq!(r, "canonical-rel");
+    }
+
+    #[test]
+    fn attest_level_round_trips_strings() {
+        for (s, v) in [
+            ("unsigned", AttestLevel::Unsigned),
+            ("self_signed", AttestLevel::SelfSigned),
+            ("peer_attested", AttestLevel::PeerAttested),
+        ] {
+            assert_eq!(AttestLevel::from_str(s), Some(v));
+            assert_eq!(v.as_str(), s);
+            assert_eq!(format!("{v}"), s);
+        }
+    }
+
+    #[test]
+    fn attest_level_from_str_returns_none_for_unknown() {
+        assert_eq!(AttestLevel::from_str("unknown"), None);
+        assert_eq!(AttestLevel::from_str(""), None);
+    }
+
+    #[test]
+    fn vector_clock_observe_advances_monotonically() {
+        let mut c = VectorClock::default();
+        c.observe("peer-a", "2026-01-01T00:00:00Z");
+        assert_eq!(c.latest_from("peer-a"), Some("2026-01-01T00:00:00Z"));
+        // Later timestamp must replace.
+        c.observe("peer-a", "2026-02-01T00:00:00Z");
+        assert_eq!(c.latest_from("peer-a"), Some("2026-02-01T00:00:00Z"));
+        // Earlier timestamp must NOT replace.
+        c.observe("peer-a", "2025-12-01T00:00:00Z");
+        assert_eq!(c.latest_from("peer-a"), Some("2026-02-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn vector_clock_latest_from_unknown_peer_is_none() {
+        let c = VectorClock::default();
+        assert_eq!(c.latest_from("never-seen"), None);
+    }
+
+    #[test]
+    fn vector_clock_serializes_as_object_with_entries() {
+        let mut c = VectorClock::default();
+        c.observe("peer-a", "2026-01-01T00:00:00Z");
+        let json = serde_json::to_value(&c).unwrap();
+        assert!(json.get("entries").is_some());
+        assert_eq!(
+            json["entries"]["peer-a"],
+            serde_json::Value::String("2026-01-01T00:00:00Z".to_string())
+        );
+    }
+}
