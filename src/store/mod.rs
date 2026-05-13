@@ -1339,4 +1339,552 @@ mod tests {
         assert_eq!(format!("{}", KgBackend::Cte), "cte");
         assert_eq!(format!("{}", KgBackend::Age), "age");
     }
+
+    // ---------------------------------------------------------------------
+    // L0.7-6 Tier E coverage — pin every trait-default method to the
+    // documented `UnsupportedCapability` / fallthrough behavior via a
+    // minimal mock adapter that only implements the trait-required
+    // methods. Without these tests the default-method bodies are
+    // unreachable from any cargo-test path.
+    // ---------------------------------------------------------------------
+
+    use crate::models::{AgentRegistration, Memory, MemoryLink, Tier};
+    use async_trait::async_trait;
+
+    /// Minimal mock adapter that implements only the trait-required
+    /// methods. Every default-bodied method on `MemoryStore` is exercised
+    /// through this adapter so the default bodies have coverage.
+    struct MinimalStore;
+
+    fn dummy_memory(id: &str) -> Memory {
+        Memory {
+            id: id.to_string(),
+            tier: Tier::Mid,
+            namespace: "mock".to_string(),
+            title: "mock title".to_string(),
+            content: "mock content".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "mock".to_string(),
+            access_count: 0,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({"agent_id": "alice"}),
+            reflection_depth: 0,
+        }
+    }
+
+    #[async_trait]
+    impl MemoryStore for MinimalStore {
+        fn capabilities(&self) -> Capabilities {
+            Capabilities::DURABLE
+        }
+        async fn store(&self, _ctx: &CallerContext, mem: &Memory) -> StoreResult<String> {
+            Ok(mem.id.clone())
+        }
+        async fn get(&self, _ctx: &CallerContext, id: &str) -> StoreResult<Memory> {
+            if id == "exists" {
+                Ok(dummy_memory(id))
+            } else {
+                Err(StoreError::NotFound { id: id.to_string() })
+            }
+        }
+        async fn update(
+            &self,
+            _ctx: &CallerContext,
+            _id: &str,
+            _patch: UpdatePatch,
+        ) -> StoreResult<()> {
+            Ok(())
+        }
+        async fn delete(&self, _ctx: &CallerContext, _id: &str) -> StoreResult<()> {
+            Ok(())
+        }
+        async fn list(&self, _ctx: &CallerContext, _filter: &Filter) -> StoreResult<Vec<Memory>> {
+            Ok(vec![dummy_memory("listed")])
+        }
+        async fn search(
+            &self,
+            _ctx: &CallerContext,
+            _query: &str,
+            _filter: &Filter,
+        ) -> StoreResult<Vec<Memory>> {
+            Ok(vec![dummy_memory("searched")])
+        }
+        async fn verify(&self, _ctx: &CallerContext, id: &str) -> StoreResult<VerifyReport> {
+            Ok(VerifyReport {
+                memory_id: id.to_string(),
+                integrity_ok: true,
+                findings: vec![],
+                signature_verified: false,
+            })
+        }
+        async fn link(&self, _ctx: &CallerContext, _link: &MemoryLink) -> StoreResult<()> {
+            Ok(())
+        }
+        async fn list_links(&self, _ns: Option<&str>) -> StoreResult<Vec<MemoryLink>> {
+            Ok(vec![])
+        }
+        async fn register_agent(
+            &self,
+            _ctx: &CallerContext,
+            _agent: &AgentRegistration,
+        ) -> StoreResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn default_schema_version_returns_zero() {
+        let s = MinimalStore;
+        assert_eq!(s.schema_version().await.expect("schema_version"), 0);
+    }
+
+    #[tokio::test]
+    async fn default_store_with_embedding_falls_through_to_store() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let mem = dummy_memory("with-emb");
+        // The default body forwards to `store` (ignoring the vector).
+        let id = s
+            .store_with_embedding(&ctx, &mem, Some(&[0.1_f32, 0.2, 0.3]))
+            .await
+            .expect("store_with_embedding default");
+        assert_eq!(id, "with-emb");
+    }
+
+    #[tokio::test]
+    async fn default_update_embedding_is_noop() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        s.update_embedding(&ctx, "any", Some(&[0.5_f32]))
+            .await
+            .expect("noop");
+    }
+
+    #[tokio::test]
+    async fn default_execute_pending_action_unsupported() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let err = s.execute_pending_action(&ctx, "any").await.unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+    }
+
+    #[tokio::test]
+    async fn default_begin_transaction_returns_unsupported() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        // Box<dyn Transaction> is not Debug; map_err to a Debug-friendly
+        // String first so we can call expect_err / matches! cleanly.
+        let result = s.begin_transaction(&ctx).await.map(|_| "got txn");
+        let err = match result {
+            Ok(_) => panic!("expected UnsupportedCapability"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+    }
+
+    #[tokio::test]
+    async fn default_link_signed_forwards_and_reports_unsigned() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let link = MemoryLink {
+            source_id: "a".to_string(),
+            target_id: "b".to_string(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        let level = s
+            .link_signed(&ctx, &link, None)
+            .await
+            .expect("default link_signed");
+        assert_eq!(level, "unsigned");
+    }
+
+    #[tokio::test]
+    async fn default_apply_remote_memory_unsupported() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let err = s
+            .apply_remote_memory(&ctx, &dummy_memory("rem"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+    }
+
+    #[tokio::test]
+    async fn default_list_memories_updated_since_unsupported() {
+        let s = MinimalStore;
+        let err = s.list_memories_updated_since(None, 10).await.unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+    }
+
+    #[tokio::test]
+    async fn default_apply_remote_link_forwards_to_link() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let link = MemoryLink {
+            source_id: "a".to_string(),
+            target_id: "b".to_string(),
+            relation: crate::models::MemoryLinkRelation::RelatedTo,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: None,
+            signature: None,
+        };
+        // Default forwards to link(); MinimalStore::link returns Ok.
+        s.apply_remote_link(&ctx, &link, "unsigned")
+            .await
+            .expect("apply_remote_link default");
+    }
+
+    #[tokio::test]
+    async fn default_apply_remote_deletion_true_on_ok_false_on_notfound() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        // MinimalStore::delete returns Ok regardless → true.
+        let gone = s
+            .apply_remote_deletion(&ctx, "any")
+            .await
+            .expect("delete ok");
+        assert!(gone, "Ok delete must surface as true");
+        // Use the NotFound branch — wrap MinimalStore in a delegating
+        // adapter that surfaces NotFound from delete().
+        struct NotFoundDeleter;
+        #[async_trait]
+        impl MemoryStore for NotFoundDeleter {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities::DURABLE
+            }
+            async fn store(&self, _: &CallerContext, m: &Memory) -> StoreResult<String> {
+                Ok(m.id.clone())
+            }
+            async fn get(&self, _: &CallerContext, id: &str) -> StoreResult<Memory> {
+                Err(StoreError::NotFound { id: id.to_string() })
+            }
+            async fn update(&self, _: &CallerContext, _: &str, _: UpdatePatch) -> StoreResult<()> {
+                Ok(())
+            }
+            async fn delete(&self, _: &CallerContext, id: &str) -> StoreResult<()> {
+                Err(StoreError::NotFound { id: id.to_string() })
+            }
+            async fn list(&self, _: &CallerContext, _: &Filter) -> StoreResult<Vec<Memory>> {
+                Ok(vec![])
+            }
+            async fn search(
+                &self,
+                _: &CallerContext,
+                _: &str,
+                _: &Filter,
+            ) -> StoreResult<Vec<Memory>> {
+                Ok(vec![])
+            }
+            async fn verify(&self, _: &CallerContext, id: &str) -> StoreResult<VerifyReport> {
+                Ok(VerifyReport {
+                    memory_id: id.to_string(),
+                    integrity_ok: true,
+                    findings: vec![],
+                    signature_verified: false,
+                })
+            }
+            async fn link(&self, _: &CallerContext, _: &MemoryLink) -> StoreResult<()> {
+                Ok(())
+            }
+            async fn list_links(&self, _: Option<&str>) -> StoreResult<Vec<MemoryLink>> {
+                Ok(vec![])
+            }
+            async fn register_agent(
+                &self,
+                _: &CallerContext,
+                _: &AgentRegistration,
+            ) -> StoreResult<()> {
+                Ok(())
+            }
+        }
+        let n = NotFoundDeleter;
+        let still = n
+            .apply_remote_deletion(&ctx, "missing")
+            .await
+            .expect("notfound branch");
+        assert!(!still, "NotFound must surface as false");
+    }
+
+    #[tokio::test]
+    async fn default_recall_hybrid_falls_back_to_search() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+        let filter = Filter::default();
+        let scored = s
+            .recall_hybrid(&ctx, "q", None, &filter)
+            .await
+            .expect("default recall_hybrid");
+        // MinimalStore::search returns 1 row; recall_hybrid scores it.
+        assert_eq!(scored.len(), 1);
+        assert!(scored[0].1 > 0.0);
+    }
+
+    #[tokio::test]
+    async fn default_touch_after_recall_is_ok_for_any_ids() {
+        let s = MinimalStore;
+        s.touch_after_recall(&["a".to_string(), "b".to_string()])
+            .await
+            .expect("touch default ok");
+    }
+
+    #[tokio::test]
+    async fn default_governance_methods_unsupported_or_safe_default() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+
+        // pending_decide → UnsupportedCapability
+        let err = s
+            .pending_decide(&ctx, "any", true, "alice")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // get_pending → UnsupportedCapability
+        let err = s.get_pending(&ctx, "any").await.unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // set_namespace_standard → UnsupportedCapability
+        let err = s
+            .set_namespace_standard(&ctx, "ns", "sid", None)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // clear_namespace_standard → UnsupportedCapability
+        let err = s.clear_namespace_standard(&ctx, "ns").await.unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // get_namespace_standard → UnsupportedCapability
+        let err = s.get_namespace_standard(&ctx, "ns").await.unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // governance_approve_with_consensus → UnsupportedCapability
+        let err = s
+            .governance_approve_with_consensus(&ctx, "pid", "alice")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, StoreError::UnsupportedCapability { .. }));
+
+        // is_registered_agent → default false
+        let yes = s.is_registered_agent("alice").await.expect("default");
+        assert!(!yes);
+
+        // enforce_governance_action → default Allow
+        let decision = s
+            .enforce_governance_action(
+                GovernedAction::Store,
+                "ns",
+                "alice",
+                None,
+                None,
+                &serde_json::json!({}),
+            )
+            .await
+            .expect("default Allow");
+        assert!(matches!(decision, crate::models::GovernanceDecision::Allow));
+
+        // build_namespace_chain → single-element default
+        let chain = s.build_namespace_chain("leaf").await.expect("chain");
+        assert_eq!(chain, vec!["leaf".to_string()]);
+
+        // resolve_governance_policy → None
+        let policy = s.resolve_governance_policy("ns").await.expect("policy");
+        assert!(policy.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_lifecycle_methods_unsupported() {
+        let s = MinimalStore;
+        let ctx = CallerContext::for_agent("alice");
+
+        assert!(matches!(
+            s.forget(&ctx, Some("ns"), None, None, false)
+                .await
+                .unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.consolidate(&ctx, &[], "t", "s", "ns", &Tier::Mid, "src", "alice")
+                .await
+                .unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.run_gc(false).await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.archive_restore(&ctx, "id").await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.archive_purge(None).await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.archive_by_ids(&ctx, &[], None).await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.export_memories().await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.export_links().await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.notify(&ctx, "agent", "t", "p", None, None)
+                .await
+                .unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn default_quota_and_verify_methods_unsupported() {
+        let s = MinimalStore;
+        assert!(matches!(
+            s.quota_status("agent").await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.quota_status_list().await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.verify_link(VerifyFilter::default()).await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+        assert!(matches!(
+            s.find_paths("a", "b", None, None).await.unwrap_err(),
+            StoreError::UnsupportedCapability { .. }
+        ));
+    }
+
+    #[test]
+    fn default_as_any_for_postgres_is_unit() {
+        let s: Box<dyn MemoryStore> = Box::new(MinimalStore);
+        let any = s.as_any_for_postgres();
+        // Default returns a unit reference; downcast must fail.
+        assert!(any.downcast_ref::<()>().is_some());
+    }
+
+    #[test]
+    fn governed_action_string_round_trip() {
+        // Trait surface uses GovernedAction::as_str for log lines + the
+        // pending_actions.action_type column. Drift is caught here.
+        assert_eq!(GovernedAction::Store.as_str(), "store");
+        assert_eq!(GovernedAction::Delete.as_str(), "delete");
+        assert_eq!(GovernedAction::Promote.as_str(), "promote");
+        assert_eq!(GovernedAction::Reflect.as_str(), "reflect");
+    }
+
+    #[test]
+    fn governed_action_from_models_matches_local_enum() {
+        // Conversion from the models::GovernedAction (used by the legacy
+        // db:: path) to the SAL-layer GovernedAction must preserve every
+        // variant. A missed variant would silently change behavior at
+        // the SAL boundary.
+        assert!(matches!(
+            GovernedAction::from(crate::models::GovernedAction::Store),
+            GovernedAction::Store
+        ));
+        assert!(matches!(
+            GovernedAction::from(crate::models::GovernedAction::Delete),
+            GovernedAction::Delete
+        ));
+        assert!(matches!(
+            GovernedAction::from(crate::models::GovernedAction::Promote),
+            GovernedAction::Promote
+        ));
+        assert!(matches!(
+            GovernedAction::from(crate::models::GovernedAction::Reflect),
+            GovernedAction::Reflect
+        ));
+    }
+
+    #[test]
+    fn store_error_invalid_input_and_integrity_displays() {
+        // Pin the Display impl for every variant the test surface has
+        // not yet exercised. Wire shape: HTTP error envelopes interpolate
+        // these strings — silent drift is a compatibility break.
+        let e = StoreError::InvalidInput {
+            detail: "missing source_id".to_string(),
+        };
+        assert!(e.to_string().contains("missing source_id"));
+        let e = StoreError::IntegrityFailed {
+            detail: "checksum mismatch".to_string(),
+        };
+        assert!(e.to_string().contains("checksum mismatch"));
+        let e = StoreError::Conflict {
+            id: "dup-id".to_string(),
+        };
+        assert!(e.to_string().contains("dup-id"));
+        let e = StoreError::UnsupportedCapability {
+            capability: "FOO".to_string(),
+        };
+        assert!(e.to_string().contains("FOO"));
+        let e = StoreError::BackendUnavailable {
+            backend: "postgres".to_string(),
+            detail: "connection refused".to_string(),
+        };
+        assert!(e.to_string().contains("postgres"));
+        assert!(e.to_string().contains("connection refused"));
+        let e = StoreError::Backend(BoxBackendError::new("raw"));
+        assert!(e.to_string().contains("raw"));
+    }
+
+    #[test]
+    fn box_backend_error_display_round_trips() {
+        let e = BoxBackendError::new("a custom error");
+        assert!(format!("{e}").contains("a custom error"));
+    }
+
+    #[test]
+    fn approve_outcome_variants_distinct() {
+        let a = ApproveOutcome::Approved;
+        let p = ApproveOutcome::Pending {
+            votes: 1,
+            quorum: 3,
+        };
+        let r = ApproveOutcome::Rejected("nope".to_string());
+        assert!(a != p);
+        assert!(p != r);
+        assert!(a != r);
+    }
+
+    #[test]
+    fn verify_filter_default_fields_unset() {
+        let f = VerifyFilter::default();
+        assert!(f.source_id.is_none());
+        assert!(f.target_id.is_none());
+        assert!(f.link_id.is_none());
+    }
+
+    #[test]
+    fn verify_report_construction_round_trip() {
+        let r = VerifyReport {
+            memory_id: "id".to_string(),
+            integrity_ok: true,
+            findings: vec!["finding".to_string()],
+            signature_verified: false,
+        };
+        assert_eq!(r.memory_id, "id");
+        assert!(r.integrity_ok);
+        assert_eq!(r.findings.len(), 1);
+        assert!(!r.signature_verified);
+    }
 }

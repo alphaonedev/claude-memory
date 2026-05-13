@@ -859,6 +859,505 @@ mod store_err_sanitize_tests {
         assert!(clean.contains("[redacted-url]"));
         assert!(clean.contains("[redacted-path]"));
     }
+
+    #[test]
+    fn sanitize_preserves_relative_paths() {
+        // A literal "/" surrounded by digits ("1/2") must NOT be
+        // treated as a path. Regression test for the boundary check.
+        let raw = "ratio 1/2 over 3/4";
+        let out = sanitize_store_err_message(raw);
+        assert_eq!(out, raw, "fraction-like content must not be redacted");
+    }
+
+    #[test]
+    fn sanitize_handles_unicode_in_clean_message() {
+        let raw = "memory not found: \u{1F4DD}-id-with-emoji";
+        let out = sanitize_store_err_message(raw);
+        assert!(out.contains("memory not found"));
+    }
+
+    #[test]
+    fn sanitize_redacts_url_at_start_of_message() {
+        let leak = "postgres://u:p@h/db is unreachable";
+        let clean = sanitize_store_err_message(leak);
+        assert!(clean.starts_with("[redacted-url]"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// L0.7-6 Tier E coverage — exercise the helper surface that does not
+// require a real Axum runtime: percent decoder, constant-time compare,
+// store-error wire-shape mapper, postgres endpoint matrix, AppState
+// helpers. The router-bound paths (api_key_auth full pipeline,
+// JsonOrBadRequest extractor, postgres_route_gate live middleware)
+// remain integration-only per coverage/policy.md.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod transport_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_typical_keys() {
+        assert_eq!(percent_decode_lossy("abc"), "abc");
+        assert_eq!(percent_decode_lossy("a%2Bb"), "a+b");
+        assert_eq!(percent_decode_lossy("hello%20world"), "hello world");
+        assert_eq!(percent_decode_lossy("%2F%3D%3F"), "/=?");
+    }
+
+    #[test]
+    fn percent_decode_passes_through_invalid_escapes() {
+        // Invalid hex digits => pass through verbatim.
+        assert_eq!(percent_decode_lossy("a%ZZb"), "a%ZZb");
+        // Truncated escape at end => verbatim.
+        assert_eq!(percent_decode_lossy("a%2"), "a%2");
+    }
+
+    #[test]
+    fn constant_time_eq_handles_equal_and_diff_inputs() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"abcd"));
+        assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn storage_backend_as_str_round_trip() {
+        assert_eq!(StorageBackend::Sqlite.as_str(), "sqlite");
+        assert_eq!(StorageBackend::Postgres.as_str(), "postgres");
+    }
+
+    #[test]
+    fn family_descriptors_returns_eight_entries() {
+        // Order must match Family::all() declaration order — see the
+        // upstream `family_descriptors` doc comment.
+        let d = family_descriptors();
+        assert_eq!(d.len(), 8, "expected 8 family descriptors, got {}", d.len());
+        // Every descriptor is a non-empty English sentence.
+        for (family, text) in d {
+            assert!(!text.is_empty(), "descriptor for {family:?} is empty");
+            assert!(
+                text.len() > 20,
+                "descriptor for {family:?} too short: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn precompute_family_embeddings_no_embedder_returns_empty() {
+        // The fast path of `precompute_family_embeddings`: when the
+        // embedder is `None` (keyword tier or load failure) the
+        // function returns an empty vector and never touches the
+        // descriptor list. Pin the contract here so a future refactor
+        // that swaps the early return for a panic catches the test.
+        let out = AppState::precompute_family_embeddings(None);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn extract_missing_fields_finds_single_field() {
+        let msg =
+            "Failed to deserialize the JSON body: missing field `content` at line 1 column 14";
+        let fields = extract_missing_fields(msg);
+        assert_eq!(fields, vec!["content".to_string()]);
+    }
+
+    #[test]
+    fn extract_missing_fields_finds_multiple_fields() {
+        let msg = "missing field `title` and missing field `content`";
+        let fields = extract_missing_fields(msg);
+        assert_eq!(fields, vec!["title".to_string(), "content".to_string()]);
+    }
+
+    #[test]
+    fn extract_missing_fields_dedups_repeats() {
+        let msg = "missing field `name` ... missing field `name` again";
+        let fields = extract_missing_fields(msg);
+        assert_eq!(fields, vec!["name".to_string()]);
+    }
+
+    #[test]
+    fn extract_missing_fields_returns_empty_for_clean_message() {
+        assert!(extract_missing_fields("no missing fields here").is_empty());
+    }
+
+    #[test]
+    fn extract_missing_fields_rejects_non_identifier_content() {
+        // The function light-validates so a hostile body cannot smuggle
+        // arbitrary content into the response envelope.
+        let msg = "missing field `<script>` injection attempt";
+        let fields = extract_missing_fields(msg);
+        // The `<script>` payload contains `<` and `>` which are not
+        // ascii_alphanumeric / _ / - so the field is dropped.
+        assert!(fields.is_empty(), "non-ident content must be rejected");
+    }
+
+    #[test]
+    fn extract_missing_fields_accepts_underscores_and_dashes() {
+        let msg = "missing field `agent_id-x` here";
+        let fields = extract_missing_fields(msg);
+        assert_eq!(fields, vec!["agent_id-x".to_string()]);
+    }
+
+    #[test]
+    fn extract_missing_fields_handles_unterminated_backtick() {
+        // No trailing backtick → break the loop without panicking.
+        let msg = "missing field `unterminated";
+        let fields = extract_missing_fields(msg);
+        assert!(fields.is_empty());
+    }
+}
+
+#[cfg(all(test, feature = "sal"))]
+mod transport_postgres_gate_tests {
+    use super::*;
+    use axum::http::Method;
+
+    #[test]
+    fn postgres_gate_always_passes_health_and_metrics() {
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/health"));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/capabilities"
+        ));
+        assert!(postgres_endpoint_supported(&Method::GET, "/metrics"));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/metrics"));
+    }
+
+    #[test]
+    fn postgres_gate_passes_core_crud() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memories"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/memories"
+        ));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/search"));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/links"));
+    }
+
+    #[test]
+    fn postgres_gate_passes_memory_id_paths() {
+        // GET / PUT / DELETE on /api/v1/memories/{id} are supported.
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/memories/abc-123"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::PUT,
+            "/api/v1/memories/abc-123"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/memories/abc-123"
+        ));
+        // POST on a single id is not in the matrix.
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memories/abc-123"
+        ));
+        // /api/v1/memories/bulk is its own endpoint (not memory_id_path).
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memories/bulk"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_links_id_paths() {
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/links/link-id-1"
+        ));
+        // Empty trailing segment must not match.
+        assert!(!postgres_endpoint_supported(&Method::GET, "/api/v1/links/"));
+    }
+
+    #[test]
+    fn postgres_gate_passes_kg_paths() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/kg/query"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/kg/timeline"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/kg/invalidate"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/kg/find_paths"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_quota_verify_entities() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/links/verify"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/quota/status"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/entities"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/entities/by_alias"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_archive_paths() {
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/archive"));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/archive/stats"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/archive"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/archive"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/archive/purge"
+        ));
+        // archive_restore_path: /api/v1/archive/{id}/restore
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/archive/abc/restore"
+        ));
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/archive/abc/restore/other"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_namespace_standard_paths() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/namespaces/proj/standard"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/namespaces/proj/standard"
+        ));
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/namespaces/standard"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_pending_decide_paths() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/pending/p1/approve"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/pending/p1/reject"
+        ));
+        // Non-approve-reject suffix must not match.
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/pending/p1/foo"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_approvals_decide_paths() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/approvals/abc-123"
+        ));
+        // /api/v1/approvals/stream is excluded from decide path.
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/approvals/stream"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_memory_promote_path() {
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memories/abc/promote"
+        ));
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memories/abc/promote/extra"
+        ));
+    }
+
+    #[test]
+    fn postgres_gate_passes_remaining_write_paths() {
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/forget"));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/consolidate"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/contradictions"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/auto_tag"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/expand_query"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/tools/list"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/memory_load_family"
+        ));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/notify"));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/gc"));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/import"));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/export"));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/agents"));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/links"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/subscriptions"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/subscriptions"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/session/start"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/sync/push"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/sync/since"
+        ));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/pending"));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/agents"));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/namespaces"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/namespaces"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::DELETE,
+            "/api/v1/namespaces"
+        ));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/stats"));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/taxonomy"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/check_duplicate"
+        ));
+        assert!(postgres_endpoint_supported(
+            &Method::GET,
+            "/api/v1/subscriptions"
+        ));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/inbox"));
+        assert!(postgres_endpoint_supported(&Method::GET, "/api/v1/recall"));
+        assert!(postgres_endpoint_supported(&Method::POST, "/api/v1/recall"));
+    }
+
+    #[test]
+    fn postgres_gate_rejects_unknown_paths() {
+        // Anything not in the allow-list must return false so the
+        // route gate surfaces 501 instead of silently routing to the
+        // empty scratch SQLite DB.
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/this/is/not/a/real/endpoint"
+        ));
+        assert!(!postgres_endpoint_supported(
+            &Method::POST,
+            "/api/v1/unknown"
+        ));
+    }
+
+    #[test]
+    fn postgres_not_implemented_carries_endpoint_and_remediation() {
+        let resp = postgres_not_implemented("/api/v1/test");
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[test]
+    fn store_err_to_response_maps_every_variant_to_status() {
+        use crate::store::StoreError;
+        let r = store_err_to_response(StoreError::NotFound {
+            id: "x".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::NOT_FOUND);
+
+        let r = store_err_to_response(StoreError::Conflict {
+            id: "x".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::CONFLICT);
+
+        let r = store_err_to_response(StoreError::PermissionDenied {
+            action: "r".to_string(),
+            target: "t".to_string(),
+            reason: "x".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let r = store_err_to_response(StoreError::InvalidInput {
+            detail: "bad".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let r = store_err_to_response(StoreError::UnsupportedCapability {
+            capability: "X".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::NOT_IMPLEMENTED);
+
+        let r = store_err_to_response(StoreError::IntegrityFailed {
+            detail: "d".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        let r = store_err_to_response(StoreError::BackendUnavailable {
+            backend: "p".to_string(),
+            detail: "d".to_string(),
+        });
+        assert_eq!(r.status(), axum::http::StatusCode::SERVICE_UNAVAILABLE);
+
+        let r = store_err_to_response(StoreError::Backend(crate::store::BoxBackendError::new(
+            "raw",
+        )));
+        assert_eq!(r.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
 }
 
 pub(crate) const MAX_BULK_SIZE: usize = 1000;

@@ -167,3 +167,97 @@ fn apply_sqlcipher_key(conn: &Connection) -> Result<()> {
 fn apply_sqlcipher_key(_conn: &Connection) -> Result<()> {
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// L0.7-6 Tier E unit coverage. The `open` path is already exercised through
+// every db-related integration test; these tests pin the idempotency probe
+// for the R1-M2 CHECK trigger install and the sqlcipher no-op fall-through.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_round_trip_creates_db_and_runs_migrations() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open(tmp.path()).expect("open initial");
+        // schema_version table must exist and be populated.
+        let v: i64 = conn
+            .query_row(
+                "SELECT COALESCE(MAX(version), 0) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema_version readable");
+        assert!(v > 0, "expected positive schema version, got {v}");
+    }
+
+    #[test]
+    fn open_twice_is_idempotent_for_check_triggers() {
+        // R1-M2 doc: re-running open() is a no-op for the trigger install
+        // because the sentinel `memories_ck_tier_ins` short-circuits the
+        // CREATE TRIGGER batch. This test exercises both branches: first
+        // open installs triggers; second open hits the already-installed
+        // probe and returns early without running CREATE TRIGGER.
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        // First open.
+        let _conn1 = open(tmp.path()).expect("first open");
+        // Second open against the same path.
+        let conn2 = open(tmp.path()).expect("re-open idempotent");
+        // Sentinel trigger must exist.
+        let n: i64 = conn2
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'trigger' AND name = 'memories_ck_tier_ins'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("trigger query");
+        assert_eq!(n, 1, "sentinel trigger must be installed exactly once");
+    }
+
+    #[test]
+    fn open_applies_wal_journal_mode() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open(tmp.path()).expect("open");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .expect("journal_mode");
+        assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[test]
+    fn open_enables_foreign_keys() {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open(tmp.path()).expect("open");
+        let fk: i32 = conn
+            .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .expect("foreign_keys");
+        assert_eq!(fk, 1, "open() must enable foreign_keys");
+    }
+
+    #[test]
+    fn check_trigger_rejects_bad_tier_insert() {
+        // R1-M2 trigger contract: a write that violates the closed-set
+        // CHECK on memories.tier must surface as an error. This test
+        // exercises the trigger's actual rejection branch, not just the
+        // install. We bypass the validator by writing directly with
+        // rusqlite::execute so the trigger is the only thing standing
+        // between the bad row and persistence.
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = open(tmp.path()).expect("open");
+        let now = chrono::Utc::now().to_rfc3339();
+        let res = conn.execute(
+            "INSERT INTO memories \
+             (id, tier, namespace, title, content, tags, priority, confidence, \
+              source, access_count, created_at, updated_at, metadata, reflection_depth) \
+             VALUES (?1, 'NOT_A_TIER', 'test', 't', 'c', '[]', 5, 1.0, \
+                     'src', 0, ?2, ?2, '{}', 0)",
+            rusqlite::params!["bad-tier-id", now],
+        );
+        assert!(
+            res.is_err(),
+            "INSERT with bad tier must be rejected by R1-M2 trigger"
+        );
+    }
+}
