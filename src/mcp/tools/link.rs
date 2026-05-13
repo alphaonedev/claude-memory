@@ -22,10 +22,21 @@ pub(super) fn handle_link(
 
     validate::validate_link(source_id, target_id, relation).map_err(|e| e.to_string())?;
 
-    // v0.7.0 K9 — unified permission pipeline (link-side).
-    // Link evaluation uses the *source* memory's namespace (the
-    // originating end of the relation) so policies can scope by
-    // who is allowed to outbound-link from a given namespace.
+    // v0.7.0 K9 — unified permission pipeline (link-side), Ask
+    // short-circuit only.
+    //
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690): the Allow/Deny gate
+    // has migrated to `storage::validate_link_pre_create` so the
+    // HTTP, SAL, and federation-receive paths enforce the same K9
+    // rules the MCP path does — closing the S5-H2 finding. The MCP
+    // path retains a thin pre-call evaluate here for ONE reason: it
+    // is the only entry point with a structured `Ask` channel back
+    // to the operator (the `{"status":"ask", ...}` envelope). The
+    // storage helper has no Ask channel and would surface Ask as
+    // Deny; doing the Ask translation here keeps the MCP wire
+    // contract unchanged. Allow / Deny outcomes ALSO get enforced
+    // again by the storage layer, which is idempotent under the
+    // registry's deny-first semantics.
     {
         use crate::permissions::{Op, PermissionContext, Permissions};
         let link_ns = match db::get(conn, source_id) {
@@ -44,21 +55,18 @@ pub(super) fn handle_link(
                 "relation": relation,
             }),
         };
-        match Permissions::evaluate(&ctx, &[]) {
-            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
-            crate::permissions::Decision::Deny(reason) => {
-                return Err(format!("link denied by permission rule: {reason}"));
-            }
-            crate::permissions::Decision::Ask(prompt) => {
-                return Ok(json!({
-                    "status": "ask",
-                    "reason": prompt,
-                    "action": "link",
-                    "source_id": source_id,
-                    "target_id": target_id,
-                }));
-            }
+        if let crate::permissions::Decision::Ask(prompt) = Permissions::evaluate(&ctx, &[]) {
+            return Ok(json!({
+                "status": "ask",
+                "reason": prompt,
+                "action": "link",
+                "source_id": source_id,
+                "target_id": target_id,
+            }));
         }
+        // Allow / Deny / Modify fall through; the storage layer
+        // (via create_link_signed → validate_link_pre_create) is the
+        // authoritative gate for those outcomes.
     }
 
     // v0.7 K8 — per-agent quota gate. The link is charged against the

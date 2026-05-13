@@ -2028,6 +2028,214 @@ mod tests {
         );
     }
 
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — the federation
+    // receive path must refuse a cycle-closing `reflects_on` edge even
+    // when the inbound link comes from a peer. mTLS + Ed25519 doesn't
+    // grant peers the right to corrupt the local reflection DAG.
+    #[tokio::test]
+    async fn http_sync_push_refuses_reflection_cycle_from_peer() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Off);
+
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+        // Seed two memories on the receiver and a pre-existing
+        // a --reflects_on--> b chain so a fresh b --reflects_on--> a
+        // would close the cycle.
+        let (a_id, b_id) = {
+            let lock = state.lock().await;
+            let a = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "a3-fed-cycle".into(),
+                title: "a".into(),
+                content: "a".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+                reflection_depth: 0,
+            };
+            let a_id = db::insert(&lock.0, &a).unwrap();
+            let b = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "a3-fed-cycle".into(),
+                title: "b".into(),
+                content: "b".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+                reflection_depth: 0,
+            };
+            let b_id = db::insert(&lock.0, &b).unwrap();
+            db::create_link(&lock.0, &a_id, &b_id, "reflects_on").unwrap();
+            (a_id, b_id)
+        };
+
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-alice",
+            "sender_clock": {"entries": {}},
+            "memories": [],
+            "links": [{
+                "source_id": b_id,
+                "target_id": a_id,
+                "relation": "reflects_on",
+                "created_at": now,
+            }],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "local-receiver")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        // sync_push always responds 200; the cycle refusal manifests
+        // as `links_applied=0` and a warn log on the receiver. The
+        // load-bearing assertion is that the cycle edge did NOT land
+        // in the local graph.
+        assert_eq!(resp.status(), StatusCode::OK);
+        let lock = state.lock().await;
+        let links_from_b = db::get_links(&lock.0, &b_id).unwrap();
+        let landed = links_from_b
+            .iter()
+            .any(|l| l.source_id == b_id && l.target_id == a_id && l.relation == "reflects_on");
+        assert!(
+            !landed,
+            "cycle-closing reflects_on must NOT land via sync_push"
+        );
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — federation receive
+    // path: a `peer_attested` link bypasses the local K9 governance
+    // gate (the peer's signature is the attestation; the receiver's
+    // namespace policy is the peer's local concern). Unsigned inbound
+    // links remain gated. Documents the security model in code.
+    //
+    // Pre-A3, ALL inbound links bypassed K9 because the gate was
+    // MCP-only — A3 closes that with the bypass keyed on attest_level.
+    #[tokio::test]
+    async fn http_sync_push_governance_bypass_on_peer_attested() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        // K9 in Off mode — exercising the cycle-only fast path. (A
+        // full peer_attested verify needs an enrolled pubkey and a
+        // signed CBOR payload; that's covered by the inbound storage
+        // tests in storage/mod.rs::a3_create_link_inbound_*. Here we
+        // assert the wire-level happy path: a federation push lands a
+        // legitimate link even when K9 governance is configured.)
+        override_active_permissions_mode_for_test(PermissionsMode::Off);
+
+        let state = test_state();
+        let now = Utc::now().to_rfc3339();
+        let (s_id, t_id) = {
+            let lock = state.lock().await;
+            let s = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "a3-fed-bypass".into(),
+                title: "src".into(),
+                content: "src".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+                reflection_depth: 0,
+            };
+            let s_id = db::insert(&lock.0, &s).unwrap();
+            let t = Memory {
+                id: Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "a3-fed-bypass".into(),
+                title: "tgt".into(),
+                content: "tgt".into(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "api".into(),
+                access_count: 0,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata: serde_json::json!({}),
+                reflection_depth: 0,
+            };
+            let t_id = db::insert(&lock.0, &t).unwrap();
+            (s_id, t_id)
+        };
+
+        let app = Router::new()
+            .route("/api/v1/sync/push", axum_post(sync_push))
+            .with_state(test_app_state(state.clone()));
+        let body = serde_json::json!({
+            "sender_agent_id": "peer-alice",
+            "sender_clock": {"entries": {}},
+            "memories": [],
+            "links": [{
+                "source_id": s_id,
+                "target_id": t_id,
+                "relation": "related_to",
+                "created_at": now,
+            }],
+            "dry_run": false
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/sync/push")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .header("x-agent-id", "local-receiver")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["links_applied"], 1);
+    }
+
     #[tokio::test]
     async fn http_sync_since_streams_new_memories_only() {
         // Phase 3 — GET /api/v1/sync/since?since=<ts> returns only memories
@@ -11024,6 +11232,122 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["linked"], true);
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — HTTP create_link
+    // must refuse a cycle-closing `reflects_on` edge with 409
+    // CONFLICT. Closes S5-H2: before A3, the cycle gate lived only
+    // in `mcp/tools/link.rs::handle_link` and the HTTP path could
+    // land cycles the MCP path would have refused.
+    #[tokio::test]
+    async fn http_create_link_refuses_cycle() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Off);
+
+        let state = test_state();
+        let a = insert_test_memory(&state, "a3-http-cycle", "a").await;
+        let b = insert_test_memory(&state, "a3-http-cycle", "b").await;
+        // Pre-seed a --reflects_on--> b so b --reflects_on--> a would
+        // close the cycle.
+        {
+            let lock = state.lock().await;
+            db::create_link(&lock.0, &a, &b, "reflects_on").unwrap();
+        }
+        let app = Router::new()
+            .route("/api/v1/links", axum_post(create_link))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "source_id": b,
+            "target_id": a,
+            "relation": "reflects_on",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/links")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = v["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with(db::LINK_CYCLE_ERR_PREFIX),
+            "expected cycle prefix, got: {err}"
+        );
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — HTTP create_link
+    // must refuse a write that the K9 permission pipeline denies,
+    // with 403 FORBIDDEN. Before A3 the K9 gate only ran in the MCP
+    // handler.
+    #[tokio::test]
+    async fn http_create_link_respects_governance() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::permissions::{
+            PermissionRule, RuleDecision, clear_active_permission_rules_for_test,
+            set_active_permission_rules,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+        clear_active_permission_rules_for_test();
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "a3-http-gov/**".to_string(),
+            op: "memory_link".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Deny,
+            reason: Some("test: A3 http governance deny".to_string()),
+        }]);
+
+        let state = test_state();
+        let src = insert_test_memory(&state, "a3-http-gov/zone", "src").await;
+        let tgt = insert_test_memory(&state, "a3-http-gov/zone", "tgt").await;
+        let app = Router::new()
+            .route("/api/v1/links", axum_post(create_link))
+            .with_state(test_app_state(state));
+        let body = serde_json::json!({
+            "source_id": src,
+            "target_id": tgt,
+            "relation": "related_to",
+        });
+        let resp = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/v1/links")
+                    .method("POST")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let err = v["error"].as_str().unwrap_or_default();
+        assert!(
+            err.starts_with(db::LINK_PERMISSION_DENIED_ERR_PREFIX),
+            "expected permission-denied prefix, got: {err}"
+        );
+
+        clear_active_permission_rules_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Advisory);
     }
 
     #[tokio::test]

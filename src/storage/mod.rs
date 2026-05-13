@@ -1402,6 +1402,185 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
 
 // --- Links ---
 
+/// v0.7.0 fix-campaign A3 (LINK-PARITY) — error prefix used when
+/// `validate_link_pre_create` rejects a `reflects_on` edge because it
+/// would close a cycle in the reflection graph. HTTP / SAL response
+/// mappers look for this prefix to surface 409 CONFLICT; MCP surfaces
+/// it as a plain text error. Centralised so all three entry points
+/// stay in lockstep.
+pub const LINK_CYCLE_ERR_PREFIX: &str = "link refused: reflection cycle";
+
+/// v0.7.0 fix-campaign A3 (LINK-PARITY) — error prefix used when the
+/// K9 permission pipeline returns `Deny` for a link write. HTTP / SAL
+/// response mappers translate this to 403 FORBIDDEN.
+pub const LINK_PERMISSION_DENIED_ERR_PREFIX: &str = "link denied by permission rule";
+
+/// v0.7.0 fix-campaign A3 (LINK-PARITY) — would creating
+/// `source_id --reflects_on--> target_id` close a cycle in the
+/// existing `reflects_on` subgraph?
+///
+/// Walks the `reflects_on` edges outbound from `target_id`. If the
+/// walk visits `source_id` at any depth, the new edge would form a
+/// cycle (the substrate's recursive-learning invariant is that
+/// `reflects_on` forms a DAG — a reflection cannot transitively
+/// reflect on something that reflects on itself).
+///
+/// Returns `Ok(true)` when a cycle would be created, `Ok(false)`
+/// otherwise. SQL errors surface as `Err`. The traversal is depth-
+/// bounded at [`MAX_REFLECTION_CYCLE_DEPTH`] so a pathological graph
+/// can never DOS the writer.
+///
+/// Only `reflects_on` participates in the DAG invariant — `related_to`
+/// / `supersedes` / `contradicts` / `derived_from` are allowed to
+/// form cycles by design (the original v0.6.x semantics) and callers
+/// should not invoke this helper for those relations.
+pub fn would_create_reflection_cycle(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+) -> Result<bool> {
+    // Trivial self-cycle short-circuit. `validate_link` already
+    // rejects self-links, but this keeps the helper safe to call in
+    // isolation (e.g. unit tests).
+    if source_id == target_id {
+        return Ok(true);
+    }
+    // BFS from `target_id` following `reflects_on` outbound edges.
+    // A visit set prevents re-traversal in case the historical graph
+    // already contains a cycle (corrupted state) — we still terminate
+    // and surface `true` because the new edge would extend that
+    // cycle through `source_id`.
+    let mut frontier: Vec<String> = vec![target_id.to_string()];
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    visited.insert(target_id.to_string());
+    let mut depth = 0usize;
+    let mut stmt = conn.prepare(
+        "SELECT target_id FROM memory_links \
+         WHERE source_id = ?1 AND relation = 'reflects_on'",
+    )?;
+    while !frontier.is_empty() && depth < MAX_REFLECTION_CYCLE_DEPTH {
+        let mut next: Vec<String> = Vec::new();
+        for node in &frontier {
+            let rows = stmt.query_map(params![node], |row| row.get::<_, String>(0))?;
+            for hit in rows {
+                let dst = hit?;
+                if dst == source_id {
+                    return Ok(true);
+                }
+                if visited.insert(dst.clone()) {
+                    next.push(dst);
+                }
+            }
+        }
+        frontier = next;
+        depth += 1;
+    }
+    Ok(false)
+}
+
+/// Maximum BFS depth for [`would_create_reflection_cycle`]. The
+/// substrate's `max_reflection_depth` governance cap is namespace-
+/// configurable but bounded; the cycle walker doubles that ceiling so
+/// a legitimate deep chain still resolves cleanly while a pathological
+/// graph terminates predictably.
+pub const MAX_REFLECTION_CYCLE_DEPTH: usize = 32;
+
+/// v0.7.0 fix-campaign A3 (LINK-PARITY) — shared pre-create validator
+/// invoked by every link-write entry point.
+///
+/// Closes the S5-H2 HIGH finding (#690): before A3 the L1-2 cycle
+/// check + K9 permission pipeline ran only in
+/// `src/mcp/tools/link.rs::handle_link`, so the HTTP `POST /api/v1/links`
+/// path and the federation-receive `sync_push` link loop could land
+/// `reflects_on` edges that the MCP path would have refused. The fix
+/// is defense-in-depth at the storage layer: every path — MCP, HTTP,
+/// SAL, federation — calls this helper, so the gates enforce no
+/// matter which entry point initiates the write.
+///
+/// Pipeline:
+///
+/// 1. Cycle check — invoked only when `relation == "reflects_on"`.
+///    Calls [`would_create_reflection_cycle`]; on `true`, returns an
+///    error prefixed with [`LINK_CYCLE_ERR_PREFIX`] so HTTP can surface
+///    409 CONFLICT and signed-event emit can record the refusal.
+/// 2. K9 permission eval — runs the unified
+///    [`crate::permissions::Permissions::evaluate`] pipeline against the
+///    source memory's namespace. On `Deny`, returns an error prefixed
+///    with [`LINK_PERMISSION_DENIED_ERR_PREFIX`] so HTTP surfaces 403.
+///    `Ask` is treated as `Deny` here because the storage-layer
+///    helper has no Ask-channel back to the operator; entry points
+///    that want interactive Ask handling (MCP) should invoke
+///    `Permissions::evaluate` directly BEFORE calling create_link.
+///
+/// `skip_governance` lets federation-receive bypass the K9 gate when
+/// the inbound link has already been cryptographically attested by an
+/// enrolled peer (attest_level == "peer_attested"). The cycle check
+/// always runs — even a trusted peer should not be able to extend a
+/// reflection cycle on the receiver. See `create_link_inbound` for the
+/// caller-side decision logic.
+///
+/// `agent_id` defaults to `"system"` when the caller cannot resolve a
+/// concrete claimant (federation receive path with no claim, etc.) —
+/// the permission rule matcher uses it for `agent_pattern` matching.
+pub fn validate_link_pre_create(
+    conn: &Connection,
+    source_id: &str,
+    target_id: &str,
+    relation: &str,
+    agent_id: &str,
+    skip_governance: bool,
+) -> Result<()> {
+    // Pass 1: cycle check. Only `reflects_on` participates in the
+    // DAG invariant — the other four relations are intentionally
+    // allowed to form cycles (e.g. mutual `related_to`).
+    if relation == "reflects_on" && would_create_reflection_cycle(conn, source_id, target_id)? {
+        anyhow::bail!(
+            "{LINK_CYCLE_ERR_PREFIX}: \
+             {source_id} --reflects_on--> {target_id} would close a cycle"
+        );
+    }
+
+    // Pass 2: K9 permission eval. Skip when the caller has already
+    // established external attestation (federation peer_attested).
+    if !skip_governance {
+        use crate::permissions::{Decision, Op, PermissionContext, Permissions};
+        // Link evaluation is scoped to the *source* memory's
+        // namespace — matches the MCP path's choice at
+        // `src/mcp/tools/link.rs:31`. Missing source memory falls
+        // back to "global"; create_link's own FK guard will surface
+        // the missing-memory error after this returns.
+        let link_ns = match get(conn, source_id) {
+            Ok(Some(m)) => m.namespace,
+            _ => "global".to_string(),
+        };
+        let ctx = PermissionContext {
+            op: Op::MemoryLink,
+            namespace: link_ns,
+            agent_id: agent_id.to_string(),
+            payload: serde_json::json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation,
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            Decision::Allow | Decision::Modify(_) => {}
+            Decision::Deny(reason) => {
+                anyhow::bail!("{LINK_PERMISSION_DENIED_ERR_PREFIX}: {reason}");
+            }
+            Decision::Ask(prompt) => {
+                // Storage layer has no Ask channel; surface as Deny.
+                // MCP path handles Ask directly via its own pre-call
+                // evaluate (returns the `{"status":"ask"}` envelope).
+                anyhow::bail!(
+                    "{LINK_PERMISSION_DENIED_ERR_PREFIX}: ask deferred to storage layer ({prompt})"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Insert a directional `(source_id, target_id, relation)` link.
 ///
 /// Backward-compat shim around [`create_link_signed`] with no active
@@ -1448,6 +1627,30 @@ pub fn create_link_signed(
     relation: &str,
     keypair: Option<&crate::identity::keypair::AgentKeypair>,
 ) -> Result<&'static str> {
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — gates that were
+    // previously enforced only at `src/mcp/tools/link.rs::handle_link`
+    // now run here so EVERY caller (MCP, HTTP, SAL, federation) hits
+    // them. The agent_id used for the K9 evaluation is the keypair's
+    // claim when present (the writer is by definition the actor);
+    // when no keypair is configured we fall back to "system" — the
+    // unified evaluator's `agent_pattern` defaults to `*`, so an
+    // operator who has not authored agent-narrow rules sees no
+    // behaviour change. The MCP path runs its own evaluate BEFORE
+    // calling here (it needs Ask-channel handling we can't surface
+    // from storage); the second evaluation here is idempotent under
+    // the registry's deny-first semantics.
+    let agent_id_for_eval = keypair
+        .as_ref()
+        .map(|kp| kp.agent_id.as_str())
+        .unwrap_or("system");
+    validate_link_pre_create(
+        conn,
+        source_id,
+        target_id,
+        relation,
+        agent_id_for_eval,
+        false,
+    )?;
     // Verify both IDs exist before creating link
     let source_exists: bool = conn
         .query_row(
@@ -1574,6 +1777,33 @@ pub fn create_link_signed(
 /// existence checks mirror the outbound path so the receiver fails loud
 /// on missing memories rather than silently dropping the link.
 pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &str) -> Result<()> {
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — defense-in-depth at
+    // the receiver. The cycle check ALWAYS runs even on inbound peer
+    // writes: a peer should not be able to extend a `reflects_on`
+    // cycle on the receiver any more than a local caller can. The K9
+    // permission gate is BYPASSED only when the inbound link is
+    // `peer_attested` (the peer's signature was cryptographically
+    // verified against an enrolled public key in
+    // `handlers::federation_receive::sync_push` before this call). For
+    // every other attest_level — including `"unsigned"`, which covers
+    // legacy peers AND peers whose public key we have not enrolled —
+    // the local K9 rules enforce. This is the design choice documented
+    // in #690: mTLS + Ed25519 sig verification is the federation's
+    // attestation layer; once that passes, namespace governance is the
+    // peer's local responsibility, not the receiver's. The
+    // `observed_by` claim becomes the `agent_id` for the K9 evaluation
+    // when not bypassed — that's the peer's claimed writer and matches
+    // what the rule matcher already uses for outbound links.
+    let skip_governance = attest_level == "peer_attested";
+    let peer_agent_id = link.observed_by.as_deref().unwrap_or("system");
+    validate_link_pre_create(
+        conn,
+        &link.source_id,
+        &link.target_id,
+        link.relation.as_str(),
+        peer_agent_id,
+        skip_governance,
+    )?;
     // Same FK guard as create_link_signed — a missing memory means the
     // peer raced ahead of us; we surface that to the caller's warn log
     // rather than papering over with INSERT OR IGNORE silently.
@@ -8224,6 +8454,200 @@ mod tests {
             "H6 regression: signature must verify against canonical CBOR \
              derived from the stored (microsecond-truncated) valid_from",
         );
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — the cycle check
+    // refuses a `reflects_on` edge whose target already transitively
+    // reflects back on the source. This is the storage-layer
+    // invariant the HTTP / SAL / federation paths now share with the
+    // MCP path.
+    #[test]
+    fn a3_validate_link_pre_create_refuses_reflection_cycle() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        // The active permissions mode is process-wide; hold the
+        // serialisation guard so parallel lib tests cannot flip the
+        // mode out from under us. See `pin_governance_enforce_for_test`
+        // in handlers/mod.rs for the same pattern.
+        let _gate = lock_permissions_mode_for_test();
+        // Pin mode to Off so the K9 evaluator stays out of the way —
+        // this test only exercises the cycle gate.
+        override_active_permissions_mode_for_test(PermissionsMode::Off);
+
+        let conn = test_db();
+        let a = make_memory("a3-a", "ns", Tier::Long, 5);
+        let b = make_memory("a3-b", "ns", Tier::Long, 5);
+        let c = make_memory("a3-c", "ns", Tier::Long, 5);
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        insert(&conn, &c).unwrap();
+
+        // Build chain: a --reflects_on--> b --reflects_on--> c.
+        create_link(&conn, &a.id, &b.id, "reflects_on").unwrap();
+        create_link(&conn, &b.id, &c.id, "reflects_on").unwrap();
+
+        // Attempting c --reflects_on--> a would close the cycle.
+        let err = create_link(&conn, &c.id, &a.id, "reflects_on")
+            .expect_err("cycle-closing reflects_on must be refused");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(LINK_CYCLE_ERR_PREFIX),
+            "expected {LINK_CYCLE_ERR_PREFIX} prefix, got: {msg}"
+        );
+
+        // A `related_to` edge between the same pair is still allowed —
+        // only `reflects_on` participates in the DAG invariant.
+        create_link(&conn, &c.id, &a.id, "related_to")
+            .expect("related_to is not gated by the cycle check");
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — the K9 permission
+    // pipeline gates link writes at the storage layer (not just at
+    // the MCP entry point). A `Deny` rule on `memory_link` refuses
+    // the write through `create_link` / `create_link_signed`.
+    #[test]
+    fn a3_validate_link_pre_create_respects_governance_deny() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::permissions::{
+            PermissionRule, RuleDecision, clear_active_permission_rules_for_test,
+            set_active_permission_rules,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+        clear_active_permission_rules_for_test();
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "a3-deny/**".to_string(),
+            op: "memory_link".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Deny,
+            reason: Some("test: link denied by a3 rule".to_string()),
+        }]);
+
+        let conn = test_db();
+        let s = make_memory("a3-src", "a3-deny/scope", Tier::Long, 5);
+        let t = make_memory("a3-tgt", "a3-deny/scope", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+
+        let err = create_link(&conn, &s.id, &t.id, "related_to")
+            .expect_err("a Deny rule must refuse the link write");
+        let msg = err.to_string();
+        assert!(
+            msg.starts_with(LINK_PERMISSION_DENIED_ERR_PREFIX),
+            "expected {LINK_PERMISSION_DENIED_ERR_PREFIX} prefix, got: {msg}"
+        );
+
+        // Cleanup so the global registry does not leak into other tests
+        // running in the same process.
+        clear_active_permission_rules_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Advisory);
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — federation receive
+    // path: peer-attested inbound links bypass the K9 governance
+    // gate (the peer is trusted by mTLS + Ed25519 attestation), but
+    // the cycle check ALWAYS runs even on peer writes.
+    #[test]
+    fn a3_create_link_inbound_peer_attested_bypasses_governance() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        use crate::permissions::{
+            PermissionRule, RuleDecision, clear_active_permission_rules_for_test,
+            set_active_permission_rules,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Enforce);
+        clear_active_permission_rules_for_test();
+        set_active_permission_rules(vec![PermissionRule {
+            namespace_pattern: "**".to_string(),
+            op: "memory_link".to_string(),
+            agent_pattern: "*".to_string(),
+            decision: RuleDecision::Deny,
+            reason: Some("test: every link denied".to_string()),
+        }]);
+
+        let conn = test_db();
+        let s = make_memory("inbound-src", "a3-fed", Tier::Long, 5);
+        let t = make_memory("inbound-tgt", "a3-fed", Tier::Long, 5);
+        insert(&conn, &s).unwrap();
+        insert(&conn, &t).unwrap();
+
+        let link = MemoryLink {
+            source_id: s.id.clone(),
+            target_id: t.id.clone(),
+            relation: "related_to".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: Some("peer:remote".to_string()),
+            signature: None,
+        };
+
+        // Peer-attested inbound bypasses the K9 deny.
+        create_link_inbound(&conn, &link, "peer_attested")
+            .expect("peer_attested must bypass K9 governance");
+
+        // But an unsigned inbound link is still gated locally.
+        let link2 = MemoryLink {
+            source_id: t.id.clone(),
+            target_id: s.id.clone(),
+            relation: "related_to".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: Some("peer:remote".to_string()),
+            signature: None,
+        };
+        let err = create_link_inbound(&conn, &link2, "unsigned")
+            .expect_err("unsigned inbound must NOT bypass governance");
+        assert!(
+            err.to_string()
+                .starts_with(LINK_PERMISSION_DENIED_ERR_PREFIX)
+        );
+
+        clear_active_permission_rules_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Advisory);
+    }
+
+    // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — even a trusted
+    // peer cannot extend a `reflects_on` cycle on the receiver. The
+    // cycle gate runs regardless of attest_level.
+    #[test]
+    fn a3_create_link_inbound_peer_attested_still_refuses_cycle() {
+        use crate::config::{
+            PermissionsMode, lock_permissions_mode_for_test,
+            override_active_permissions_mode_for_test,
+        };
+        let _gate = lock_permissions_mode_for_test();
+        override_active_permissions_mode_for_test(PermissionsMode::Off);
+
+        let conn = test_db();
+        let a = make_memory("inbound-cycle-a", "ns", Tier::Long, 5);
+        let b = make_memory("inbound-cycle-b", "ns", Tier::Long, 5);
+        insert(&conn, &a).unwrap();
+        insert(&conn, &b).unwrap();
+        create_link(&conn, &a.id, &b.id, "reflects_on").unwrap();
+
+        let cycle_link = MemoryLink {
+            source_id: b.id.clone(),
+            target_id: a.id.clone(),
+            relation: "reflects_on".to_string(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            valid_from: None,
+            valid_until: None,
+            observed_by: Some("peer:remote".to_string()),
+            signature: None,
+        };
+        let err = create_link_inbound(&conn, &cycle_link, "peer_attested")
+            .expect_err("cycle check must run even on peer_attested inbound");
+        assert!(err.to_string().starts_with(LINK_CYCLE_ERR_PREFIX));
     }
 
     // v0.7.0 H6 (round-2) — pure-function test: the truncation helper

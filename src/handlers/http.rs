@@ -5038,6 +5038,20 @@ pub async fn create_link(
                 .into_response()
         }
         Err(e) => {
+            // v0.7.0 fix-campaign A3 (LINK-PARITY, #690) — map the
+            // two new storage-layer refusals to their canonical HTTP
+            // status codes. Cycle refusals are 409 CONFLICT (the
+            // graph state conflicts with the new edge); K9 deny is
+            // 403 FORBIDDEN. Anything else stays 500 — those are
+            // server faults the caller cannot fix by retrying with
+            // different inputs.
+            let msg = e.to_string();
+            if msg.starts_with(db::LINK_CYCLE_ERR_PREFIX) {
+                return (StatusCode::CONFLICT, Json(json!({"error": msg}))).into_response();
+            }
+            if msg.starts_with(db::LINK_PERMISSION_DENIED_ERR_PREFIX) {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": msg}))).into_response();
+            }
             tracing::error!("handler error: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
