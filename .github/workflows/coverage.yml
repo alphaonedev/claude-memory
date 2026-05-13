@@ -1,0 +1,73 @@
+# v0.7.0 L0.7-7 — per-module coverage threshold gate (discipline keystone).
+#
+# Per L0.7 playbook §8: this workflow enforces per-module CURRENT-floor
+# coverage thresholds defined in coverage/thresholds.toml. Thresholds
+# rise across releases; NEVER fall. If a module drops below its
+# threshold, this job fails and the PR cannot merge until coverage is
+# restored.
+#
+# Complementary to the `Code Coverage` job in `ci.yml`:
+#   - `Code Coverage` (ci.yml) enforces the absolute floor + ratchet on
+#     TOTAL line coverage (catastrophic-regression backstop).
+#   - `Per-Module Coverage Thresholds` (this file) enforces a per-module
+#     floor so that no single module can quietly slide while the workspace
+#     average stays high.
+
+name: Per-Module Coverage Thresholds
+
+on:
+  pull_request:
+    branches: [main, develop, "release/**", "feat/v0.7.0-grand-slam"]
+  push:
+    branches: [main, develop, "feat/v0.7.0-grand-slam", "release/**"]
+
+env:
+  CARGO_TERM_COLOR: always
+  AI_MEMORY_NO_CONFIG: "1"
+
+jobs:
+  per-module-thresholds:
+    name: Per-Module Coverage Thresholds
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Generate coverage JSON
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov \
+            --features sal,sal-postgres \
+            --lib --tests \
+            --json \
+            --output-path coverage/current.json \
+            --workspace \
+            -- --test-threads=2
+
+      - name: Enforce per-module thresholds
+        run: |
+          bash coverage/check-thresholds.sh \
+            coverage/thresholds.toml \
+            coverage/current.json
+
+      - name: Upload coverage JSON
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: coverage-json
+          path: coverage/current.json

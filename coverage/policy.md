@@ -186,6 +186,158 @@ exercising it.
 - The signing-keypair auto-gen path in `ensure_and_load_daemon_keypair`
   is exercised by the F12 cold-boot cell.
 
+### L0.7-4 structural ceilings (Tier C — PARTIAL EXCEPTIONS)
+
+Five Tier C modules carry **structural ceilings** that prevent the tier-C
+92% target from being reached without process-level integration. Each is
+documented below with the unreachable surface, measured residual, and the
+ship-gate cell that compensates.
+
+#### `src/federation/receive.rs` — peer ingest path (STRUCTURAL CEILING)
+
+The receive path is the inbound half of the federation push protocol.
+Substantial portions of `apply_remote_event` + `apply_remote_link` +
+`apply_remote_archive` only fire when the routing layer hands a
+deserialized peer envelope through the validator pipeline. The
+SQL-fanout branches under `cfg(feature = "sal-postgres")` are unreachable
+without a live Postgres + AGE instance.
+
+**Ship-gate compensation**:
+
+- Phase 2 federation cell pushes real events from a peer fleet through
+  the full receive pipeline against a sqlite daemon.
+- Phase 1 Postgres cell exercises the `sal-postgres` branches against
+  the `packaging/docker-compose.postgres.yml` fixture.
+
+#### `src/federation/sync.rs` — outbound push loop (STRUCTURAL CEILING)
+
+`push_one_peer` + `pull_one_peer` open real `reqwest` clients against peer
+URLs and walk paginated vector-clock cursors. The retry / backoff /
+quorum-vote branches require multi-peer concurrency that is impractical
+to fake at unit-test scope.
+
+**Ship-gate compensation**:
+
+- Phase 2 federation cell drives a 3-node mesh through the full
+  push/pull loop including retry on simulated peer 5xx.
+- A2A-gate ironclaw-mtls cell exercises sync over real TLS.
+
+#### `src/hooks/executor.rs` — runtime hook dispatch (STRUCTURAL CEILING)
+
+`run_chain` orchestrates async hook invocation across the chain with
+per-hook timeouts. The `tokio::time::timeout` failure arms + the
+panic-propagation arm of the JoinHandle only fire under real
+multi-threaded async execution; the unit tests cover the happy path,
+short-circuit, and explicit timeout configuration.
+
+**Ship-gate compensation**:
+
+- Phase 1 functional cell exercises the chain under real Tokio
+  multi-threaded runtime with the recall + store hook families wired.
+
+#### `src/reranker.rs` — hybrid recall blender (STRUCTURAL CEILING)
+
+The blender ingests scored results from FTS5 + HNSW + (optionally) the
+cross-encoder. The cross-encoder branch is gated on `--features
+cross-encoder` and is exercised only when a real ONNX model is loaded;
+this is not feasible in the default `--features sal,sal-postgres` CI
+matrix.
+
+**Ship-gate compensation**:
+
+- The cross-encoder branch is exercised by the `autonomous`-tier
+  ship-gate cell, which loads a real ONNX model and exercises the
+  reranker against a representative recall corpus.
+
+#### `src/storage/reflect.rs` — recursive-learning materializer (STRUCTURAL CEILING)
+
+`materialize_reflection` walks the reflection graph with bounded depth
+and writes back consolidated nodes. The depth-cap-exceeded path
+(`REFLECTION_DEPTH_EXCEEDED`) is exercised by the reproduce script
+(`scripts/reproduce-recursive-learning.sh`); the defensive
+`map_err(|e| e.to_string())` closures on healthy sqlite calls cannot
+be exercised without injecting sqlite errors, which would require a
+mock-storage layer that the project has chosen to defer to v0.8.0.
+
+**Ship-gate compensation**:
+
+- The reproduce script is run as part of Phase 1 functional cell.
+- Depth-cap refusal verified end-to-end at depth=4 in the script.
+
+### L0.7-3 chunk-D Postgres-branch ceilings (Tier B — PARTIAL EXCEPTIONS)
+
+Three Tier B HTTP handler modules carry Postgres-branch ceilings. Each
+file's `cfg(feature = "sal")` Postgres dispatch arms are unreachable
+without a live Postgres + AGE instance.
+
+#### `src/handlers/http.rs` — REST surface (STRUCTURAL CEILING — PG branches)
+
+The 50-endpoint REST surface dispatches every write into the `Store`
+trait. The `Store::Postgres(_)` arms — selected by `--store-url
+postgres://...` at daemon boot — are unreachable from unit tests because
+the trait is constructed at runtime and the unit-test scaffold always
+hands a sqlite store. Sqlite branches ARE exercised end-to-end by the
+L0.7-3 chunk-D test suite.
+
+**Ship-gate compensation**:
+
+- Phase 1 Postgres cell exercises every endpoint against a live PG
+  daemon (the `live_*` test family).
+- Phase 3 migration cell exercises the sqlite-to-Postgres handoff.
+
+#### `src/handlers/hook_subscribers.rs` — subscriber management (STRUCTURAL CEILING — PG branches)
+
+Hook-subscriber CRUD reads/writes the subscriptions table; the PG branch
+of `Store::list_subscriptions` / `register_subscription` only fires
+under a Postgres daemon.
+
+**Ship-gate compensation**:
+
+- Phase 2 federation cell registers + invokes subscribers against a PG
+  store. Phase 1 functional cell exercises sqlite branches end-to-end.
+
+#### `src/handlers/federation_receive.rs` — inbound federation handler (STRUCTURAL CEILING — PG branches)
+
+Mirror of `federation/receive.rs` at the HTTP boundary: deserializes the
+peer envelope, calls the receive pipeline, writes back the
+acknowledgement. The PG arm of the write-back is unreachable without a
+live PG.
+
+**Ship-gate compensation**:
+
+- Phase 2 federation cell pushes real envelopes from peers against a PG
+  store.
+
+### L0.7-3 chunk-C structural ceilings (Tier B — PARTIAL EXCEPTIONS)
+
+Six MCP tool modules carry **defensive-closure ceilings**. Each has a
+small constellation of `map_err(|e| e.to_string())` closures wrapped
+around sqlite calls that, on a healthy database, never fail. Exercising
+these closures would require either injecting sqlite errors (out of
+scope for L0.7 — deferred to v0.8.0 mock-storage layer) or corrupting
+the database mid-test (rejected as too brittle).
+
+- `src/mcp/tools/promote.rs` — defensive `map_err` on the tier-update
+  path; happy path + every business-logic branch covered.
+- `src/mcp/tools/archive.rs` — defensive `map_err` on the archive
+  insertion + the foreign-key cascade. Functional branches all covered.
+- `src/mcp/tools/replay.rs` — defensive `map_err` on the journal scan;
+  the replay reflection union path is the L0.5.5-3 Tier F placeholder
+  (`transcripts/replay.rs`).
+- `src/mcp/tools/forget.rs` — defensive `map_err` on the gravestone
+  insert + the FTS-trigger removal. Happy path + retention-policy
+  branches covered.
+- `src/mcp/tools/consolidate.rs` — defensive `map_err` on the n-way
+  merge path; the LLM-bound branch is Tier D.
+- `src/mcp/tools/namespace.rs` — defensive `map_err` on the namespace
+  CRUD; happy path + every policy branch covered.
+
+**Ship-gate compensation**:
+
+- Phase 1 functional cell exercises every tool end-to-end against a
+  real sqlite daemon, taking the happy path through each defensive
+  closure (which is never reached because the sqlite call succeeds).
+
 ## Process
 
 When a Tier E module changes:
