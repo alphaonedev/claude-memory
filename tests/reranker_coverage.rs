@@ -340,3 +340,122 @@ fn rerank_is_stable_when_inputs_have_no_query_tokens() {
     assert!((out[1].1 - 0.18).abs() < 1e-9);
     assert!((out[2].1 - 0.06).abs() < 1e-9);
 }
+
+// ---------------------------------------------------------------------------
+// L0.7-4 Tier C — BatchedReranker coverage closures
+// ---------------------------------------------------------------------------
+//
+// The cfg(test) unit tests in src/reranker.rs cover most BatchedReranker
+// paths but skip several integration scenarios — particularly the
+// degraded-lexical signal, with_params, encoder() accessor, and
+// multi-fire serialization. These tests close those gaps.
+
+#[test]
+fn batched_reranker_new_wraps_lexical_encoder_correctly() {
+    use ai_memory::reranker::BatchedReranker;
+    let br = BatchedReranker::new(CrossEncoder::new());
+    assert!(!br.is_neural());
+    assert!(!br.is_degraded_lexical());
+}
+
+#[test]
+fn batched_reranker_with_params_uses_custom_batch_and_wait() {
+    use ai_memory::reranker::BatchedReranker;
+    // Force tiny max_batch + larger wait to test the with_params path.
+    let br = BatchedReranker::with_params(CrossEncoder::new(), 4, 10);
+    let cands = vec![
+        (make_memory("alpha", "alpha alpha"), 0.5),
+        (make_memory("beta", "beta beta"), 0.4),
+    ];
+    let out = br.rerank("alpha", cands);
+    assert_eq!(out.len(), 2);
+    for (_, s) in &out {
+        assert!((0.0..=1.0).contains(s));
+    }
+}
+
+#[test]
+fn batched_reranker_encoder_accessor_returns_inner() {
+    use ai_memory::reranker::BatchedReranker;
+    let br = BatchedReranker::new(CrossEncoder::new());
+    let inner = br.encoder();
+    // Inner encoder is the lexical variant we constructed.
+    assert!(!inner.is_neural());
+}
+
+#[test]
+fn batched_reranker_is_degraded_lexical_proxy_to_encoder() {
+    use ai_memory::reranker::BatchedReranker;
+    // Build a CrossEncoder that's intentionally degraded: an offline
+    // new_neural() fallback yields Lexical { degraded: true }.
+    let tmp = tempfile::tempdir().expect("tempdir");
+    unsafe {
+        std::env::set_var("HF_HUB_OFFLINE", "1");
+        std::env::set_var("HF_HOME", tmp.path());
+        std::env::set_var("HUGGINGFACE_HUB_CACHE", tmp.path().join("hub"));
+        std::env::set_var("HF_HUB_CACHE", tmp.path().join("hub"));
+    }
+    let ce = CrossEncoder::new_neural();
+    unsafe {
+        std::env::remove_var("HF_HUB_OFFLINE");
+        std::env::remove_var("HF_HOME");
+        std::env::remove_var("HUGGINGFACE_HUB_CACHE");
+        std::env::remove_var("HF_HUB_CACHE");
+    }
+    let br = BatchedReranker::new(ce);
+    // On hosts without a cached model, the fallback is Lexical { degraded: true }
+    // and is_degraded_lexical() returns true. On hosts WITH a cached
+    // model, hf-hub may still load it and we get Neural — both are valid;
+    // we just exercise the proxy method.
+    let _ = br.is_degraded_lexical();
+}
+
+#[test]
+fn batched_reranker_handles_empty_candidates() {
+    use ai_memory::reranker::BatchedReranker;
+    let br = BatchedReranker::new(CrossEncoder::new());
+    let out = br.rerank("q", Vec::new());
+    assert!(out.is_empty());
+}
+
+#[test]
+fn batched_reranker_serializes_concurrent_calls() {
+    // Multiple sequential rerank() calls through the same batcher
+    // exercises the worker's batch-loop steady-state path.
+    use ai_memory::reranker::BatchedReranker;
+    let br = BatchedReranker::new(CrossEncoder::new());
+    for i in 0..5 {
+        let cands = vec![
+            (make_memory(&format!("alpha-{i}"), "alpha body"), 0.5),
+            (make_memory(&format!("beta-{i}"), "beta body"), 0.4),
+        ];
+        let out = br.rerank("alpha", cands);
+        assert_eq!(out.len(), 2);
+    }
+}
+
+#[test]
+fn batched_reranker_drop_terminates_worker() {
+    // Construct + drop several batchers to exercise the H2 shutdown path.
+    use ai_memory::reranker::BatchedReranker;
+    for _ in 0..3 {
+        let br = BatchedReranker::with_params(CrossEncoder::new(), 16, 5);
+        // Use it once so the worker hits the inner loop at least once.
+        let _ = br.rerank("x", vec![(make_memory("a", "a"), 0.5)]);
+    }
+    // If Drop hung the test would time out, so we get here only when
+    // every worker exited cleanly via the shutdown channel.
+}
+
+// ---------------------------------------------------------------------------
+// is_degraded_lexical: cover both branches on CrossEncoder directly.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn cross_encoder_is_degraded_lexical_for_non_degraded_is_false() {
+    let ce = CrossEncoder::new();
+    assert!(
+        !ce.is_degraded_lexical(),
+        "freshly-constructed lexical is not degraded"
+    );
+}

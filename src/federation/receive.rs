@@ -105,7 +105,7 @@ pub(super) async fn catchup_once(config: &FederationConfig, db: &crate::handlers
 }
 
 #[cfg(feature = "sal")]
-async fn catchup_once_with_store(
+pub(super) async fn catchup_once_with_store(
     config: &FederationConfig,
     db: &crate::handlers::Db,
     store: Option<&Arc<dyn crate::store::MemoryStore>>,

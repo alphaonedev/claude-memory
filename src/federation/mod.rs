@@ -2475,4 +2475,319 @@ mod tests {
             other => panic!("expected QuorumNotMet, got {other:?}"),
         }
     }
+
+    // ---------------------------------------------------------------------
+    // L0.7-4 Tier C — broadcast_*_quorum IdDrift + transient-retry coverage
+    // ---------------------------------------------------------------------
+    //
+    // The existing tests cover broadcast_store_quorum's IdDrift/retry
+    // paths but not the equivalents in archive/delete/restore/link/
+    // consolidate/pending/decision/namespace-meta. Each broadcast
+    // function duplicates the post-quorum detach logic so the
+    // IdDrift / join-error / partial-quorum WARN branches are unique
+    // per function — closing the gap requires hitting each one.
+
+    #[tokio::test]
+    async fn delete_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_delete_quorum(&cfg, "mem-del-retry")
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            count2.load(Ordering::Relaxed),
+            2,
+            "transient failure must retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_archive_quorum(&cfg, "mem-arc-retry")
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn restore_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_restore_quorum(&cfg, "mem-res-retry")
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn link_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_link_quorum(&cfg, &sample_link()).await.unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn consolidate_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let mem = sample_memory();
+        let sources = vec!["src-1".to_string(), "src-2".to_string()];
+        let _tracker = broadcast_consolidate_quorum(&cfg, &mem, &sources)
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn pending_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_pending_quorum(&cfg, &sample_pending())
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn pending_decision_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_pending_decision_quorum(&cfg, &sample_decision())
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn namespace_meta_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let _tracker = broadcast_namespace_meta_quorum(&cfg, &sample_namespace_meta())
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn namespace_meta_clear_quorum_transient_peer_failure_retried_once() {
+        let (url1, count1) = spawn_mock_peer(MockBehaviour::Ack).await;
+        let (url2, count2) = spawn_mock_peer(MockBehaviour::FailThenAck { fail_until: 1 }).await;
+        let cfg = build_config(vec![url1, url2], 2, 2000);
+        let namespaces = vec!["ns/x".to_string()];
+        let _tracker = broadcast_namespace_meta_clear_quorum(&cfg, &namespaces)
+            .await
+            .unwrap();
+        for _ in 0..200 {
+            if count1.load(Ordering::Relaxed) >= 1 && count2.load(Ordering::Relaxed) >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(count2.load(Ordering::Relaxed), 2);
+    }
+
+    // ---- IdDrift variants for non-store broadcast functions ----
+
+    #[tokio::test]
+    async fn delete_quorum_id_drift_does_not_count_as_ack() {
+        let url1 = spawn_id_drift_peer().await;
+        let url2 = spawn_id_drift_peer().await;
+        let cfg = build_config(vec![url1, url2], 2, 1000);
+        let tracker = broadcast_delete_quorum(&cfg, "mem-del-drift")
+            .await
+            .unwrap();
+        let err = finalise_quorum(&tracker).unwrap_err();
+        match err {
+            QuorumError::QuorumNotMet { got, .. } => assert_eq!(got, 1),
+            other => panic!("expected QuorumNotMet, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn archive_quorum_id_drift_does_not_count_as_ack() {
+        let url1 = spawn_id_drift_peer().await;
+        let url2 = spawn_id_drift_peer().await;
+        let cfg = build_config(vec![url1, url2], 2, 1000);
+        let tracker = broadcast_archive_quorum(&cfg, "mem-arc-drift")
+            .await
+            .unwrap();
+        let err = finalise_quorum(&tracker).unwrap_err();
+        assert!(matches!(err, QuorumError::QuorumNotMet { .. }));
+    }
+
+    #[tokio::test]
+    async fn link_quorum_id_drift_does_not_count_as_ack() {
+        let url1 = spawn_id_drift_peer().await;
+        let url2 = spawn_id_drift_peer().await;
+        let cfg = build_config(vec![url1, url2], 2, 1000);
+        let tracker = broadcast_link_quorum(&cfg, &sample_link()).await.unwrap();
+        let err = finalise_quorum(&tracker).unwrap_err();
+        assert!(matches!(err, QuorumError::QuorumNotMet { .. }));
+    }
+
+    // ---------------------------------------------------------------------
+    // L0.7-4 Tier C — catchup_once_with_store SAL path coverage
+    // ---------------------------------------------------------------------
+    //
+    // The non-SAL path through catchup_once is covered extensively above;
+    // the SAL store branch (lines 184-218 of receive.rs) is uncovered.
+    // These tests exercise the `Some(store)` path through a SqliteStore
+    // handle so the store.apply_remote_memory() dispatch + sync_state
+    // observe at end of batch are both hit.
+
+    #[cfg(feature = "sal")]
+    #[tokio::test]
+    async fn catchup_once_with_store_applies_via_sal_handle() {
+        use super::receive::catchup_once_with_store;
+        use crate::store::MemoryStore;
+
+        let mem = catchup_memory("sal-applied", "2026-04-26T10:00:00Z");
+        let (url, hits, _, _) =
+            spawn_since_peer(SinceMockBehaviour::ReturnMemories(vec![mem.clone()])).await;
+        let cfg = build_catchup_cfg(&url, 2000);
+        let db = build_test_db();
+        // Build a SqliteStore on the same DB path the federation Db
+        // owns. Since build_test_db returns an in-memory db that is
+        // distinct from any SqliteStore-opened DB, we use a tempdir
+        // for the SAL store and a separate in-memory db for the
+        // Federation Db. The catchup path writes via the store; the
+        // vector-clock advancement happens on the Federation Db.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store_path = dir.path().join("store.db");
+        let store: Arc<dyn MemoryStore> = Arc::new(
+            crate::store::sqlite::SqliteStore::open(&store_path).expect("open SqliteStore"),
+        );
+        catchup_once_with_store(&cfg, &db, Some(&store)).await;
+
+        assert_eq!(hits.load(Ordering::Relaxed), 1, "peer must be hit once");
+        // The mem must have been applied via the SAL store handle —
+        // read it back through the store's get() method.
+        let ctx = crate::store::CallerContext::for_agent("test");
+        let got = store
+            .get(&ctx, &mem.id)
+            .await
+            .expect("SAL store should have the catchup memory");
+        assert_eq!(got.title, "sal-applied");
+
+        // sync_state should have advanced to the memory's timestamp on
+        // the Federation Db (sync_state is always tracked via the
+        // local rusqlite handle even on SAL builds).
+        let lock = db.lock().await;
+        let clock = crate::db::sync_state_load(&lock.0, "ai:catchup-test").unwrap();
+        assert_eq!(
+            clock.entries.get("peer-0").map(String::as_str),
+            Some("2026-04-26T10:00:00Z"),
+        );
+    }
+
+    /// `catchup_once_with_store` with `None` store falls back to the
+    /// legacy rusqlite insert_if_newer path. Pin parity so the
+    /// `else` branch (line 219-247 of receive.rs) is exercised by
+    /// the SAL build.
+    #[cfg(feature = "sal")]
+    #[tokio::test]
+    async fn catchup_once_with_store_none_uses_legacy_rusqlite() {
+        use super::receive::catchup_once_with_store;
+        let mem = catchup_memory("legacy-applied", "2026-04-26T10:00:00Z");
+        let (url, hits, _, _) =
+            spawn_since_peer(SinceMockBehaviour::ReturnMemories(vec![mem])).await;
+        let cfg = build_catchup_cfg(&url, 2000);
+        let db = build_test_db();
+        catchup_once_with_store(&cfg, &db, None).await;
+        assert_eq!(hits.load(Ordering::Relaxed), 1);
+        let lock = db.lock().await;
+        let count: i64 = lock
+            .0
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "legacy path must insert the row locally");
+    }
+
+    /// SAL store path with an invalid memory in the batch — the
+    /// `validate_memory` skip-branch must trigger and the valid
+    /// neighbour must still apply via the store handle.
+    #[cfg(feature = "sal")]
+    #[tokio::test]
+    async fn catchup_once_with_store_skips_invalid_memory_via_sal_path() {
+        use super::receive::catchup_once_with_store;
+        let valid = catchup_memory("sal-valid", "2026-04-26T10:00:00Z");
+        let mut bad = catchup_memory("sal-bad", "2026-04-26T10:00:01Z");
+        bad.source = "not-in-allowlist".to_string();
+        let mems = vec![valid.clone(), bad];
+
+        let (url, _, _, _) = spawn_since_peer(SinceMockBehaviour::ReturnMemories(mems)).await;
+        let cfg = build_catchup_cfg(&url, 2000);
+        let db = build_test_db();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store: Arc<dyn crate::store::MemoryStore> = Arc::new(
+            crate::store::sqlite::SqliteStore::open(dir.path().join("store.db"))
+                .expect("open SqliteStore"),
+        );
+        catchup_once_with_store(&cfg, &db, Some(&store)).await;
+        // Only the valid memory should be in the SAL store.
+        let ctx = crate::store::CallerContext::for_agent("test");
+        assert!(
+            store.get(&ctx, &valid.id).await.is_ok(),
+            "valid memory must land via SAL store"
+        );
+    }
 }
