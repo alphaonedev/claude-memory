@@ -169,15 +169,18 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          time); got {v}"
     );
     assert_eq!(
-        v, 32,
+        v, 33,
         "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (32 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
+         (33 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
          `governance_rules` table, L1-1 bumped 30 to 31 to add the \
-         typed `memories.memory_kind` column, and L1-5 bumped 31 to \
-         32 to add `skills` + `skill_resources` tables for the Agent \
-         Skills ingestion substrate). A drift here means either the \
-         binary's migrate ladder skipped a step or the new SAL \
-         `schema_version()` lookup is reading from the wrong source."
+         typed `memories.memory_kind` column, L1-5 bumped 31 to 32 \
+         to add `skills` + `skill_resources` tables for the Agent \
+         Skills ingestion substrate, and v0.7.1-fold (commit 58877c7) \
+         bumped 32 to 33 to add the column-level CHECK constraint on \
+         `memory_links.relation` per the closed-taxonomy hardening \
+         backlog). A drift here means either the binary's migrate \
+         ladder skipped a step or the new SAL `schema_version()` \
+         lookup is reading from the wrong source."
     );
 
     // 4) The wire-format discriminator stays alongside but distinct
