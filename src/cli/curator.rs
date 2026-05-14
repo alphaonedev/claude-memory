@@ -6,6 +6,8 @@
 //! this module owns only the outer wrapper and the report printer.
 
 use crate::cli::CliOutput;
+use crate::curator::reflection_pass;
+use crate::identity::keypair as identity_keypair;
 use crate::{autonomy, config, curator, db, llm};
 use anyhow::{Context, Result};
 use clap::Args;
@@ -48,6 +50,29 @@ pub struct CuratorArgs {
     /// instead of a single id.
     #[arg(long)]
     pub rollback_last: Option<usize>,
+    /// v0.7.0 L2-1 — Run the reflection-pass curator mode. Clusters
+    /// co-recalled Observations and synthesises typed Reflection
+    /// memories with `reflects_on` provenance. Mutually exclusive with
+    /// the sweep / rollback modes. Requires either `--namespace` or
+    /// `--all-namespaces`.
+    #[arg(long, conflicts_with_all = ["once", "daemon", "rollback", "rollback_last"])]
+    pub reflect: bool,
+    /// Scope the reflection pass to a single namespace. Pairs with
+    /// `--reflect`; ignored otherwise.
+    #[arg(long)]
+    pub namespace: Option<String>,
+    /// Curator-side reflection-depth ceiling. The substrate's per-
+    /// namespace `max_reflection_depth` policy is still enforced on
+    /// top — this flag refuses to *propose* reflections that would
+    /// exceed the operator-supplied cap so the curator never burns an
+    /// LLM round-trip on a doomed write.
+    #[arg(long)]
+    pub max_depth: Option<u32>,
+    /// Run the reflection pass over every observable namespace rather
+    /// than a single one. Per-namespace `reflection_pass.enabled`
+    /// flags still gate participation. Pairs with `--reflect`.
+    #[arg(long)]
+    pub all_namespaces: bool,
 }
 
 fn build_curator_llm(tier: config::FeatureTier) -> Option<llm::OllamaClient> {
@@ -98,8 +123,14 @@ pub async fn run(
         return run_rollback(db_path, args, out);
     }
 
+    if args.reflect {
+        return run_reflect(db_path, args, app_config, out);
+    }
+
     if !args.once && !args.daemon {
-        anyhow::bail!("curator requires --once, --daemon, --rollback <id>, or --rollback-last N");
+        anyhow::bail!(
+            "curator requires --once, --daemon, --reflect, --rollback <id>, or --rollback-last N"
+        );
     }
 
     let cfg = curator::CuratorConfig {
@@ -149,6 +180,158 @@ pub async fn run(
         shutdown,
     )
     .await
+}
+
+/// v0.7.0 L2-1 — reflection-pass entry point. Wires the operator's
+/// CLI flags to [`reflection_pass::run_reflection_pass`] and prints
+/// the structured report.
+///
+/// Per #666 acceptance:
+///
+/// * `--namespace foo` runs the pass on one namespace; `--all-
+///   namespaces` enumerates every observable namespace.
+/// * Per-namespace `reflection_pass.enabled` config gates which
+///   namespaces actually run (defaults to `false`). The CLI does NOT
+///   load the per-namespace config from `ai-memory.toml` yet — that's
+///   a v0.7.1 follow-up; for now, the operator-supplied
+///   `--namespace` is treated as "operator opted in for this run"
+///   so a single-namespace invocation always proceeds. The
+///   `--all-namespaces` path applies the strict `enabled` gate (no
+///   external config loaded → no namespaces enabled → zero rows
+///   written), which is the safe default until the config-file
+///   wiring lands.
+/// * `--dry-run` reports proposed clusters without writing anything.
+/// * `--max-depth` is the curator-side guard rail on top of the
+///   substrate's per-namespace policy cap.
+fn run_reflect(
+    db_path: &Path,
+    args: &CuratorArgs,
+    app_config: &config::AppConfig,
+    out: &mut CliOutput<'_>,
+) -> Result<()> {
+    if args.namespace.is_none() && !args.all_namespaces {
+        anyhow::bail!("--reflect requires either --namespace <ns> or --all-namespaces");
+    }
+    if args.namespace.is_some() && args.all_namespaces {
+        anyhow::bail!("--reflect: --namespace and --all-namespaces are mutually exclusive");
+    }
+
+    let conn = db::open(db_path).context("--reflect: db::open failed")?;
+
+    // Resolve the curator's signing keypair. We rely on the
+    // process-wide identity (the same one `serve` uses) so every
+    // `reflects_on` edge attributes to the daemon's Ed25519 identity.
+    // When no keypair is configured (operator opted out via
+    // `[identity].disabled = true` or runs a one-off `--reflect`
+    // against a fresh data dir) the pass falls back to `"ai:curator"`
+    // — same fall-back the autonomy `consolidate` path uses.
+    let keypair = load_curator_keypair_best_effort();
+
+    let feature_tier = app_config.effective_tier(None);
+    let llm = build_curator_llm(feature_tier);
+
+    // Single-namespace invocations bypass the per-namespace `enabled`
+    // gate (operator explicitly asked). `--all-namespaces` defers to
+    // the gate predicate, which conservatively returns `false` for
+    // every namespace until the per-namespace config-file wiring
+    // lands (v0.7.1). Operators who want to fan out today can script
+    // a loop of `--namespace <each>` invocations.
+    let scope_single = args.namespace.is_some();
+    let enabled_check = |_ns: &str| -> bool { scope_single };
+
+    let report = if let Some(llm_client) = llm.as_ref() {
+        reflection_pass::run_reflection_pass(
+            &conn,
+            llm_client,
+            keypair.as_ref(),
+            args.namespace.as_deref(),
+            args.max_depth,
+            args.dry_run,
+            enabled_check,
+        )?
+    } else {
+        // No LLM available — surface as a populated report with the
+        // configured-but-unreachable error, matching the existing
+        // `run_once` no-LLM behaviour.
+        let mut empty = reflection_pass::ReflectionPassReport {
+            dry_run: args.dry_run,
+            ..Default::default()
+        };
+        empty.errors.push(
+            "no LLM client configured — set a feature tier that provides an llm_model".into(),
+        );
+        empty
+    };
+
+    if args.json {
+        writeln!(out.stdout, "{}", serde_json::to_string_pretty(&report)?)?;
+    } else {
+        print_reflection_report(&report, out)?;
+    }
+    Ok(())
+}
+
+/// Load the curator's per-process signing keypair. Best-effort — if the
+/// keypair file is missing or unreadable we return `None` and the pass
+/// stamps `ai:curator` as `agent_id`. Errors are deliberately not
+/// surfaced; an operator who wants a strict-mode "fail if keypair
+/// missing" can run `ai-memory identity list` first.
+fn load_curator_keypair_best_effort() -> Option<identity_keypair::AgentKeypair> {
+    let dir = identity_keypair::default_key_dir().ok()?;
+    // We don't know which agent_id the operator wants the curator to
+    // run as. Pick the lexicographically-first key under the key dir;
+    // operators who run multiple curators on the same host should
+    // either give each a dedicated key dir via `AI_MEMORY_KEY_DIR` or
+    // set the daemon `AI_MEMORY_AGENT_ID` env var.
+    let listed = identity_keypair::list(&dir).ok()?;
+    let first = listed.into_iter().next()?;
+    identity_keypair::load(&first.agent_id, &dir).ok()
+}
+
+fn print_reflection_report(
+    r: &reflection_pass::ReflectionPassReport,
+    out: &mut CliOutput<'_>,
+) -> Result<()> {
+    writeln!(out.stdout, "reflection pass report")?;
+    writeln!(out.stdout, "  started_at:            {}", r.started_at)?;
+    writeln!(out.stdout, "  completed_at:          {}", r.completed_at)?;
+    writeln!(
+        out.stdout,
+        "  namespaces_visited:    {}",
+        r.namespaces_visited
+    )?;
+    writeln!(
+        out.stdout,
+        "  observations_scanned:  {}",
+        r.observations_scanned
+    )?;
+    writeln!(out.stdout, "  clusters_formed:       {}", r.clusters_formed)?;
+    writeln!(
+        out.stdout,
+        "  clusters_eligible:     {}",
+        r.clusters_eligible
+    )?;
+    writeln!(
+        out.stdout,
+        "  reflections_persisted: {}",
+        r.reflections_persisted
+    )?;
+    writeln!(out.stdout, "  depth_refusals:        {}", r.depth_refusals)?;
+    writeln!(out.stdout, "  errors:                {}", r.errors.len())?;
+    writeln!(out.stdout, "  dry_run:               {}", r.dry_run)?;
+    for e in &r.errors {
+        writeln!(out.stdout, "    - {e}")?;
+    }
+    for prop in &r.dry_run_proposals {
+        writeln!(
+            out.stdout,
+            "  proposal: ns='{}' title='{}' sources={}",
+            prop.namespace,
+            prop.proposed_title,
+            prop.source_ids.len()
+        )?;
+    }
+    Ok(())
 }
 
 fn run_rollback(db_path: &Path, args: &CuratorArgs, out: &mut CliOutput<'_>) -> Result<()> {
@@ -251,6 +434,10 @@ mod tests {
             json: false,
             rollback: None,
             rollback_last: None,
+            reflect: false,
+            namespace: None,
+            max_depth: None,
+            all_namespaces: false,
         }
     }
 
@@ -266,7 +453,7 @@ mod tests {
         assert!(
             res.unwrap_err()
                 .to_string()
-                .contains("--once, --daemon, --rollback")
+                .contains("--once, --daemon, --reflect")
         );
     }
 
