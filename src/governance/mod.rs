@@ -47,6 +47,13 @@ use crate::hooks::events::MemoryDelta;
 // the seed rules R001-R004 land at `enabled=0` awaiting operator
 // activation via `ai-memory rules enable <id> --sign`.
 pub mod agent_action;
+// v0.7.0 Policy-Engine Item 3 — deferred audit-log queue for
+// storage-hook refusals. Closes the cryptographic-log gap on the
+// `GOVERNANCE_PRE_WRITE` path that previously routed through
+// `check_agent_action_no_audit` (no chain-log emit) to avoid a
+// re-entrant `Connection` deadlock. See `deferred_audit.rs` for the
+// architecture.
+pub mod deferred_audit;
 pub mod rules_store;
 
 // ---------------------------------------------------------------------------

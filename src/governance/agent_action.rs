@@ -563,6 +563,54 @@ pub fn check_agent_action_no_audit(conn: &Connection, action: &AgentAction) -> R
     })
 }
 
+/// v0.7.0 Policy-Engine Item 3 — deferred-audit variant of
+/// [`check_agent_action_no_audit`] used by the substrate
+/// `GOVERNANCE_PRE_WRITE` hook (issue #691 follow-up).
+///
+/// Identical matching semantics to [`check_agent_action_no_audit`]:
+/// reads from the connection passed in (single-use, hot-path
+/// no-allocation on the Allow leg). On a refusal it ALSO submits a
+/// [`crate::governance::deferred_audit::DeferredAuditEvent`] to the
+/// supplied queue so the background drainer can chain-log the
+/// refusal to `signed_events` AFTER the in-flight write
+/// transaction has released its lock.
+///
+/// # Why this exists
+///
+/// The `GOVERNANCE_PRE_WRITE` storage hook fires INSIDE
+/// `storage::insert`, while the substrate's writer connection is
+/// held under `Arc<Mutex<Connection>>`. Calling
+/// `append_signed_event` on that same connection would re-enter the
+/// in-flight INSERT and deadlock. The `_no_audit` variant solved
+/// the deadlock but at the cost of dropping the chain-log property
+/// for storage refusals. This variant fixes that by deferring the
+/// audit write to a background tokio task with its OWN
+/// `Connection` (SQLite WAL allows parallel writers).
+///
+/// On Allow / Warn paths the queue is NOT touched — the
+/// load-bearing audit emit only happens on `Refuse`.
+///
+/// # Errors
+///
+/// Returns an error if the rules-table SELECT fails. The deferred
+/// audit submit is fire-and-forget (it never errors out to the
+/// caller; a closed receiver bumps a metric counter and emits a
+/// tracing::warn).
+pub fn check_agent_action_deferred(
+    conn: &Connection,
+    agent_id: &str,
+    action: &AgentAction,
+    queue: &crate::governance::deferred_audit::DeferredAuditQueue,
+) -> Result<Decision> {
+    let decision = check_agent_action_no_audit(conn, action)?;
+    if decision.is_refusal() {
+        // Fire-and-forget submit. Never blocks the storage write
+        // path. The queue is process-wide and clone-cheap.
+        queue.submit_refusal(agent_id, action, &decision);
+    }
+    Ok(decision)
+}
+
 /// Convenience for tests + the future K10 wiring: count how many
 /// rules match the given action without running side effects.
 /// Skips the audit emit (read-only).
