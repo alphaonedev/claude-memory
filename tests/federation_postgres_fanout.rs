@@ -145,6 +145,9 @@ fn federation_cfg_for_test(peer_urls: &[String], quorum_writes: usize) -> Federa
         peers,
         client,
         sender_agent_id: "ai:fold-a2a1-1-test".to_string(),
+        // v0.7.0 fold-A2A1.4 backcompat default: this test path doesn't run
+        // with api-key auth, so no outbound x-api-key header is needed.
+        api_key: None,
     }
 }
 
@@ -191,7 +194,13 @@ async fn spawn_daemon_with_federation(
 ) {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let api_key_state = ApiKeyState { key: None };
+    // v0.7.0 fold-A2A1.4 backcompat default — this test does not exercise mTLS
+    // enforcement; api-key checks remain off and the inbound bypass is not
+    // configured.
+    let api_key_state = ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let app_state = build_postgres_app_state(url, federation).await;
     let shutdown = Arc::new(Notify::new());
     let shutdown_for_daemon = shutdown.clone();
