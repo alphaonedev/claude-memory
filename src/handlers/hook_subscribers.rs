@@ -754,7 +754,7 @@ pub async fn list_subscriptions(
     // dispatch loop itself is still sqlite-bound; the wire envelope
     // here lets the cert oracle observe that the subscription
     // round-trips through the persistent store.
-    #[cfg(feature = "sal")]
+    #[cfg(feature = "sal-postgres")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let ctx = crate::store::CallerContext::for_agent(q.agent_id.as_deref().unwrap_or("daemon"));
         // When `agent_id` is supplied, scope to `_subscriptions/<aid>`;

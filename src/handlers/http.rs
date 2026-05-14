@@ -3629,7 +3629,7 @@ pub async fn get_taxonomy(
     // memory), then assembles the hierarchical tree with honest
     // `subtree_count` so the cert oracle can detect dishonest
     // truncation.
-    #[cfg(feature = "sal")]
+    #[cfg(feature = "sal-postgres")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let pairs = match crate::store::postgres::taxonomy_namespaces_via_store(
             &app.store,
