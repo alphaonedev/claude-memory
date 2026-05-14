@@ -38,6 +38,33 @@ pub(super) async fn post_once(
     // subsequent catchup sync carrying the same memory.id will be a
     // no-op via `insert_if_newer`. The key is set from the outgoing
     // memory id by default, which is stable across retries.
+    // v0.7.0 (issue #691 fold-1) — wire the NetworkRequest governance
+    // gate BEFORE the outbound HTTPS POST. A refuse rule
+    // (`{"host":"evil.example.com"}` etc.) short-circuits the fan-out
+    // for that peer with a typed `AckOutcome::Fail` carrying the
+    // refusal reason. The quorum combiner already treats `Fail` as
+    // "this peer did not ack", so a refusal counts as a peer-miss
+    // without crashing the broadcast (allowing the remaining peers to
+    // reach quorum). The audit chain records the refusal via the
+    // governance.check signed_events row emitted on the daemon side.
+    let host = reqwest::Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string))
+        .unwrap_or_else(|| url.to_string());
+    let scheme = reqwest::Url::parse(url)
+        .ok()
+        .map(|u| u.scheme().to_string())
+        .unwrap_or_default();
+    let net_action = crate::governance::agent_action::AgentAction::NetworkRequest {
+        host: host.clone(),
+        scheme,
+    };
+    if let Err(refusal) = crate::governance::wire_check::check(&net_action) {
+        return AckOutcome::Fail(format!(
+            "governance refused outbound to {host}: {}",
+            refusal.reason
+        ));
+    }
     let mut req = client.post(url).json(body);
     if let Some(key) = idempotency_key {
         req = req.header("Idempotency-Key", key);

@@ -1978,6 +1978,70 @@ pub async fn bootstrap_serve(
         }
     }
 
+    // v0.7.0 (issue #691 fold-1) — install the universal AgentAction
+    // wire-point hook BEFORE any daemon-side write/network/spawn paths
+    // come live. Mirrors the L1-6 E pattern above but covers the FOUR
+    // agent-EXTERNAL action variants (Bash, FilesystemWrite,
+    // NetworkRequest, ProcessSpawn) consulted by skill_export,
+    // federation::sync, hooks::executor, and the LLM client. CLI
+    // one-shot binaries never reach this path so the hook stays empty
+    // for direct operator ops (L1-6 E operator-as-actor exemption).
+    {
+        use crate::governance::agent_action::{
+            AgentAction, Decision as RuleDecision, check_agent_action_no_audit,
+        };
+        let rules_db_path = db_path.to_path_buf();
+        let install_result = crate::governance::wire_check::GOVERNANCE_PRE_ACTION.set(Box::new(
+            move |action: &AgentAction| -> std::result::Result<(), String> {
+                let conn_for_check = match db::open(&rules_db_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "wire_check: failed to open rules DB at {}: {}; \
+                             degrading to ALLOW for this action ({})",
+                            rules_db_path.display(),
+                            e,
+                            action.kind(),
+                        );
+                        return Ok(());
+                    }
+                };
+                match check_agent_action_no_audit(&conn_for_check, action) {
+                    Ok(RuleDecision::Allow | RuleDecision::Warn { .. }) => Ok(()),
+                    Ok(RuleDecision::Refuse { rule_id, reason }) => {
+                        tracing::info!(
+                            "wire_check refused action kind={} rule_id={} reason={}",
+                            action.kind(),
+                            rule_id,
+                            reason,
+                        );
+                        Err(reason)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "wire_check: rule consultation failed: {}; degrading to ALLOW \
+                             for this action ({})",
+                            e,
+                            action.kind(),
+                        );
+                        Ok(())
+                    }
+                }
+            },
+        ));
+        if install_result.is_err() {
+            tracing::debug!(
+                "wire_check pre-action hook already installed (process-wide OnceLock); \
+                 the existing hook remains active for this daemon"
+            );
+        } else {
+            tracing::info!(
+                "wire_check pre-action hook installed (agent-action gate active for \
+                 FilesystemWrite/NetworkRequest/ProcessSpawn/Bash/Custom)"
+            );
+        }
+    }
+
     // Issue #219: build the embedder + HNSW index up front so HTTP write
     // paths can populate them. Previously the daemon never constructed an
     // embedder, silently excluding every HTTP-authored memory from semantic

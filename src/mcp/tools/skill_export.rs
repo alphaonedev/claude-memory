@@ -148,8 +148,25 @@ pub fn handle_skill_export(
     // -----------------------------------------------------------------------
     // Write SKILL.md
     // -----------------------------------------------------------------------
+    // v0.7.0 (issue #691 fold-1) — wire the FilesystemWrite gate
+    // BEFORE the std::fs::write call. The closure installed by the
+    // daemon's bootstrap_serve consults the operator-signed
+    // governance_rules table for a refusal verdict (R001/R002/R003
+    // glob-based filesystem rules); a refusal short-circuits the
+    // export cleanly before any directory is created.
+    let skill_md_path = target.join("SKILL.md");
+    let skill_md_action = crate::governance::agent_action::AgentAction::FilesystemWrite {
+        path: skill_md_path.clone(),
+        byte_estimate: Some(skill_md_content.len() as u64),
+    };
+    if let Err(refusal) = crate::governance::wire_check::check(&skill_md_action) {
+        return Err(format!(
+            "governance refused SKILL.md write: {}",
+            refusal.reason
+        ));
+    }
     std::fs::create_dir_all(target).map_err(|e| format!("create_dir_all '{target_str}': {e}"))?;
-    std::fs::write(target.join("SKILL.md"), skill_md_content.as_bytes())
+    std::fs::write(&skill_md_path, skill_md_content.as_bytes())
         .map_err(|e| format!("write SKILL.md: {e}"))?;
 
     // -----------------------------------------------------------------------
@@ -179,6 +196,22 @@ pub fn handle_skill_export(
             let content = zstd::decode_all(blob.as_slice())
                 .map_err(|e| format!("decompress resource '{res_path}': {e}"))?;
             let res_file = target.join("resources").join(&res_path);
+            // v0.7.0 (issue #691 fold-1) — per-resource FilesystemWrite
+            // gate. Same uniform wire_check shape as the SKILL.md write
+            // above; a refusal on any resource halts the export at that
+            // file (prior writes are kept — partial exports are visible
+            // and recoverable by re-running with a less-restrictive
+            // ruleset).
+            let res_action = crate::governance::agent_action::AgentAction::FilesystemWrite {
+                path: res_file.clone(),
+                byte_estimate: Some(content.len() as u64),
+            };
+            if let Err(refusal) = crate::governance::wire_check::check(&res_action) {
+                return Err(format!(
+                    "governance refused resource '{res_path}' write: {}",
+                    refusal.reason
+                ));
+            }
             if let Some(parent) = res_file.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|e| format!("create_dir_all for resource: {e}"))?;

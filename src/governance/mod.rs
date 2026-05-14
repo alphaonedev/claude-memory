@@ -49,6 +49,19 @@ use crate::hooks::events::MemoryDelta;
 pub mod agent_action;
 pub mod rules_store;
 
+// v0.7.0 (issue #691 fold-1) — universal AgentAction wire-point helper.
+// Same OnceLock-based hook pattern as `storage::GOVERNANCE_PRE_WRITE`,
+// but covering the four agent-EXTERNAL action variants (Bash,
+// FilesystemWrite, NetworkRequest, ProcessSpawn) — the storage hook
+// handles the substrate-INTERNAL Custom("memory_write") gate.
+//
+// The daemon `bootstrap_serve` installs ONE shared closure that
+// consults the same `governance_rules` table the storage hook reads,
+// then every wire-point in the daemon-side code paths (skill_export,
+// federation::sync, hooks::executor, llm) calls
+// `wire_check::check(&action)?` to consult it.
+pub mod wire_check;
+
 // ---------------------------------------------------------------------------
 // Op tag — the five gated operations
 // ---------------------------------------------------------------------------
