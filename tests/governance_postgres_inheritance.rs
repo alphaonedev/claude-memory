@@ -524,3 +524,215 @@ async fn inheritance_walk_capped_at_five_levels() {
 
     cleanup(&pool, &ns_prefix).await;
 }
+
+// =====================================================================
+// F-A2A1.5 (#705) — postgres governance enforcement on the bulk_create,
+// import_memories, and entity_register handler postgres branches.
+//
+// Each handler now consults `enforce_governance_action(Store, ns, agent_id,
+// ...)` before persisting. The tests below pin the trait-surface contract
+// that the new handler code relies on: when the namespace standard's
+// `write=owner` rule applies, a non-owner write resolves to Deny; when
+// the standard's `write=approve` rule applies, the action resolves to
+// Pending with a freshly-issued pending_actions row.
+//
+// These tests are siblings of S34/S53 above — they share the seed/cleanup
+// helpers and the same skip-when-unset discipline.
+// =====================================================================
+
+/// fold-A2A1.5 (#705) — `bulk_create` postgres branch now consults
+/// `enforce_governance_action(Store, ns, agent_id, ...)` before each
+/// row's `store.store()` call. This pins the Deny contract on a
+/// `write=owner` namespace for a non-owner row.
+#[tokio::test]
+async fn bulk_create_postgres_enforces_governance() {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+        return;
+    };
+    ai_memory::config::override_active_permissions_mode_for_test(
+        ai_memory::config::PermissionsMode::Enforce,
+    );
+    let store = PostgresStore::connect(&url).await.expect("connect");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("test-side pool");
+
+    let suffix = unique_suffix();
+    let ns_prefix = format!("fa2a15-bulk-{suffix}");
+    let ns = ns_prefix.clone();
+    let owner = format!("ai:fa2a15-bulk-owner-{suffix}");
+    let intruder = format!("ai:fa2a15-bulk-intruder-{suffix}");
+
+    seed_standard(
+        &pool,
+        &ns,
+        &owner,
+        serde_json::json!({"write": "owner", "promote": "any", "delete": "owner"}),
+        None,
+    )
+    .await;
+
+    // Non-owner bulk row → Deny.
+    let intruder_payload = serde_json::json!({"title": "bulk-intruder"});
+    let intruder_decision = store
+        .enforce_governance_action(
+            GovernedAction::Store,
+            &ns,
+            &intruder,
+            None,
+            None,
+            &intruder_payload,
+        )
+        .await
+        .expect("intruder bulk enforce");
+    assert!(
+        matches!(intruder_decision, GovernanceDecision::Deny(_)),
+        "bulk_create non-owner row to owner-only ns must Deny; got {intruder_decision:?}"
+    );
+
+    // Owner bulk row → Allow.
+    let owner_payload = serde_json::json!({"title": "bulk-owner"});
+    let owner_decision = store
+        .enforce_governance_action(
+            GovernedAction::Store,
+            &ns,
+            &owner,
+            None,
+            None,
+            &owner_payload,
+        )
+        .await
+        .expect("owner bulk enforce");
+    assert!(
+        matches!(owner_decision, GovernanceDecision::Allow),
+        "bulk_create owner row to owner-only ns must Allow; got {owner_decision:?}"
+    );
+
+    cleanup(&pool, &ns_prefix).await;
+}
+
+/// fold-A2A1.5 (#705) — `import_memories` postgres branch now consults
+/// `enforce_governance_action(Store, ns, agent_id, ...)` per row. This
+/// pins the Pending contract on a `write=approve` namespace: the import
+/// must surface a pending_actions row rather than silently materialise.
+#[tokio::test]
+async fn import_memories_postgres_enforces_governance() {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+        return;
+    };
+    ai_memory::config::override_active_permissions_mode_for_test(
+        ai_memory::config::PermissionsMode::Enforce,
+    );
+    let store = PostgresStore::connect(&url).await.expect("connect");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("test-side pool");
+
+    let suffix = unique_suffix();
+    let ns_prefix = format!("fa2a15-import-{suffix}");
+    let ns = ns_prefix.clone();
+    let owner = format!("ai:fa2a15-import-owner-{suffix}");
+    let importer = format!("ai:fa2a15-importer-{suffix}");
+
+    seed_standard(
+        &pool,
+        &ns,
+        &owner,
+        serde_json::json!({"write": "approve", "promote": "any", "delete": "owner"}),
+        None,
+    )
+    .await;
+
+    let payload = serde_json::json!({"title": "imported-row"});
+    let decision = store
+        .enforce_governance_action(GovernedAction::Store, &ns, &importer, None, None, &payload)
+        .await
+        .expect("import enforce");
+    let pending_id = match decision {
+        GovernanceDecision::Pending(id) => id,
+        other => panic!("import_memories on write=approve ns must Pend; got {other:?}"),
+    };
+    assert!(!pending_id.is_empty(), "Pending id must be non-empty");
+
+    let row: (String, String, String) =
+        sqlx::query_as("SELECT action_type, namespace, status FROM pending_actions WHERE id = $1")
+            .bind(&pending_id)
+            .fetch_one(&pool)
+            .await
+            .expect("pending_actions row must exist");
+    assert_eq!(row.0, "store");
+    assert_eq!(row.1, ns);
+    assert_eq!(row.2, "pending");
+
+    cleanup(&pool, &ns_prefix).await;
+}
+
+/// fold-A2A1.5 (#705) — `entity_register` postgres branch now consults
+/// `enforce_governance_action(Store, ns, aid, ...)` before the upsert.
+/// This pins the Deny contract on a `write=owner` namespace for a
+/// non-owner register call. Entities are governance-relevant writes
+/// because they materialise a `Memory` row in the requested namespace.
+#[tokio::test]
+async fn entity_register_postgres_enforces_governance() {
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+        return;
+    };
+    ai_memory::config::override_active_permissions_mode_for_test(
+        ai_memory::config::PermissionsMode::Enforce,
+    );
+    let store = PostgresStore::connect(&url).await.expect("connect");
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("test-side pool");
+
+    let suffix = unique_suffix();
+    let ns_prefix = format!("fa2a15-entity-{suffix}");
+    let ns = ns_prefix.clone();
+    let owner = format!("ai:fa2a15-entity-owner-{suffix}");
+    let intruder = format!("ai:fa2a15-entity-intruder-{suffix}");
+
+    seed_standard(
+        &pool,
+        &ns,
+        &owner,
+        serde_json::json!({"write": "owner", "promote": "any", "delete": "owner"}),
+        None,
+    )
+    .await;
+
+    let payload = serde_json::json!({
+        "title": "entity:canonical-name",
+        "kind": "entity",
+    });
+
+    // Non-owner entity_register → Deny.
+    let intruder_decision = store
+        .enforce_governance_action(GovernedAction::Store, &ns, &intruder, None, None, &payload)
+        .await
+        .expect("intruder entity_register enforce");
+    assert!(
+        matches!(intruder_decision, GovernanceDecision::Deny(_)),
+        "entity_register non-owner to owner-only ns must Deny; got {intruder_decision:?}"
+    );
+
+    // Owner entity_register → Allow.
+    let owner_decision = store
+        .enforce_governance_action(GovernedAction::Store, &ns, &owner, None, None, &payload)
+        .await
+        .expect("owner entity_register enforce");
+    assert!(
+        matches!(owner_decision, GovernanceDecision::Allow),
+        "entity_register owner to owner-only ns must Allow; got {owner_decision:?}"
+    );
+
+    cleanup(&pool, &ns_prefix).await;
+}
