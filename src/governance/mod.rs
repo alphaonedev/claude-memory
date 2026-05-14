@@ -925,4 +925,263 @@ mod tests {
             "permissions: off"
         );
     }
+
+    #[test]
+    fn op_from_str_unknown_returns_none() {
+        assert!(Op::from_str("not_a_real_op").is_none());
+        assert!(Op::from_str("").is_none());
+    }
+
+    #[test]
+    fn glob_matches_empty_pattern_only_matches_empty_value() {
+        assert!(glob_matches("", ""));
+        assert!(!glob_matches("", "anything"));
+    }
+
+    #[test]
+    fn glob_matches_pattern_longer_than_value_fails() {
+        assert!(!glob_matches("longpattern", "x"));
+    }
+
+    #[test]
+    fn pattern_specificity_increasing_order() {
+        let s1 = pattern_specificity("**");
+        let s2 = pattern_specificity("foo/*");
+        let s3 = pattern_specificity("foo/bar");
+        let s4 = pattern_specificity("foo/bar/baz/qux/quux");
+        assert!(s2 > s1);
+        assert!(s3 > s2);
+        assert!(s4 > s3);
+    }
+
+    #[test]
+    fn hook_deny_propagates_through_pipeline() {
+        let hook_decisions = vec![HookDecision::Deny {
+            reason: "hook said no".into(),
+            code: 403,
+        }];
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[],
+            PermissionsMode::Enforce,
+        );
+        match d {
+            Decision::Deny(reason) => assert!(reason.contains("hook said no")),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_modify_composes_into_decision() {
+        let delta = MemoryDelta {
+            tags: Some(vec!["hooked".into()]),
+            ..Default::default()
+        };
+        let hook_decisions = vec![HookDecision::Modify(
+            crate::hooks::decision::ModifyPayload { delta },
+        )];
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[],
+            PermissionsMode::Enforce,
+        );
+        match d {
+            Decision::Modify(delta) => {
+                assert_eq!(delta.tags.as_deref(), Some(&["hooked".to_string()][..]));
+            }
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_modify_namespace_escalation_rejected_when_destination_denied() {
+        // Hook proposes to redirect into "secrets/api" — a denied ns.
+        let delta = MemoryDelta {
+            namespace: Some("secrets/api".into()),
+            ..Default::default()
+        };
+        let hook_decisions = vec![HookDecision::Modify(
+            crate::hooks::decision::ModifyPayload { delta },
+        )];
+        let r = rule("secrets/**", "memory_store", "*", RuleDecision::Deny);
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[r],
+            PermissionsMode::Enforce,
+        );
+        match d {
+            Decision::Deny(reason) => {
+                assert!(
+                    reason.contains("namespace escalation rejected"),
+                    "expected escalation rejection: {reason}"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_modify_namespace_change_to_allowed_passes() {
+        let delta = MemoryDelta {
+            namespace: Some("public/wiki".into()),
+            ..Default::default()
+        };
+        let hook_decisions = vec![HookDecision::Modify(
+            crate::hooks::decision::ModifyPayload { delta },
+        )];
+        let r = rule("public/**", "memory_store", "*", RuleDecision::Allow);
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[r],
+            PermissionsMode::Enforce,
+        );
+        match d {
+            Decision::Modify(_) => {}
+            other => panic!("expected Modify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rule_allow_short_circuits_ask() {
+        let allow = rule("public/*", "memory_store", "*", RuleDecision::Allow);
+        let ask = rule("public/*", "memory_store", "*", RuleDecision::Ask);
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &[],
+            &[allow, ask],
+            PermissionsMode::Enforce,
+        );
+        assert_eq!(d, Decision::Allow);
+    }
+
+    #[test]
+    fn ask_under_enforce_mode_escalates_to_deny() {
+        let r = rule("private/*", "memory_store", "*", RuleDecision::Ask);
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "private/journal", "ai:claude"),
+            &[],
+            &[r],
+            PermissionsMode::Enforce,
+        );
+        match d {
+            Decision::Deny(reason) => assert!(reason.contains("permission ask escalated")),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ask_under_advisory_mode_returns_ask() {
+        let r = rule("private/*", "memory_store", "*", RuleDecision::Ask);
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "private/journal", "ai:claude"),
+            &[],
+            &[r],
+            PermissionsMode::Advisory,
+        );
+        match d {
+            Decision::Ask(_) => {}
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_askuser_under_advisory_mode_surfaces_ask() {
+        let hook_decisions = vec![HookDecision::AskUser {
+            prompt: "Please confirm".into(),
+            options: vec!["yes".into(), "no".into()],
+            default: Some("no".into()),
+        }];
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[],
+            PermissionsMode::Advisory,
+        );
+        match d {
+            Decision::Ask(prompt) => assert!(prompt.contains("Please confirm")),
+            other => panic!("expected Ask, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_allow_alone_short_circuits_to_allow() {
+        let hook_decisions = vec![HookDecision::Allow];
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "public/blog", "ai:claude"),
+            &hook_decisions,
+            &[],
+            PermissionsMode::Enforce,
+        );
+        assert_eq!(d, Decision::Allow);
+    }
+
+    #[test]
+    fn evaluate_public_facade_uses_active_rules() {
+        clear_active_permission_rules_for_test();
+        let d = Permissions::evaluate(&ctx(Op::MemoryStore, "anywhere", "ai:claude"), &[]);
+        // No active rules and no hook decisions → mode default Allow.
+        assert_eq!(d, Decision::Allow);
+    }
+
+    #[test]
+    fn set_and_active_permission_rules_round_trip() {
+        clear_active_permission_rules_for_test();
+        set_active_permission_rules(vec![rule(
+            "secrets/*",
+            "memory_store",
+            "*",
+            RuleDecision::Deny,
+        )]);
+        let rules = active_permission_rules();
+        assert_eq!(rules.len(), 1);
+        clear_active_permission_rules_for_test();
+        assert!(active_permission_rules().is_empty());
+    }
+
+    #[test]
+    fn permissions_mode_serde_round_trip() {
+        let modes = [
+            PermissionsMode::Off,
+            PermissionsMode::Advisory,
+            PermissionsMode::Enforce,
+        ];
+        for m in modes {
+            let json = serde_json::to_string(&m).unwrap();
+            let back: PermissionsMode = serde_json::from_str(&json).unwrap();
+            assert_eq!(m, back);
+        }
+    }
+
+    #[test]
+    fn decision_partial_eq_distinct_variants() {
+        let allow = Decision::Allow;
+        let deny = Decision::Deny("x".into());
+        let ask = Decision::Ask("?".into());
+        let modify = Decision::Modify(MemoryDelta::default());
+        assert_ne!(allow, deny);
+        assert_ne!(allow, ask);
+        assert_ne!(allow, modify);
+        assert_ne!(deny, ask);
+    }
+
+    #[test]
+    fn glob_double_star_matches_zero_segments() {
+        // "foo/**" should match "foo" itself per the standard glob extension.
+        assert!(glob_matches("foo/**", "foo/anything"));
+    }
+
+    #[test]
+    fn evaluate_no_rules_no_hooks_returns_allow() {
+        let d = Permissions::evaluate_with(
+            &ctx(Op::MemoryStore, "anywhere", "ai:claude"),
+            &[],
+            &[],
+            PermissionsMode::Enforce,
+        );
+        assert_eq!(d, Decision::Allow);
+    }
 }
