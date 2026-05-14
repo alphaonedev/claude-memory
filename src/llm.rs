@@ -103,6 +103,25 @@ impl OllamaClient {
         Self::new_with_url(DEFAULT_OLLAMA_URL, model)
     }
 
+    /// Test-only constructor that skips the Ollama reachability check.
+    /// Use this in unit tests that only need a `Some(&OllamaClient)` value
+    /// to exercise non-LLM code paths (e.g. the `autonomy_hook_skipped`
+    /// skip-reason waterfall short-circuits before any RPC fires when the
+    /// reason is `content_too_short` or `internal_namespace`).
+    #[cfg(test)]
+    pub fn new_for_testing(model: &str) -> Self {
+        Self {
+            base_url: DEFAULT_OLLAMA_URL.trim_end_matches('/').to_string(),
+            model: model.to_string(),
+            client: reqwest::blocking::Client::builder()
+                .timeout(GENERATE_TIMEOUT)
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .expect("test reqwest client builds"),
+            breaker: Mutex::new(BreakerState::new()),
+        }
+    }
+
     /// Creates a new `OllamaClient` with a custom base URL.
     /// Checks that Ollama is reachable before returning.
     ///
