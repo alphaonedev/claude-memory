@@ -1,7 +1,7 @@
 # ai-memory v0.7.0 — SHIP-VERDICT memo (Phase I)
 
-**Status:** PROVISIONAL · awaiting Phase D (DigitalOcean A2A run 25890925457) + Phase H (full-spectrum cover) landing.
-**HEAD:** `dfa4847`
+**Status:** PROVISIONAL · awaiting Phase D Round 4b (DigitalOcean A2A run 25891326669) landing. Phase H landed favorable.
+**HEAD:** `41bd382` (build-fix on top of `dfa4847`)
 **Date:** 2026-05-14
 **Authors:** AI NHI cross-LLM campaign (Claude Opus 4.7 driving, Grok 4.20-0309-reasoning cross-verifying)
 **Tracking:** #700, #29
@@ -41,11 +41,11 @@ defect.
 | A | fold-A2A1.1-6 substrate fixes | 17/17 scenarios resolved | 6-branch integration cascade `12a7f29 → d0343e7 → dfa4847` |
 | B | Mac Mini + f2 native test cell | live, 4 ai-memory daemons + Postgres+AGE | `/Users/fate/v07/test-cell/` |
 | C | 100% regression | GREEN — L4 13-gate revalidated thrice | `READY-TO-MERGE` memo at #686 |
-| D | A2A full spectrum 79 scenarios | RUNNING (Option C: DO cluster) | run 25890925457 |
+| D | A2A full spectrum 79 scenarios | Round 4 caught real regression (cfg-gate drift); fix landed at 41bd382, Round 4b RUNNING | runs 25890925457 (build-fail) → 25891326669 (post-fix) |
 | E | AI NHI cross-LLM verdict | **convergent favorable** | `docs/v0.7.0/ai-nhi-verdict-claude-vs-grok.md` |
 | F | Security + safety controls | 13/13 sub-checks GREEN | audit-honest signed_events row note documented |
 | G | Benchmarks all 4 tiers + cost | strong — see below | `docs/benchmarks/longmemeval-reflection.md` |
-| H | Full spectrum cover (12 cells) | RUNNING | bench branch in flight |
+| H | Full spectrum cover (12 cells) | **12/12 pass (9 code-evidence + 3 footnoted)** — 0 substrate defects | `docs/v0.7.0/phase-h-full-spectrum-cover.md` |
 | I | This memo + tag-cut | this document | operator gate on tag |
 | J | Roadmap + grand-slam audit | zero functional gaps, 13 doc-drift closed | `docs/v0.7.0/roadmap-audit-report.md` |
 
@@ -212,6 +212,37 @@ This discipline is what allows the SHIP recommendation to be honest.
 A GREEN verdict from a campaign that would have flipped GREEN regardless
 of substrate state is not evidence of anything. The campaign demonstrably
 self-corrects when reality and aspiration disagree.
+
+### Phase D Round 4 — caught a real build regression
+
+The first Phase D DigitalOcean run (`25890925457`) failed at the
+`cargo build --release --features sal` step. The build error was a
+real bug, not a flaky CI environment:
+
+```
+error[E0433]: failed to resolve: could not find `postgres` in `store`
+  --> src/handlers/hook_subscribers.rs:766:33
+note: the item is gated behind the `sal-postgres` feature
+```
+
+Two fold-A2A1 wire-points were gated `#[cfg(feature = "sal")]` instead
+of the correct `#[cfg(feature = "sal-postgres")]` — drift from the 6
+sibling postgres-fanout sites that use the right gate. Fix landed at
+`41bd382` (`fix(build): gate postgres-fanout sites behind sal-postgres,
+not sal`). Re-triggered as Round 4b (`25891326669`).
+
+**Coverage gap surfaced:** the L4 13-gate runs `cargo test` with the
+default feature set (sqlite-bundled) and the campaign harness runs
+`cargo test --features sal-postgres`. Neither tests the `--features
+sal --no-default-features` path that the production-ish workflow build
+uses. This is a gap in our own quality gates — a `cargo check
+--features sal` step belongs in the gate matrix. File-and-classify as
+post-ship v0.8.0 work; does not gate v0.7.0 because the actual build
+config is the one that ships.
+
+**What this proves:** the DigitalOcean campaign caught a regression
+that the local Mac Mini test cell missed (because the local cell built
+with default features). Multi-environment campaigns earn their cost.
 
 ---
 
