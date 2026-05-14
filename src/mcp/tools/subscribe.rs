@@ -122,3 +122,164 @@ pub(super) fn handle_subscription_replay(
     crate::subscriptions::memory_subscription_replay(conn, subscription_id, since)
         .map_err(|e| e.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage C-2 — focused tests for `handle_subscribe`,
+    //! `handle_unsubscribe`, `handle_list_subscriptions`, and
+    //! `handle_subscription_replay`.
+
+    use super::*;
+    use crate::storage as db;
+    use serde_json::json;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn register_agent(conn: &rusqlite::Connection) -> String {
+        // Resolve the agent_id the handler will pick (None override, None mcp_client)
+        // so `subscribe`'s registry check finds the row.
+        let agent_id = crate::identity::resolve_agent_id(None, None).unwrap();
+        db::register_agent(conn, &agent_id, "test", &[]).expect("register");
+        agent_id
+    }
+
+    // R3-S1.HMAC: no per-subscription secret AND no server-wide secret → refusal.
+    #[test]
+    fn no_secret_refuses_unsigned() {
+        // Belt-and-braces: ensure no global secret is set.
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        let _ = register_agent(&conn);
+        let err = handle_subscribe(
+            &conn,
+            &json!({"url": "https://example.com/hook", "events": "*"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("HMAC secret required"), "got: {err}");
+    }
+
+    // Per-subscription secret allowed → registration proceeds.
+    #[test]
+    fn per_subscription_secret_accepted() {
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        let _ = register_agent(&conn);
+        let resp = handle_subscribe(
+            &conn,
+            &json!({
+                "url": "https://example.com/hook",
+                "events": "memory_store",
+                "secret": "shared-secret-hex",
+            }),
+            None,
+        )
+        .expect("ok");
+        assert!(resp["id"].is_string());
+        assert_eq!(resp["url"].as_str(), Some("https://example.com/hook"));
+        assert_eq!(resp["events"].as_str(), Some("memory_store"));
+    }
+
+    // event_types array — structured per-event-type opt-in echoed in response.
+    #[test]
+    fn event_types_array_propagated() {
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        let _ = register_agent(&conn);
+        let resp = handle_subscribe(
+            &conn,
+            &json!({
+                "url": "https://example.com/hook",
+                "secret": "shared-secret-hex",
+                "event_types": ["memory_store", "memory_link_created"],
+            }),
+            None,
+        )
+        .expect("ok");
+        let arr = resp["event_types"].as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+    }
+
+    // Missing url → typed error.
+    #[test]
+    fn missing_url_errors() {
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        let _ = register_agent(&conn);
+        let err = handle_subscribe(&conn, &json!({"secret": "s"}), None).unwrap_err();
+        assert!(err.contains("url"), "got: {err}");
+    }
+
+    // Unregistered agent refused.
+    #[test]
+    fn unregistered_agent_refused() {
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        // NB: did not call register_agent
+        let err = handle_subscribe(
+            &conn,
+            &json!({"url": "https://example.com/hook", "secret": "s"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("not registered"), "got: {err}");
+    }
+
+    // Invalid URL rejected by validate_url.
+    #[test]
+    fn invalid_url_rejected() {
+        crate::config::set_active_hooks_hmac_secret(None);
+        let conn = fresh_conn();
+        let _ = register_agent(&conn);
+        let err =
+            handle_subscribe(&conn, &json!({"url": "not-a-url", "secret": "s"}), None).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // handle_unsubscribe — unknown id returns removed: false (no error).
+    #[test]
+    fn unsubscribe_unknown_id_returns_false() {
+        let conn = fresh_conn();
+        let resp = handle_unsubscribe(
+            &conn,
+            &json!({"id": "00000000-0000-0000-0000-000000000000"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["removed"], false);
+    }
+
+    // handle_unsubscribe — missing id errors.
+    #[test]
+    fn unsubscribe_missing_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_unsubscribe(&conn, &json!({})).unwrap_err();
+        assert!(err.contains("id"), "got: {err}");
+    }
+
+    // handle_list_subscriptions — empty DB returns count=0.
+    #[test]
+    fn list_subscriptions_empty() {
+        let conn = fresh_conn();
+        let resp = handle_list_subscriptions(&conn).expect("ok");
+        assert_eq!(resp["count"].as_u64(), Some(0));
+    }
+
+    // handle_subscription_replay — missing fields error.
+    #[test]
+    fn subscription_replay_missing_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_subscription_replay(&conn, &json!({"since": "2026-01-01T00:00:00Z"}))
+            .unwrap_err();
+        assert!(err.contains("subscription_id"), "got: {err}");
+    }
+
+    #[test]
+    fn subscription_replay_missing_since_errors() {
+        let conn = fresh_conn();
+        let err =
+            handle_subscription_replay(&conn, &json!({"subscription_id": "sub-1"})).unwrap_err();
+        assert!(err.contains("since"), "got: {err}");
+    }
+}
