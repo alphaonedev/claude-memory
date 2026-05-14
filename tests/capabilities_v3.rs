@@ -417,12 +417,13 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
 fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     let describe = build_capabilities_describe_to_user(&Profile::full());
 
-    // 56 = 57 total - 1 always-on bootstrap excluded from describe.
+    // 62 = 63 total - 1 always-on bootstrap excluded from describe.
     // Bumped from 51 to 56 in v0.7.0 L1-5 (Family::Other gained
-    // 5 memory_skill_* tools: memory_skill_register, memory_skill_list,
-    // memory_skill_get, memory_skill_resource, memory_skill_export).
+    // 5 memory_skill_* tools); to 60 with L2-3 (memory_dependents_of_invalidated);
+    // to 61 with L2-6 (memory_skill_promote_from_reflection);
+    // to 62 with L2-7 (memory_skill_compositional_context).
     assert!(
-        describe.starts_with("I can directly use all 60 memory tools right now ("),
+        describe.starts_with("I can directly use all 62 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -445,7 +446,9 @@ fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     );
     // Preview is the first 5 of the 18 loaded — the first 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
-    assert!(describe.contains("42 more"));
+    // 44 more = 62 substantive - 18 loaded (L2-3 + L2-6 + L2-7 each
+    // added one tool not loaded under graph, so 42 → 43 → 44).
+    assert!(describe.contains("44 more"));
 }
 
 // ---------------------------------------------------------------------------
