@@ -512,6 +512,51 @@ pub async fn create_memory(
                         ),
                     ));
                 }
+                // F-A2A1.6 (#700, S18) — postgres-branch federation
+                // fanout on `create_memory`. Mirrors the sqlite path
+                // at handlers/http.rs:937-966 so peers receive the
+                // freshly-stored row via `sync_push_via_store`, which
+                // re-embeds on arrival (see
+                // handlers/federation_receive.rs:387-395). Without
+                // this, a recall against a federated reader peer
+                // returns 0 rows even after the row settles on the
+                // leader — A2A scenario S18 reproduced this with
+                // `list=[1,1]` (peer sees the row in keyword list)
+                // but `/api/v1/recall` empty top-K (no embedding on
+                // peer's `embedding` column → pgvector cosine filter
+                // strips every row).
+                //
+                // Failure handling: fanout failures surface as 503
+                // with `Retry-After: 2` mirroring sqlite. The local
+                // commit has already landed; per ADR-0001 the
+                // substrate does NOT roll back on quorum failure.
+                if let Some(fed) = app.federation.as_ref() {
+                    let mut mem_echo = mem.clone();
+                    mem_echo.id = id.clone();
+                    match crate::federation::broadcast_store_quorum(fed, &mem_echo).await {
+                        Ok(tracker) => {
+                            if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        Err(err) => {
+                            let payload = crate::federation::QuorumNotMetPayload::from_err(&err);
+                            return (
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                [("Retry-After", "2")],
+                                Json(serde_json::to_value(&payload).unwrap_or_default()),
+                            )
+                                .into_response();
+                        }
+                    }
+                }
                 let mut payload = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
                 if let Some(obj) = payload.as_object_mut() {
                     obj.insert("id".to_string(), serde_json::Value::String(id));
