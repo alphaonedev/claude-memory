@@ -4007,6 +4007,60 @@ pub async fn entity_register(
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
         };
+        // F-A2A1.5 (#705) — governance enforcement on the postgres
+        // entity-register path. Mirrors the F-A2A1.2 delete/promote gates
+        // and the Wave-3 Continuation 3 create_memory gate: entity rows
+        // are governance-relevant writes (they upsert a `Memory` row in
+        // the requested namespace), so the postgres branch must consult
+        // `enforce_governance_action(Store, ...)` before the upsert. Deny
+        // returns 403; Pending returns 202 + pending_id. Without this
+        // gate, postgres-backed daemons silently allowed any caller to
+        // register entities into namespaces governed by `write=owner` or
+        // `write=approve` standards, defeating the same A2A surface
+        // F-A2A1.2 closed for delete/promote and create_memory.
+        {
+            use crate::models::GovernanceDecision;
+            let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
+            match app
+                .store
+                .enforce_governance_action(
+                    crate::store::GovernedAction::Store,
+                    &mem.namespace,
+                    &aid,
+                    None,
+                    None,
+                    &payload_for_pending,
+                )
+                .await
+            {
+                Ok(GovernanceDecision::Allow) => {}
+                Ok(GovernanceDecision::Deny(reason)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({
+                            "error": format!("entity_register denied by governance: {reason}"),
+                        })),
+                    )
+                        .into_response();
+                }
+                Ok(GovernanceDecision::Pending(pending_id)) => {
+                    return (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "status": "pending",
+                            "pending_id": pending_id,
+                            "reason": "governance requires approval",
+                            "action": "store",
+                            "namespace": mem.namespace,
+                            "storage_backend": "postgres",
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+
         let created = prior_aliases.is_empty();
         return match app.store.store(&ctx, &mem).await {
             Ok(id) => (
@@ -5467,11 +5521,62 @@ pub async fn import_memories(
         let ctx = crate::store::CallerContext::for_agent("http-import");
         let mut imported = 0usize;
         let mut errors: Vec<String> = Vec::new();
+        let mut pending: Vec<serde_json::Value> = Vec::new();
         for mem in body.memories {
             if let Err(e) = validate::validate_memory(&mem) {
                 errors.push(format!("{}: {}", mem.id, e));
                 continue;
             }
+
+            // F-A2A1.5 (#705) — governance enforcement on the postgres
+            // import path. Mirrors the F-A2A1.2 delete/promote gates and
+            // the Wave-3 Continuation 3 create_memory gate: each imported
+            // row is a Store action and must be gated by the destination
+            // namespace's standard. Deny rows accumulate into `errors`
+            // alongside other per-row failures; Pending rows accumulate
+            // into `pending` with their pending_id so the caller can
+            // drive consensus. Without this gate, postgres-backed
+            // daemons silently bypassed namespace governance on the
+            // bulk-import surface (same A2A bypass cluster fold-A2A1.2
+            // closed on delete/promote/create paths).
+            use crate::models::GovernanceDecision;
+            let agent_id = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("http-import");
+            let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
+            match app
+                .store
+                .enforce_governance_action(
+                    crate::store::GovernedAction::Store,
+                    &mem.namespace,
+                    agent_id,
+                    None,
+                    None,
+                    &payload_for_pending,
+                )
+                .await
+            {
+                Ok(GovernanceDecision::Allow) => {}
+                Ok(GovernanceDecision::Deny(reason)) => {
+                    errors.push(format!("{}: import denied by governance: {reason}", mem.id));
+                    continue;
+                }
+                Ok(GovernanceDecision::Pending(pending_id)) => {
+                    pending.push(json!({
+                        "id": mem.id,
+                        "namespace": mem.namespace,
+                        "pending_id": pending_id,
+                    }));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!("{}: governance error: {e}", mem.id));
+                    continue;
+                }
+            }
+
             match app.store.store(&ctx, &mem).await {
                 Ok(_) => imported += 1,
                 Err(e) => errors.push(format!("{}: {}", mem.id, e)),
@@ -5488,6 +5593,7 @@ pub async fn import_memories(
         return Json(json!({
             "imported": imported,
             "errors": errors,
+            "pending": pending,
             "storage_backend": "postgres",
         }))
         .into_response();
@@ -6347,6 +6453,7 @@ pub async fn bulk_create(
         let ctx = crate::store::CallerContext::for_agent("daemon");
         let mut created: usize = 0;
         let mut errors: Vec<String> = Vec::new();
+        let mut pending: Vec<serde_json::Value> = Vec::new();
         for body in bodies {
             if let Err(e) = validate::validate_create(&body) {
                 errors.push(format!("{}: {}", body.title, e));
@@ -6375,12 +6482,70 @@ pub async fn bulk_create(
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
             };
+
+            // F-A2A1.5 (#705) — governance enforcement on the postgres
+            // bulk_create path. Mirrors F-A2A1.2 delete/promote and the
+            // Wave-3 Continuation 3 create_memory gate. Each row is a
+            // Store action against its own namespace, so the standard's
+            // `write=` rule must be consulted per row. Deny rows
+            // accumulate into `errors`; Pending rows accumulate into
+            // `pending` with their pending_id. Without this gate,
+            // postgres-backed daemons silently bypassed namespace
+            // governance on the bulk-create surface (same A2A bypass
+            // cluster fold-A2A1.2 closed on delete/promote/create
+            // paths).
+            use crate::models::GovernanceDecision;
+            let agent_id = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("daemon");
+            let payload_for_pending = serde_json::to_value(&mem).unwrap_or_else(|_| json!({}));
+            match app
+                .store
+                .enforce_governance_action(
+                    crate::store::GovernedAction::Store,
+                    &mem.namespace,
+                    agent_id,
+                    None,
+                    None,
+                    &payload_for_pending,
+                )
+                .await
+            {
+                Ok(GovernanceDecision::Allow) => {}
+                Ok(GovernanceDecision::Deny(reason)) => {
+                    errors.push(format!(
+                        "{}: bulk_create denied by governance: {reason}",
+                        mem.title
+                    ));
+                    continue;
+                }
+                Ok(GovernanceDecision::Pending(pending_id)) => {
+                    pending.push(json!({
+                        "title": mem.title,
+                        "namespace": mem.namespace,
+                        "pending_id": pending_id,
+                    }));
+                    continue;
+                }
+                Err(e) => {
+                    errors.push(format!("{}: governance error: {e}", mem.title));
+                    continue;
+                }
+            }
+
             match app.store.store(&ctx, &mem).await {
                 Ok(_) => created += 1,
                 Err(e) => errors.push(e.to_string()),
             }
         }
-        return Json(json!({"created": created, "errors": errors})).into_response();
+        return Json(json!({
+            "created": created,
+            "errors": errors,
+            "pending": pending,
+        }))
+        .into_response();
     }
 
     // Stage 1 — validate + insert locally. Collect the successfully-inserted
