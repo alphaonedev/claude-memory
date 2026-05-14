@@ -1844,6 +1844,61 @@ pub async fn delete_memory(
             .unwrap_or_else(|_| "ai:http".to_string());
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
         let target = app.store.get(&ctx, &id).await.ok();
+
+        // F-A2A1.2 (#700) — governance enforcement on the postgres delete
+        // path. Mirrors the sqlite gate at line ~1913 below: a denied
+        // delete returns 403; an `Approve`-level policy queues a pending
+        // action and returns 202 Accepted. Without this gate the postgres
+        // branch silently bypassed the namespace standard's `delete=`
+        // rule, allowing any caller to delete a row in a governed
+        // namespace. Closes the postgres half of the same surface S34/S60
+        // exercise on the write path.
+        if let Some(ref mem) = target {
+            use crate::models::GovernanceDecision;
+            let memory_owner = mem
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let payload = json!({"id": mem.id, "title": mem.title});
+            match app
+                .store
+                .enforce_governance_action(
+                    crate::store::GovernedAction::Delete,
+                    &mem.namespace,
+                    &agent_id,
+                    Some(&mem.id),
+                    memory_owner.as_deref(),
+                    &payload,
+                )
+                .await
+            {
+                Ok(GovernanceDecision::Allow) => {}
+                Ok(GovernanceDecision::Deny(reason)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": format!("delete denied by governance: {reason}")})),
+                    )
+                        .into_response();
+                }
+                Ok(GovernanceDecision::Pending(pending_id)) => {
+                    return (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "status": "pending",
+                            "pending_id": pending_id,
+                            "reason": "governance requires approval",
+                            "action": "delete",
+                            "memory_id": mem.id,
+                            "storage_backend": "postgres",
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+
         return match app.store.delete(&ctx, &id).await {
             Ok(()) => {
                 if crate::audit::is_enabled() {
@@ -2107,6 +2162,60 @@ pub async fn promote_memory(
             }
             Err(e) => return store_err_to_response(e),
         };
+
+        // F-A2A1.2 (#700) — governance enforcement on the postgres promote
+        // path. Mirrors the sqlite gate at line ~2169 below: an `owner`
+        // policy on the namespace standard denies a non-owner promote
+        // (403); an `approve`-level policy queues a pending action (202).
+        // The postgres branch previously skipped this gate, letting any
+        // caller promote a row to `long` tier regardless of namespace
+        // governance.
+        {
+            use crate::models::GovernanceDecision;
+            let memory_owner = target
+                .metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let payload = json!({"id": target.id});
+            match app
+                .store
+                .enforce_governance_action(
+                    crate::store::GovernedAction::Promote,
+                    &target.namespace,
+                    &agent_id,
+                    Some(&target.id),
+                    memory_owner.as_deref(),
+                    &payload,
+                )
+                .await
+            {
+                Ok(GovernanceDecision::Allow) => {}
+                Ok(GovernanceDecision::Deny(reason)) => {
+                    return (
+                        StatusCode::FORBIDDEN,
+                        Json(json!({"error": format!("promote denied by governance: {reason}")})),
+                    )
+                        .into_response();
+                }
+                Ok(GovernanceDecision::Pending(pending_id)) => {
+                    return (
+                        StatusCode::ACCEPTED,
+                        Json(json!({
+                            "status": "pending",
+                            "pending_id": pending_id,
+                            "reason": "governance requires approval",
+                            "action": "promote",
+                            "memory_id": target.id,
+                            "storage_backend": "postgres",
+                        })),
+                    )
+                        .into_response();
+                }
+                Err(e) => return store_err_to_response(e),
+            }
+        }
+
         let patch = crate::store::UpdatePatch {
             tier: Some(Tier::Long),
             ..Default::default()

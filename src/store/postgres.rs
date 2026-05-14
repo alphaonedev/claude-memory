@@ -3962,11 +3962,20 @@ async fn record_schema_version(
 /// the chain walk shares a snapshot with the downstream policy lookup +
 /// pending_actions INSERT. Logic identical to the trait method — the
 /// only delta is `fetch_optional(&mut *tx)` instead of `&self.pool`.
+///
+/// # F-A2A1.2 inheritance recursion cap
+///
+/// The governance-inheritance walk is capped at
+/// [`GOVERNANCE_INHERITANCE_DEPTH_CAP`] (= 5) intermediate levels per the
+/// v0.7.0 spec. Both the `/`-derived ancestor chain and the explicit
+/// `namespace_meta.parent_namespace` walk are bounded by the same cap so a
+/// pathological deep namespace cannot blow the policy resolver's bind list
+/// or its connection-hold budget. The implicit `"*"` global standard is
+/// always retained and is not counted toward the cap.
 async fn build_namespace_chain_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     namespace: &str,
 ) -> StoreResult<Vec<String>> {
-    const MAX_EXPLICIT_DEPTH: usize = 8;
     let mut chain: Vec<String> = Vec::new();
 
     if namespace == "*" {
@@ -3983,7 +3992,7 @@ async fn build_namespace_chain_in_tx(
     if let Some(root) = hierarchy_chain.first().cloned() {
         let mut explicit_above: Vec<String> = Vec::new();
         let mut current = root;
-        for _ in 0..MAX_EXPLICIT_DEPTH {
+        for _ in 0..GOVERNANCE_INHERITANCE_DEPTH_CAP {
             let row: Option<(Option<String>,)> =
                 sqlx::query_as("SELECT parent_namespace FROM namespace_meta WHERE namespace = $1")
                     .bind(&current)
@@ -4009,13 +4018,44 @@ async fn build_namespace_chain_in_tx(
             }
         }
     }
-    for entry in hierarchy_chain.drain(..) {
+    // F-A2A1.2 — cap the `/`-derived ancestor chain to the same depth as
+    // the explicit walk so a deeply nested namespace cannot bypass the
+    // resolver's bounded budget. The cap counts the most-specific N
+    // levels (the leaf and its closest ancestors) so an over-deep
+    // namespace still resolves against its most-relevant policy.
+    let drained: Vec<String> = hierarchy_chain.drain(..).collect();
+    let drained_len = drained.len();
+    let kept: Vec<String> = if drained_len > GOVERNANCE_INHERITANCE_DEPTH_CAP {
+        // hierarchy_chain is top-down (root → leaf); keep the LAST
+        // GOVERNANCE_INHERITANCE_DEPTH_CAP entries (most-specific).
+        drained
+            .into_iter()
+            .skip(drained_len - GOVERNANCE_INHERITANCE_DEPTH_CAP)
+            .collect()
+    } else {
+        drained
+    };
+    for entry in kept {
         if !chain.contains(&entry) {
             chain.push(entry);
         }
     }
     Ok(chain)
 }
+
+/// F-A2A1.2 — maximum depth of the governance-inheritance walk.
+///
+/// Bounds both the `/`-derived ancestor decomposition AND the explicit
+/// `namespace_meta.parent_namespace` walk to a single cap of 5 levels.
+/// The implicit `"*"` global standard is always retained and is not
+/// counted toward the cap.
+///
+/// Pinned to 5 per the v0.7.0 fold-A2A1 spec (see
+/// `docs/v0.7.0/a2a-triage-wave4-r2.md` §F-A2A1.2). Real-world
+/// namespaces are 3-4 levels deep; the cap leaves headroom for one
+/// inherited override beyond the deepest authored ancestor while
+/// keeping the per-write resolver's connection-hold budget bounded.
+pub const GOVERNANCE_INHERITANCE_DEPTH_CAP: usize = 5;
 
 /// Maximum traversal depth supported by [`PostgresStore::kg_query`].
 ///
@@ -6425,7 +6465,11 @@ impl MemoryStore for PostgresStore {
     // resolution, multi-vote consensus state machine.
 
     async fn build_namespace_chain(&self, namespace: &str) -> StoreResult<Vec<String>> {
-        const MAX_EXPLICIT_DEPTH: usize = 8;
+        // F-A2A1.2 — the governance-inheritance walk caps at
+        // [`GOVERNANCE_INHERITANCE_DEPTH_CAP`] (= 5) intermediate levels per
+        // the v0.7.0 spec, matching the bound the in-tx companion
+        // [`build_namespace_chain_in_tx`] uses. See that helper's docstring
+        // for the rationale and trade-offs.
         let mut chain: Vec<String> = Vec::new();
 
         if namespace == "*" {
@@ -6446,7 +6490,7 @@ impl MemoryStore for PostgresStore {
         if let Some(root) = hierarchy_chain.first().cloned() {
             let mut explicit_above: Vec<String> = Vec::new();
             let mut current = root;
-            for _ in 0..MAX_EXPLICIT_DEPTH {
+            for _ in 0..GOVERNANCE_INHERITANCE_DEPTH_CAP {
                 let row: Option<(Option<String>,)> = sqlx::query_as(
                     "SELECT parent_namespace FROM namespace_meta WHERE namespace = $1",
                 )
@@ -6473,7 +6517,21 @@ impl MemoryStore for PostgresStore {
                 }
             }
         }
-        for entry in hierarchy_chain.drain(..) {
+        // F-A2A1.2 — same `/`-derived cap as the in-tx companion. Keep the
+        // most-specific GOVERNANCE_INHERITANCE_DEPTH_CAP levels so a deeply
+        // nested namespace still resolves against its closest authored
+        // policy without blowing the resolver's connection-hold budget.
+        let drained: Vec<String> = hierarchy_chain.drain(..).collect();
+        let drained_len = drained.len();
+        let kept: Vec<String> = if drained_len > GOVERNANCE_INHERITANCE_DEPTH_CAP {
+            drained
+                .into_iter()
+                .skip(drained_len - GOVERNANCE_INHERITANCE_DEPTH_CAP)
+                .collect()
+        } else {
+            drained
+        };
+        for entry in kept {
             if !chain.contains(&entry) {
                 chain.push(entry);
             }
@@ -7647,6 +7705,91 @@ mod tests {
     // These tests verify the placeholder lives in the template AND
     // that the substitution leaves no stray placeholders behind.
     // ------------------------------------------------------------------
+
+    // ------------------------------------------------------------------
+    // F-A2A1.2 (#700) — governance inheritance depth cap.
+    //
+    // These tests pin the depth-cap constant + the chain-build behaviour
+    // that does NOT require a live Postgres connection. The cap value is
+    // surface-visible via `GOVERNANCE_INHERITANCE_DEPTH_CAP`; the chain
+    // walk semantics (most-specific-N levels retained) ride the same
+    // helper for both the pool-side `build_namespace_chain` and the
+    // tx-side `build_namespace_chain_in_tx`. Live-PG variants below
+    // exercise the same paths through `enforce_governance_action` end-
+    // to-end against a real schema; the unit tests here are the
+    // structural pin so a future refactor cannot silently drift the cap.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn governance_inheritance_depth_cap_is_five() {
+        // Pinned to 5 per the v0.7.0 fold-A2A1 spec. Any change to this
+        // value must be reflected in
+        // `docs/v0.7.0/a2a-triage-wave4-r2.md` §F-A2A1.2 and
+        // accompanied by a CHANGELOG entry — the cap shapes the
+        // bind-list size and connection-hold budget of every governed
+        // write on postgres.
+        assert_eq!(super::GOVERNANCE_INHERITANCE_DEPTH_CAP, 5);
+    }
+
+    #[test]
+    fn namespace_ancestors_within_cap_pass_through() {
+        // A namespace at or below the depth cap retains every level
+        // (root → leaf). This is the common case: real-world
+        // namespaces are 3-4 segments deep, so the cap should be a
+        // no-op for ordinary writes.
+        let ancestors: Vec<String> = crate::models::namespace_ancestors("a/b/c")
+            .into_iter()
+            .rev()
+            .collect();
+        // 3 levels: "a", "a/b", "a/b/c" — all retained.
+        assert_eq!(ancestors.len(), 3);
+        assert_eq!(ancestors[0], "a");
+        assert_eq!(ancestors[2], "a/b/c");
+    }
+
+    #[test]
+    fn namespace_ancestors_at_max_namespace_depth() {
+        // The compile-time `MAX_NAMESPACE_DEPTH` is 8; namespaces at
+        // that depth produce 8 ancestor levels. Our cap of 5 trims
+        // such a chain when applied in the governance walker.
+        let deep = "l1/l2/l3/l4/l5/l6/l7/l8";
+        let ancestors: Vec<String> = crate::models::namespace_ancestors(deep)
+            .into_iter()
+            .rev()
+            .collect();
+        assert_eq!(ancestors.len(), 8);
+        // Simulate the cap: keep last N most-specific entries.
+        let cap = super::GOVERNANCE_INHERITANCE_DEPTH_CAP;
+        let kept: Vec<String> = if ancestors.len() > cap {
+            ancestors
+                .iter()
+                .skip(ancestors.len() - cap)
+                .cloned()
+                .collect()
+        } else {
+            ancestors
+        };
+        assert_eq!(kept.len(), cap);
+        // The most-specific entry is the leaf itself.
+        assert_eq!(kept.last().map(String::as_str), Some(deep));
+        // The least-specific kept entry is the (cap-1)-from-leaf
+        // ancestor, NOT the root. The root ("l1") is dropped under
+        // the cap so resolution stays bounded — operators who want a
+        // root-level policy applied to deep children must seat that
+        // policy on a level within the cap reach.
+        assert_eq!(kept.first().map(String::as_str), Some("l1/l2/l3/l4"));
+    }
+
+    #[test]
+    fn namespace_ancestors_star_short_circuits() {
+        // The synthetic `"*"` global standard is never decomposed by
+        // `namespace_ancestors` — the chain walker prepends it
+        // unconditionally instead. Verify the input shape so a future
+        // refactor that auto-prefixes everything with `*` doesn't
+        // silently double-count.
+        let ancestors = crate::models::namespace_ancestors("*");
+        assert_eq!(ancestors, vec!["*".to_string()]);
+    }
 
     #[test]
     fn schema_template_carries_embedding_dim_placeholder() {
@@ -8963,5 +9106,321 @@ mod tests {
             .execute(&store.pool)
             .await
             .expect("delete agent_quotas row");
+    }
+
+    // ------------------------------------------------------------------
+    // F-A2A1.2 (#700) — live-PG governance enforcement tests.
+    //
+    // These pin the postgres adapter's `enforce_governance_action` end-
+    // to-end against a real schema: seed a namespace standard with a
+    // governance policy, walk inheritance through deep children, and
+    // assert the per-level decision matches the SQLite reference.
+    // Skipped when `AI_MEMORY_TEST_POSTGRES_URL` is unset (matches the
+    // discipline of the existing live tests above).
+    //
+    // Mapping to the failing A2A scenarios:
+    // - `live_governance_allow_owner_at_leaf`           — S53 phase B (owner write 201)
+    // - `live_governance_deny_non_owner_inherited`      — S53/S60/S80 (intruder 403)
+    // - `live_governance_pending_on_approve_level`      — S34 (write goes pending)
+    // - `live_governance_inheritance_cap_at_five`       — depth-cap spec pin
+    // ------------------------------------------------------------------
+
+    /// Seed a namespace standard memory and register it via
+    /// `namespace_meta`. Returns the standard_id. Owner is the
+    /// metadata.agent_id stamped on the standard memory.
+    async fn seed_governance_standard(
+        pool: &sqlx::PgPool,
+        namespace: &str,
+        owner: &str,
+        policy_json: serde_json::Value,
+    ) -> String {
+        let standard_id = uuid::Uuid::new_v4().to_string();
+        let now = chrono::Utc::now();
+        let metadata = serde_json::json!({
+            "agent_id": owner,
+            "governance": policy_json,
+        });
+        sqlx::query(
+            "INSERT INTO memories (
+                id, tier, namespace, title, content, tags, priority, confidence,
+                source, access_count, created_at, updated_at, metadata
+            ) VALUES ($1, 'long', $2, $3, 'standard', '[]'::jsonb, 5, 1.0,
+                      'test', 0, $4, $4, $5)",
+        )
+        .bind(&standard_id)
+        .bind(namespace)
+        .bind(format!("standard:{namespace}"))
+        .bind(now)
+        .bind(&metadata)
+        .execute(pool)
+        .await
+        .expect("seed standard memory");
+
+        sqlx::query(
+            "INSERT INTO namespace_meta (namespace, standard_id, parent_namespace) \
+             VALUES ($1, $2, NULL) \
+             ON CONFLICT (namespace) DO UPDATE SET standard_id = EXCLUDED.standard_id",
+        )
+        .bind(namespace)
+        .bind(&standard_id)
+        .execute(pool)
+        .await
+        .expect("seed namespace_meta");
+
+        standard_id
+    }
+
+    async fn cleanup_governance_ns(pool: &sqlx::PgPool, namespace: &str) {
+        let _ = sqlx::query("DELETE FROM pending_actions WHERE namespace LIKE $1")
+            .bind(format!("{namespace}%"))
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM namespace_meta WHERE namespace LIKE $1")
+            .bind(format!("{namespace}%"))
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM memories WHERE namespace LIKE $1")
+            .bind(format!("{namespace}%"))
+            .execute(pool)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn live_governance_allow_owner_at_leaf() {
+        // S53 phase B — owner writes to their own namespace under a
+        // `write=owner` policy. Decision must be Allow.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        let pool = store.pool.clone();
+        let owner = format!("ai:gov-owner-{}", uuid::Uuid::new_v4());
+        let ns = format!("fa2a12-allow-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        seed_governance_standard(
+            &pool,
+            &ns,
+            &owner,
+            serde_json::json!({"write": "owner", "promote": "any", "delete": "owner"}),
+        )
+        .await;
+
+        let payload = serde_json::json!({"title": "owner write"});
+        let decision = store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &ns,
+                &owner,
+                None,
+                None,
+                &payload,
+            )
+            .await
+            .expect("enforce_governance_action");
+        assert!(
+            matches!(decision, crate::models::GovernanceDecision::Allow),
+            "owner write to own ns must Allow; got {decision:?}"
+        );
+
+        cleanup_governance_ns(&pool, &ns).await;
+    }
+
+    #[tokio::test]
+    async fn live_governance_deny_non_owner_inherited() {
+        // S53/S60/S80 — a non-owner write to a deep child of a
+        // `write=owner` parent must be Denied via the inheritance walk.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        let pool = store.pool.clone();
+        let owner = format!("ai:gov-owner-{}", uuid::Uuid::new_v4());
+        let intruder = format!("ai:gov-intruder-{}", uuid::Uuid::new_v4());
+        let parent = format!("fa2a12-deny-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        let deep_child = format!("{parent}/sub/level/deep");
+        seed_governance_standard(
+            &pool,
+            &parent,
+            &owner,
+            serde_json::json!({
+                "write": "owner",
+                "promote": "any",
+                "delete": "owner",
+                "inherit": true,
+            }),
+        )
+        .await;
+
+        let payload = serde_json::json!({"title": "intruder"});
+        let decision = store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &deep_child,
+                &intruder,
+                None,
+                None,
+                &payload,
+            )
+            .await
+            .expect("enforce_governance_action");
+        match decision {
+            crate::models::GovernanceDecision::Deny(reason) => {
+                assert!(
+                    reason.contains("owner-only namespace")
+                        || reason.to_lowercase().contains("owner"),
+                    "deny reason should reference owner-only policy; got: {reason}"
+                );
+            }
+            other => panic!("intruder write to deep child must Deny; got {other:?}"),
+        }
+
+        // Owner write to the same deep child should Allow — owner walk
+        // resolves leaf→root and finds the parent's standard owner.
+        let owner_decision = store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &deep_child,
+                &owner,
+                None,
+                None,
+                &payload,
+            )
+            .await
+            .expect("enforce_governance_action owner");
+        assert!(
+            matches!(owner_decision, crate::models::GovernanceDecision::Allow),
+            "owner write to inherited deep child must Allow; got {owner_decision:?}"
+        );
+
+        cleanup_governance_ns(&pool, &parent).await;
+    }
+
+    #[tokio::test]
+    async fn live_governance_pending_on_approve_level() {
+        // S34 — a `write=approve` policy on a namespace must route
+        // non-owner writes through Pending. The decision payload must
+        // land a row in `pending_actions`.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        let pool = store.pool.clone();
+        let owner = format!("ai:gov-owner-{}", uuid::Uuid::new_v4());
+        let requester = format!("ai:gov-requester-{}", uuid::Uuid::new_v4());
+        let ns = format!("fa2a12-pending-{}", &uuid::Uuid::new_v4().to_string()[..8]);
+        seed_governance_standard(
+            &pool,
+            &ns,
+            &owner,
+            serde_json::json!({"write": "approve", "promote": "any", "delete": "owner"}),
+        )
+        .await;
+
+        let payload = serde_json::json!({"title": "needs approval"});
+        let decision = store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &ns,
+                &requester,
+                None,
+                None,
+                &payload,
+            )
+            .await
+            .expect("enforce_governance_action");
+        let pending_id = match decision {
+            crate::models::GovernanceDecision::Pending(id) => id,
+            other => panic!("approve-level non-owner write must Pending; got {other:?}"),
+        };
+        assert!(!pending_id.is_empty(), "Pending id must be non-empty");
+
+        let row: (String, String, String) = sqlx::query_as(
+            "SELECT action_type, namespace, status FROM pending_actions WHERE id = $1",
+        )
+        .bind(&pending_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read pending_actions row");
+        assert_eq!(row.0, "store", "action_type must be 'store'");
+        assert_eq!(row.1, ns, "namespace must match");
+        assert_eq!(row.2, "pending", "status must be 'pending'");
+
+        cleanup_governance_ns(&pool, &ns).await;
+    }
+
+    #[tokio::test]
+    async fn live_governance_inheritance_cap_at_five() {
+        // F-A2A1.2 depth cap — a namespace at MAX_NAMESPACE_DEPTH (8
+        // levels) under a `write=owner` parent at the root must still
+        // resolve to Deny for a non-owner, because the cap retains the
+        // most-specific 5 levels which include the policy-anchored
+        // child path. Conversely, a policy seated at the root that's
+        // OUTSIDE the cap (depth 8 child, policy at depth 1 root) is
+        // expected NOT to apply — the cap is the explicit contract.
+        //
+        // This test pins the "most-specific kept" semantics by seating
+        // the policy 2 levels above the leaf (well within the cap)
+        // and verifying inheritance fires.
+        let Some(url) = postgres_url() else {
+            eprintln!("skip: AI_MEMORY_TEST_POSTGRES_URL not set");
+            return;
+        };
+        crate::config::override_active_permissions_mode_for_test(
+            crate::config::PermissionsMode::Enforce,
+        );
+        let store = PostgresStore::connect(&url).await.expect("connect");
+        let pool = store.pool.clone();
+        let owner = format!("ai:cap-owner-{}", uuid::Uuid::new_v4());
+        let intruder = format!("ai:cap-intruder-{}", uuid::Uuid::new_v4());
+        // Anchor the policy at a 4-segment namespace; the leaf is 6
+        // segments — within the cap.
+        let suffix = &uuid::Uuid::new_v4().to_string()[..6];
+        let policy_ns = format!("fa2a12-cap-{suffix}/a/b/c");
+        let leaf_ns = format!("{policy_ns}/d/e");
+        seed_governance_standard(
+            &pool,
+            &policy_ns,
+            &owner,
+            serde_json::json!({
+                "write": "owner",
+                "promote": "any",
+                "delete": "owner",
+                "inherit": true,
+            }),
+        )
+        .await;
+
+        let payload = serde_json::json!({"leaf": leaf_ns});
+        let decision = store
+            .enforce_governance_action(
+                crate::store::GovernedAction::Store,
+                &leaf_ns,
+                &intruder,
+                None,
+                None,
+                &payload,
+            )
+            .await
+            .expect("enforce_governance_action");
+        match decision {
+            crate::models::GovernanceDecision::Deny(_) => {}
+            other => panic!(
+                "policy at depth 4 must deny intruder write at depth 6 (within cap); got \
+                 {other:?}"
+            ),
+        }
+
+        cleanup_governance_ns(&pool, &format!("fa2a12-cap-{suffix}")).await;
     }
 }
