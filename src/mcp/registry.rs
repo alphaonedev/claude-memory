@@ -1304,6 +1304,21 @@ pub fn tool_definitions() -> Value {
                     },
                     "required": ["skill_id", "target_folder"]
                 }
+            },
+            {
+                "name": "memory_skill_promote_from_reflection",
+                "description": "Promote a Reflection-kind memory into a reusable Agent Skill (closes the recursive-learning loop).",
+                "docs": "v0.7.0 L2-6 (issue #671) — the closing loop. Promotes a reflection memory (memory_kind='reflection', depth ≥ namespace.governance.skill_promotion_min_depth, default 1) into a SKILL.md-format Agent Skill stored in the skills table. Each reflects_on source becomes a references/source_{i}.md resource. Frontmatter carries metadata.derived_from_reflection_id and metadata.original_reflection_depth so the lineage is preserved. The constructed skill is digest-equivalent to a hand-authored SKILL.md — promote → export → re-register produces the IDENTICAL SHA-256 digest. Refuses depth-0 reflections (no synthesised insight to promote).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "reflection_id": {"type": "string", "description": "The UUID of a Reflection-kind memory (created via memory_reflect)."},
+                        "skill_name": {"type": "string", "description": "agentskills.io §3.1-compliant name: ^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$, 1-64 chars."},
+                        "skill_description": {"type": "string", "description": "1-1024 char description for the promoted skill."},
+                        "parameters_schema": {"type": "object", "description": "Optional JSON schema for the skill's parameters; spliced into the SKILL.md body as a Parameters section."}
+                    },
+                    "required": ["reflection_id", "skill_name", "skill_description"]
+                }
             }
         ]
     })

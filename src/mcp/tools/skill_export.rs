@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::identity::keypair::AgentKeypair;
 use crate::signed_events::{SignedEvent, append_signed_event, payload_hash};
 
-pub(super) fn handle_skill_export(
+pub fn handle_skill_export(
     conn: &Connection,
     params: &Value,
     active_keypair: Option<&AgentKeypair>,
