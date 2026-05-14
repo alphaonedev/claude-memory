@@ -37,6 +37,9 @@ pub use storage as db;
 pub mod embeddings;
 pub mod errors;
 pub mod federation;
+// v0.7.0 L2-5 (issue #670) — forensic evidence bundle assembly +
+// verification. OSS surface for the AgenticMem Attest tier.
+pub mod forensic;
 pub mod handlers;
 // v0.7 Track B — harness detection. B4 reads the MCP `clientInfo.name`
 // captured at the JSON-RPC `initialize` handshake and maps it to a

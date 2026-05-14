@@ -329,6 +329,16 @@ pub enum Command {
     /// Ed25519 signature, and emits a structured chain-integrity
     /// report. Exit 0 if fully verified; non-zero otherwise.
     VerifyReflectionChain(VerifyChainArgs),
+    /// v0.7.0 L2-5 (issue #670) — export a procurement-grade forensic
+    /// evidence bundle (signed tarball) for a memory and its
+    /// reflection chain. The OSS surface for the `AgenticMem Attest`
+    /// tier; see [`crate::forensic::bundle`] for the bundle layout.
+    ExportForensicBundle(crate::forensic::bundle::ExportForensicBundleArgs),
+    /// v0.7.0 L2-5 (issue #670) — verify a forensic evidence bundle.
+    /// Re-hashes every file, checks the manifest signature when
+    /// present, and re-verifies every edge signature against the
+    /// bundled `observed_by` public key.
+    VerifyForensicBundle(crate::forensic::bundle::VerifyForensicBundleArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1107,6 +1117,28 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             match cli::verify::run(&db_path, &a, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        Command::ExportForensicBundle(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::export::export(&db_path, &a, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        Command::VerifyForensicBundle(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::export::verify(&a, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }

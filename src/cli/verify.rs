@@ -59,57 +59,57 @@ pub struct VerifyChainArgs {
 /// One `reflects_on` edge in the ancestry tree, with its verification
 /// result.
 #[derive(Debug, Serialize)]
-pub(super) struct EdgeResult {
-    pub(super) source_id: String,
-    pub(super) target_id: String,
+pub struct EdgeResult {
+    pub source_id: String,
+    pub target_id: String,
     /// Signature bytes as hex, or `null` when the edge is unsigned.
-    pub(super) signature_hex: Option<String>,
-    pub(super) attest_level: String,
-    pub(super) verified: bool,
+    pub signature_hex: Option<String>,
+    pub attest_level: String,
+    pub verified: bool,
     /// Human-readable reason when `verified = false`.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) failure_reason: Option<String>,
+    pub failure_reason: Option<String>,
 }
 
 /// Per-`signed_events` row summary for a memory in the chain.
 #[derive(Debug, Serialize)]
-pub(super) struct SignedEventSummary {
-    pub(super) memory_id: String,
-    pub(super) event_id: String,
-    pub(super) event_type: String,
-    pub(super) attest_level: String,
-    pub(super) timestamp: String,
-    pub(super) signature_present: bool,
+pub struct SignedEventSummary {
+    pub memory_id: String,
+    pub event_id: String,
+    pub event_type: String,
+    pub attest_level: String,
+    pub timestamp: String,
+    pub signature_present: bool,
 }
 
 /// Full chain-integrity report — the `AgenticMem Attest` tier evidence
 /// packet.
 #[derive(Debug, Serialize)]
-pub(super) struct ChainReport {
+pub struct ChainReport {
     /// Root memory id supplied on the command line.
-    pub(super) root_id: String,
+    pub root_id: String,
     /// Total number of distinct memories visited (root + ancestors).
-    pub(super) n_memories: usize,
+    pub n_memories: usize,
     /// Longest path from root to a depth-0 memory.
-    pub(super) chain_depth: usize,
+    pub chain_depth: usize,
     /// Number of `reflects_on` edges that passed Ed25519 verification
     /// (or were unsigned but presence-confirmed).
-    pub(super) edges_verified: usize,
+    pub edges_verified: usize,
     /// Number of edges that failed verification, with reasons.
-    pub(super) edges_failed: usize,
+    pub edges_failed: usize,
     /// Per-edge detail.
-    pub(super) edges: Vec<EdgeResult>,
+    pub edges: Vec<EdgeResult>,
     /// Maximum `reflection_depth` column value per namespace.
-    pub(super) max_reflection_depth_per_namespace: HashMap<String, i32>,
+    pub max_reflection_depth_per_namespace: HashMap<String, i32>,
     /// `"within_cap"` when no namespace exceeded its governance cap,
     /// `"exceeded_cap"` when at least one did, or
     /// `"no_cap_configured"` when no governance policy rows exist.
-    pub(super) bounded_status: String,
+    pub bounded_status: String,
     /// Optional `signed_events` entries when `--include-signed-events`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub(super) signed_events: Vec<SignedEventSummary>,
+    pub signed_events: Vec<SignedEventSummary>,
     /// RFC3339 timestamp of report generation.
-    pub(super) generated_at: String,
+    pub generated_at: String,
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -235,12 +235,36 @@ fn governance_cap_for_namespace(conn: &Connection, namespace: &str) -> Option<u3
 
 /// Walk the `reflects_on` ancestry tree from `root_id`, verify every
 /// edge, and return the [`ChainReport`].
-pub(super) fn build_chain_report(
+///
+/// # Errors
+///
+/// Propagates database read errors.
+pub fn build_chain_report(
     conn: &Connection,
     root_id: &str,
     include_signed_events: bool,
 ) -> Result<ChainReport> {
-    let generated_at = chrono::Utc::now().to_rfc3339();
+    build_chain_report_at(conn, root_id, include_signed_events, None)
+}
+
+/// Variant of [`build_chain_report`] that lets the caller pin the
+/// `generated_at` timestamp. Used by `forensic::bundle` so the
+/// embedded `verification.json` is byte-stable across rebuilds (the
+/// bundle's own `manifest.generated_at` is the *only* legitimate
+/// non-deterministic field). `None` falls back to `Utc::now()`.
+///
+/// # Errors
+///
+/// Propagates database read errors.
+pub fn build_chain_report_at(
+    conn: &Connection,
+    root_id: &str,
+    include_signed_events: bool,
+    generated_at_override: Option<&str>,
+) -> Result<ChainReport> {
+    let generated_at = generated_at_override
+        .map(ToString::to_string)
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
     let mut visited: HashSet<String> = HashSet::new();
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
