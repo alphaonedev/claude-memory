@@ -981,6 +981,27 @@ pub async fn create_memory(
                     );
                 }
             }
+            // v0.7.0 L1-6 Deliverable E — surface the substrate
+            // governance pre-write hook's refusal as `403 FORBIDDEN`
+            // with code `GOVERNANCE_REFUSED` and the operator-authored
+            // reason verbatim. The substrate wraps the refusal in a
+            // typed `storage::GovernanceRefusal` propagated via
+            // `anyhow::Error`; downcasting here keeps the
+            // happy-path-cheap `?`-friendly return shape upstream.
+            if let Some(refusal) = e.downcast_ref::<crate::storage::GovernanceRefusal>() {
+                tracing::info!(
+                    "create_memory refused by substrate governance: {}",
+                    refusal.reason
+                );
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(json!({
+                        "code": "GOVERNANCE_REFUSED",
+                        "error": refusal.reason,
+                    })),
+                )
+                    .into_response();
+            }
             tracing::error!("handler error: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
