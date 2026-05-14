@@ -1161,4 +1161,114 @@ mod tests {
             "got: {err}"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // C-5 (#699): close the `load_mtls_rustls_config` gap.
+    //
+    // The mTLS server config path was completely uncovered at lib-tier
+    // (38 lines / 38 misses → tls.rs sat at 92.94%). These tests drive
+    // the happy path against the real PEM fixtures, the empty-allowlist
+    // refusal, and the read-error branches for the cert + key paths.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_happy_path() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        // Build a single-entry allowlist on disk; the parser converts hex
+        // into a [u8; 32] which goes into the verifier. Hex content is
+        // irrelevant to the builder — it just needs to be non-empty so
+        // the empty-allowlist refusal does not trip.
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "a".repeat(64))).unwrap();
+
+        let config = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect("mTLS server config build with valid cert+key+allowlist");
+        // Returned RustlsConfig is opaque; success of the ?-cascade is
+        // the contract.
+        drop(config);
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_empty_allowlist_refuses() {
+        // Line 148-152: the operator-friendly refusal when an allowlist
+        // file parses but contains zero fingerprints. We deliberately
+        // never reach the cert/key reads.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        // Comment-only allowlist — parses successfully, but the set is empty.
+        std::fs::write(allowlist.path(), "# nothing here\n").unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("empty allowlist must refuse to start");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("empty") && msg.contains("refuse"),
+            "expected refuse-to-start error, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_cert_errors() {
+        // Line 156-158: cert-read failure path inside the mTLS builder.
+        let cert = std::path::PathBuf::from("/does/not/exist/mtls-cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "b".repeat(64))).unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("missing cert must error");
+        assert!(
+            err.to_string().contains("failed to read TLS cert"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_key_errors() {
+        // Line 159-161: key-read failure path inside the mTLS builder.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from("/does/not/exist/mtls-key.pem");
+        let allowlist = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(allowlist.path(), format!("{}\n", "c".repeat(64))).unwrap();
+
+        let err = load_mtls_rustls_config(&cert, &key, allowlist.path())
+            .await
+            .expect_err("missing key must error");
+        assert!(
+            err.to_string().contains("failed to read TLS key"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_load_mtls_rustls_config_missing_allowlist_errors() {
+        // The first read inside load_mtls_rustls_config — the allowlist
+        // file itself — must surface a clean error envelope when the
+        // file does not exist.
+        let cert = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_cert.pem");
+        let key = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/tls/valid_key_pkcs8.pem");
+        let allowlist = std::path::PathBuf::from("/does/not/exist/allowlist.txt");
+
+        let err = load_mtls_rustls_config(&cert, &key, &allowlist)
+            .await
+            .expect_err("missing allowlist must error");
+        assert!(
+            err.to_string().contains("failed to read mTLS allowlist"),
+            "got: {err}"
+        );
+    }
 }
