@@ -109,6 +109,94 @@ Substrate-native primitive for **recursive refinement**: an agent reads one or m
 
 Tasks 7-8 (ship-gate test suite + docs/release-notes/capabilities honesty pass) land on the same branch and roll up into this v0.7.0 entry. Tracker issue: [#655](https://github.com/alphaonedev/ai-memory-mcp/issues/655).
 
+### v0.7.0 substrate authority — Policy Engine (Option B in flight, parent meta [#693](https://github.com/alphaonedev/ai-memory-mcp/issues/693))
+
+The v0.7.0 substrate ships the policy engine surface that gates
+agent-EXTERNAL actions (Bash, FilesystemWrite outside the substrate,
+NetworkRequest, ProcessSpawn, Custom) against an operator-signed
+`governance_rules` table, alongside the existing K9 governance
+pipeline that gates substrate-INTERNAL ops. Full architectural
+documentation lives at
+[`docs/policy-engine.md`](docs/policy-engine.md); the audit-trail
+coverage matrix at
+[`docs/security/audit-trail-coverage.md`](docs/security/audit-trail-coverage.md).
+
+**Shipped at v0.7.0 grand-slam HEAD:**
+
+- **L1-6 substrate-rules engine** ([#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691)).
+  `AgentAction` enum + variants (`Bash` / `FilesystemWrite` /
+  `NetworkRequest` / `ProcessSpawn` / `Custom`); `RulesStore` typed
+  CRUD over the new `governance_rules` table (migration
+  `0024_v07_governance_rules.sql`); `check_agent_action` audited path
+  (every call emits one `governance.check` row to `signed_events`);
+  seed rules R001-R004 land at `enabled = 0` per the cold-start
+  contract; operator keypair at `~/.config/ai-memory/operator.key`
+  (mode 0600 enforced at load); load-time Ed25519 signature
+  verification with the bypass-prevention property
+  (`canonical_bytes_for_signing` commits to `enabled`, so a direct
+  `UPDATE governance_rules SET enabled = 1` invalidates the recorded
+  signature and the rule is skipped). Six L1-6 integration tests
+  pin the tampered-signature / direct-enabled-flip / open-permissions
+  / sign-seed-idempotent / rotated-key matrices.
+- **L1-6 Deliverable E — `storage::insert` governance pre-write hook**
+  ([#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691),
+  commit `1b877ce`). Process-wide `OnceLock` in
+  `src/storage/mod.rs::GOVERNANCE_PRE_WRITE`; installed exactly once
+  at daemon `serve` boot (CLI one-shot paths leave it empty by
+  design). Every substrate write path (`insert`,
+  `insert_with_conflict`, `insert_if_newer`) consults the hook before
+  the SQL `INSERT`; refusal short-circuits the write with no row
+  touched and propagates `MemoryError::RefusedByGovernance` →
+  HTTP `403 GOVERNANCE_REFUSED`. Six integration tests
+  (`tests/governance_storage_insert_hook.rs`) pin the bypass-impossibility
+  property — including that **all three** insert paths are gated and
+  that the CLI one-shot mode does NOT install the hook.
+
+**v0.7.0 Option B work in flight (parent meta [#693](https://github.com/alphaonedev/ai-memory-mcp/issues/693)):**
+
+- **PE-1** ([#694](https://github.com/alphaonedev/ai-memory-mcp/issues/694))
+  universal `AgentAction` wire-point coverage. Branch
+  `policy-engine/wire-points`.
+- **PE-2** ([#695](https://github.com/alphaonedev/ai-memory-mcp/issues/695))
+  Claude Code PreToolUse harness hook installer. Branch
+  `policy-engine/harness-hook`. Once merged, `ai-memory install
+  --harness claude-code --enforce-policy` configures the hook so
+  the harness consults `memory_check_agent_action` before every
+  Bash / Write / Network / ProcessSpawn the agent proposes.
+- **PE-3** ([#696](https://github.com/alphaonedev/ai-memory-mcp/issues/696))
+  deferred audit-log queue. Branch
+  `policy-engine/deferred-audit-log`. Closes the storage-hook
+  audit gap: refusals at the substrate-internal pre-write path are
+  typed AND chain-logged via a process-local tokio drain task —
+  same canonical bytes / payload hash as the audited path, no
+  re-entrancy on the substrate writer.
+
+**Honest framing.** v0.7.0 ships substrate authority for
+agent-EXTERNAL actions that are **substrate-visible** (the storage
+write path mechanically; the agent-external Bash / Write / Network /
+ProcessSpawn surface via opt-in harness coverage once PE-2 merges).
+Out-of-band channels (agents that bypass the harness entirely) are
+not enforceable by the substrate — see V08-PE-1 (mandatory-hook
+profile) and V08-PE-6 (TPM-bound binary integrity) under the v0.8.0
+closeout below. Subprocess-chain visibility (a permitted Bash whose
+child forks an unrelated process) is also out of scope at v0.7.0 —
+see V08-PE-3.
+
+**v0.8.0 closeout epic — 100% Cryptographic Forensic Audit Trail
+([#697](https://github.com/alphaonedev/ai-memory-mcp/issues/697)).**
+Closes the remaining ~5% gap. Eight sub-tasks (V08-PE-1 …
+V08-PE-8): mandatory-hook profile, read-action gating, subprocess-chain
+visibility via eBPF/dtrace, persistent audit queue (durable across
+daemon restart — closes PE-3's process-local gap), severity-based
+human escalation (adds `Decision::Escalate`), TPM-bound binary
+integrity, refuse-by-default profile, and the
+`ai-memory verify-audit-trail` completeness verifier. Effort:
+22-28 sessions · 3-4 weeks wall-clock. Full sub-task detail in
+ROADMAP2 §16. Operator directive of 2026-05-14 verbatim — "Every
+tool call passes through a policy engine; the engine logs every
+refusal cryptographically; severity-classified rules can escalate
+to human" — is the property v0.8.0 closes literally.
+
 ### Track summary (11 tracks, 69 tasks)
 
 - **Track A — Capabilities v3 response shape (5 tasks).** Adds `summary`, `to_describe_to_user`, `callable_now`, `agent_permitted_families` to the `memory_capabilities` response, plus `schema_version="3"` (additive over v2). Pre-computed per-agent calibration strings let LLMs converge on accurate first-answer descriptions instead of improvising. v3 fields are additive — v2 wire shape stays supported through the v0.7.x line. Canonical phrasings pinned in [`docs/v0.7/canonical-phrasings.md`](docs/v0.7/canonical-phrasings.md).
