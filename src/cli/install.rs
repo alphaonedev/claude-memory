@@ -145,6 +145,37 @@ pub struct TargetArgs {
     /// `$PATH`, otherwise the bare string `ai-memory`.
     #[arg(long, value_name = "PATH")]
     pub binary: Option<PathBuf>,
+
+    /// Install a harness-side hook variant in place of the default
+    /// managed block. Supported value: `pretool` — installs Claude
+    /// Code's `PreToolUse` hook routing every Bash / Edit / Write tool
+    /// call through `memory_check_agent_action` (v0.7.0 policy-engine
+    /// item 2, issue #691).
+    ///
+    /// Only meaningful for `claude-code`; other targets reject this
+    /// flag with a clear error.
+    #[arg(long, value_name = "KIND")]
+    pub hook: Option<HookKind>,
+
+    /// When installing a hook (`--hook`), overwrite any pre-existing
+    /// entry whose `matcher` / `tool` shape conflicts with ours.
+    /// Without `--force`, the installer refuses to clobber a
+    /// differing-but-similar config and points the operator at this
+    /// flag in the stderr warning.
+    #[arg(long, default_value_t = false)]
+    pub force: bool,
+}
+
+/// Harness-side hook variant selectable via `--hook <kind>`. Today
+/// only `Pretool` is wired; future variants (e.g. `PostToolUse`,
+/// `Stop`) plug into the same dispatch shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum HookKind {
+    /// Claude Code's `PreToolUse` hook. Routes every Bash / Edit /
+    /// Write tool call through `memory_check_agent_action` so the
+    /// substrate-rules engine can refuse or warn before the action
+    /// dispatches.
+    Pretool,
 }
 
 /// Concrete target enum used internally. `TargetCmd` carries clap
@@ -227,6 +258,16 @@ pub fn run(args: &InstallArgs, out: &mut CliOutput<'_>) -> Result<()> {
     let target = args.target.target();
     let t_args = args.target.args();
 
+    // --hook is meaningful for claude-code only today; reject loudly on
+    // other targets so operators don't silently lose the flag.
+    if t_args.hook.is_some() && target != Target::ClaudeCode {
+        bail!(
+            "--hook {kind:?} is only supported for `claude-code` today; \
+             other harnesses do not expose a PreToolUse-equivalent hook surface.",
+            kind = t_args.hook.unwrap(),
+        );
+    }
+
     let config_path = resolve_config_path(target, t_args)?;
     let binary = resolve_binary(t_args.binary.as_deref());
 
@@ -236,7 +277,13 @@ pub fn run(args: &InstallArgs, out: &mut CliOutput<'_>) -> Result<()> {
     let (before_text, before_value) = read_config_or_empty(&config_path)?;
 
     // Compute the desired after-state.
-    let after_value = if t_args.uninstall {
+    let after_value = if let Some(hook_kind) = t_args.hook {
+        if t_args.uninstall {
+            remove_hook_block(target, hook_kind, before_value.clone())?
+        } else {
+            apply_hook_block(target, hook_kind, before_value.clone(), t_args.force, out)?
+        }
+    } else if t_args.uninstall {
         remove_managed_block(target, before_value.clone())?
     } else {
         apply_managed_block(target, before_value.clone(), &binary)?
@@ -324,6 +371,23 @@ pub fn run(args: &InstallArgs, out: &mut CliOutput<'_>) -> Result<()> {
         action = action_label,
         path = config_path.display(),
     )?;
+
+    // v0.7.0 policy-engine item 2: when `--hook pretool` was the trigger,
+    // emit the operator-readable confirmation line documented in the
+    // installer contract (`installed PreToolUse hook -> <path>`).
+    if let Some(hook_kind) = t_args.hook
+        && !t_args.uninstall
+    {
+        match hook_kind {
+            HookKind::Pretool => {
+                writeln!(
+                    out.stdout,
+                    "installed PreToolUse hook -> {}",
+                    config_path.display(),
+                )?;
+            }
+        }
+    }
     if let Some(b) = backup_path {
         writeln!(out.stdout, "ai-memory install: backup at {}", b.display())?;
     }
@@ -333,7 +397,10 @@ pub fn run(args: &InstallArgs, out: &mut CliOutput<'_>) -> Result<()> {
     // the agent once the server is gone. Failures here are surfaced as
     // a stderr warning, not a hard error: the install itself succeeded
     // and operators can re-derive the snippet from the docs.
-    if !t_args.uninstall {
+    // For the `--hook pretool` variant the system-prompt snippet is
+    // unrelated (the hook is the load-bearing mechanism), so we skip it
+    // there too.
+    if !t_args.uninstall && t_args.hook.is_none() {
         match write_system_prompt_snippet(target) {
             Ok(snippet_path) => {
                 writeln!(
@@ -814,6 +881,207 @@ fn remove_claude_code(obj: &mut Map<String, Value>) {
     }
 }
 
+// --- v0.7.0 policy-engine item 2 — Claude Code PreToolUse hook ------------
+//
+// Wires the substrate-rules engine into every Bash / Edit / Write tool
+// call Claude Code proposes. The hook's `type=mcp_tool` form invokes
+// `memory_check_agent_action` and honors the Allow / Refuse / Warn
+// decision before the tool dispatches. The MCP tool itself already
+// exists (issue #691 L1-6 A); the installer is the missing turnkey.
+//
+// Design choices:
+//
+// - The PreToolUse entry lives under a separate managed block (different
+//   `MANAGED_KEYS_PROPERTY` payload) so a future operator can install
+//   SessionStart and PreToolUse independently — uninstalling one does
+//   not strip the other.
+// - We APPEND to an existing `PreToolUse` array, preserving operator-
+//   authored entries' order. The substrate-check is positioned LAST so
+//   the operator's earlier hooks still run; this matches the
+//   "defence-in-depth" guidance in docs/governance/agent-action-rules.md.
+// - Conflict detection: if an existing entry already names
+//   `memory_check_agent_action` but with a DIFFERENT `matcher`, we
+//   refuse to overwrite without `--force`. Operators sometimes
+//   intentionally scope the hook to a subset of tools; clobbering that
+//   would silently change their policy.
+
+/// Reference name for the MCP tool the PreToolUse hook invokes. Pinned
+/// here so changing the tool name in one place updates the installer +
+/// docs together. Matches the wire name registered in `src/mcp/mod.rs`.
+const PRETOOL_HOOK_TOOL_NAME: &str = "memory_check_agent_action";
+
+/// Build the PreToolUse entry the installer writes. Uses the
+/// type=`mcp_tool` form (vs `type=command`) so Claude Code dispatches
+/// over the MCP channel directly — no shell, no fork, no PATH
+/// dependence. The marker keys live alongside the operator-visible
+/// fields so the entry round-trips through Claude Code's reader
+/// unchanged.
+fn claude_code_pretool_entry() -> Value {
+    serde_json::json!({
+        MARKER_START_KEY: MARKER_PAYLOAD,
+        MANAGED_KEYS_PROPERTY: ["matcher", "hooks"],
+        "matcher": "*",
+        "hooks": [
+            { "type": "mcp_tool", "tool": PRETOOL_HOOK_TOOL_NAME }
+        ],
+        MARKER_END_KEY: MARKER_PAYLOAD,
+    })
+}
+
+/// Predicate: does `v` look like a non-managed PreToolUse entry that
+/// *also* points at our MCP tool (so installing on top would silently
+/// shadow operator intent)? Returns the matcher string if so.
+fn pretool_conflict_matcher(v: &Value) -> Option<String> {
+    let obj = v.as_object()?;
+    if obj.contains_key(MARKER_START_KEY) {
+        return None;
+    }
+    let matcher = obj.get("matcher").and_then(Value::as_str)?;
+    let hooks = obj.get("hooks").and_then(Value::as_array)?;
+    for h in hooks {
+        let h_obj = h.as_object()?;
+        if h_obj.get("type").and_then(Value::as_str) == Some("mcp_tool")
+            && h_obj.get("tool").and_then(Value::as_str) == Some(PRETOOL_HOOK_TOOL_NAME)
+        {
+            return Some(matcher.to_string());
+        }
+    }
+    None
+}
+
+/// Apply the PreToolUse managed block. APPENDS the entry to the existing
+/// `hooks.PreToolUse` array so any operator-authored hooks earlier in
+/// the list still run. Returns `bail!` on a conflict-without-force.
+fn apply_claude_code_pretool(
+    obj: &mut Map<String, Value>,
+    force: bool,
+    out: &mut CliOutput<'_>,
+) -> Result<()> {
+    let entry = claude_code_pretool_entry();
+
+    let hooks = obj
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(Map::new()));
+    if !hooks.is_object() {
+        *hooks = Value::Object(Map::new());
+    }
+    let hooks_obj = hooks.as_object_mut().expect("just-inserted object");
+    let pretool = hooks_obj
+        .entry("PreToolUse".to_string())
+        .or_insert_with(|| Value::Array(Vec::new()));
+    if !pretool.is_array() {
+        *pretool = Value::Array(Vec::new());
+    }
+    let arr = pretool.as_array_mut().expect("just-inserted array");
+
+    // Detect any operator-authored entry that points at the same MCP
+    // tool with a different `matcher`. That's the conflict path —
+    // refuse without --force.
+    let conflicting: Vec<String> = arr
+        .iter()
+        .filter_map(pretool_conflict_matcher)
+        .filter(|m| m != "*")
+        .collect();
+    if !conflicting.is_empty() && !force {
+        writeln!(
+            out.stderr,
+            "ai-memory install: warning — existing PreToolUse entry(s) already invoke \
+             `{tool}` with matcher(s) {conflicts:?}. Pass --force to overwrite, or \
+             remove the existing entries by hand if you want to keep your scoping.",
+            tool = PRETOOL_HOOK_TOOL_NAME,
+            conflicts = conflicting,
+        )?;
+        bail!(
+            "refusing to overwrite a differing-but-similar PreToolUse hook \
+             without --force; existing matcher(s): {conflicting:?}"
+        );
+    }
+
+    // Drop any previous managed entry (idempotent re-runs) AND any
+    // conflicting entries when --force is set. Operator-authored entries
+    // that don't touch our tool are left untouched.
+    arr.retain(|v| {
+        if is_managed_value(v) {
+            return false;
+        }
+        if force && pretool_conflict_matcher(v).is_some() {
+            return false;
+        }
+        true
+    });
+    arr.push(entry);
+    Ok(())
+}
+
+/// Remove the PreToolUse managed block (the inverse of
+/// [`apply_claude_code_pretool`]). Idempotent on a clean config.
+fn remove_claude_code_pretool(obj: &mut Map<String, Value>) {
+    if let Some(hooks) = obj.get_mut("hooks").and_then(|h| h.as_object_mut())
+        && let Some(arr) = hooks.get_mut("PreToolUse").and_then(|s| s.as_array_mut())
+    {
+        arr.retain(|v| !is_managed_value(v));
+        if arr.is_empty() {
+            hooks.remove("PreToolUse");
+        }
+    }
+    if let Some(hooks) = obj.get("hooks").and_then(|h| h.as_object())
+        && hooks.is_empty()
+    {
+        obj.remove("hooks");
+    }
+}
+
+/// Apply the requested hook variant. Today only `--hook pretool` for
+/// claude-code is wired; the dispatch is split out so future hook
+/// kinds (PostToolUse, Stop) plug in without touching `run`.
+fn apply_hook_block(
+    target: Target,
+    kind: HookKind,
+    mut cfg: Value,
+    force: bool,
+    out: &mut CliOutput<'_>,
+) -> Result<Value> {
+    let obj = ensure_object(&mut cfg)?;
+    match (target, kind) {
+        (Target::ClaudeCode, HookKind::Pretool) => {
+            apply_claude_code_pretool(obj, force, out)?;
+        }
+        // Other (target, kind) pairs are rejected upstream in `run` so
+        // this match is exhaustive in practice. Keep the explicit
+        // `_` arm to document the design intent.
+        _ => bail!(
+            "internal error: unsupported (target, hook) combination ({:?}, {:?})",
+            target,
+            kind
+        ),
+    }
+    Ok(cfg)
+}
+
+/// Remove the requested hook variant (the inverse of
+/// [`apply_hook_block`]). Idempotent on a clean config.
+fn remove_hook_block(target: Target, kind: HookKind, mut cfg: Value) -> Result<Value> {
+    let obj = match cfg.as_object_mut() {
+        Some(o) => o,
+        None => return Ok(cfg),
+    };
+    match (target, kind) {
+        (Target::ClaudeCode, HookKind::Pretool) => {
+            remove_claude_code_pretool(obj);
+        }
+        _ => {
+            // Same rationale as `apply_hook_block` — surface internal
+            // errors loudly rather than silently no-op.
+            bail!(
+                "internal error: unsupported (target, hook) combination ({:?}, {:?})",
+                target,
+                kind
+            );
+        }
+    }
+    Ok(cfg)
+}
+
 // --- OpenClaw -------------------------------------------------------------
 
 fn ai_memory_server_value(binary: &str) -> Value {
@@ -1018,6 +1286,8 @@ mod tests {
             dry_run: false,
             uninstall: false,
             binary: Some(PathBuf::from("/usr/local/bin/ai-memory")),
+            hook: None,
+            force: false,
         };
         let target_cmd = match target {
             Target::ClaudeCode => TargetCmd::ClaudeCode(t),
@@ -2263,6 +2533,8 @@ mod tests {
             dry_run: false,
             uninstall: false,
             binary: Some(PathBuf::from("/usr/local/bin/ai-memory")),
+            hook: None,
+            force: false,
         };
         let target_cmd = match target {
             Target::ClaudeCode => TargetCmd::ClaudeCode(t),
@@ -2582,5 +2854,315 @@ mod tests {
             }
         }
         assert!(found.is_some(), "expected to find ai-memory under $PATH");
+    }
+
+    // ------------------------------------------------------------------
+    // v0.7.0 policy-engine item 2 — PreToolUse hook installer
+    // ------------------------------------------------------------------
+    //
+    // Tier B coverage (≥95%) target on every new code path in this
+    // module. Each branch below pins one behaviour of the installer's
+    // PreToolUse mode:
+    //
+    // - `pretool_entry_shape_matches_documented_form`: the JSON we
+    //   emit is the same shape Claude Code consumes (matcher + hooks
+    //   array, type=mcp_tool, tool=memory_check_agent_action).
+    // - `apply_then_remove_round_trips`: install + uninstall returns
+    //   the config to its original shape, modulo whitespace.
+    // - `apply_appends_to_existing_pretooluse`: an operator-authored
+    //   entry is preserved when we install on top.
+    // - `apply_is_idempotent_when_rerun`: re-installing under the
+    //   managed marker leaves exactly one managed entry.
+    // - `apply_refuses_conflict_without_force`: a non-managed entry
+    //   that ALSO names our MCP tool with a different matcher
+    //   triggers the refusal path.
+    // - `apply_overwrites_conflict_with_force`: same with --force
+    //   replaces the conflicting entry.
+    // - `apply_rejects_hook_flag_on_non_claude_code`: the cross-target
+    //   gate in `run` errors loudly when --hook is set on, say,
+    //   cursor.
+
+    fn args_for_pretool_apply(config: PathBuf) -> InstallArgs {
+        let t = TargetArgs {
+            config: Some(config),
+            apply: true,
+            dry_run: false,
+            uninstall: false,
+            binary: Some(PathBuf::from("/usr/local/bin/ai-memory")),
+            hook: Some(HookKind::Pretool),
+            force: false,
+        };
+        InstallArgs {
+            target: TargetCmd::ClaudeCode(t),
+        }
+    }
+
+    fn args_for_pretool_dry_run(config: PathBuf) -> InstallArgs {
+        let mut a = args_for_pretool_apply(config);
+        match &mut a.target {
+            TargetCmd::ClaudeCode(t) => t.apply = false,
+            _ => unreachable!(),
+        }
+        a
+    }
+
+    fn args_for_pretool_uninstall(config: PathBuf) -> InstallArgs {
+        let mut a = args_for_pretool_apply(config);
+        match &mut a.target {
+            TargetCmd::ClaudeCode(t) => {
+                t.uninstall = true;
+            }
+            _ => unreachable!(),
+        }
+        a
+    }
+
+    fn args_for_pretool_apply_force(config: PathBuf) -> InstallArgs {
+        let mut a = args_for_pretool_apply(config);
+        match &mut a.target {
+            TargetCmd::ClaudeCode(t) => t.force = true,
+            _ => unreachable!(),
+        }
+        a
+    }
+
+    #[test]
+    fn pretool_entry_shape_matches_documented_form() {
+        let v = claude_code_pretool_entry();
+        assert_eq!(v["matcher"], "*");
+        assert_eq!(v["hooks"][0]["type"], "mcp_tool");
+        assert_eq!(v["hooks"][0]["tool"], PRETOOL_HOOK_TOOL_NAME);
+        assert_eq!(v["hooks"][0]["tool"], "memory_check_agent_action");
+        assert!(v[MARKER_START_KEY].is_string());
+        assert!(v[MARKER_END_KEY].is_string());
+    }
+
+    #[test]
+    fn pretool_conflict_detector_recognises_same_tool() {
+        let v = serde_json::json!({
+            "matcher": "Bash",
+            "hooks": [
+                { "type": "mcp_tool", "tool": "memory_check_agent_action" }
+            ]
+        });
+        assert_eq!(pretool_conflict_matcher(&v).as_deref(), Some("Bash"));
+    }
+
+    #[test]
+    fn pretool_conflict_detector_ignores_managed_blocks() {
+        let v = claude_code_pretool_entry();
+        assert!(pretool_conflict_matcher(&v).is_none());
+    }
+
+    #[test]
+    fn pretool_conflict_detector_ignores_other_tools() {
+        let v = serde_json::json!({
+            "matcher": "*",
+            "hooks": [
+                { "type": "command", "command": "echo hi" }
+            ]
+        });
+        assert!(pretool_conflict_matcher(&v).is_none());
+    }
+
+    #[test]
+    fn pretool_install_apply_writes_documented_entry() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(&path, "{}\n");
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        let written = fs::read_to_string(&path).unwrap();
+        let parsed: Value = serde_json::from_str(&written).unwrap();
+        let arr = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        // Exactly one managed entry.
+        assert_eq!(arr.len(), 1);
+        let entry = &arr[0];
+        assert_eq!(entry["matcher"], "*");
+        assert_eq!(entry["hooks"][0]["type"], "mcp_tool");
+        assert_eq!(entry["hooks"][0]["tool"], "memory_check_agent_action");
+        assert!(env.stdout_str().contains("installed PreToolUse hook ->"));
+    }
+
+    #[test]
+    fn pretool_install_preserves_existing_keys() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(
+            &path,
+            r#"{"permissions":{"allow":["npm:*"]},"env":{"FOO":"bar"}}"#,
+        );
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["permissions"]["allow"][0], "npm:*");
+        assert_eq!(parsed["env"]["FOO"], "bar");
+        assert!(parsed["hooks"]["PreToolUse"].is_array());
+    }
+
+    #[test]
+    fn pretool_install_appends_to_existing_pretooluse_array() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        // Operator already has one PreToolUse entry (an unrelated command hook).
+        seed(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo hi"}]}]}}"#,
+        );
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 2, "operator entry + our managed entry");
+        // First entry is the operator's; second is ours.
+        assert_eq!(arr[0]["matcher"], "Bash");
+        assert_eq!(arr[0]["hooks"][0]["command"], "echo hi");
+        assert_eq!(arr[1]["matcher"], "*");
+        assert_eq!(arr[1]["hooks"][0]["tool"], "memory_check_agent_action");
+    }
+
+    #[test]
+    fn pretool_install_is_idempotent() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(&path, "{}\n");
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        let first = fs::read_to_string(&path).unwrap();
+        env.stdout.clear();
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        let second = fs::read_to_string(&path).unwrap();
+        assert_eq!(first, second);
+        assert!(env.stdout_str().contains("no-op"));
+    }
+
+    #[test]
+    fn pretool_install_refuses_overwrite_without_force() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        // Pre-existing PreToolUse entry that ALSO names memory_check_agent_action
+        // but with a non-`*` matcher — i.e. the operator scoped the hook
+        // intentionally. Clobbering would silently change their policy.
+        seed(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"mcp_tool","tool":"memory_check_agent_action"}]}]}}"#,
+        );
+        let err = run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("--force"),
+            "error should mention --force: {msg}"
+        );
+        // File must NOT have been modified.
+        let still = serde_json::from_str::<Value>(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = still["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1, "no new entry appended on refusal");
+        assert_eq!(arr[0]["matcher"], "Bash");
+        // Stderr should explain the conflict.
+        assert!(
+            env.stderr_str().contains("existing PreToolUse entry"),
+            "stderr should contain conflict warning: {}",
+            env.stderr_str()
+        );
+    }
+
+    #[test]
+    fn pretool_install_overwrites_conflict_with_force() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"mcp_tool","tool":"memory_check_agent_action"}]}]}}"#,
+        );
+        run(
+            &args_for_pretool_apply_force(path.clone()),
+            &mut env.output(),
+        )
+        .unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let arr = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        // Conflicting entry replaced with ours (matcher="*").
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "*");
+        assert_eq!(arr[0]["hooks"][0]["tool"], "memory_check_agent_action");
+        assert!(arr[0][MARKER_START_KEY].is_string());
+    }
+
+    #[test]
+    fn pretool_uninstall_removes_managed_block_only() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(
+            &path,
+            r#"{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"echo hi"}]}]},"theme":"dark"}"#,
+        );
+        // Install on top.
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        // Uninstall.
+        run(&args_for_pretool_uninstall(path.clone()), &mut env.output()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(parsed["theme"], "dark");
+        // The operator's PreToolUse entry survives; ours is gone.
+        let arr = parsed["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["matcher"], "Bash");
+        assert_eq!(arr[0]["hooks"][0]["command"], "echo hi");
+    }
+
+    #[test]
+    fn pretool_uninstall_clean_config_is_safe_noop() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(&path, "{}\n");
+        // Uninstall against a config that never had the hook.
+        run(&args_for_pretool_uninstall(path.clone()), &mut env.output()).unwrap();
+        let parsed: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(parsed.as_object().unwrap().is_empty());
+    }
+
+    #[test]
+    fn pretool_dry_run_does_not_write() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(&path, "{\n}\n");
+        let mtime_before = fs::metadata(&path).unwrap().modified().unwrap();
+        run(&args_for_pretool_dry_run(path.clone()), &mut env.output()).unwrap();
+        let mtime_after = fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after, "dry-run must not write");
+        let stdout = env.stdout_str();
+        assert!(stdout.contains("dry-run"));
+        assert!(stdout.contains("PreToolUse"));
+        assert!(stdout.contains("memory_check_agent_action"));
+    }
+
+    #[test]
+    fn pretool_install_rejects_hook_flag_on_non_claude_code() {
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "mcp.json");
+        seed(&path, "{}\n");
+        let mut a = args_for_pretool_apply(path.clone());
+        // Wrap a Cursor target around the same TargetArgs.
+        let t_args = match a.target {
+            TargetCmd::ClaudeCode(t) => t,
+            _ => unreachable!(),
+        };
+        a.target = TargetCmd::Cursor(t_args);
+        let err = run(&a, &mut env.output()).unwrap_err();
+        assert!(
+            format!("{err}").contains("only supported for `claude-code`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn pretool_install_does_not_emit_system_prompt_snippet() {
+        // Hook-mode installs are the load-bearing mechanism; no snippet
+        // is required. Pin that behaviour so we don't accidentally
+        // re-add the snippet emission and clutter operator stderr.
+        let mut env = TestEnv::fresh();
+        let path = config_path(&env, "settings.json");
+        seed(&path, "{}\n");
+        run(&args_for_pretool_apply(path.clone()), &mut env.output()).unwrap();
+        assert!(
+            !env.stderr_str().contains("system-prompt snippet"),
+            "stderr should NOT mention the system-prompt snippet under --hook pretool: {}",
+            env.stderr_str()
+        );
     }
 }
