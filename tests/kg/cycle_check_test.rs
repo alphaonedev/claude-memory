@@ -210,6 +210,7 @@ fn refusal_recorded_in_signed_events_with_full_path() {
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp: Utc::now().to_rfc3339(),
+        ..SignedEvent::default()
     };
     append_signed_event(&conn, &audit_event).expect("append audit row");
 

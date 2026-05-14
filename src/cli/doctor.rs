@@ -1710,13 +1710,24 @@ mod tests {
 
     /// Helper: insert a `reflection.depth_exceeded` signed event.
     fn seed_depth_exceeded_event(conn: &rusqlite::Connection, timestamp: &str) {
-        conn.execute(
-            "INSERT INTO signed_events \
-             (id, agent_id, event_type, payload_hash, attest_level, timestamp) \
-             VALUES (?, 'test-agent', 'reflection.depth_exceeded', X'aa', 'unsigned', ?)",
-            rusqlite::params![uuid::Uuid::new_v4().to_string(), timestamp],
-        )
-        .unwrap();
+        // Route through `append_signed_event` so the cross-row chain
+        // (v34, #698 V-4 closeout) is populated correctly. The
+        // helper used a raw INSERT before v34 because there was no
+        // chain to populate; v34's UNIQUE INDEX on `sequence`
+        // tolerates the raw NULL-sequence shape but the seeded
+        // events would not chain-verify, which complicates any
+        // downstream doctor probe that walks the chain.
+        let event = crate::signed_events::SignedEvent {
+            id: uuid::Uuid::new_v4().to_string(),
+            agent_id: "test-agent".to_string(),
+            event_type: "reflection.depth_exceeded".to_string(),
+            payload_hash: vec![0xaa],
+            signature: None,
+            attest_level: "unsigned".to_string(),
+            timestamp: timestamp.to_string(),
+            ..crate::signed_events::SignedEvent::default()
+        };
+        crate::signed_events::append_signed_event(conn, &event).unwrap();
     }
 
     #[test]

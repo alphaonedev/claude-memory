@@ -704,6 +704,7 @@ pub(crate) fn emit_reflection_depth_exceeded_audit(
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp: created_at,
+        ..crate::signed_events::SignedEvent::default()
     };
     if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
         tracing::warn!(

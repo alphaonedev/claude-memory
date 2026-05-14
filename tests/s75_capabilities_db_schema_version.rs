@@ -170,17 +170,19 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          time); got {v}"
     );
     assert_eq!(
-        v, 33,
+        v, 34,
         "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (33 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
+         (34 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
          `governance_rules` table, L1-1 bumped 30 to 31 to add the \
          typed `memories.memory_kind` column, L1-5 bumped 31 to 32 \
          to add `skills` + `skill_resources` tables for the Agent \
-         Skills ingestion substrate, and v0.7.1-fold (commit 58877c7) \
+         Skills ingestion substrate, v0.7.1-fold (commit 58877c7) \
          bumped 32 to 33 to add the column-level CHECK constraint on \
          `memory_links.relation` per the closed-taxonomy hardening \
-         backlog). A drift here means either the binary's migrate \
-         ladder skipped a step or the new SAL `schema_version()` \
+         backlog, and V-4 closeout (#698) bumped 33 to 34 to add \
+         the cross-row hash chain columns (`prev_hash` + `sequence`) \
+         on `signed_events`). A drift here means either the binary's \
+         migrate ladder skipped a step or the new SAL `schema_version()` \
          lookup is reading from the wrong source."
     );
 

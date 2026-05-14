@@ -25,31 +25,30 @@
 -- signed_events` / `DELETE FROM signed_events` strings appear in
 -- src/ outside doc comments.
 --
--- # NOT a cross-row hash chain
+-- # Cross-row hash chain (schema v34, #698 V-4 closeout)
 --
--- This table is row-level append-only ONLY. There is no `prev_hash`
--- column pointing to the previous row, and no monotonic `sequence`
--- column. Direct-SQL deletion of a single row leaves NO evidence in
--- `signed_events` itself — the remaining rows still hash-verify
--- individually, and a missing UUID cannot be distinguished from
--- "this event never happened."
+-- Rows carry two chain columns on top of the per-row signature:
 --
--- The load-bearing cross-row tamper-evident chain in `ai-memory`
--- lives in the JSONL audit log emitted by `src/audit.rs`
--- (`<audit_dir>/audit.log`), which carries (1) a cross-line
--- `prev_hash` chain, (2) a restart-stable monotonic sequence
--- counter (F2, v0.7.0 round-2), and (3) a best-effort append-only
--- OS hint. The two surfaces are complementary, not redundant:
--- `signed_events` answers "what did this signed link's bytes look
--- like at write time?"; `audit.rs` JSONL answers "was the substrate
--- tampered with between T0 and T1?".
+-- * `prev_hash BLOB` — SHA-256 (32 bytes) over the canonical-bytes
+--   encoding of the PRECEDING row, or 32 zero bytes for the first
+--   row. The encoding (`canonical_chain_bytes` in
+--   `src/signed_events.rs`) commits to every column that uniquely
+--   identifies the row's content. An UPDATE or DELETE of any prior
+--   row therefore propagates as a `prev_hash` mismatch at row N+1.
+-- * `sequence INTEGER` — monotonically-increasing rank starting at 1,
+--   pinned by a UNIQUE index. A tampered or duplicated `sequence`
+--   breaks the contiguity check.
 --
--- A future schema migration MAY introduce `prev_hash BLOB` and
--- `sequence INTEGER` here to mirror the JSONL chain at the SQL
--- surface (planned for the commercial AgenticMem layer). That
--- migration is intentionally out of scope for v0.7.0 — adding it
--- now would be a backward-incompatible change across the migrate
--- ladder for a property the JSONL chain already provides.
+-- The chain is the LOAD-BEARING tamper-evidence property in the SQL
+-- substrate. Per-row Ed25519 signatures (the existing `signature`
+-- column) remain as defense-in-depth.
+--
+-- The JSONL audit log emitted by `src/audit.rs` (`<audit_dir>/
+-- audit.log`) remains as the cross-host portable evidence format with
+-- its own (1) `prev_hash` chain, (2) restart-stable monotonic
+-- sequence (F2, v0.7.0 round-2), and (3) best-effort append-only OS
+-- hint. The SQL chain is the daemon-local property; the two are
+-- complementary.
 --
 -- # Columns
 --
@@ -94,7 +93,15 @@ CREATE TABLE IF NOT EXISTS signed_events (
     payload_hash BLOB NOT NULL,
     signature BLOB,
     attest_level TEXT NOT NULL DEFAULT 'unsigned',
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    -- v34 (v0.7.0 V-4 closeout, #698) — cross-row hash chain columns.
+    -- Nullable here because the migration ALTER cannot retroactively
+    -- enforce NOT NULL on pre-existing rows; backfill stamps them in
+    -- `migrate_v34_backfill_chain`, and `append_signed_event`
+    -- populates both on every new write. See doc block above + the
+    -- `signed_events::canonical_chain_bytes` helper for the encoding.
+    prev_hash BLOB,
+    sequence  INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_signed_events_agent
@@ -103,3 +110,5 @@ CREATE INDEX IF NOT EXISTS idx_signed_events_type
     ON signed_events(event_type);
 CREATE INDEX IF NOT EXISTS idx_signed_events_timestamp
     ON signed_events(timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signed_events_sequence
+    ON signed_events(sequence);

@@ -435,12 +435,20 @@ CREATE TABLE IF NOT EXISTS signed_events (
     payload_hash BYTEA NOT NULL,
     signature    BYTEA,
     attest_level TEXT NOT NULL DEFAULT 'unsigned',
-    timestamp    TIMESTAMPTZ NOT NULL
+    timestamp    TIMESTAMPTZ NOT NULL,
+    -- v33 (v0.7.0 V-4 closeout, #698) — cross-row hash chain columns
+    -- mirroring SQLite schema v34. Nullable so the connect-time ALTER
+    -- can land without rewriting pre-existing rows; backfill stamps
+    -- them in `PostgresStore::migrate_v33`, and the application-layer
+    -- `append_signed_event` populates both on every new write.
+    prev_hash    BYTEA,
+    sequence     BIGINT
 );
 
 CREATE INDEX IF NOT EXISTS idx_signed_events_agent     ON signed_events (agent_id);
 CREATE INDEX IF NOT EXISTS idx_signed_events_type      ON signed_events (event_type);
 CREATE INDEX IF NOT EXISTS idx_signed_events_timestamp ON signed_events (timestamp);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_signed_events_sequence ON signed_events (sequence);
 
 -- ─────────────────────────────────────────────────────────────────────
 -- subscription_events / subscription_dlq — A2A correlation IDs, ACK

@@ -270,6 +270,7 @@ fn write_notification(
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp: pending.timestamp.clone(),
+        ..crate::signed_events::SignedEvent::default()
     };
     if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
         // Best-effort — the notification memory itself is the

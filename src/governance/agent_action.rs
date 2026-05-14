@@ -494,6 +494,7 @@ fn emit_check_event(
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        ..crate::signed_events::SignedEvent::default()
     };
     append_signed_event(conn, &event).context("emit_check_event: append_signed_event")?;
     Ok(())
@@ -692,7 +693,10 @@ mod tests {
                  payload_hash BLOB NOT NULL,
                  signature BLOB,
                  attest_level TEXT NOT NULL DEFAULT 'unsigned',
-                 timestamp TEXT NOT NULL
+                 timestamp TEXT NOT NULL,
+                 -- v34 (V-4 closeout, #698) — cross-row chain columns.
+                 prev_hash BLOB,
+                 sequence INTEGER
              );",
         )
         .unwrap();

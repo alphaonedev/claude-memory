@@ -49,6 +49,7 @@ and read-action visibility. See §4.
 
 | Event class | Current logging status at `c359e89` | `signed_events` row shape | Known gaps | v0.8.0 issue |
 |---|---|---|---|---|
+| Cross-row chain integrity | **Chain-logged today** (v0.7.0 V-4 closeout, #698) — every row carries `prev_hash` + `sequence`; [`verify_chain`](../../src/signed_events.rs) walks every row and flags chain breaks | `prev_hash BLOB` = SHA-256 over [`canonical_chain_bytes`](../../src/signed_events.rs) of the preceding row (ZERO_HASH for first); `sequence INTEGER` monotonic from 1, pinned by UNIQUE index | DELETE row N is detected at row N+1's prev_hash check; raw row-pruning operators must accept the documented chain break | — |
 | Memory writes (`store` / `update` / `link` / `delete` / `archive` / `consolidate`) | **Chain-logged today** via `signed_events.append` (`src/signed_events.rs`) on every successful substrate write | `event_type = "memory.<verb>"`, `payload_hash` over canonical-JSON of the post-write row, `signature` (Ed25519 over `payload_hash`), `attest_level` ∈ {`unsigned`, `signed`} | none for the success leg | — |
 | Reflection writes | **Chain-logged today** with `peer_origin` for cross-peer paths (L2-2 commit `2aef248`) | `event_type = "reflection.write"`, payload binds `(source_ids, depth, peer_origin)` | none | — |
 | Governance refusals on agent-EXTERNAL surface (Bash / Write / Network / ProcessSpawn / Custom) via `check_agent_action` (audited path) | **Chain-logged today** synchronously, every call | `event_type = "governance.check"`, `payload_hash` over canonical `{action, decision}` JSON, `agent_id` carrier set | none | — |
@@ -64,31 +65,49 @@ and read-action visibility. See §4.
 
 ## 3. Reading the chain
 
-Three operator-facing surfaces.
+Four operator-facing surfaces.
 
-### 3.1 `ai-memory verify-reflection-chain`
+### 3.1 `ai-memory verify-signed-events-chain` (v0.7.0 V-4 closeout, #698)
 
-Walks the `signed_events` rows in monotonic-sequence order. For each
-row:
+Walks the SQL-side `signed_events` cross-row hash chain in
+sequence-ascending order. For each row:
 
-1. Verify the sequence number is strictly increasing.
-2. Recompute `payload_hash` over the canonical-bytes encoding for the
-   row's `event_type`. Compare against the stored value.
+1. Verify the `sequence` column is `prior + 1` (first row: `1`).
+2. Recompute `SHA-256(canonical_chain_bytes(row N-1))` and compare
+   against row N's stored `prev_hash`. Mismatch flags a chain break
+   at row N.
 3. When `signature` is present and `attest_level = signed`, verify
-   the Ed25519 signature against the operator-issued (or
-   per-agent-issued) verifying key.
+   the Ed25519 signature against the operator-issued (or per-agent-
+   issued) verifying key.
 
-Exits non-zero on the first failure. Prints the precise row id and
-failure mode.
+Exits 0 on chain GREEN; 1 on chain break. `--since <sequence>`
+skips already-verified rows. `--format json` emits a
+machine-parseable
+[`signed_events::ChainVerificationReport`](../../src/signed_events.rs)
+mirror.
 
-### 3.2 `ai-memory export-forensic-bundle` (L2-5, commit `340367f`)
+The chain is the LOAD-BEARING tamper-evidence property of the SQL
+substrate. Per-row Ed25519 signatures remain as defense-in-depth.
+Implementation: `src/signed_events.rs::verify_chain` +
+`src/cli/verify_signed_events.rs::run`. Schema columns:
+`signed_events.prev_hash BLOB` + `signed_events.sequence INTEGER`
+(SQLite v34 / Postgres v33).
+
+### 3.2 `ai-memory verify-reflection-chain`
+
+Walks `memory_links.reflects_on` edges backward from a target memory
+to depth 0, verifies each Ed25519 signature, and emits a structured
+chain-integrity report for the reflection ancestry. Distinct from
+§3.1 (this surface walks edges, not the audit table).
+
+### 3.3 `ai-memory export-forensic-bundle` (L2-5, commit `340367f`)
 
 Produces a self-contained tarball: every `signed_events` row + the
 in-scope reflection / link / approval rows + the operator pubkey + a
 manifest. Designed to be handed to an external auditor without giving
 them direct database access.
 
-### 3.3 Raw `signed_events` query example
+### 3.4 Raw `signed_events` query example
 
 ```sql
 -- Every refusal verdict, newest first, for a given agent
@@ -115,6 +134,15 @@ matching emit in `emit_check_event`.
 
 Comprehensive list, all shipped at HEAD `c359e89`:
 
+- **Cross-row chain integrity** (v0.7.0 V-4 closeout, #698) — every
+  `signed_events` row carries `prev_hash BLOB` (SHA-256 over the
+  canonical-bytes encoding of the preceding row, or 32 zero bytes
+  for the first row) and `sequence INTEGER` (monotonic from 1,
+  pinned by a UNIQUE index). The SQL chain is the daemon-local
+  tamper-evidence property; the JSONL chain in `src/audit.rs`
+  remains as the cross-host portable evidence format. Verify via
+  `ai-memory verify-signed-events-chain` (chain GREEN exit 0; chain
+  break exit 1). Schema bump: SQLite v33 → v34, Postgres v32 → v33.
 - **All memory writes** via `signed_events.append`
   (`src/signed_events.rs`) on the success leg of every
   `storage::insert*` and `create_link_signed` path.
@@ -130,6 +158,34 @@ Comprehensive list, all shipped at HEAD `c359e89`:
 - **Schema migrations** — every `signed_events` table migration
   itself emits a row at boot identifying the from-version /
   to-version transition.
+
+### 4.1 v0.7.0 V-4 closeout — SQL-side hash chain
+
+The v0.7.0 [Policy Engine](https://github.com/alphaonedev/ai-memory-mcp/issues/693)
+validation pass flagged V-4 (substrate-authority cross-row chain
+property) as YELLOW: the directive's `monotonic_sequence == prior +
+1` assertion required a `sequence` column on `signed_events` that
+didn't exist pre-v34. V-4 closeout (#698) adds the column pair
+inline:
+
+| Property | Surface | Verification |
+|---|---|---|
+| Row-level append-only | Rust API surface, no public mutators | `signed_events::tests::append_only_invariant_no_mutators_in_src` |
+| Per-row Ed25519 signature | `signed_events.signature` (filled when the writer holds a keypair) | `verify-reflection-chain` (for reflection rows); planned signature-leg in `verify-signed-events-chain --verify-signatures` |
+| **Cross-row hash chain** (this closeout) | `signed_events.prev_hash` + `signed_events.sequence` (v34/v33) | `verify-signed-events-chain` walks every row, reports chain GREEN or first break |
+| JSONL portable chain | `<audit_dir>/audit.log` line-by-line | `ai-memory audit verify` |
+
+Tamper modes detected by `verify-signed-events-chain`:
+
+- **Row DELETE**: row N+1's stored `prev_hash` no longer matches
+  the recomputed canonical-bytes digest of the (now-missing) row N.
+- **Row UPDATE** (any column in `canonical_chain_bytes` encoding):
+  row N+1's `prev_hash` mismatch propagates the change downstream.
+- **Sequence gap / duplicate / non-monotonic jump**: contiguity
+  check fails.
+
+The cross-row chain is the LOAD-BEARING tamper-evidence property;
+per-row Ed25519 signatures remain as defense-in-depth.
 
 ---
 

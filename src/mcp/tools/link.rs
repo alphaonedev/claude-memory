@@ -121,6 +121,7 @@ pub(super) fn handle_link(
                 signature: None,
                 attest_level: "unsigned".to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
+                ..crate::signed_events::SignedEvent::default()
             };
             if let Err(e) = crate::signed_events::append_signed_event(conn, &audit_event) {
                 tracing::warn!(

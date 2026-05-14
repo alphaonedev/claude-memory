@@ -343,6 +343,7 @@ async fn sync_push_via_store(app: AppState, _headers: HeaderMap, body: SyncPushB
                             signature: None,
                             attest_level: "unsigned".to_string(),
                             timestamp: chrono::Utc::now().to_rfc3339(),
+                            ..crate::signed_events::SignedEvent::default()
                         },
                     );
                     quota_refused += 1;
@@ -811,6 +812,7 @@ pub async fn sync_push(
                         signature: None,
                         attest_level: "unsigned".to_string(),
                         timestamp: chrono::Utc::now().to_rfc3339(),
+                        ..crate::signed_events::SignedEvent::default()
                     },
                 );
                 quota_refused += 1;

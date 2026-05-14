@@ -380,6 +380,7 @@ impl DeferredAuditSink for SqliteSignedEventsSink {
             signature: None,
             attest_level: "unsigned".to_string(),
             timestamp: event.timestamp.to_rfc3339(),
+            ..SignedEvent::default()
         };
         append_signed_event(conn, &signed)
             .context("SqliteSignedEventsSink: append governance.refusal row")?;

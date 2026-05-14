@@ -337,6 +337,7 @@ fn signed_events_payload_hash_matches_canonical_cbor() {
         signature: Some(sig_on_row.clone()),
         attest_level: "self_signed".to_string(),
         timestamp: Utc::now().to_rfc3339(),
+        ..SignedEvent::default()
     };
     signed_events::append_signed_event(&f.conn, &event).expect("append audit row");
 

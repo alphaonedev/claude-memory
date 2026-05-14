@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 33).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 34).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -203,7 +203,23 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       table → RENAME → recreate indexes + attest_level triggers.
 //       The v23 relation triggers are dropped and not recreated; the
 //       column-level CHECK supersedes them.
-const CURRENT_SCHEMA_VERSION: i64 = 33;
+// v34 = v0.7.0 V-4 closeout (#698) — add SQL-side cross-row hash
+//       chain to `signed_events`. Adds `prev_hash BLOB` + `sequence
+//       INTEGER` columns plus a UNIQUE index on sequence. Per-row
+//       Ed25519 signatures (the existing `signature` column) remain
+//       as defense-in-depth; the cross-row chain becomes the LOAD-
+//       BEARING tamper-evidence property in the SQL substrate.
+//       SQLite has no `ALTER TABLE ADD COLUMN IF NOT EXISTS`, so the
+//       ALTERs are emitted from Rust via column-existence probes;
+//       the SQL file (`0028_v07_signed_events_chain.sql`) holds the
+//       supporting UNIQUE INDEX. Backfill runs in
+//       `migrate_v34_backfill_chain` because the row-by-row
+//       prev_hash computation needs the application-layer
+//       canonical-bytes encoding (`signed_events::
+//       canonical_chain_bytes`). Idempotent — re-running on an
+//       already-backfilled DB is a no-op (probes detect the columns
+//       and the existence of populated sequence rows).
+const CURRENT_SCHEMA_VERSION: i64 = 34;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -317,6 +333,16 @@ const MIGRATION_V32_SQLITE: &str =
 // is `memory_links_new` only for the duration of the batch.
 const MIGRATION_V33_SQLITE: &str =
     include_str!("../../migrations/sqlite/0027_v07_memory_links_relation_check.sql");
+// v0.7.0 V-4 closeout (#698) — SQL-side cross-row hash chain on
+// `signed_events`. The ALTERs that add `prev_hash` + `sequence`
+// columns are emitted from Rust (SQLite has no `ADD COLUMN IF NOT
+// EXISTS`); this file just holds the supporting UNIQUE INDEX on
+// `sequence`. Backfill of prev_hash + sequence on pre-existing rows
+// runs in `migrate_v34_backfill_chain` because the per-row
+// prev_hash computation needs the application-layer canonical-bytes
+// encoding.
+const MIGRATION_V34_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0028_v07_signed_events_chain.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -999,6 +1025,57 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // they clean up offending rows then re-run the migration.
             conn.execute_batch(MIGRATION_V33_SQLITE)?;
         }
+        if version < 34 {
+            // v0.7.0 V-4 closeout (#698) — add `signed_events.prev_hash`
+            // + `signed_events.sequence` columns, plus the supporting
+            // UNIQUE INDEX. ALTERs are emitted from Rust (SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`); the column-existence probe
+            // keeps the step idempotent against a partially-stamped DB
+            // (fresh installs pick up the columns inline from the SQL
+            // file referenced by MIGRATION_V26_SQLITE which was updated
+            // in v34 to ship the columns in the CREATE TABLE).
+            //
+            // Gate the entire v34 step on the existence of the
+            // `signed_events` table. Some test fixtures stamp
+            // `schema_version` to a high value without ever creating
+            // the v26 substrate (they bootstrap from the SCHEMA
+            // constant which intentionally omits later-added tables
+            // like signed_events); in that scenario there's nothing
+            // to migrate, and we should skip rather than fail the
+            // ALTER. Real-deployment DBs that ran the v26 step
+            // always have the table.
+            let signed_events_exists: bool = conn
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'signed_events')",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if signed_events_exists {
+                let has_prev_hash = conn
+                    .prepare("SELECT prev_hash FROM signed_events LIMIT 0")
+                    .is_ok();
+                if !has_prev_hash {
+                    conn.execute("ALTER TABLE signed_events ADD COLUMN prev_hash BLOB", [])?;
+                }
+                let has_sequence = conn
+                    .prepare("SELECT sequence FROM signed_events LIMIT 0")
+                    .is_ok();
+                if !has_sequence {
+                    conn.execute("ALTER TABLE signed_events ADD COLUMN sequence INTEGER", [])?;
+                }
+                // Backfill prev_hash + sequence on pre-existing rows.
+                // Idempotent: skips rows whose sequence column is
+                // already populated. The UNIQUE INDEX in
+                // MIGRATION_V34_SQLITE is created AFTER the backfill
+                // so duplicate-NULL sequences (the pre-backfill
+                // state) don't trip the constraint at index creation
+                // time.
+                migrate_v34_backfill_chain(conn)?;
+                conn.execute_batch(MIGRATION_V34_SQLITE)?;
+            }
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -1018,6 +1095,133 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             Err(e)
         }
     }
+}
+
+/// v34 (V-4 closeout, #698) — backfill `prev_hash` + `sequence` on
+/// pre-existing `signed_events` rows.
+///
+/// Walks every row in `(rowid ASC)` order, assigns
+/// `sequence = 1, 2, 3, ...`, and computes `prev_hash` as the
+/// SHA-256 over the canonical-bytes encoding of the PRIOR row (or
+/// 32 zero bytes for the first row). Idempotent — rows that already
+/// have `sequence` set are skipped, so a re-run after a partial
+/// failure picks up where the previous run left off.
+///
+/// Called from `migrate` inside the v34 step's transaction. The
+/// UNIQUE INDEX on `sequence` (created in `MIGRATION_V34_SQLITE`)
+/// is added AFTER this function completes so the backfill itself
+/// doesn't trip the constraint while sequence is still being filled
+/// in. A future call to `migrate` on an already-backfilled DB hits
+/// the `if version < 34` arm only on a downgrade-then-replay path;
+/// in steady state the `version >= CURRENT_SCHEMA_VERSION` fast-path
+/// at the top of `migrate` skips the whole ladder.
+///
+/// # Errors
+///
+/// Returns the underlying `rusqlite` error if the SELECT or any
+/// UPDATE fails.
+pub fn migrate_v34_backfill_chain(conn: &Connection) -> Result<()> {
+    use crate::signed_events::{SignedEvent, ZERO_HASH, canonical_chain_bytes};
+    use sha2::{Digest, Sha256};
+
+    // Pull rows that still have NULL sequence, ordered by rowid so
+    // the backfill is deterministic across replays.
+    let mut stmt = conn.prepare(
+        "SELECT rowid, id, agent_id, event_type, payload_hash, signature, attest_level, \
+                timestamp \
+         FROM signed_events \
+         WHERE sequence IS NULL \
+         ORDER BY rowid ASC",
+    )?;
+    let pending: Vec<(i64, SignedEvent)> = stmt
+        .query_map([], |row| {
+            let rowid: i64 = row.get(0)?;
+            Ok((
+                rowid,
+                SignedEvent {
+                    id: row.get(1)?,
+                    agent_id: row.get(2)?,
+                    event_type: row.get(3)?,
+                    payload_hash: row.get(4)?,
+                    signature: row.get(5)?,
+                    attest_level: row.get(6)?,
+                    timestamp: row.get(7)?,
+                    prev_hash: Vec::new(),
+                    sequence: 0,
+                },
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    drop(stmt);
+
+    if pending.is_empty() {
+        return Ok(());
+    }
+
+    // Discover the starting sequence — we may be appending to a row
+    // set whose first half was backfilled in a prior run, or to a
+    // table where new writes from a pre-v34 binary already landed
+    // without sequence. SELECT the MAX(sequence) so far; default 0
+    // (so the first backfilled row gets sequence = 1).
+    let mut next_seq: i64 = conn.query_row(
+        "SELECT COALESCE(MAX(sequence), 0) FROM signed_events",
+        [],
+        |r| r.get(0),
+    )?;
+    // Recompute prev canonical hash from the row at MAX(sequence)
+    // (if any). For a totally-fresh backfill (next_seq == 0) the
+    // first prev_hash is ZERO_HASH.
+    let mut prev_hash: [u8; 32] = ZERO_HASH;
+    if next_seq > 0 {
+        let head: Option<SignedEvent> = conn
+            .query_row(
+                "SELECT id, agent_id, event_type, payload_hash, signature, attest_level, \
+                        timestamp, COALESCE(sequence, 0) \
+                 FROM signed_events \
+                 WHERE sequence = ?1",
+                params![next_seq],
+                |row| {
+                    Ok(SignedEvent {
+                        id: row.get(0)?,
+                        agent_id: row.get(1)?,
+                        event_type: row.get(2)?,
+                        payload_hash: row.get(3)?,
+                        signature: row.get(4)?,
+                        attest_level: row.get(5)?,
+                        timestamp: row.get(6)?,
+                        sequence: row.get(7)?,
+                        prev_hash: Vec::new(),
+                    })
+                },
+            )
+            .map(Some)
+            .or_else(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                other => Err(other),
+            })?;
+        if let Some(h) = head {
+            let canon = canonical_chain_bytes(&h);
+            let mut hasher = Sha256::new();
+            hasher.update(&canon);
+            prev_hash.copy_from_slice(&hasher.finalize());
+        }
+    }
+
+    // Stamp each pending row in order.
+    for (rowid, mut event) in pending {
+        next_seq += 1;
+        event.sequence = next_seq;
+        conn.execute(
+            "UPDATE signed_events SET prev_hash = ?1, sequence = ?2 WHERE rowid = ?3",
+            params![prev_hash.to_vec(), next_seq, rowid],
+        )?;
+        // Recompute prev_hash for the NEXT row.
+        let canon = canonical_chain_bytes(&event);
+        let mut hasher = Sha256::new();
+        hasher.update(&canon);
+        prev_hash.copy_from_slice(&hasher.finalize());
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------
@@ -1077,7 +1281,7 @@ mod tests {
         // without updating the docstring is a documented foot-gun.
         // We pin the relationship so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 33,
+            CURRENT_SCHEMA_VERSION, 34,
             "module docstring advertises 33; bump the docstring when this number changes"
         );
     }

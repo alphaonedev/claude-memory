@@ -228,6 +228,7 @@ pub(super) fn register_core(
         signature: signature_bytes.clone(),
         attest_level: attest.to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        ..SignedEvent::default()
     };
     let _ = append_signed_event(conn, &event); // best-effort; don't fail registration on audit err
 

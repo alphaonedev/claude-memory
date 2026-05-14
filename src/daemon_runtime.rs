@@ -71,6 +71,7 @@ use crate::cli::store::StoreArgs;
 use crate::cli::sync::{SyncArgs, SyncDaemonArgs};
 use crate::cli::update::UpdateArgs;
 use crate::cli::verify::VerifyChainArgs;
+use crate::cli::verify_signed_events::VerifySignedEventsChainArgs;
 use crate::cli::wrap::WrapArgs;
 use crate::config::{AppConfig, FeatureTier};
 use crate::embeddings::Embedder;
@@ -329,6 +330,13 @@ pub enum Command {
     /// Ed25519 signature, and emits a structured chain-integrity
     /// report. Exit 0 if fully verified; non-zero otherwise.
     VerifyReflectionChain(VerifyChainArgs),
+    /// v0.7.0 V-4 closeout (#698) — walk the SQL-side `signed_events`
+    /// cross-row hash chain (schema v34) and emit a structured
+    /// report. Distinct from `verify-reflection-chain` (which walks
+    /// reflects_on edges) and from `audit verify` (which walks the
+    /// JSONL audit log). Exit 0 if the chain holds; 1 on chain
+    /// break.
+    VerifySignedEventsChain(VerifySignedEventsChainArgs),
     /// v0.7.0 L2-5 (issue #670) — export a procurement-grade forensic
     /// evidence bundle (signed tarball) for a memory and its
     /// reflection chain. The OSS surface for the `AgenticMem Attest`
@@ -1117,6 +1125,17 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             match cli::verify::run(&db_path, &a, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        Command::VerifySignedEventsChain(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::verify_signed_events::run(&db_path, &a, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }
@@ -4138,6 +4157,28 @@ mod tests {
             env.db_path.to_str().unwrap(),
             "get",
             &id,
+        ])
+        .unwrap();
+        run(cli, &cfg).await.unwrap();
+    }
+
+    /// v0.7.0 V-4 closeout (#698) — dispatch coverage for the new
+    /// `verify-signed-events-chain` subcommand. We don't tamper here
+    /// (the lib-side test suite owns that property); the goal is to
+    /// exercise the dispatch arm so a `cargo llvm-cov` pass over the
+    /// daemon_runtime module sees it. On an empty DB the chain holds
+    /// vacuously and the subcommand exits 0, so `run()` returns
+    /// Ok(()).
+    #[tokio::test]
+    async fn test_run_dispatch_verify_signed_events_chain_command() {
+        let _g = no_config_env();
+        let env = TestEnv::fresh();
+        let cfg = AppConfig::default();
+        let cli = Cli::try_parse_from([
+            "ai-memory",
+            "--db",
+            env.db_path.to_str().unwrap(),
+            "verify-signed-events-chain",
         ])
         .unwrap();
         run(cli, &cfg).await.unwrap();

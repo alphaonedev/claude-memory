@@ -221,7 +221,12 @@ fn visibility_clause(start: usize, table_alias: &str) -> String {
 // `pub use storage as db;` shim in `src/lib.rs` preserves the
 // historical `crate::db::*` paths used elsewhere.
 pub(crate) mod connection;
-pub(crate) mod migrations;
+// `pub` (rather than `pub(crate)`) so the V-4 closeout
+// integration test suite (`tests/signed_events_chain_v34.rs`) can
+// invoke `migrate_v34_backfill_chain` directly to exercise the
+// idempotent-replay property without going through a full daemon
+// boot cycle.
+pub mod migrations;
 pub(crate) mod reflect;
 
 // Re-exports — every `pub` item that previously lived in `src/db.rs`
@@ -1930,6 +1935,7 @@ pub fn create_link_signed(
                     signature: signature.clone(),
                     attest_level: attest_level.to_string(),
                     timestamp: Utc::now().to_rfc3339(),
+                    ..crate::signed_events::SignedEvent::default()
                 };
                 if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
                     tracing::warn!(
@@ -2107,6 +2113,7 @@ pub fn create_link_inbound(conn: &Connection, link: &MemoryLink, attest_level: &
                     signature: link.signature.clone(),
                     attest_level: attest_level.to_string(),
                     timestamp: Utc::now().to_rfc3339(),
+                    ..crate::signed_events::SignedEvent::default()
                 };
                 if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
                     tracing::warn!(
@@ -3393,6 +3400,7 @@ pub fn invalidate_link(
                     signature: prior_signature,
                     attest_level: "unsigned".to_string(),
                     timestamp: Utc::now().to_rfc3339(),
+                    ..crate::signed_events::SignedEvent::default()
                 };
                 if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
                     tracing::warn!(
@@ -5965,6 +5973,7 @@ fn emit_pending_action_event(
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp,
+        ..crate::signed_events::SignedEvent::default()
     };
     if let Err(e) = crate::signed_events::append_signed_event(conn, &event) {
         tracing::warn!(

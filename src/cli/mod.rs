@@ -53,6 +53,7 @@ pub mod store;
 pub mod sync;
 pub mod update;
 pub mod verify;
+pub mod verify_signed_events;
 pub mod wrap;
 
 #[cfg(test)]

@@ -246,6 +246,7 @@ pub fn handle_skill_export(
         signature: None,
         attest_level: "unsigned".to_string(),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        ..SignedEvent::default()
     };
     let _ = append_signed_event(conn, &event);
 

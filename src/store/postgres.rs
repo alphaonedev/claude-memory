@@ -81,6 +81,14 @@ const MIGRATION_V31_REFLECTION_DEPTH: &str =
 const MIGRATION_V32_LINK_RELATION_CHECK: &str =
     include_str!("../../migrations/postgres/0014_v07_memory_links_relation_check.sql");
 
+/// v0.7.0 V-4 closeout (#698) — SQL-side cross-row hash chain on
+/// `signed_events`. Adds `prev_hash BYTEA` + `sequence BIGINT`
+/// columns plus a UNIQUE INDEX on `sequence`. Mirrors SQLite schema
+/// v34. Postgres supports `ADD COLUMN IF NOT EXISTS` so the DDL is a
+/// pure idempotent batch.
+const MIGRATION_V33_SIGNED_EVENTS_CHAIN: &str =
+    include_str!("../../migrations/postgres/0015_v07_signed_events_chain.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -132,7 +140,15 @@ const MIGRATION_V32_LINK_RELATION_CHECK: &str =
 //       full-table-rebuild dance. Idempotent via pg_constraint probe.
 //       Fresh installs inherit the constraint inline from
 //       `postgres_schema.sql`.
-const CURRENT_SCHEMA_VERSION: i32 = 32;
+// v33 = v0.7.0 V-4 closeout (#698) — SQL-side cross-row hash chain
+//       on `signed_events`. Adds `prev_hash BYTEA` + `sequence
+//       BIGINT` columns plus a UNIQUE INDEX. Mirrors SQLite schema
+//       v34. Per-row Ed25519 signatures remain as defense-in-depth;
+//       the cross-row chain becomes the LOAD-BEARING tamper-evidence
+//       property. Backfill runs application-side in `migrate_v33` so
+//       both backends share the canonical-bytes encoding from
+//       `signed_events::canonical_chain_bytes`.
+const CURRENT_SCHEMA_VERSION: i32 = 33;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -527,6 +543,9 @@ impl PostgresStore {
         if current_version < 32 {
             self.migrate_v32().await?;
         }
+        if current_version < 33 {
+            self.migrate_v33().await?;
+        }
 
         Ok(())
     }
@@ -686,6 +705,110 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v32 applied (memory_links.relation CHECK constraint)"
+        );
+        Ok(())
+    }
+
+    /// v33 — `signed_events.prev_hash` + `signed_events.sequence`
+    /// (v0.7.0 V-4 closeout, #698).
+    ///
+    /// Adds the cross-row hash chain columns + UNIQUE INDEX on
+    /// `sequence`, then backfills `prev_hash` and `sequence` on
+    /// pre-existing rows using the application-layer canonical-bytes
+    /// encoding from `signed_events::canonical_chain_bytes`.
+    /// Mirrors SQLite schema v34.
+    ///
+    /// Idempotent via `ADD COLUMN IF NOT EXISTS` (Postgres 14+) +
+    /// `WHERE sequence IS NULL` on the backfill loop. Re-running on
+    /// an already-backfilled DB is a no-op. Fresh installs inherit
+    /// the columns inline from `postgres_schema.sql`, so this step
+    /// only fires on pre-v33 Postgres deployments that already have
+    /// `signed_events` rows.
+    async fn migrate_v33(&self) -> StoreResult<()> {
+        use crate::signed_events::{ZERO_HASH, canonical_chain_bytes};
+        use sha2::{Digest, Sha256};
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v33 tx", e))?;
+
+        // Add columns + UNIQUE INDEX (idempotent).
+        sqlx::raw_sql(MIGRATION_V33_SIGNED_EVENTS_CHAIN)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v33 signed_events chain", e))?;
+
+        // Backfill prev_hash + sequence on rows that still have NULL
+        // sequence, ordered by the natural insertion order (the
+        // `ctid` row id is reliable here because we only do INSERTs
+        // on this table — no UPDATE has moved rows around). We
+        // stream rows server-side so the backfill scales even on
+        // large pre-existing audit tables.
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            Vec<u8>,
+            Option<Vec<u8>>,
+            String,
+            chrono::DateTime<chrono::Utc>,
+        )> = sqlx::query_as(
+            "SELECT id, agent_id, event_type, payload_hash, signature, attest_level, \
+                        timestamp \
+                 FROM signed_events \
+                 WHERE sequence IS NULL \
+                 ORDER BY ctid ASC",
+        )
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|e| to_store_err("v33 backfill: select pending", e))?;
+
+        if !rows.is_empty() {
+            let mut next_seq: i64 =
+                sqlx::query_scalar("SELECT COALESCE(MAX(sequence), 0) FROM signed_events")
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(|e| to_store_err("v33 backfill: read max sequence", e))?;
+
+            let mut prev_hash: [u8; 32] = ZERO_HASH;
+            for (id, agent_id, event_type, payload_hash, signature, attest_level, ts_dt) in rows {
+                next_seq += 1;
+                let event = crate::signed_events::SignedEvent {
+                    id: id.clone(),
+                    agent_id,
+                    event_type,
+                    payload_hash,
+                    signature,
+                    attest_level,
+                    timestamp: ts_dt.to_rfc3339(),
+                    prev_hash: Vec::new(),
+                    sequence: next_seq,
+                };
+                sqlx::query("UPDATE signed_events SET prev_hash = $1, sequence = $2 WHERE id = $3")
+                    .bind(prev_hash.to_vec())
+                    .bind(next_seq)
+                    .bind(&id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| to_store_err("v33 backfill: UPDATE row", e))?;
+                let canon = canonical_chain_bytes(&event);
+                let mut hasher = Sha256::new();
+                hasher.update(&canon);
+                prev_hash.copy_from_slice(&hasher.finalize());
+            }
+        }
+
+        record_schema_version(&mut tx, 33).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v33 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v33 applied (signed_events prev_hash + sequence chain)"
         );
         Ok(())
     }
@@ -3635,21 +3758,21 @@ impl PostgresStore {
         } else {
             "reflection.depth_exceeded"
         };
-        if let Err(e) = sqlx::query(
-            "INSERT INTO signed_events \
-                (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(&id)
-        .bind(agent_id)
-        .bind(event_type)
-        .bind(&payload_hash)
-        .bind(Option::<Vec<u8>>::None)
-        .bind("unsigned")
-        .bind(created_at_dt)
-        .execute(&self.pool)
-        .await
-        {
+        // v34 (#698 V-4 closeout) — compute the cross-row chain
+        // (prev_hash, sequence) and INSERT all in one transaction so
+        // the read MAX(sequence) → INSERT race is closed. The UNIQUE
+        // INDEX on `sequence` makes the worst case a constraint
+        // violation rather than a silent chain break.
+        let insert_row = PgSignedEventInsert {
+            id: &id,
+            agent_id,
+            event_type,
+            payload_hash: &payload_hash,
+            signature: None,
+            attest_level: "unsigned",
+            timestamp: created_at_dt,
+        };
+        if let Err(e) = pg_append_signed_event_with_chain(&self.pool, insert_row).await {
             tracing::warn!(
                 target: "signed_events",
                 agent_id, attempted, cap, namespace,
@@ -3657,6 +3780,116 @@ impl PostgresStore {
             );
         }
     }
+}
+
+/// Caller-supplied fields for [`pg_append_signed_event_with_chain`].
+/// Bundled in a struct rather than positional args so the helper
+/// doesn't trip `clippy::too_many_arguments`.
+struct PgSignedEventInsert<'a> {
+    id: &'a str,
+    agent_id: &'a str,
+    event_type: &'a str,
+    payload_hash: &'a [u8],
+    signature: Option<&'a [u8]>,
+    attest_level: &'a str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+}
+
+/// Postgres-side companion to
+/// [`crate::signed_events::append_signed_event`]. Computes the
+/// chain head (`MAX(sequence)` + canonical hash of that row) and
+/// INSERTs the new row inside a single transaction. The
+/// `SERIALIZABLE` isolation isn't required — the UNIQUE INDEX on
+/// `sequence` enforces correctness under concurrent writers — but
+/// we wrap in a transaction so the read+insert pair is atomic
+/// against rollback.
+///
+/// # Errors
+///
+/// Returns the underlying `sqlx::Error` wrapped in `StoreError` on
+/// failure.
+async fn pg_append_signed_event_with_chain(
+    pool: &PgPool,
+    row: PgSignedEventInsert<'_>,
+) -> Result<(), sqlx::Error> {
+    let PgSignedEventInsert {
+        id,
+        agent_id,
+        event_type,
+        payload_hash,
+        signature,
+        attest_level,
+        timestamp,
+    } = row;
+    use crate::signed_events::{ZERO_HASH, canonical_chain_bytes};
+    use sha2::{Digest, Sha256};
+
+    let mut tx = pool.begin().await?;
+
+    // Read the chain head.
+    let head: Option<(
+        String,
+        String,
+        String,
+        Vec<u8>,
+        Option<Vec<u8>>,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, agent_id, event_type, payload_hash, signature, attest_level, timestamp, \
+                sequence \
+         FROM signed_events \
+         ORDER BY COALESCE(sequence, 0) DESC, ctid DESC \
+         LIMIT 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    let (next_seq, prev_hash) = match head {
+        None => (1_i64, ZERO_HASH.to_vec()),
+        Some((h_id, h_agent, h_type, h_payload, h_sig, h_attest, h_ts, h_seq)) => {
+            let seq = h_seq.unwrap_or(0);
+            let event = crate::signed_events::SignedEvent {
+                id: h_id,
+                agent_id: h_agent,
+                event_type: h_type,
+                payload_hash: h_payload,
+                signature: h_sig,
+                attest_level: h_attest,
+                timestamp: h_ts.to_rfc3339(),
+                prev_hash: Vec::new(),
+                sequence: seq,
+            };
+            let canon = canonical_chain_bytes(&event);
+            let mut hasher = Sha256::new();
+            hasher.update(&canon);
+            let mut digest = [0u8; 32];
+            digest.copy_from_slice(&hasher.finalize());
+            (seq + 1, digest.to_vec())
+        }
+    };
+
+    sqlx::query(
+        "INSERT INTO signed_events \
+            (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp, \
+             prev_hash, sequence) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+    )
+    .bind(id)
+    .bind(agent_id)
+    .bind(event_type)
+    .bind(payload_hash)
+    .bind(signature.map(<[u8]>::to_vec))
+    .bind(attest_level)
+    .bind(timestamp)
+    .bind(&prev_hash)
+    .bind(next_seq)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(())
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -8383,11 +8616,12 @@ mod tests {
         // mirrors SQLite v29 (`memories.reflection_depth`, v0.7.0
         // Task 1/8 — recursive learning). v32 mirrors SQLite v33 — the
         // v0.7.1-fold (#687/#688) SQL-side CHECK constraint on
-        // `memory_links.relation`. A future bump on either side
-        // without the corresponding port re-trips this assertion before
-        // the migration runner gets a chance to write a partial schema
-        // to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 32);
+        // `memory_links.relation`. v33 mirrors SQLite v34 — V-4
+        // closeout (#698) signed_events cross-row hash chain. A
+        // future bump on either side without the corresponding port
+        // re-trips this assertion before the migration runner gets a
+        // chance to write a partial schema to disk.
+        assert_eq!(CURRENT_SCHEMA_VERSION, 33);
     }
 
     #[tokio::test]

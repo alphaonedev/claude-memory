@@ -179,7 +179,10 @@ mod tests {
                  payload_hash BLOB NOT NULL,
                  signature BLOB,
                  attest_level TEXT NOT NULL DEFAULT 'unsigned',
-                 timestamp TEXT NOT NULL
+                 timestamp TEXT NOT NULL,
+                 -- v34 (V-4 closeout, #698) — cross-row chain columns.
+                 prev_hash BLOB,
+                 sequence INTEGER
              );",
         )
         .unwrap();

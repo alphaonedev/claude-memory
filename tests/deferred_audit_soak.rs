@@ -17,17 +17,14 @@
 //!     60s). Invoked explicitly with `cargo test ... --
 //!     --include-ignored`.
 //!
-//! Architectural caveat:
-//!
-//! The `signed_events` table is documented (`src/signed_events.rs`
-//! module doc) as "row-level append-only" — it does NOT carry a
-//! `sequence` column today. The directive's "monotonic sequence ==
-//! prior + 1" check is therefore adapted to: rows order by
-//! `timestamp ASC, id ASC` (the stable order documented by
-//! `list_signed_events`), and the count equals submissions. A
-//! follow-up issue is filed in the verdict memo for adding a
-//! cross-row `prev_hash` / `sequence` column to `signed_events`
-//! (referenced in the existing module doc as a v0.7.x add-on).
+//! v34 closeout (#698): `signed_events` now carries `prev_hash` +
+//! `sequence` (the cross-row hash chain documented at
+//! `src/signed_events.rs:32-83`). This soak test asserts the chain
+//! holds end-to-end across concurrent drainer inserts via
+//! [`signed_events::verify_chain`] — the load-bearing monotonic-
+//! sequence + tamper-evident property the directive originally
+//! requested. The timestamp-ordering assertion is preserved as a
+//! defense-in-depth invariant.
 
 use ai_memory::governance::agent_action::{AgentAction, Decision};
 use ai_memory::governance::deferred_audit::{
@@ -215,6 +212,37 @@ async fn soak_run(
             );
         }
         prev = Some(ts.clone());
+    }
+
+    // v34 (#698 V-4 closeout): walk the cross-row hash chain and
+    // assert it holds end-to-end. This is the load-bearing
+    // monotonic-sequence + tamper-evidence property the V-4
+    // directive originally requested. The timestamp ordering above
+    // is preserved as defense-in-depth.
+    {
+        let conn = ai_memory::db::open(&db_path).expect("reopen for chain verify");
+        let report = ai_memory::signed_events::verify_chain(&conn, None).expect("verify_chain");
+        assert!(
+            report.chain_holds(),
+            "{label}: cross-row chain MUST hold end-to-end after {expected} concurrent inserts; \
+             report = {report:?}"
+        );
+        assert_eq!(
+            report.chain_break, None,
+            "{label}: no chain break expected; report = {report:?}"
+        );
+        // Every row the soak generated must show up under the chain
+        // walk (it doesn't help to have a clean chain if rows are
+        // missing).
+        assert!(
+            report.rows_checked >= expected,
+            "{label}: verify_chain saw {} rows but expected at least {expected}; report = {report:?}",
+            report.rows_checked,
+        );
+        eprintln!(
+            "{label}: chain GREEN | rows_checked={} chain_break=None",
+            report.rows_checked,
+        );
     }
 
     // Drainer-lag p99 proxy: the total observed wall-time from
