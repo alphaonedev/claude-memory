@@ -124,16 +124,48 @@ pub fn list(conn: &Connection) -> Result<Vec<Rule>> {
     Ok(out)
 }
 
-/// List only the rules of `kind` that are enabled. The dominant
-/// query shape called once per [`crate::governance::agent_action::check_agent_action`]
+/// List only the rules of `kind` that are enabled AND pass the L1-6
+/// load-time signature verification. The dominant query shape called
+/// once per [`crate::governance::agent_action::check_agent_action`]
 /// invocation; covered by `idx_governance_rules_kind_enabled`.
 ///
 /// Ordered by `id ASC` to make first-refusal-wins deterministic for
 /// audit reproduction.
 ///
+/// # L1-6 enforcement policy
+///
+/// Activation is driven by the OPERATOR PUBKEY presence — the
+/// substrate stays in pre-L1-6 mode until the operator places a
+/// pubkey on disk (or sets `AI_MEMORY_OPERATOR_PUBKEY`).
+///
+/// - Pubkey NOT resolved (cold start, fresh install, or test
+///   environment): every `enabled = 1` row passes through unchanged —
+///   this preserves the pre-L1-6 contract that
+///   `agent_action::check_agent_action` evaluated rules without any
+///   signature pre-check.
+/// - Pubkey resolved + row is `attest_level = 'operator_signed'` +
+///   signature verifies: rule is enforced.
+/// - Pubkey resolved + row is `attest_level = 'operator_signed'`
+///   but signature does NOT verify (tampered row, post-sign direct
+///   SQL mutation, wrong key): `tracing::error!` and SKIP. The
+///   daemon does NOT crash; a tampered rule must never bring down
+///   the substrate.
+/// - Pubkey resolved + row is `attest_level = 'unsigned'` (a
+///   freshly-seeded row that the operator has not yet signed):
+///   misconfiguration → `tracing::warn!` and SKIP. Enforced rules
+///   MUST be operator-signed once the operator has activated L1-6
+///   by placing the pubkey.
+///
+/// The activation cliff (place pubkey ⇒ require signatures) is the
+/// operator's switch. It avoids breaking the pre-L1-6 test fleet that
+/// inserts unsigned-enabled rules + asserts they fire, while
+/// guaranteeing the bypass-prevention property the moment the
+/// operator opts in.
+///
 /// # Errors
 ///
-/// Propagates SQLite errors.
+/// Propagates SQLite errors. Verification failures are NOT errors —
+/// they are logged and the rule is filtered out.
 pub fn list_enabled_by_kind(conn: &Connection, kind: &str) -> Result<Vec<Rule>> {
     let mut stmt = conn
         .prepare(
@@ -147,11 +179,107 @@ pub fn list_enabled_by_kind(conn: &Connection, kind: &str) -> Result<Vec<Rule>> 
     let rows = stmt
         .query_map(params![kind], row_to_rule)
         .context("rules_store::list_enabled_by_kind: query_map")?;
+    let operator_pubkey = resolve_operator_pubkey();
     let mut out = Vec::new();
     for r in rows {
-        out.push(r.context("rules_store::list_enabled_by_kind: row")?);
+        let rule = r.context("rules_store::list_enabled_by_kind: row")?;
+        if enforced_rule_passes(&rule, operator_pubkey.as_ref()) {
+            out.push(rule);
+        }
     }
     Ok(out)
+}
+
+/// L1-6 — decide whether `rule` (already filtered to `enabled = 1`
+/// by the SQL WHERE clause) should pass to the enforcement engine.
+/// See [`list_enabled_by_kind`] for the policy summary. Pulled out so
+/// the L1-6 integration tests can exercise the matrix
+/// (signed/tampered/unsigned-enabled/no-key) directly without driving
+/// SQLite.
+#[must_use]
+pub fn enforced_rule_passes(
+    rule: &Rule,
+    operator_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+) -> bool {
+    match (operator_pubkey, rule.attest_level.as_str()) {
+        (Some(pk), "operator_signed") => match verify_rule_signature(rule, pk) {
+            Ok(()) => true,
+            Err(_) => {
+                tracing::error!(
+                    rule_id = %rule.id,
+                    "L1-6: operator_signed rule failed signature verification — \
+                     skipping. Tampered row OR rule was directly modified after \
+                     signing (e.g. `UPDATE governance_rules SET enabled = 1`). \
+                     Re-sign with `ai-memory rules sign-seed` after audit."
+                );
+                false
+            }
+        },
+        (Some(_), _) => {
+            // Pubkey is available (operator has activated L1-6) but
+            // the rule is not operator_signed. It has `enabled = 1`
+            // (SQL filter); refuse to enforce unsigned-enabled rules
+            // as misconfiguration.
+            tracing::warn!(
+                rule_id = %rule.id,
+                attest_level = %rule.attest_level,
+                "L1-6: enabled rule is not operator_signed — skipping. Run \
+                 `ai-memory rules sign-seed` to commit the operator signature."
+            );
+            false
+        }
+        (None, _) => {
+            // No operator pubkey configured — substrate is in pre-L1-6
+            // mode. Every `enabled = 1` row passes through unchanged
+            // (preserves the pre-L1-6 contract that
+            // `check_agent_action` evaluated rules without any
+            // signature pre-check). The operator activates L1-6 by
+            // placing the pubkey at the default path or setting the
+            // env var.
+            true
+        }
+    }
+}
+
+/// Resolve the operator verifying key:
+///
+/// 1. `AI_MEMORY_OPERATOR_PUBKEY` env var (base64, URL-safe-no-pad or
+///    standard padded — same as the rest of the codebase).
+/// 2. `~/.config/ai-memory/operator.key.pub` file (base64, same
+///    flavors). Path resolution via `dirs::config_dir()`.
+///
+/// Returns `None` when neither source resolves a 32-byte verifying
+/// key. A failure to decode either source is silently treated as
+/// "no key" (the once-per-process diagnostic in
+/// [`log_missing_operator_pubkey_once`] surfaces the misconfig to the
+/// operator).
+fn resolve_operator_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::Engine;
+    let try_decode = |s: &str| -> Option<ed25519_dalek::VerifyingKey> {
+        let trimmed = s.trim();
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(trimmed)
+            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(trimmed))
+            .ok()?;
+        if bytes.len() != ed25519_dalek::PUBLIC_KEY_LENGTH {
+            return None;
+        }
+        let mut arr = [0u8; ed25519_dalek::PUBLIC_KEY_LENGTH];
+        arr.copy_from_slice(&bytes);
+        ed25519_dalek::VerifyingKey::from_bytes(&arr).ok()
+    };
+
+    if let Ok(v) = std::env::var("AI_MEMORY_OPERATOR_PUBKEY")
+        && !v.is_empty()
+        && let Some(pk) = try_decode(&v)
+    {
+        return Some(pk);
+    }
+
+    let base = dirs::config_dir()?;
+    let pub_path = base.join("ai-memory").join("operator.key.pub");
+    let contents = std::fs::read_to_string(&pub_path).ok()?;
+    try_decode(&contents)
 }
 
 /// Remove a rule by id. Returns `true` when a row was deleted,
@@ -610,5 +738,71 @@ mod tests {
         let mut rule = make_rule("R1", "bash", false);
         rule.signature = Some(vec![0u8; 8]); // not 64
         assert!(verify_rule_signature(&rule, &signing.verifying_key()).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // L1-6 — enforced_rule_passes
+    // -----------------------------------------------------------------
+
+    fn signed_rule(id: &str, enabled: bool, signing: &ed25519_dalek::SigningKey) -> Rule {
+        use ed25519_dalek::Signer;
+        let mut rule = make_rule(id, "bash", enabled);
+        rule.attest_level = "operator_signed".to_string();
+        let canonical = canonical_bytes_for_signing(&rule).unwrap();
+        let sig = signing.sign(&canonical);
+        rule.signature = Some(sig.to_bytes().to_vec());
+        rule
+    }
+
+    #[test]
+    fn enforced_rule_passes_when_no_pubkey_configured() {
+        // Pre-L1-6 compat: every enabled rule passes through when no
+        // operator pubkey is configured.
+        let rule = make_rule("R1", "bash", true);
+        assert!(enforced_rule_passes(&rule, None));
+        // Even a row marked operator_signed but without a real
+        // signature passes through when there is no key to verify
+        // against — the substrate is in pre-L1-6 mode.
+        let mut signed_ish = make_rule("R2", "bash", true);
+        signed_ish.attest_level = "operator_signed".to_string();
+        assert!(enforced_rule_passes(&signed_ish, None));
+    }
+
+    #[test]
+    fn enforced_rule_passes_signed_under_correct_key() {
+        let mut csprng = rand_core::OsRng;
+        let signing = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let pk = signing.verifying_key();
+        let rule = signed_rule("R1", false, &signing);
+        assert!(enforced_rule_passes(&rule, Some(&pk)));
+    }
+
+    #[test]
+    fn enforced_rule_passes_rejects_tampered_signed_row() {
+        let mut csprng = rand_core::OsRng;
+        let signing = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let pk = signing.verifying_key();
+        let mut rule = signed_rule("R1", false, &signing);
+        // Direct enabled-flip bypass attempt — sig no longer verifies.
+        rule.enabled = true;
+        assert!(!enforced_rule_passes(&rule, Some(&pk)));
+    }
+
+    #[test]
+    fn enforced_rule_passes_rejects_unsigned_with_pubkey_configured() {
+        let mut csprng = rand_core::OsRng;
+        let signing = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let pk = signing.verifying_key();
+        let rule = make_rule("R1", "bash", true); // attest_level = unsigned
+        assert!(!enforced_rule_passes(&rule, Some(&pk)));
+    }
+
+    #[test]
+    fn enforced_rule_passes_rejects_signed_under_wrong_key() {
+        let mut csprng = rand_core::OsRng;
+        let signing = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let other = ed25519_dalek::SigningKey::generate(&mut csprng);
+        let rule = signed_rule("R1", false, &signing);
+        assert!(!enforced_rule_passes(&rule, Some(&other.verifying_key())));
     }
 }
