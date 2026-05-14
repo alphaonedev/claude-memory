@@ -701,32 +701,105 @@ fn resolve_key_dir(override_dir: Option<&std::path::Path>) -> Result<PathBuf> {
     kp::default_key_dir()
 }
 
-/// Load the operator's signing key from `<key_dir>/operator.priv`.
+/// Load the operator's signing key from `key_dir`. Auto-detects which
+/// of the two operator-key naming conventions is in use:
 ///
-/// Refuses if the file is missing, if the mode bits are not 0600 on
-/// Unix, or if the file contents do not parse as a 32-byte Ed25519
-/// signing key. Returns the typed `SigningKey` ready to call
-/// `.sign()`.
+/// 1. `operator.priv` (raw 32-byte seed) + `operator.pub` (raw 32-byte
+///    verifying key) — the legacy dir-based layout the `add` / `enable`
+///    / `disable` / `remove` verbs originally targeted, loaded via
+///    [`kp::load`].
+/// 2. `operator.key` (raw 32-byte seed) + `operator.key.pub` (base64url
+///    no-pad encoded 32-byte verifying key) — the layout `rules keygen`
+///    writes (`~/.config/ai-memory/operator.key`) per the L1-6 spec.
 ///
-/// Used by the original `add` / `enable` / `disable` / `remove` verbs
-/// (dir-based key layout — `operator.priv` + `operator.pub`). The
-/// L1-6 `keygen` / `sign-seed` verbs use [`load_operator_signing_key`]
-/// instead, which takes the explicit private-seed file path
-/// (`~/.config/ai-memory/operator.key`) per the L1-6 spec.
+/// v0.7.0 G-PHASE-E-3 (#708) — before this fix, `rules keygen` wrote
+/// files under (2) but `rules enable --sign` only looked for (1), so
+/// the documented flow `keygen → enable` was broken end-to-end without
+/// any error message that hinted at the naming mismatch. Now both
+/// conventions are accepted; the error message when neither is found
+/// names both so the operator can pick the right one.
+///
+/// Refuses if no matching pair is present, if the private-half mode
+/// bits are not 0600 on Unix, or if the parsed bytes are not a valid
+/// 32-byte Ed25519 signing key. Returns the typed `SigningKey` ready
+/// to call `.sign()`.
 fn load_operator_signing_key_from_dir(
     key_dir: &std::path::Path,
 ) -> Result<ed25519_dalek::SigningKey> {
-    let kp = kp::load(OPERATOR_KEY_ID, key_dir).with_context(|| {
-        format!(
-            "governance.no_operator_key: operator.priv missing at {}",
-            key_dir.display()
-        )
-    })?;
-    kp.private.ok_or_else(|| {
-        anyhow::anyhow!(
-            "governance.no_operator_key: operator keypair has no private half (public-only load)"
-        )
-    })
+    // Layout 1 — `operator.priv` + `operator.pub` (the legacy dir
+    // layout). `kp::load` already handles mode-bit + length + curve
+    // checks. Empty-dir cases that lack any operator file land in the
+    // unified error path below.
+    let priv_legacy = key_dir.join("operator.priv");
+    let pub_legacy = key_dir.join("operator.pub");
+    if priv_legacy.exists() && pub_legacy.exists() {
+        let kp = kp::load(OPERATOR_KEY_ID, key_dir).with_context(|| {
+            format!(
+                "governance.no_operator_key: failed loading operator.priv/operator.pub at {}",
+                key_dir.display()
+            )
+        })?;
+        return kp.private.ok_or_else(|| {
+            anyhow::anyhow!(
+                "governance.no_operator_key: operator keypair has no private half (public-only load)"
+            )
+        });
+    }
+    // Layout 2 — `operator.key` (raw 32-byte seed) + `operator.key.pub`
+    // (base64url no-pad encoded 32-byte verifying key). This is what
+    // `rules keygen` writes; verify the public half decodes and matches
+    // the seed's derived verifying key before returning so a tampered
+    // .pub surfaces here, not on the next signature-verify call.
+    let priv_keygen = key_dir.join("operator.key");
+    let pub_keygen = key_dir.join("operator.key.pub");
+    if priv_keygen.exists() {
+        let signing = load_operator_signing_key(&priv_keygen).with_context(|| {
+            format!(
+                "governance.no_operator_key: failed loading {}",
+                priv_keygen.display()
+            )
+        })?;
+        if pub_keygen.exists() {
+            use base64::Engine;
+            let encoded = std::fs::read_to_string(&pub_keygen).with_context(|| {
+                format!("governance.no_operator_key: read {}", pub_keygen.display())
+            })?;
+            let trimmed = encoded.trim();
+            let pub_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(trimmed)
+                .with_context(|| {
+                    format!(
+                        "governance.no_operator_key: decode base64url public key at {}",
+                        pub_keygen.display()
+                    )
+                })?;
+            if pub_bytes.len() != ED25519_PUBLIC_LEN {
+                bail!(
+                    "governance.no_operator_key: public key {} decoded to {} bytes (expected {ED25519_PUBLIC_LEN})",
+                    pub_keygen.display(),
+                    pub_bytes.len(),
+                );
+            }
+            if signing.verifying_key().to_bytes().as_slice() != pub_bytes.as_slice() {
+                bail!(
+                    "governance.no_operator_key: private key {} does not match public key {}",
+                    priv_keygen.display(),
+                    pub_keygen.display(),
+                );
+            }
+        }
+        return Ok(signing);
+    }
+    // Neither layout present — name both so the operator picks the
+    // right one to materialise.
+    bail!(
+        "governance.no_operator_key: no operator key found at {dir}. \
+         Expected either `operator.priv` + `operator.pub` (raw 32-byte pair, \
+         as produced by per-agent `keypair` generation) OR \
+         `operator.key` + `operator.key.pub` (raw 32-byte seed + base64url \
+         verifier, as produced by `ai-memory rules keygen`)",
+        dir = key_dir.display(),
+    )
 }
 
 /// Resolve the caller's agent_id for `created_by` provenance. Uses
