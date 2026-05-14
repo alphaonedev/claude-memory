@@ -858,7 +858,102 @@ If any of these commitments are ever broken, OSS users have the right to fork th
 
 ---
 
-## 16. Net
+## 16. v0.8.0 Policy Engine 100% Audit Trail Closeout
+
+Closes the remaining ~5% gap between v0.7.0 Option B (issues
+[#693](https://github.com/alphaonedev/ai-memory-mcp/issues/693) +
+[#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691) +
+[#694](https://github.com/alphaonedev/ai-memory-mcp/issues/694) +
+[#695](https://github.com/alphaonedev/ai-memory-mcp/issues/695) +
+[#696](https://github.com/alphaonedev/ai-memory-mcp/issues/696)) and
+the full property documented by the operator directive of 2026-05-14:
+
+> "Every tool call passes through a policy engine; the engine logs
+> every refusal cryptographically; severity-classified rules can
+> escalate to human."
+
+Tracking: [#697](https://github.com/alphaonedev/ai-memory-mcp/issues/697)
+(epic) with 8 sub-tasks (V08-PE-1 through V08-PE-8). Full architectural
+detail at [`docs/policy-engine.md`](docs/policy-engine.md) and audit
+coverage matrix at
+[`docs/security/audit-trail-coverage.md`](docs/security/audit-trail-coverage.md).
+
+### Sub-task summary
+
+- **V08-PE-1: Mandatory-hook profile** — `--enforce` for
+  procurement-tier deployments. The daemon refuses to serve when the
+  Claude Code PreToolUse hook is not installed. Closes the
+  out-of-band-actions gap by raising the cost of "I forgot to install
+  the hook" from silent permissiveness to refuse-to-start.
+- **V08-PE-2: Read-action gating** — `AgentAction::Read` variant +
+  wire-point coverage across recall / search / list / get /
+  session_boot. Today the K9 `Permissions::evaluate` pipeline gates
+  the substrate-INTERNAL read path (memory-scoped); V08-PE-2 adds the
+  top-level engine surface so reads land in `signed_events` alongside
+  writes.
+- **V08-PE-3: Subprocess-chain visibility** — eBPF on Linux, dtrace
+  on macOS. Surfaces the fork+exec chain underneath a permitted Bash
+  invocation so a `bash -c "evil_thing"` whose child then spawns an
+  unrelated process is visible to the engine and chain-logged.
+- **V08-PE-4: Persistent audit queue** — durable across daemon
+  restart. Closes the hard-crash gap in PE-3's process-local
+  deferred queue ([#696](https://github.com/alphaonedev/ai-memory-mcp/issues/696)).
+  Design candidate: on-disk WAL-style queue with periodic
+  fsync + drain-on-recovery at boot.
+- **V08-PE-5: Severity-based human escalation** — adds
+  `Decision::Escalate { rule_id, prompt }`. Pairs with the L1-8
+  Approval-API surface (already shipped): an Escalate verdict emits
+  a `pending_action`, the operator dashboard surfaces it, the
+  operator's allow/deny decision joins the audit chain. Closes the
+  "rules can escalate to human" half of the operator directive.
+- **V08-PE-6: TPM-bound binary integrity** — daemon attests the
+  shipping binary against a signed manifest at boot. Closes the
+  last partial mitigation for out-of-band actions: a forked binary
+  that no-ops the hook fails attestation and the operator's TPM
+  refuses to release the rule-signing key.
+- **V08-PE-7: Refuse-by-default profile** — procurement-tier rule
+  set that ships `enabled = 1, attest_level = operator_signed` out
+  of the box for a vendored operator key (with an opt-out path for
+  fresh self-hosted operators who want the default-permissive
+  cold-start contract).
+- **V08-PE-8: Audit-trail completeness verifier** — `ai-memory
+  verify-audit-trail`. Walks the `signed_events` chain end to end:
+  monotonic sequence check + Ed25519 signature check per row +
+  cross-reference against the expected event surface (memories,
+  links, approvals, migrations). Closes the verification loop the
+  v0.7.0 ship cannot mechanically perform today.
+
+### Effort
+
+22-28 sessions · 3-4 weeks wall-clock · MEDIUM-HIGH risk. At the v0.7.0
+cadence (4 production releases in 14 days through v0.6.4 + v0.7.0),
+22-28 sessions sit inside the Q4 2026 v0.8.0 window without
+displacing any prior commitment from §7.4 (Distributed Coordination
+Substrate). The audit-trail closeout is **additive** to the v0.8.0
+scope — it does not replace Pillar 1 / Pillar 2 / Pillar 2.5 / Pillar 3
+or the strategic adjacencies (§7.4.A-F).
+
+### Cutline discipline if slipping
+
+- **Keep (cutline-protected):** V08-PE-1 mandatory-hook profile,
+  V08-PE-5 severity-based escalation, V08-PE-8 completeness verifier
+  — these are the three sub-tasks that close the operator's stated
+  property literally.
+- **Defer to v0.8.1 if substrate slips:** V08-PE-3 subprocess-chain
+  visibility (eBPF / dtrace work has platform-specific risk).
+- **Defer to v0.9 if slippage severe:** V08-PE-6 TPM-bound integrity
+  (depends on TPM toolchain maturity in the deployment fleet);
+  V08-PE-7 refuse-by-default profile (operator-side rollout
+  exercise).
+
+The three cutline-protected sub-tasks together close ~90% of the
+remaining 5% gap. V08-PE-2 read-action gating folds in if cycle
+budget allows — it widens visibility but does not close a
+distinct property the operator directive named.
+
+---
+
+## 17. Net
 
 ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms. v0.7.0 grand-slam ship state (as of `feat/v0.7.0-layer-1` HEAD, L1-7 / L1-5 landed): schema **v30** (sqlite ladder per §4.1), **52 MCP tools** total (including 5 Agent Skills tools from L1-5, not 6 — the 6th `_promote_from_reflection` is L2-6 / v0.8.0), and **25 hook lifecycle events** (see §4.7 grand-slam block for the ladder).
 
