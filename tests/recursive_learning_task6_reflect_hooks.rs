@@ -804,6 +804,7 @@ fn canonical_cbor_reflection_depth_exceeded_is_deterministic() {
         &["src-1".to_string(), "src-2".to_string()],
         "title",
         "2026-01-01T00:00:00Z",
+        None,
     )
     .expect("encode");
     let b = canonical_cbor_reflection_depth_exceeded(
@@ -814,6 +815,7 @@ fn canonical_cbor_reflection_depth_exceeded_is_deterministic() {
         &["src-1".to_string(), "src-2".to_string()],
         "title",
         "2026-01-01T00:00:00Z",
+        None,
     )
     .expect("encode");
     // Identical input -> identical CBOR bytes (canonical encoding).
