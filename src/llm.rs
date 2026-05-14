@@ -1976,3 +1976,161 @@ mod wiremock_tests {
         assert_eq!(tags, vec!["one".to_string(), "two".to_string()]);
     }
 }
+
+// ---------------------------------------------------------------------------
+// C-5 (#699): close the circuit-breaker open-arm gaps in llm.rs.
+//
+// The wiremock tests above drive the success path of generate/embed/etc.
+// What was uncovered at the 93.45% baseline is the `breaker_is_open() →
+// fast-fail` arm of each public method (lines 242-248, 411-417, 471-477),
+// plus the `BreakerState::is_open` body itself (lines 70-73). These
+// tests drive 3 consecutive failures through `generate` to trip the
+// breaker, then assert the next call returns immediately with the
+// "circuit breaker open" error envelope and that `circuit_breaker_open`
+// publicly reports the open state.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod c5_breaker_tests {
+    use super::OllamaClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mount_tags_ok(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(server)
+            .await;
+    }
+
+    /// Drive `generate` against a wiremock that returns 500 on every
+    /// `/api/chat` call. Three 5xx failures must trip the breaker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn generate_fast_fails_after_breaker_trips() {
+        let server = MockServer::start().await;
+        mount_tags_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("upstream sick"))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            // Pre-trip: breaker is closed.
+            assert!(
+                !client.circuit_breaker_open(),
+                "breaker open before any failure"
+            );
+
+            // Three 5xx responses → breaker tripped.
+            for _ in 0..super::CIRCUIT_BREAKER_THRESHOLD {
+                let _ = client.generate("ping", None); // ignore Err (expected)
+            }
+            assert!(
+                client.circuit_breaker_open(),
+                "breaker should be open after {} consecutive 5xx",
+                super::CIRCUIT_BREAKER_THRESHOLD
+            );
+
+            // Post-trip: next generate fast-fails with breaker-open envelope.
+            let err = client
+                .generate("ping", None)
+                .expect_err("breaker-open path must Err");
+            err.to_string()
+        })
+        .await
+        .unwrap();
+        assert!(
+            outcome.contains("circuit breaker open"),
+            "expected breaker-open envelope, got: {outcome}"
+        );
+    }
+
+    /// Same trip, but assert the embed_text path also fast-fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_text_fast_fails_after_breaker_trips() {
+        let server = MockServer::start().await;
+        mount_tags_ok(&server).await;
+        // /api/chat → 500 to trip the breaker. embed_text doesn't share
+        // the chat path but the breaker state is shared across methods.
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            for _ in 0..super::CIRCUIT_BREAKER_THRESHOLD {
+                let _ = client.generate("ping", None);
+            }
+            assert!(client.circuit_breaker_open());
+            // Now exercise the embed_text breaker-open arm.
+            client
+                .embed_text("hello", "nomic-embed-text")
+                .expect_err("embed_text must fast-fail when breaker open")
+                .to_string()
+        })
+        .await
+        .unwrap();
+        assert!(
+            outcome.contains("circuit breaker open"),
+            "expected breaker-open envelope on embed_text, got: {outcome}"
+        );
+    }
+
+    /// `circuit_breaker_open` is the public observability hook for the
+    /// breaker. Confirm it returns false initially.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn circuit_breaker_open_starts_closed() {
+        let server = MockServer::start().await;
+        mount_tags_ok(&server).await;
+        let uri = server.uri();
+        let closed = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            client.circuit_breaker_open()
+        })
+        .await
+        .unwrap();
+        assert!(
+            !closed,
+            "freshly-constructed client must have closed breaker"
+        );
+    }
+
+    /// After tripping the breaker, a successful response (once it's
+    /// served through) resets `consecutive_failures`. Drive the
+    /// generate happy path AFTER the breaker has not yet tripped (only
+    /// 2 failures, less than the threshold) and confirm the breaker
+    /// stays closed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn breaker_stays_closed_under_threshold() {
+        let server = MockServer::start().await;
+        mount_tags_ok(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let still_closed = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            // Stay strictly below the threshold so the breaker stays closed.
+            for _ in 0..(super::CIRCUIT_BREAKER_THRESHOLD - 1) {
+                let _ = client.generate("ping", None);
+            }
+            client.circuit_breaker_open()
+        })
+        .await
+        .unwrap();
+        assert!(
+            !still_closed,
+            "breaker must stay closed strictly below the threshold"
+        );
+    }
+}

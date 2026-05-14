@@ -1295,3 +1295,239 @@ fn load_from_fallback_succeeds_when_files_present() {
     assert!(tok.ends_with("tokenizer.json"));
     assert!(w.ends_with("model.safetensors"));
 }
+
+// ---------------------------------------------------------------------------
+// C-5 (#699): Cover the Ollama-variant `Embedder` constructor + `embed*` +
+// `dim` / `model_description` paths using a wiremock-backed real
+// `OllamaClient`. This closes the lib-tier `Ollama { .. }` arms across
+// `embed()`, `dim()`, `model_description()`, and `embed_with_status()` that
+// were the bulk of the 91.39% baseline gap on `embeddings.rs`. Hermetic —
+// no live Ollama daemon required.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod c5_ollama_variant_tests {
+    use super::*;
+    use crate::llm::OllamaClient;
+    use serde_json::json;
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Stand up an in-process `OllamaClient` against a wiremock instance
+    /// pre-configured with the minimum routes required to construct +
+    /// embed. Returns the `Arc<OllamaClient>` plus the server (keep the
+    /// server alive in the caller's scope).
+    async fn ollama_with_embed_response(embedding_dim: usize) -> (Arc<OllamaClient>, MockServer) {
+        let server = MockServer::start().await;
+        // /api/tags — required so `OllamaClient::new_with_url` doesn't
+        // fail the construct-time health check.
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        // /api/pull — for ensure_embed_model; we let it succeed.
+        Mock::given(method("POST"))
+            .and(path("/api/pull"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(""))
+            .mount(&server)
+            .await;
+        // /api/embed — the dispatch target for `client.embed_text(...)`.
+        let vec_of_floats: Vec<f32> = (0..embedding_dim).map(|i| (i as f32) * 0.001).collect();
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "embeddings": [vec_of_floats],
+            })))
+            .mount(&server)
+            .await;
+
+        let uri = server.uri();
+        let client = tokio::task::spawn_blocking(move || {
+            OllamaClient::new_with_url(&uri, "test-model").expect("ollama client builds")
+        })
+        .await
+        .expect("spawn blocking completes");
+        (Arc::new(client), server)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_new_ollama_constructs_with_expected_model_name() {
+        // Lines 221-226: `new_ollama` constructor path.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        assert!(matches!(embedder, Embedder::Ollama { .. }));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_for_model_nomic_with_client_succeeds() {
+        // Lines 238-247 (Ok arm) + lines 243-246 of `for_model`:
+        // `ensure_embed_model` is invoked and the Ollama variant
+        // returned.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = tokio::task::spawn_blocking(move || {
+            Embedder::for_model(EmbeddingModel::NomicEmbedV15, Some(client))
+                .expect("for_model NomicEmbedV15 with ollama client")
+        })
+        .await
+        .unwrap();
+        assert!(matches!(embedder, Embedder::Ollama { .. }));
+        assert_eq!(embedder.dim(), NOMIC_DIM); // covers line 256
+        let desc = embedder.model_description();
+        assert!(desc.contains("nomic")); // covers line 264
+        assert!(desc.contains("768"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embedder_ollama_embed_returns_vector_from_wiremock() {
+        // Line 281: dispatch arm of `Embedder::embed` for the Ollama
+        // variant. We hop into `spawn_blocking` because OllamaClient's
+        // HTTP calls are reqwest::blocking under the hood.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let v = tokio::task::spawn_blocking(move || embedder.embed("hello"))
+            .await
+            .unwrap()
+            .expect("embed_text via wiremock");
+        assert_eq!(v.len(), NOMIC_DIM);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_skipped_on_empty_content() {
+        // Lines 299-302: empty content → Skipped("empty content").
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let (vec_opt, status) = embedder.embed_with_status("");
+        assert!(vec_opt.is_none());
+        assert!(matches!(status, EmbedStatus::Skipped(_)));
+        assert_eq!(status.as_str(), "skipped");
+        assert!(status.reason().contains("empty"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_skipped_on_oversized_content() {
+        // Lines 303-310: content > EMBED_MAX_BYTES → Skipped(reason).
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let big = "a".repeat(EMBED_MAX_BYTES + 1);
+        let (vec_opt, status) = embedder.embed_with_status(&big);
+        assert!(vec_opt.is_none());
+        match status {
+            EmbedStatus::Skipped(r) => {
+                assert!(r.contains("exceeds embed cap"), "got: {r}");
+            }
+            other => panic!("expected Skipped, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_indexed_on_happy_path() {
+        // Lines 311-316: Ok(v) where v is non-empty → Indexed.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let (vec_opt, status) =
+            tokio::task::spawn_blocking(move || embedder.embed_with_status("hello world"))
+                .await
+                .unwrap();
+        assert!(vec_opt.is_some());
+        assert_eq!(status, EmbedStatus::Indexed);
+        assert!(!status.is_degraded());
+        assert_eq!(vec_opt.unwrap().len(), NOMIC_DIM);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_with_status_failed_when_embedder_errors() {
+        // Lines 317-321: Err arm — wiremock returns a 500 so the
+        // OllamaClient's embed_text returns Err.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/tags"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"models": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/embed"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("server error"))
+            .mount(&server)
+            .await;
+        let uri = server.uri();
+        let embedder = tokio::task::spawn_blocking(move || {
+            let client = OllamaClient::new_with_url(&uri, "test-model").unwrap();
+            Embedder::new_ollama(Arc::new(client))
+        })
+        .await
+        .unwrap();
+
+        let (vec_opt, status) =
+            tokio::task::spawn_blocking(move || embedder.embed_with_status("hello"))
+                .await
+                .unwrap();
+        assert!(vec_opt.is_none());
+        match status {
+            EmbedStatus::Failed(reason) => {
+                assert!(!reason.is_empty());
+            }
+            other => panic!("expected Failed(_), got {other:?}"),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_batch_via_inherent_impl_returns_one_vec_per_input() {
+        // Lines 370-372: `Embedder::embed_batch` inherent method.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let vecs =
+            tokio::task::spawn_blocking(move || embedder.embed_batch(&["one", "two", "three"]))
+                .await
+                .unwrap()
+                .expect("batch embed succeeds");
+        assert_eq!(vecs.len(), 3);
+        for v in &vecs {
+            assert_eq!(v.len(), NOMIC_DIM);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn embed_trait_for_embedder_delegates_to_inherent_impl() {
+        // Lines 452-458: `impl Embed for Embedder { embed / embed_batch }`.
+        let (client, _server) = ollama_with_embed_response(NOMIC_DIM).await;
+        let embedder = Embedder::new_ollama(client);
+        let embedder_box: Box<dyn Embed> = Box::new(embedder);
+        let single = tokio::task::spawn_blocking({
+            let e = embedder_box;
+            move || {
+                let single = e.embed("alpha").expect("single embed");
+                let batch = e.embed_batch(&["beta", "gamma"]).expect("batch embed");
+                (single, batch)
+            }
+        })
+        .await
+        .unwrap();
+        let (single, batch) = single;
+        assert_eq!(single.len(), NOMIC_DIM);
+        assert_eq!(batch.len(), 2);
+        for v in &batch {
+            assert_eq!(v.len(), NOMIC_DIM);
+        }
+    }
+
+    #[test]
+    fn embed_trait_default_batch_default_impl_runs_for_external_impls() {
+        // Lines 144-146: trait default `Embed::embed_batch`. To trigger
+        // the default body we need an `Embed` implementor that does NOT
+        // override `embed_batch`. We define one inline.
+        struct ConstEmbedder;
+        impl Embed for ConstEmbedder {
+            fn embed(&self, _text: &str) -> Result<Vec<f32>> {
+                Ok(vec![1.0_f32, 2.0_f32, 3.0_f32])
+            }
+            // intentionally NOT overriding embed_batch → default impl runs
+        }
+        let e = ConstEmbedder;
+        let batch = e.embed_batch(&["a", "b"]).expect("default batch path");
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch[0], vec![1.0_f32, 2.0_f32, 3.0_f32]);
+        assert_eq!(batch[1], vec![1.0_f32, 2.0_f32, 3.0_f32]);
+    }
+}
