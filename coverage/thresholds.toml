@@ -189,7 +189,7 @@ min_line_coverage = 88.0
 "mcp/tools/expand_query.rs" = 99   # tier D, measured 100.00 (raised materially in L0.7-6)
 
 # ----- Tier E (target >=90%, wire/IO — documented exceptions per coverage/policy.md) -----
-"daemon_runtime.rs"        = 86    # tier E, measured 86.70 — EXCEPTION: bootstrap/sync-net (see coverage/policy.md)
+"daemon_runtime.rs"        = 86    # tier E, measured 86.30 post-yellow-close (#699) — EXCEPTION: bootstrap/sync-net (see coverage/policy.md)
 "embeddings.rs"            = 95    # tier E, measured 96.16 post-C5
 "handlers/mod.rs"          = 98    # tier E, measured 98.67
 "handlers/transport.rs"    = 95    # tier E, measured 95.54 — PARTIAL EXCEPTION: listener integration (see coverage/policy.md)

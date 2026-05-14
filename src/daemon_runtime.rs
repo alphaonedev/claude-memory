@@ -4430,4 +4430,111 @@ mod tests {
         .await;
         assert!(res.is_err(), "expected bind error, got: {res:?}");
     }
+
+    // ----- v0.7.0 coverage close: dispatch arms for identity/rules/governance ---
+    //
+    // The grand-slam integration cascade lifted coverage uniformly except
+    // for a handful of CLI dispatch arms in `run()` that no run-dispatch
+    // test had ever entered: `Command::Identity`, `Command::Rules`,
+    // `Command::Governance`. Each arm is just the stdout/stderr-lock
+    // boilerplate + a one-line hand-off to the relevant `cli::*::run`
+    // handler — those handlers already have their own unit tests under
+    // `src/cli/identity.rs`, `src/cli/rules.rs`,
+    // `src/cli/governance_migrate.rs`. The missing piece was the dispatch
+    // boilerplate itself. These three tests exercise the read-only
+    // (mutation-free, hermetic) verb of each arm so coverage closes
+    // without adding any production semantics.
+
+    #[tokio::test]
+    async fn test_run_dispatch_identity_list_command() {
+        // Covers daemon_runtime::run dispatch arm `Command::Identity(a)`:
+        // exercises the stdout/stderr lock + `cli::identity::run` hand-off.
+        // `identity list` is read-only and DB-free; passing an empty
+        // tempdir as --key-dir keeps the test hermetic (no HOME deps).
+        let _g = no_config_env();
+        let env = TestEnv::fresh();
+        let key_dir = env.db_path.parent().unwrap().join("keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let cfg = AppConfig::default();
+        let cli = Cli::try_parse_from([
+            "ai-memory",
+            "--db",
+            env.db_path.to_str().unwrap(),
+            "identity",
+            "--key-dir",
+            key_dir.to_str().unwrap(),
+            "list",
+        ])
+        .unwrap();
+        run(cli, &cfg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_dispatch_rules_list_command() {
+        // Covers daemon_runtime::run dispatch arm `Command::Rules(a)`:
+        // exercises the stdout/stderr lock + `cli::rules::run` hand-off.
+        // `rules list` is the documented read-only verb (no operator key
+        // required per the module-level docstring of src/cli/rules.rs).
+        // We open the DB once via `db::open` to materialize the full
+        // schema (including the `governance_rules` table that migration
+        // 0024 creates + seeds), then let the run() dispatch open its
+        // own raw rusqlite connection against the same file.
+        let _g = no_config_env();
+        let env = TestEnv::fresh();
+        drop(crate::db::open(&env.db_path).expect("db::open"));
+        let key_dir = env.db_path.parent().unwrap().join("keys");
+        std::fs::create_dir_all(&key_dir).unwrap();
+        let cfg = AppConfig::default();
+        let cli = Cli::try_parse_from([
+            "ai-memory",
+            "--db",
+            env.db_path.to_str().unwrap(),
+            "rules",
+            "--key-dir",
+            key_dir.to_str().unwrap(),
+            "list",
+        ])
+        .unwrap();
+        run(cli, &cfg).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_run_dispatch_governance_migrate_command() {
+        // Covers daemon_runtime::run dispatch arm `Command::Governance(a)`
+        // (including the inner `GovernanceAction::MigrateToPermissions`
+        // match arm): exercises the stdout/stderr lock +
+        // `cli::governance_migrate::run` hand-off. Dry-run is the
+        // documented default, so we omit --config-out; the migrator
+        // reads --config-in, parses the legacy `[governance]` block,
+        // renders the v0.7 `[[permissions.rules]]` to stdout, and
+        // returns Ok. No filesystem mutation outside the tempdir.
+        let _g = no_config_env();
+        let env = TestEnv::fresh();
+        let cfg_path = env.db_path.parent().unwrap().join("legacy_cfg.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+[governance]
+
+[[governance.policy]]
+scope = "team/eng/*"
+action = "write"
+role = "engineer"
+decision = "allow"
+"#,
+        )
+        .unwrap();
+        let cfg = AppConfig::default();
+        let cli = Cli::try_parse_from([
+            "ai-memory",
+            "--db",
+            env.db_path.to_str().unwrap(),
+            "governance",
+            "migrate-to-permissions",
+            "--config-in",
+            cfg_path.to_str().unwrap(),
+        ])
+        .unwrap();
+        run(cli, &cfg).await.unwrap();
+    }
 }
