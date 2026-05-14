@@ -372,3 +372,317 @@ mod hex {
         bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn open_db() -> (rusqlite::Connection, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.db");
+        let conn = crate::db::open(&path).expect("db::open");
+        (conn, dir)
+    }
+
+    fn make_keypair() -> AgentKeypair {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let mut rng = rand_core::OsRng;
+        let sk = SigningKey::generate(&mut rng);
+        let vk: VerifyingKey = (&sk).into();
+        AgentKeypair {
+            agent_id: "test:signer".to_string(),
+            public: vk,
+            private: Some(sk),
+        }
+    }
+
+    fn minimal_skill_md(name: &str) -> String {
+        format!("---\nnamespace: testns\nname: {name}\ndescription: A demo skill.\n---\n\nBody.\n")
+    }
+
+    // ---- digest helpers ---------------------------------------------------
+
+    #[test]
+    fn compute_skill_digest_is_deterministic() {
+        let fm = b"{\"a\":1}";
+        let body = b"hello";
+        let d1 = compute_skill_digest(fm, body, vec![]);
+        let d2 = compute_skill_digest(fm, body, vec![]);
+        assert_eq!(d1, d2);
+        assert_eq!(d1.len(), 32);
+    }
+
+    #[test]
+    fn compute_skill_digest_resource_order_independent() {
+        // Sorted internally; same digest regardless of input order.
+        let fm = b"fm";
+        let body = b"body";
+        let r_a = vec![1u8; 32];
+        let r_b = vec![2u8; 32];
+        let d_ab = compute_skill_digest(fm, body, vec![r_a.clone(), r_b.clone()]);
+        let d_ba = compute_skill_digest(fm, body, vec![r_b, r_a]);
+        assert_eq!(d_ab, d_ba);
+    }
+
+    #[test]
+    fn resource_digest_known_value() {
+        // SHA-256 of empty = e3b0...; sanity-check we wired sha2 right.
+        let d = resource_digest(b"");
+        assert_eq!(
+            hex::encode(&d),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn compress_round_trip() {
+        let input = b"hello world".repeat(100);
+        let compressed = compress(&input).unwrap();
+        let decompressed = zstd::decode_all(compressed.as_slice()).unwrap();
+        assert_eq!(decompressed, input);
+    }
+
+    // ---- handler input validation ----------------------------------------
+
+    #[test]
+    fn rejects_missing_input() {
+        let (conn, _dir) = open_db();
+        let err = handle_skill_register(&conn, &json!({}), None).unwrap_err();
+        assert!(err.contains("folder_path") || err.contains("inline_skill"));
+    }
+
+    #[test]
+    fn rejects_nonexistent_folder_path() {
+        let (conn, dir) = open_db();
+        let bad = dir.path().join("no-such-folder");
+        let err =
+            handle_skill_register(&conn, &json!({"folder_path": bad.to_str().unwrap()}), None)
+                .unwrap_err();
+        assert!(err.contains("is not a directory"));
+    }
+
+    #[test]
+    fn rejects_folder_without_skill_md() {
+        let (conn, dir) = open_db();
+        let target = dir.path().join("empty");
+        std::fs::create_dir_all(&target).unwrap();
+        let err = handle_skill_register(
+            &conn,
+            &json!({"folder_path": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("cannot read SKILL.md"));
+    }
+
+    // ---- happy path: inline ----------------------------------------------
+
+    #[test]
+    fn registers_inline_skill_minimal() {
+        let (conn, _dir) = open_db();
+        let inline = minimal_skill_md("inline-skill");
+        let v = handle_skill_register(&conn, &json!({"inline_skill": inline}), None).unwrap();
+        assert_eq!(v["registered"], json!(true));
+        assert_eq!(v["namespace"], json!("testns"));
+        assert_eq!(v["name"], json!("inline-skill"));
+        assert_eq!(v["signed"], json!(false));
+        let hex_dig = v["digest"].as_str().unwrap();
+        assert_eq!(hex_dig.len(), 64);
+        // No superseded_id on first register.
+        assert!(v.get("superseded_id").is_none());
+    }
+
+    #[test]
+    fn supersede_returns_previous_id() {
+        let (conn, _dir) = open_db();
+        let v1 = handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("chain-me")}),
+            None,
+        )
+        .unwrap();
+        let id1 = v1["id"].as_str().unwrap().to_string();
+
+        // Re-register with the same name + namespace → supersede.
+        let v2 = handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("chain-me")}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v2["superseded_id"], json!(id1));
+    }
+
+    #[test]
+    fn registers_with_active_keypair_signs() {
+        let (conn, _dir) = open_db();
+        let kp = make_keypair();
+        let v = handle_skill_register(
+            &conn,
+            &json!({"inline_skill": minimal_skill_md("signed-skill")}),
+            Some(&kp),
+        )
+        .unwrap();
+        assert_eq!(v["signed"], json!(true));
+        // Verify the signature column was populated.
+        let sig: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT signature FROM skills WHERE id = ?1",
+                [v["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sig.is_some());
+        let sig = sig.unwrap();
+        assert_eq!(sig.len(), 64); // Ed25519 signature size.
+
+        // signing_agent column populated.
+        let sa: Option<String> = conn
+            .query_row(
+                "SELECT signing_agent FROM skills WHERE id = ?1",
+                [v["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sa.as_deref(), Some("test:signer"));
+    }
+
+    // ---- folder_path path -------------------------------------------------
+
+    fn write_skill_md(dir: &PathBuf, content: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("SKILL.md"), content).unwrap();
+    }
+
+    #[test]
+    fn registers_from_folder_with_resources() {
+        let (conn, dir) = open_db();
+        let folder = dir.path().join("skill-folder");
+        write_skill_md(&folder, &minimal_skill_md("folder-skill"));
+        // Scripts subdir
+        let scripts = folder.join("resources").join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("run.sh"), b"echo hi\n").unwrap();
+        // Reference subdir
+        let refer = folder.join("resources").join("reference");
+        std::fs::create_dir_all(&refer).unwrap();
+        std::fs::write(refer.join("notes.md"), b"# Notes\n").unwrap();
+        // Plain asset
+        let asset = folder.join("resources").join("asset.png");
+        std::fs::write(&asset, b"\x89PNG\r\n").unwrap();
+
+        let v = handle_skill_register(
+            &conn,
+            &json!({"folder_path": folder.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["registered"], json!(true));
+        // Resources are inserted into skill_resources.
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM skill_resources WHERE skill_id = ?1",
+                [v["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn registers_folder_with_no_resources_dir() {
+        // folder without a resources/ subdir is valid — just no resources.
+        let (conn, dir) = open_db();
+        let folder = dir.path().join("plain-skill");
+        write_skill_md(&folder, &minimal_skill_md("plain"));
+
+        let v = handle_skill_register(
+            &conn,
+            &json!({"folder_path": folder.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["registered"], json!(true));
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM skill_resources WHERE skill_id = ?1",
+                [v["id"].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    // ---- skill md parse failure ------------------------------------------
+
+    #[test]
+    fn rejects_malformed_inline_skill() {
+        let (conn, _dir) = open_db();
+        let bad = "no frontmatter here, just body text";
+        let err = handle_skill_register(&conn, &json!({"inline_skill": bad}), None).unwrap_err();
+        // The parser surfaces a non-empty error string.
+        assert!(!err.is_empty());
+    }
+
+    // ---- infer_kind --------------------------------------------------------
+
+    #[test]
+    fn infer_kind_classifies_scripts() {
+        assert_eq!(infer_kind("scripts/run.sh"), "script");
+        assert_eq!(infer_kind("a/b.sh"), "script");
+        assert_eq!(infer_kind("a/b.py"), "script");
+    }
+
+    #[test]
+    fn infer_kind_classifies_references() {
+        assert_eq!(infer_kind("reference/x.md"), "reference");
+        assert_eq!(infer_kind("references/y.md"), "reference");
+    }
+
+    #[test]
+    fn infer_kind_defaults_to_asset() {
+        assert_eq!(infer_kind("asset.png"), "asset");
+        assert_eq!(infer_kind("img/logo.svg"), "asset");
+    }
+
+    // ---- collect_resources directly --------------------------------------
+
+    #[test]
+    fn collect_resources_walks_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().to_path_buf();
+        std::fs::create_dir_all(base.join("a")).unwrap();
+        std::fs::create_dir_all(base.join("b").join("c")).unwrap();
+        std::fs::write(base.join("a").join("f1.txt"), b"f1").unwrap();
+        std::fs::write(base.join("b").join("c").join("f2.txt"), b"f2").unwrap();
+
+        let mut out: Vec<(String, String, Vec<u8>)> = Vec::new();
+        collect_resources(&base, &base, &mut out).unwrap();
+        assert_eq!(out.len(), 2);
+        // Paths are relative to base, with forward slashes (StringLossy).
+        let paths: Vec<&str> = out.iter().map(|(p, _, _)| p.as_str()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("f1.txt")));
+        assert!(paths.iter().any(|p| p.ends_with("f2.txt")));
+    }
+
+    #[test]
+    fn collect_resources_rejects_nonexistent() {
+        let mut out: Vec<(String, String, Vec<u8>)> = Vec::new();
+        let nonexistent = std::path::PathBuf::from("/does/not/exist/at/all");
+        let err = collect_resources(&nonexistent, &nonexistent, &mut out).unwrap_err();
+        assert!(err.contains("read_dir"));
+    }
+
+    // ---- hex module --------------------------------------------------------
+
+    #[test]
+    fn hex_encode_empty_and_bytes() {
+        assert_eq!(hex::encode(&[]), "");
+        assert_eq!(hex::encode(&[0x00, 0xff, 0xab]), "00ffab");
+    }
+}

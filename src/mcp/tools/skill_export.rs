@@ -278,3 +278,427 @@ fn yaml_quote(s: &str) -> String {
         s.to_string()
     }
 }
+
+// ---------------------------------------------------------------------------
+// Unit tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn open_db() -> (rusqlite::Connection, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.db");
+        let conn = crate::db::open(&path).expect("db::open");
+        (conn, dir)
+    }
+
+    fn insert_skill_full(
+        conn: &rusqlite::Connection,
+        id: &str,
+        ns: &str,
+        name: &str,
+        description: &str,
+        body: &str,
+    ) {
+        let body_blob = zstd::encode_all(body.as_bytes(), 3).unwrap();
+        let digest = vec![0xab_u8; 32];
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, metadata, body_blob, digest, created_at) \
+             VALUES (?1, ?2, ?3, ?4, '{}', ?5, ?6, 0)",
+            params![id, ns, name, description, body_blob, digest],
+        )
+        .unwrap();
+    }
+
+    // ---- input validation ------------------------------------------------
+
+    #[test]
+    fn rejects_missing_skill_id() {
+        let (conn, _dir) = open_db();
+        let err =
+            handle_skill_export(&conn, &json!({"target_folder": "/tmp/x"}), None).unwrap_err();
+        assert!(err.contains("requires 'skill_id'"));
+    }
+
+    #[test]
+    fn rejects_empty_skill_id() {
+        let (conn, _dir) = open_db();
+        let err = handle_skill_export(
+            &conn,
+            &json!({"skill_id": "", "target_folder": "/tmp/x"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("requires 'skill_id'"));
+    }
+
+    #[test]
+    fn rejects_missing_target_folder() {
+        let (conn, _dir) = open_db();
+        let err = handle_skill_export(&conn, &json!({"skill_id": "sk"}), None).unwrap_err();
+        assert!(err.contains("requires 'target_folder'"));
+    }
+
+    #[test]
+    fn rejects_empty_target_folder() {
+        let (conn, _dir) = open_db();
+        let err = handle_skill_export(&conn, &json!({"skill_id": "sk", "target_folder": ""}), None)
+            .unwrap_err();
+        assert!(err.contains("requires 'target_folder'"));
+    }
+
+    #[test]
+    fn returns_not_found_for_missing_skill() {
+        let (conn, dir) = open_db();
+        let target = dir.path().join("out");
+        let err = handle_skill_export(
+            &conn,
+            &json!({"skill_id": "no-such", "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("skill not found"));
+    }
+
+    // ---- happy path ------------------------------------------------------
+
+    #[test]
+    fn exports_skill_md_with_minimal_frontmatter() {
+        let (conn, dir) = open_db();
+        let id = "1aaaaaaa-0000-0000-0000-000000000001";
+        insert_skill_full(
+            &conn,
+            id,
+            "ns-a",
+            "my-skill",
+            "A short description.",
+            "Body content here.\n",
+        );
+
+        let target = dir.path().join("export-min");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+        assert_eq!(v["skill_id"], json!(id));
+        assert_eq!(v["resources_exported"], json!(0));
+        assert_eq!(v["files"], json!([]));
+
+        let skill_md = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        assert!(skill_md.starts_with("---\n"));
+        assert!(skill_md.contains("namespace: ns-a"));
+        assert!(skill_md.contains("name: my-skill"));
+        assert!(skill_md.contains("description: A short description."));
+        assert!(skill_md.contains("Body content here."));
+    }
+
+    #[test]
+    fn exports_skill_with_optional_fields() {
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let allowed_tools = serde_json::to_string(&vec!["tool_a", "tool_b"]).unwrap();
+        let metadata = serde_json::json!({"author": "alice"}).to_string();
+        let id = "2bbbbbbb-0000-0000-0000-000000000002";
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, license, compatibility, \
+                                  allowed_tools, metadata, body_blob, digest, signing_agent, \
+                                  created_at) \
+             VALUES (?1, 'ns', 'name', 'desc', 'MIT', 'v1', ?2, ?3, ?4, ?5, 'agent:x', 0)",
+            params![id, allowed_tools, metadata, body_blob, digest],
+        )
+        .unwrap();
+
+        let target = dir.path().join("export-opt");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+        let md = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        assert!(md.contains("license: MIT"));
+        assert!(md.contains("compatibility: v1"));
+        assert!(md.contains("allowed_tools:"));
+        assert!(md.contains("- tool_a"));
+        assert!(md.contains("- tool_b"));
+        assert!(md.contains("author: alice"));
+    }
+
+    #[test]
+    fn exports_resources_to_subdir() {
+        let (conn, dir) = open_db();
+        let id = "3cccc-0000-0000-0000-000000000003";
+        insert_skill_full(&conn, id, "ns", "name", "d", "body");
+        let blob1 = zstd::encode_all(b"echo hi\n".as_slice(), 3).unwrap();
+        let blob2 = zstd::encode_all(b"# Notes\n".as_slice(), 3).unwrap();
+        let dig = vec![0u8; 32];
+        conn.execute(
+            "INSERT INTO skill_resources (skill_id, resource_path, resource_kind, content_blob, digest) \
+             VALUES (?1, 'scripts/run.sh', 'script', ?2, ?3)",
+            params![id, blob1, dig],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO skill_resources (skill_id, resource_path, resource_kind, content_blob, digest) \
+             VALUES (?1, 'reference/notes.md', 'reference', ?2, ?3)",
+            params![id, blob2, dig],
+        )
+        .unwrap();
+        // A reference-only resource (no inline content) — must be silently skipped on export.
+        conn.execute(
+            "INSERT INTO skill_resources (skill_id, resource_path, resource_kind, content_blob, digest) \
+             VALUES (?1, 'placeholder.md', 'reference', NULL, NULL)",
+            params![id],
+        )
+        .unwrap();
+
+        let target = dir.path().join("export-res");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["resources_exported"], json!(2));
+        let files = v["files"].as_array().unwrap();
+        assert_eq!(files.len(), 2);
+
+        let script_body = std::fs::read(target.join("resources/scripts/run.sh")).unwrap();
+        assert_eq!(script_body, b"echo hi\n");
+        let ref_body = std::fs::read(target.join("resources/reference/notes.md")).unwrap();
+        assert_eq!(ref_body, b"# Notes\n");
+    }
+
+    #[test]
+    fn exports_with_active_keypair_uses_agent_id() {
+        // Build an AgentKeypair (public-only) and run export. We're not
+        // checking the signed_events row directly; this path simply
+        // exercises the `active_keypair.map(|kp| kp.agent_id.clone())`
+        // branch versus the fallback.
+        let (conn, dir) = open_db();
+        let id = "4dddd-0000-0000-0000-000000000004";
+        insert_skill_full(&conn, id, "ns", "name", "d", "body");
+
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let mut rng = rand_core::OsRng;
+        let sk = SigningKey::generate(&mut rng);
+        let vk: VerifyingKey = (&sk).into();
+        let kp = crate::identity::keypair::AgentKeypair {
+            agent_id: "test:agent-1".to_string(),
+            public: vk,
+            private: Some(sk),
+        };
+
+        let target = dir.path().join("export-kp");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            Some(&kp),
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+    }
+
+    #[test]
+    fn export_with_signing_agent_in_db_uses_that() {
+        // When no keypair is supplied, agent_id falls back to the
+        // skill's signing_agent column (when present).
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let id = "5eeee-0000-0000-0000-000000000005";
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, metadata, body_blob, digest, signing_agent, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', '{}', ?2, ?3, 'agent:from-db', 0)",
+            params![id, body_blob, digest],
+        )
+        .unwrap();
+
+        let target = dir.path().join("export-dbagent");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+    }
+
+    // ---- corrupt blob path ----------------------------------------------
+
+    #[test]
+    fn rejects_corrupt_body_blob() {
+        let (conn, dir) = open_db();
+        let id = "6ffff-0000-0000-0000-000000000006";
+        let bogus: Vec<u8> = vec![0xff, 0xff, 0xff, 0xff];
+        let digest = vec![0u8; 32];
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, metadata, body_blob, digest, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', '{}', ?2, ?3, 0)",
+            params![id, bogus, digest],
+        )
+        .unwrap();
+        let target = dir.path().join("export-corrupt");
+        let err = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("zstd decompress body"));
+    }
+
+    #[test]
+    fn rejects_corrupt_resource_blob() {
+        let (conn, dir) = open_db();
+        let id = "7gggg-0000-0000-0000-000000000007";
+        insert_skill_full(&conn, id, "ns", "name", "d", "body");
+        let bogus: Vec<u8> = vec![0xff, 0xff, 0xff, 0xff];
+        let dig = vec![0u8; 32];
+        conn.execute(
+            "INSERT INTO skill_resources (skill_id, resource_path, resource_kind, content_blob, digest) \
+             VALUES (?1, 'bad.bin', 'asset', ?2, ?3)",
+            params![id, bogus, dig],
+        )
+        .unwrap();
+        let target = dir.path().join("export-bad-res");
+        let err = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("decompress resource"));
+    }
+
+    // ---- yaml_quote helper ----------------------------------------------
+
+    #[test]
+    fn yaml_quote_plain_string_unchanged() {
+        assert_eq!(yaml_quote("simple"), "simple");
+        assert_eq!(yaml_quote("a-b_c.d"), "a-b_c.d");
+    }
+
+    #[test]
+    fn yaml_quote_special_chars_wrapped() {
+        assert_eq!(yaml_quote("a:b"), "\"a:b\"");
+        assert_eq!(yaml_quote("a#b"), "\"a#b\"");
+        assert_eq!(yaml_quote("a\"b"), "\"a\\\"b\"");
+        assert_eq!(yaml_quote("a'b"), "\"a'b\"");
+        assert_eq!(yaml_quote("a\nb"), "\"a\nb\"");
+    }
+
+    #[test]
+    fn yaml_quote_leading_trailing_whitespace_wrapped() {
+        assert_eq!(yaml_quote(" leading"), "\" leading\"");
+        assert_eq!(yaml_quote("trailing "), "\"trailing \"");
+    }
+
+    #[test]
+    fn export_with_malformed_metadata_skips_extra_fields() {
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let id = "8hhhh-0000-0000-0000-000000000008";
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, metadata, body_blob, digest, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', 'not-json', ?2, ?3, 0)",
+            params![id, body_blob, digest],
+        )
+        .unwrap();
+        let target = dir.path().join("export-bad-meta");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+    }
+
+    #[test]
+    fn export_with_malformed_allowed_tools_json_skips() {
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let id = "9iiii-0000-0000-0000-000000000009";
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, allowed_tools, metadata, body_blob, digest, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', 'not-json-array', '{}', ?2, ?3, 0)",
+            params![id, body_blob, digest],
+        )
+        .unwrap();
+        let target = dir.path().join("export-bad-tools");
+        let v = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        assert_eq!(v["exported"], json!(true));
+        let md = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        // No allowed_tools section should appear (parse failed).
+        assert!(!md.contains("allowed_tools:"));
+    }
+
+    #[test]
+    fn export_with_empty_allowed_tools_array_omits_section() {
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let id = "aiiii-0000-0000-0000-00000000000a";
+        let empty_tools = serde_json::to_string(&Vec::<String>::new()).unwrap();
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, allowed_tools, metadata, body_blob, digest, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', ?2, '{}', ?3, ?4, 0)",
+            params![id, empty_tools, body_blob, digest],
+        )
+        .unwrap();
+        let target = dir.path().join("export-empty-tools");
+        let _ = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        let md = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        assert!(!md.contains("allowed_tools:"));
+    }
+
+    #[test]
+    fn export_with_metadata_array_value_skipped() {
+        // Metadata fields with non-string values are skipped in the
+        // frontmatter — only string-valued keys are exported.
+        let (conn, dir) = open_db();
+        let body_blob = zstd::encode_all(b"body".as_slice(), 3).unwrap();
+        let digest = vec![0u8; 32];
+        let id = "bjjjj-0000-0000-0000-00000000000b";
+        let meta = serde_json::json!({"author": "alice", "version_int": 7, "tags": ["a", "b"]})
+            .to_string();
+        conn.execute(
+            "INSERT INTO skills (id, namespace, name, description, metadata, body_blob, digest, created_at) \
+             VALUES (?1, 'ns', 'name', 'd', ?2, ?3, ?4, 0)",
+            params![id, meta, body_blob, digest],
+        )
+        .unwrap();
+        let target = dir.path().join("export-meta-array");
+        let _ = handle_skill_export(
+            &conn,
+            &json!({"skill_id": id, "target_folder": target.to_str().unwrap()}),
+            None,
+        )
+        .unwrap();
+        let md = std::fs::read_to_string(target.join("SKILL.md")).unwrap();
+        assert!(md.contains("author: alice"));
+        assert!(!md.contains("version_int:")); // integer skipped
+        assert!(!md.contains("tags:")); // array skipped
+    }
+}
