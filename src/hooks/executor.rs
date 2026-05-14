@@ -209,6 +209,12 @@ pub enum ExecutorError {
     /// The daemon child crashed or was unreachable after exhausting
     /// the reconnect budget.
     DaemonUnavailable { attempts: u32 },
+    /// v0.7.0 (issue #691 fold-1) — the governance pre-action wire
+    /// hook refused the `ProcessSpawn` action. `reason` carries the
+    /// operator-authored explanation from the matched rule. Surfaced
+    /// to the chain runner so the cascade policy can treat it as a
+    /// distinct outcome from a Spawn / Io error.
+    GovernanceRefused { command: String, reason: String },
 }
 
 impl std::fmt::Display for ExecutorError {
@@ -233,6 +239,12 @@ impl std::fmt::Display for ExecutorError {
                 write!(
                     f,
                     "hook daemon unavailable after {attempts} reconnect attempts"
+                )
+            }
+            ExecutorError::GovernanceRefused { command, reason } => {
+                write!(
+                    f,
+                    "hook spawn refused by governance for {command}: {reason}"
                 )
             }
         }
@@ -375,6 +387,25 @@ impl ExecExecutor {
     }
 
     async fn fire_inner(&self, event: HookEvent, payload: Value) -> Result<HookDecision> {
+        // v0.7.0 (issue #691 fold-1) — wire the ProcessSpawn governance
+        // gate BEFORE the Command::new(...).spawn() call. The closure
+        // installed by bootstrap_serve consults the governance_rules
+        // table for a refusal verdict (e.g. R004 — cargo forbidden on
+        // low-disk system). Refusal short-circuits cleanly with a
+        // typed ExecutorError::GovernanceRefused so the chain runner
+        // can apply the cascade policy without confusing it with a
+        // legitimate spawn IO failure.
+        let command_str = self.config.command.display().to_string();
+        let spawn_action = crate::governance::agent_action::AgentAction::ProcessSpawn {
+            binary: command_str.clone(),
+            args: Vec::new(),
+        };
+        if let Err(refusal) = crate::governance::wire_check::check(&spawn_action) {
+            return Err(ExecutorError::GovernanceRefused {
+                command: command_str,
+                reason: refusal.reason,
+            });
+        }
         let envelope = FireEnvelope {
             event,
             payload: &payload,
@@ -743,6 +774,22 @@ impl DaemonExecutor {
     }
 
     fn spawn_one(&self) -> Result<DaemonConnection> {
+        // v0.7.0 (issue #691 fold-1) — same ProcessSpawn gate as the
+        // exec-mode path above. Daemon-mode hooks spawn at most once
+        // per (process, hook) so this fires at start-up rather than
+        // per-event; a governance refusal here aborts the daemon
+        // connection attempt cleanly.
+        let command_str = self.config.command.display().to_string();
+        let spawn_action = crate::governance::agent_action::AgentAction::ProcessSpawn {
+            binary: command_str.clone(),
+            args: Vec::new(),
+        };
+        if let Err(refusal) = crate::governance::wire_check::check(&spawn_action) {
+            return Err(ExecutorError::GovernanceRefused {
+                command: command_str,
+                reason: refusal.reason,
+            });
+        }
         let mut child = Command::new(&self.config.command)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

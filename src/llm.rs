@@ -381,6 +381,32 @@ impl OllamaClient {
     /// here — a series of failures fast-fails subsequent calls until the
     /// cooldown elapses, so a dead Ollama can't peg the auto_tag path on
     /// the per-call 30s timeout.
+    /// v0.7.0 (issue #691 fold-1) — consult the governance wire-point
+    /// hook before issuing an outbound HTTP request to the Ollama
+    /// endpoint. Returns `Err` (with a typed anyhow context) when a
+    /// `refuse` rule matches the Ollama host. The caller surfaces the
+    /// error verbatim — the LLM-absent fallback path (auto_tag, etc.)
+    /// already handles `Err` gracefully so a governance refusal
+    /// degrades to "no LLM tags this call" rather than crashing the
+    /// store handler.
+    fn check_outbound(&self) -> Result<()> {
+        let url = reqwest::Url::parse(&self.base_url).ok();
+        let host = url
+            .as_ref()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_else(|| self.base_url.clone());
+        let scheme = url
+            .as_ref()
+            .map(|u| u.scheme().to_string())
+            .unwrap_or_default();
+        let action = crate::governance::agent_action::AgentAction::NetworkRequest {
+            host: host.clone(),
+            scheme,
+        };
+        crate::governance::wire_check::check_anyhow(&action)
+            .with_context(|| format!("governance refused outbound to ollama at {host}"))
+    }
+
     fn generate_with_body(&self, body: &Value) -> Result<String> {
         if self.breaker_is_open() {
             return Err(anyhow!(
@@ -390,6 +416,8 @@ impl OllamaClient {
                 self.base_url,
             ));
         }
+        // v0.7.0 (issue #691 fold-1) — wire NetworkRequest gate.
+        self.check_outbound()?;
         let url = format!("{}/api/generate", self.base_url);
         let resp = match self
             .client
@@ -448,6 +476,8 @@ impl OllamaClient {
                 self.base_url,
             ));
         }
+        // v0.7.0 (issue #691 fold-1) — wire NetworkRequest gate.
+        self.check_outbound()?;
         let url = format!("{}/api/embed", self.base_url);
         let payload = json!({
             "model": embed_model,
