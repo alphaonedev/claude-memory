@@ -1178,4 +1178,124 @@ mod tests {
         };
         assert!(std::error::Error::source(&err).is_none());
     }
+
+    #[test]
+    fn executor_error_from_io_error_wraps_into_io_variant() {
+        let io_err = io::Error::new(io::ErrorKind::PermissionDenied, "nope");
+        let err: ExecutorError = io_err.into();
+        assert!(matches!(err, ExecutorError::Io(_)));
+        let s = err.to_string();
+        assert!(s.contains("hook io error"));
+        assert!(std::error::Error::source(&err).is_some());
+    }
+
+    #[test]
+    fn executor_error_spawn_source_chain() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "no such cmd");
+        let err = ExecutorError::Spawn {
+            command: "/bin/missing".into(),
+            source: io_err,
+        };
+        assert!(std::error::Error::source(&err).is_some());
+        let s = err.to_string();
+        assert!(s.contains("/bin/missing"));
+        assert!(s.contains("no such cmd"));
+    }
+
+    #[test]
+    fn executor_error_child_exit_with_signaled_code() {
+        let err = ExecutorError::ChildExit {
+            code: None,
+            stderr: "killed".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("<signaled>"));
+        assert!(s.contains("killed"));
+    }
+
+    #[test]
+    fn executor_error_child_exit_stderr_is_truncated_for_display() {
+        let big = "x".repeat(1024);
+        let err = ExecutorError::ChildExit {
+            code: Some(1),
+            stderr: big,
+        };
+        let s = err.to_string();
+        // Display previews at most 256 chars of stderr.
+        // The total display is "hook child exited (code 1): " (28) + up to 256 chars.
+        assert!(s.len() < 1024);
+    }
+
+    #[test]
+    fn executor_error_decode_display_carries_reason() {
+        let err = ExecutorError::Decode {
+            reason: "bad parse".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("decode failed"));
+        assert!(s.contains("bad parse"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_error_timeout_display_carries_ms() {
+        let err = ExecutorError::Timeout { ms: 5000 };
+        let s = err.to_string();
+        assert!(s.contains("5000ms"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_error_daemon_unavailable_carries_attempts() {
+        let err = ExecutorError::DaemonUnavailable { attempts: 7 };
+        let s = err.to_string();
+        assert!(s.contains("7"));
+        assert!(s.contains("reconnect attempts"));
+        assert!(std::error::Error::source(&err).is_none());
+    }
+
+    #[test]
+    fn executor_metrics_serialize_to_json() {
+        let m = ExecutorMetrics {
+            events_fired: 42,
+            events_dropped: 1,
+            mean_latency_us: 250,
+        };
+        let json = serde_json::to_string(&m).unwrap();
+        assert!(json.contains("\"events_fired\":42"));
+        assert!(json.contains("\"events_dropped\":1"));
+        assert!(json.contains("\"mean_latency_us\":250"));
+    }
+
+    #[test]
+    fn metrics_counters_overflow_safe_latency() {
+        let m = MetricsCounters::default();
+        // Use a huge duration; record_fire clamps to u64::MAX via try_from.
+        m.record_fire(Duration::from_micros(u64::MAX));
+        m.record_fire(Duration::from_micros(0));
+        let snap = m.snapshot();
+        assert_eq!(snap.events_fired, 2);
+    }
+
+    #[test]
+    fn registry_default_is_empty_and_default_eq_new() {
+        let reg = ExecutorRegistry::default();
+        assert!(reg.is_empty());
+        assert_eq!(reg.len(), 0);
+    }
+
+    #[test]
+    fn parse_decision_line_modify_invalid_delta_wraps_to_decode() {
+        let err = parse_decision_line(r#"{"action":"modify","delta":99}"#).unwrap_err();
+        assert!(matches!(err, ExecutorError::Decode { .. }));
+    }
+
+    #[test]
+    fn parse_decision_line_array_payload_wraps_to_decode() {
+        let err = parse_decision_line(r#"[1,2,3]"#).unwrap_err();
+        match err {
+            ExecutorError::Decode { reason } => assert!(reason.contains("object")),
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
 }

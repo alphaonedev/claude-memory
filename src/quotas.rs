@@ -772,4 +772,249 @@ mod tests {
         assert_eq!(s.max_links_per_day, DEFAULT_MAX_LINKS_PER_DAY);
         assert_eq!(s.current_memories_today, 0);
     }
+
+    #[test]
+    fn quota_limit_as_str_returns_expected_canonical_form() {
+        assert_eq!(QuotaLimit::MemoriesPerDay.as_str(), "memories_per_day");
+        assert_eq!(QuotaLimit::StorageBytes.as_str(), "storage_bytes");
+        assert_eq!(QuotaLimit::LinksPerDay.as_str(), "links_per_day");
+    }
+
+    #[test]
+    fn quota_error_display_format_contract() {
+        let err = QuotaError {
+            agent_id: "alice".to_string(),
+            limit: QuotaLimit::StorageBytes,
+            current: 1024,
+            max: 2048,
+        };
+        let s = format!("{err}");
+        assert!(s.contains("QUOTA_EXCEEDED"));
+        assert!(s.contains("alice"));
+        assert!(s.contains("storage_bytes"));
+        assert!(s.contains("current=1024"));
+        assert!(s.contains("max=2048"));
+        // Trait surface: std::error::Error
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn quota_check_error_display_quota_variant_delegates_to_inner() {
+        let err = QuotaCheckError::Quota(QuotaError {
+            agent_id: "bob".to_string(),
+            limit: QuotaLimit::MemoriesPerDay,
+            current: 99,
+            max: 100,
+        });
+        let s = format!("{err}");
+        assert!(s.contains("QUOTA_EXCEEDED"));
+        assert!(s.contains("memories_per_day"));
+        let _: &dyn std::error::Error = &err;
+    }
+
+    #[test]
+    fn quota_check_error_display_sql_variant_wraps_substrate_error() {
+        let err = QuotaCheckError::Sql(anyhow::anyhow!("boom"));
+        let s = format!("{err}");
+        assert!(s.contains("quota check substrate error"));
+        assert!(s.contains("boom"));
+    }
+
+    #[test]
+    fn check_and_record_under_limit_increments_counters() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-cr-a", QuotaOp::Memory { bytes: 50 }).unwrap();
+        let s = get_status(&conn, "agent-cr-a").unwrap();
+        assert_eq!(s.current_memories_today, 1);
+        assert_eq!(s.current_storage_bytes, 50);
+        check_and_record(&conn, "agent-cr-a", QuotaOp::Link).unwrap();
+        let s2 = get_status(&conn, "agent-cr-a").unwrap();
+        assert_eq!(s2.current_links_today, 1);
+    }
+
+    #[test]
+    fn check_and_record_at_memories_limit_returns_quota_error_and_rolls_back() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-cr-b", QuotaOp::Memory { bytes: 1 }).unwrap();
+        // Tighten the cap so the next write would exceed.
+        conn.execute(
+            "UPDATE agent_quotas SET max_memories_per_day = 1 WHERE agent_id = ?1",
+            params!["agent-cr-b"],
+        )
+        .unwrap();
+        let err = check_and_record(&conn, "agent-cr-b", QuotaOp::Memory { bytes: 1 }).unwrap_err();
+        match err {
+            QuotaCheckError::Quota(q) => {
+                assert_eq!(q.limit, QuotaLimit::MemoriesPerDay);
+            }
+            QuotaCheckError::Sql(e) => panic!("expected Quota, got SQL: {e}"),
+        }
+        // Counter NOT incremented (rollback).
+        let s = get_status(&conn, "agent-cr-b").unwrap();
+        assert_eq!(s.current_memories_today, 1);
+    }
+
+    #[test]
+    fn check_and_record_storage_limit_returns_quota_error() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-cr-c", QuotaOp::Memory { bytes: 1 }).unwrap();
+        conn.execute(
+            "UPDATE agent_quotas SET max_storage_bytes = 100 WHERE agent_id = ?1",
+            params!["agent-cr-c"],
+        )
+        .unwrap();
+        let err = check_and_record(&conn, "agent-cr-c", QuotaOp::Memory { bytes: 1000 })
+            .expect_err("storage cap should fire");
+        match err {
+            QuotaCheckError::Quota(q) => assert_eq!(q.limit, QuotaLimit::StorageBytes),
+            QuotaCheckError::Sql(e) => panic!("expected quota, got SQL: {e}"),
+        }
+    }
+
+    #[test]
+    fn check_and_record_links_limit_returns_quota_error() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-cr-d", QuotaOp::Link).unwrap();
+        conn.execute(
+            "UPDATE agent_quotas SET max_links_per_day = 1 WHERE agent_id = ?1",
+            params!["agent-cr-d"],
+        )
+        .unwrap();
+        let err = check_and_record(&conn, "agent-cr-d", QuotaOp::Link)
+            .expect_err("links cap should fire");
+        match err {
+            QuotaCheckError::Quota(q) => assert_eq!(q.limit, QuotaLimit::LinksPerDay),
+            QuotaCheckError::Sql(e) => panic!("expected quota, got SQL: {e}"),
+        }
+    }
+
+    #[test]
+    fn check_and_record_day_roll_branch_for_memory_zeros_daily_counters() {
+        let conn = fresh_db();
+        // Seed yesterday's row with non-zero counters.
+        check_and_record(&conn, "agent-cr-e", QuotaOp::Memory { bytes: 10 }).unwrap();
+        conn.execute(
+            "UPDATE agent_quotas SET day_started_at = '2020-01-01T00:00:00+00:00',
+                current_memories_today = 999, current_links_today = 7
+             WHERE agent_id = ?1",
+            params!["agent-cr-e"],
+        )
+        .unwrap();
+        check_and_record(&conn, "agent-cr-e", QuotaOp::Memory { bytes: 5 }).unwrap();
+        let s = get_status(&conn, "agent-cr-e").unwrap();
+        // Day rolled: memories reset to 1 (this one), links reset to 0.
+        assert_eq!(s.current_memories_today, 1);
+        assert_eq!(s.current_links_today, 0);
+        // Storage is lifetime, accumulates.
+        assert_eq!(s.current_storage_bytes, 15);
+    }
+
+    #[test]
+    fn check_and_record_day_roll_branch_for_link_resets_daily_counters() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-cr-f", QuotaOp::Link).unwrap();
+        conn.execute(
+            "UPDATE agent_quotas SET day_started_at = '2020-01-01T00:00:00+00:00',
+                current_memories_today = 50, current_links_today = 8
+             WHERE agent_id = ?1",
+            params!["agent-cr-f"],
+        )
+        .unwrap();
+        check_and_record(&conn, "agent-cr-f", QuotaOp::Link).unwrap();
+        let s = get_status(&conn, "agent-cr-f").unwrap();
+        assert_eq!(s.current_memories_today, 0);
+        assert_eq!(s.current_links_today, 1);
+    }
+
+    #[test]
+    fn refund_op_memory_decrements_counters_saturating_to_zero() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-rf-a", QuotaOp::Memory { bytes: 200 }).unwrap();
+        refund_op(&conn, "agent-rf-a", QuotaOp::Memory { bytes: 200 }).unwrap();
+        let s = get_status(&conn, "agent-rf-a").unwrap();
+        assert_eq!(s.current_memories_today, 0);
+        assert_eq!(s.current_storage_bytes, 0);
+        // Saturating: double-refund stays at 0.
+        refund_op(&conn, "agent-rf-a", QuotaOp::Memory { bytes: 200 }).unwrap();
+        let s2 = get_status(&conn, "agent-rf-a").unwrap();
+        assert_eq!(s2.current_memories_today, 0);
+        assert_eq!(s2.current_storage_bytes, 0);
+    }
+
+    #[test]
+    fn refund_op_link_decrements_counter_saturating_to_zero() {
+        let conn = fresh_db();
+        check_and_record(&conn, "agent-rf-b", QuotaOp::Link).unwrap();
+        refund_op(&conn, "agent-rf-b", QuotaOp::Link).unwrap();
+        let s = get_status(&conn, "agent-rf-b").unwrap();
+        assert_eq!(s.current_links_today, 0);
+        // Saturating.
+        refund_op(&conn, "agent-rf-b", QuotaOp::Link).unwrap();
+        let s2 = get_status(&conn, "agent-rf-b").unwrap();
+        assert_eq!(s2.current_links_today, 0);
+    }
+
+    #[test]
+    fn record_op_day_roll_branch_for_memory() {
+        let conn = fresh_db();
+        record_op(&conn, "agent-ro-a", QuotaOp::Memory { bytes: 100 }).unwrap();
+        // Roll day backwards + populate non-zero counters.
+        conn.execute(
+            "UPDATE agent_quotas SET day_started_at = '2020-01-01T00:00:00+00:00',
+                current_memories_today = 50, current_links_today = 4
+             WHERE agent_id = ?1",
+            params!["agent-ro-a"],
+        )
+        .unwrap();
+        record_op(&conn, "agent-ro-a", QuotaOp::Memory { bytes: 5 }).unwrap();
+        let s = get_status(&conn, "agent-ro-a").unwrap();
+        assert_eq!(s.current_memories_today, 1);
+        assert_eq!(s.current_links_today, 0);
+        assert_eq!(s.current_storage_bytes, 105);
+    }
+
+    #[test]
+    fn record_op_day_roll_branch_for_link() {
+        let conn = fresh_db();
+        record_op(&conn, "agent-ro-b", QuotaOp::Link).unwrap();
+        conn.execute(
+            "UPDATE agent_quotas SET day_started_at = '2020-01-01T00:00:00+00:00',
+                current_memories_today = 7, current_links_today = 9
+             WHERE agent_id = ?1",
+            params!["agent-ro-b"],
+        )
+        .unwrap();
+        record_op(&conn, "agent-ro-b", QuotaOp::Link).unwrap();
+        let s = get_status(&conn, "agent-ro-b").unwrap();
+        assert_eq!(s.current_memories_today, 0);
+        assert_eq!(s.current_links_today, 1);
+    }
+
+    #[test]
+    fn quota_status_serde_roundtrip() {
+        let conn = fresh_db();
+        let s = get_status(&conn, "ser-agent").unwrap();
+        let json = serde_json::to_string(&s).unwrap();
+        let parsed: QuotaStatus = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.agent_id, "ser-agent");
+        assert_eq!(parsed.max_memories_per_day, DEFAULT_MAX_MEMORIES_PER_DAY);
+    }
+
+    #[test]
+    fn check_quota_day_roll_branch_treats_daily_as_zero() {
+        let conn = fresh_db();
+        check_quota(&conn, "agent-cq-roll", QuotaOp::Memory { bytes: 1 }).unwrap();
+        // Roll day backwards with high counters.
+        conn.execute(
+            "UPDATE agent_quotas SET day_started_at = '2020-01-01T00:00:00+00:00',
+                current_memories_today = 99999, current_links_today = 99999
+             WHERE agent_id = ?1",
+            params!["agent-cq-roll"],
+        )
+        .unwrap();
+        // Despite the inflated stored counter, the inline roll resets the
+        // effective counter to 0 so the check passes.
+        assert!(check_quota(&conn, "agent-cq-roll", QuotaOp::Memory { bytes: 1 }).is_ok());
+        assert!(check_quota(&conn, "agent-cq-roll", QuotaOp::Link).is_ok());
+    }
 }

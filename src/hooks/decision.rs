@@ -724,4 +724,165 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn parse_action_must_be_string() {
+        let err = HookDecision::parse(r#"{"action": 42}"#).unwrap_err();
+        match err {
+            DecisionParseError::Malformed(m) => assert!(m.contains("must be a string")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deny_reason_must_be_string() {
+        let err = HookDecision::parse(r#"{"action":"deny","reason": 99}"#).unwrap_err();
+        match err {
+            DecisionParseError::Malformed(m) => assert!(m.contains("reason")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_prompt_must_be_string() {
+        let err =
+            HookDecision::parse(r#"{"action":"ask_user","prompt":1,"options":["a"]}"#).unwrap_err();
+        match err {
+            DecisionParseError::Malformed(m) => assert!(m.contains("prompt")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_default_must_be_string_when_present() {
+        let err = HookDecision::parse(
+            r#"{"action":"ask_user","prompt":"p","options":["a"],"default":42}"#,
+        )
+        .unwrap_err();
+        match err {
+            DecisionParseError::Malformed(m) => assert!(m.contains("default")),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_default_null_is_none() {
+        let d = HookDecision::parse(
+            r#"{"action":"ask_user","prompt":"q","options":["yes","no"],"default":null}"#,
+        )
+        .expect("parse");
+        match d {
+            HookDecision::AskUser { default, .. } => assert!(default.is_none()),
+            other => panic!("expected AskUser, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_modify_with_invalid_delta_returns_malformed() {
+        // delta must deserialise into MemoryDelta; an entirely wrong shape
+        // forces the serde_json::from_value error path.
+        let err = HookDecision::parse(r#"{"action":"modify","delta": 7}"#).unwrap_err();
+        match err {
+            DecisionParseError::Malformed(_) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ask_user_options_must_be_array_of_strings() {
+        let err = HookDecision::parse(r#"{"action":"ask_user","prompt":"p","options":"nope"}"#)
+            .unwrap_err();
+        match err {
+            DecisionParseError::Malformed(_) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_deny_code_out_of_i32_range_falls_back_to_default() {
+        // Code larger than i32::MAX falls back to the default 403.
+        let raw = r#"{"action":"deny","reason":"big code","code": 9999999999}"#;
+        let d = HookDecision::parse(raw).expect("parse");
+        match d {
+            HookDecision::Deny { code, .. } => assert_eq!(code, 403),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hook_decision_deserialize_via_serde_routes_through_parse() {
+        // The custom Deserialize impl funnels through `parse`.
+        let raw = r#"{"action":"allow"}"#;
+        let d: HookDecision = serde_json::from_str(raw).expect("decode");
+        assert_eq!(d, HookDecision::Allow);
+    }
+
+    #[test]
+    fn hook_decision_deserialize_unknown_action_returns_serde_error() {
+        let raw = r#"{"action":"explode"}"#;
+        let r: Result<HookDecision, _> = serde_json::from_str(raw);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn hook_decision_partial_eq_modify_with_equal_deltas() {
+        let a = HookDecision::Modify(ModifyPayload {
+            delta: MemoryDelta {
+                tags: Some(vec!["x".into()]),
+                ..Default::default()
+            },
+        });
+        let b = HookDecision::Modify(ModifyPayload {
+            delta: MemoryDelta {
+                tags: Some(vec!["x".into()]),
+                ..Default::default()
+            },
+        });
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn hook_decision_partial_eq_modify_with_different_deltas() {
+        let a = HookDecision::Modify(ModifyPayload {
+            delta: MemoryDelta {
+                tags: Some(vec!["x".into()]),
+                ..Default::default()
+            },
+        });
+        let b = HookDecision::Modify(ModifyPayload {
+            delta: MemoryDelta {
+                tags: Some(vec!["y".into()]),
+                ..Default::default()
+            },
+        });
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn hook_decision_partial_eq_distinct_variants() {
+        assert_ne!(
+            HookDecision::Allow,
+            HookDecision::Deny {
+                reason: "x".into(),
+                code: 403,
+            }
+        );
+        assert_ne!(
+            HookDecision::Deny {
+                reason: "a".into(),
+                code: 403,
+            },
+            HookDecision::AskUser {
+                prompt: "p".into(),
+                options: vec!["a".into()],
+                default: None,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_array_payload_rejected_as_not_object() {
+        let err = HookDecision::parse("[1,2,3]").unwrap_err();
+        assert!(matches!(err, DecisionParseError::NotAnObject));
+    }
 }

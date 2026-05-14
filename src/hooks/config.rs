@@ -869,4 +869,182 @@ namespace = "team/*"
         assert_eq!(exec_json, "\"exec\"");
         assert_eq!(daemon_json, "\"daemon\"");
     }
+
+    #[test]
+    fn fail_mode_default_is_open() {
+        assert_eq!(FailMode::default(), FailMode::Open);
+        assert_eq!(default_fail_mode(), FailMode::Open);
+    }
+
+    #[test]
+    fn fail_mode_serde_round_trip() {
+        let open = serde_json::to_string(&FailMode::Open).unwrap();
+        let closed = serde_json::to_string(&FailMode::Closed).unwrap();
+        assert_eq!(open, "\"open\"");
+        assert_eq!(closed, "\"closed\"");
+        let back: FailMode = serde_json::from_str("\"closed\"").unwrap();
+        assert_eq!(back, FailMode::Closed);
+    }
+
+    #[test]
+    fn default_mode_for_event_matrix() {
+        // Hot-path events default to Daemon.
+        assert_eq!(
+            default_mode_for_event(HookEvent::PostRecall),
+            HookMode::Daemon
+        );
+        assert_eq!(
+            default_mode_for_event(HookEvent::PostSearch),
+            HookMode::Daemon
+        );
+        assert_eq!(
+            default_mode_for_event(HookEvent::PreRecallExpand),
+            HookMode::Daemon
+        );
+        // Cold-path events default to Exec.
+        assert_eq!(default_mode_for_event(HookEvent::PostStore), HookMode::Exec);
+        assert_eq!(default_mode_for_event(HookEvent::PreStore), HookMode::Exec);
+        assert_eq!(default_mode_for_event(HookEvent::PreDelete), HookMode::Exec);
+    }
+
+    #[test]
+    fn fail_mode_closed_is_parsed() {
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+mode = "exec"
+enabled = true
+namespace = "*"
+fail_mode = "closed"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses");
+        assert_eq!(hooks[0].fail_mode, FailMode::Closed);
+    }
+
+    #[test]
+    fn fail_mode_omitted_defaults_to_open() {
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+mode = "exec"
+enabled = true
+namespace = "*"
+"#;
+        let hooks = HookConfig::load_from_str(toml_src).expect("parses");
+        assert_eq!(hooks[0].fail_mode, FailMode::Open);
+    }
+
+    #[test]
+    fn validation_error_display_surfaces_field_and_reason() {
+        let err = HooksConfigError::Validation {
+            field: "hook[0].timeout_ms".into(),
+            reason: "exceeds maximum".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("hook[0].timeout_ms"));
+        assert!(s.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn io_error_display_and_source() {
+        let io_err = std::io::Error::other("simulated read failure");
+        let err = HooksConfigError::Io(io_err);
+        let s = err.to_string();
+        assert!(s.contains("hooks.toml read error"));
+        assert!(s.contains("simulated read failure"));
+        // source() returns Some for Io variant
+        use std::error::Error;
+        assert!(err.source().is_some());
+    }
+
+    #[test]
+    fn toml_error_no_span_displays_without_line_marker() {
+        // Manually construct (we can't easily force toml to produce a
+        // no-span error from a public API, but this covers the `line == 0`
+        // branch of Display).
+        let err = HooksConfigError::Toml {
+            line: 0,
+            column: 0,
+            message: "no span here".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("no span here"));
+        assert!(!s.contains("line 0"));
+    }
+
+    #[test]
+    fn toml_error_with_span_displays_line_and_column() {
+        let err = HooksConfigError::Toml {
+            line: 7,
+            column: 3,
+            message: "broken".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("line 7"));
+        assert!(s.contains("column 3"));
+    }
+
+    #[test]
+    fn hooks_config_error_source_for_non_io_variants_is_none() {
+        use std::error::Error;
+        let v = HooksConfigError::Validation {
+            field: "x".into(),
+            reason: "y".into(),
+        };
+        assert!(v.source().is_none());
+        let t = HooksConfigError::Toml {
+            line: 0,
+            column: 0,
+            message: "z".into(),
+        };
+        assert!(t.source().is_none());
+    }
+
+    #[test]
+    fn load_from_file_returns_io_error_for_missing_path() {
+        let p = std::path::Path::new("/this/path/does/not/exist/hooks-test.toml");
+        let err = HookConfig::load_from_file(p).unwrap_err();
+        assert!(matches!(err, HooksConfigError::Io(_)));
+    }
+
+    #[test]
+    fn rejects_whitespace_only_namespace() {
+        let toml_src = r#"
+[[hook]]
+event = "post_store"
+command = "/bin/true"
+priority = 0
+timeout_ms = 1000
+mode = "exec"
+enabled = true
+namespace = "   "
+"#;
+        let err = HookConfig::load_from_str(toml_src).unwrap_err();
+        match err {
+            HooksConfigError::Validation { field, .. } => {
+                assert!(field.ends_with("namespace"));
+            }
+            other => panic!("expected Validation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn byte_offset_to_line_col_handles_multiline_input() {
+        let s = "first\nsecond\nthird";
+        // offset 0 = line 1, col 1
+        assert_eq!(byte_offset_to_line_col(s, 0), (1, 1));
+        // offset 5 (newline after "first") still on line 1
+        assert_eq!(byte_offset_to_line_col(s, 5), (1, 6));
+        // offset 6 (start of "second") = line 2
+        assert_eq!(byte_offset_to_line_col(s, 6), (2, 1));
+        // offset way past end = still walks to end
+        let (line, _) = byte_offset_to_line_col(s, 9_999);
+        assert!(line >= 3);
+    }
 }

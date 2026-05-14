@@ -1382,6 +1382,162 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_chain_fire_empty_returns_allow_directly() {
+        let chain = HookChain::new(vec![]);
+        let mut reg = ExecutorRegistry::new();
+        let r = chain
+            .fire(HookEvent::PreStore, json!({"k":"v"}), &mut reg)
+            .await;
+        assert_eq!(r, ChainResult::Allow);
+    }
+
+    #[tokio::test]
+    async fn fire_on_index_eviction_empty_chain_returns_allow() {
+        let chain = HookChain::new(vec![]);
+        let mut reg = ExecutorRegistry::new();
+        let ev = EvictionEvent {
+            memory_id: "1".into(),
+            namespace: "test".into(),
+            evicted_at: "2026-01-01T00:00:00Z".into(),
+            reason: "max_entries_reached".into(),
+        };
+        let r = fire_on_index_eviction(&chain, &mut reg, ev).await;
+        assert_eq!(r, ChainResult::Allow);
+    }
+
+    #[tokio::test]
+    async fn spawn_eviction_observer_exits_when_sender_drops() {
+        let chain = Arc::new(HookChain::new(vec![]));
+        let reg = ExecutorRegistry::new();
+        let tx = spawn_eviction_observer(chain, reg);
+        // Drop the sender — observer task should exit cleanly without
+        // panicking. We can't observe the task directly, but the test
+        // verifies no panic surfaces and the send-half drops cleanly.
+        drop(tx);
+        // Give the task a brief moment to exit.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+
+    #[test]
+    fn chain_result_partial_eq_modified_allow_equal_deltas() {
+        let a = ChainResult::ModifiedAllow(MemoryDelta {
+            tags: Some(vec!["x".into()]),
+            ..Default::default()
+        });
+        let b = ChainResult::ModifiedAllow(MemoryDelta {
+            tags: Some(vec!["x".into()]),
+            ..Default::default()
+        });
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn chain_result_partial_eq_distinct_variants_not_equal() {
+        let allow = ChainResult::Allow;
+        let deny = ChainResult::Deny {
+            reason: "x".into(),
+            code: 500,
+        };
+        let ask = ChainResult::AskUser {
+            queued: vec![AskUserPrompt {
+                prompt: "?".into(),
+                options: vec!["a".into()],
+                default: None,
+                origin_command: "/h".into(),
+            }],
+        };
+        let mod_allow = ChainResult::ModifiedAllow(MemoryDelta::default());
+        assert_ne!(allow, deny);
+        assert_ne!(allow, ask);
+        assert_ne!(allow, mod_allow);
+        assert_ne!(deny, ask);
+        assert_ne!(deny, mod_allow);
+        assert_ne!(ask, mod_allow);
+    }
+
+    #[test]
+    fn chain_result_partial_eq_deny_different_codes_not_equal() {
+        let a = ChainResult::Deny {
+            reason: "x".into(),
+            code: 403,
+        };
+        let b = ChainResult::Deny {
+            reason: "x".into(),
+            code: 503,
+        };
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn ask_user_prompt_partial_eq_round_trip() {
+        let p1 = AskUserPrompt {
+            prompt: "p".into(),
+            options: vec!["a".into(), "b".into()],
+            default: Some("a".into()),
+            origin_command: "/h".into(),
+        };
+        let p2 = p1.clone();
+        assert_eq!(p1, p2);
+    }
+
+    #[test]
+    fn apply_delta_to_payload_does_nothing_on_empty_delta() {
+        let mut payload = json!({"keep": "me"});
+        apply_delta_to_payload(&mut payload, &MemoryDelta::default());
+        assert_eq!(payload["keep"], json!("me"));
+    }
+
+    #[test]
+    fn merge_delta_into_overwrites_all_fields() {
+        let mut acc = MemoryDelta::default();
+        let incoming = MemoryDelta {
+            tier: Some(crate::models::Tier::Short),
+            namespace: Some("ns".into()),
+            title: Some("t".into()),
+            content: Some("c".into()),
+            tags: Some(vec!["tag".into()]),
+            priority: Some(7),
+            confidence: Some(0.5),
+            source: Some("src".into()),
+            expires_at: Some("2026-01-01".into()),
+            metadata: Some(json!({"k": "v"})),
+        };
+        merge_delta_into(&mut acc, incoming);
+        assert!(acc.tier.is_some());
+        assert_eq!(acc.namespace.as_deref(), Some("ns"));
+        assert_eq!(acc.title.as_deref(), Some("t"));
+        assert_eq!(acc.content.as_deref(), Some("c"));
+        assert_eq!(acc.priority, Some(7));
+        assert_eq!(acc.confidence, Some(0.5));
+        assert_eq!(acc.source.as_deref(), Some("src"));
+        assert_eq!(acc.expires_at.as_deref(), Some("2026-01-01"));
+        assert_eq!(acc.metadata.as_ref().unwrap()["k"], json!("v"));
+    }
+
+    #[test]
+    fn merge_delta_into_none_fields_dont_overwrite() {
+        let mut acc = MemoryDelta {
+            tier: Some(crate::models::Tier::Long),
+            namespace: Some("orig".into()),
+            title: Some("orig-title".into()),
+            content: Some("orig-content".into()),
+            tags: Some(vec!["orig".into()]),
+            priority: Some(1),
+            confidence: Some(0.1),
+            source: Some("orig-src".into()),
+            expires_at: Some("orig-exp".into()),
+            metadata: Some(json!({"orig": true})),
+        };
+        // All None — should not change anything.
+        merge_delta_into(&mut acc, MemoryDelta::default());
+        assert!(acc.tier.is_some());
+        assert_eq!(acc.namespace.as_deref(), Some("orig"));
+        assert_eq!(acc.title.as_deref(), Some("orig-title"));
+        assert_eq!(acc.content.as_deref(), Some("orig-content"));
+        assert_eq!(acc.priority, Some(1));
+    }
+
+    #[tokio::test]
     async fn dispatch_event_with_hooks_pre_event_deny_skips_subscription() {
         // The G5 contract: on pre- events, if the hook chain Denies,
         // the subscription dispatch is skipped (the operation isn't
