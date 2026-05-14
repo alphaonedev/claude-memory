@@ -347,6 +347,9 @@ mod skill_list;
 mod skill_register;
 #[path = "tools/skill_resource.rs"]
 mod skill_resource;
+// v0.7.0 L2-7 (issue #672) — reflection-skill composition declaration.
+#[path = "tools/skill_compositional_context.rs"]
+mod skill_compositional_context;
 
 // ---------------------------------------------------------------------------
 // Re-exports — preserve exact `crate::mcp::*` pub surface (zero new pub items)
@@ -419,6 +422,34 @@ use promote::handle_promote;
 use reflect::handle_reflect;
 use reflection_origin::handle_reflection_origin;
 use search::handle_search;
+use skill_compositional_context::handle_skill_compositional_context;
+
+/// v0.7.0 L2-7 (issue #672) — integration-test entry point for
+/// `memory_skill_compositional_context`. Hides the internal
+/// `pub(super)` handler symbol from integration tests while still
+/// keeping the production dispatch identical (no second copy of the
+/// routing logic, no jsonrpc envelope construction for callers that
+/// only want the tool's response). Other handlers cross the
+/// integration-test boundary via direct SQL fixtures and the
+/// capabilities harness — composing skills need the handler itself, so
+/// this shim mirrors the dispatch arm used in `handle_request`.
+///
+/// Returns the handler's `Result<Value, String>` as-is so test code can
+/// assert on both success and error shapes without having to peel a
+/// `serde_json::Value` envelope.
+///
+/// # Errors
+///
+/// Forwards the handler's error string verbatim (the only failure mode
+/// is the handler itself returning `Err` — e.g. for an unknown
+/// `skill_id`).
+#[doc(hidden)]
+pub fn skill_compositional_context_for_tests(
+    conn: &rusqlite::Connection,
+    params: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    handle_skill_compositional_context(conn, params)
+}
 use skill_export::handle_skill_export;
 use skill_get::handle_skill_get;
 use skill_list::handle_skill_list;
@@ -931,6 +962,10 @@ fn handle_request(
                 "memory_skill_get" => handle_skill_get(conn, arguments),
                 "memory_skill_resource" => handle_skill_resource(conn, arguments),
                 "memory_skill_export" => handle_skill_export(conn, arguments, active_keypair),
+                // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
+                "memory_skill_compositional_context" => {
+                    handle_skill_compositional_context(conn, arguments)
+                }
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
@@ -1411,9 +1446,12 @@ mod tests {
         // memory_rule_list (Family::Power) → 55. Mutation tools are
         // explicitly NOT registered over MCP.
         // v0.7.0 L1-5 adds 5 memory_skill_* tools (Family::Other) → 60.
+        // v0.7.0 L2-7 (issue #672) adds memory_skill_compositional_context
+        // (Family::Other) → 61. Integration with sibling L2-3 / L2-6
+        // worktrees will reconcile additional bumps at merge time.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 60);
+        assert_eq!(tools.len(), 61);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1468,7 +1506,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            60,
+            61,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1477,7 +1515,8 @@ mod tests {
              v0.7.0 Task 4/8 memory_reflect (1) + \
              v0.7.0 L2-2 memory_reflection_origin (1) + \
              v0.7.0 (issue #691) memory_check_agent_action + memory_rule_list (2) + \
-             v0.7.0 L1-5 5×memory_skill_* (5) = 60"
+             v0.7.0 L1-5 5×memory_skill_* (5) + \
+             v0.7.0 L2-7 memory_skill_compositional_context (1) = 61"
         );
     }
 

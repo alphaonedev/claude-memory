@@ -59,10 +59,11 @@ fn k8_quota_status_loaded_under_full_profile() {
     );
     assert_eq!(
         Profile::full().expected_tool_count(),
-        60,
-        "tool count cascade must advance to 60 with v0.7.0 issue #691 \
-         memory_check_agent_action + memory_rule_list (post-L2-2) and \
-         v0.7.0 L1-5 5 memory_skill_* tools"
+        61,
+        "tool count cascade must advance to 61 with v0.7.0 issue #691 \
+         memory_check_agent_action + memory_rule_list (post-L2-2), v0.7.0 L1-5 \
+         5 memory_skill_* tools, and v0.7.0 L2-7 \
+         memory_skill_compositional_context"
     );
 }
 

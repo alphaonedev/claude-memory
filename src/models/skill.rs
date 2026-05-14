@@ -9,6 +9,34 @@
 
 use serde::{Deserialize, Serialize};
 
+/// v0.7.0 L2-7 (issue #672) — a single entry in the SKILL.md
+/// `composes_with_reflections` frontmatter list.
+///
+/// Skills declare which reflection namespaces the substrate should
+/// surface when the `memory_skill_compositional_context` MCP tool is
+/// invoked. Each entry pins a `namespace` and a `min_depth` floor: the
+/// substrate filters out reflections shallower than the floor before
+/// applying the per-namespace `max_reflection_depth` ceiling
+/// (`GovernancePolicy::effective_max_reflection_depth`). The ceiling is
+/// authoritative — composition cannot bypass the bounded-recursion
+/// guarantee documented on `GovernancePolicy::max_reflection_depth`.
+///
+/// The struct is round-trip-stable through JSON: registration parses it
+/// out of the YAML frontmatter, embeds it under
+/// `metadata.composes_with_reflections` (so older clients that don't
+/// know the field see it as opaque metadata per the v0.7.0 backward-
+/// compat guarantee), and `compositional_context` reads it back.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ComposesWithReflectionEntry {
+    /// The reflection-bearing namespace (e.g. `"foo/observations"`).
+    pub namespace: String,
+    /// Minimum `reflection_depth` (inclusive) a memory must carry to be
+    /// surfaced for this entry. `0` admits caller-minted observations
+    /// (rare for a reflection-composition flow but legal); typical use
+    /// is `1+` to require at least one reflection pass.
+    pub min_depth: u32,
+}
+
 /// Parsed, validated SKILL.md manifest.
 ///
 /// Produced by [`crate::parsing::skill_md::parse`] and consumed by the
@@ -28,7 +56,16 @@ pub struct SkillManifest {
     pub compatibility: Option<String>,
     /// `allowed_tools` — list of MCP tool names.
     pub allowed_tools: Vec<String>,
+    /// v0.7.0 L2-7 (issue #672) — declared composition with reflection
+    /// namespaces. Empty vector when the frontmatter omits the field
+    /// (the common case for non-composing skills). The field is also
+    /// duplicated into the JSON `metadata` payload for opaque-metadata
+    /// readability by older clients.
+    pub composes_with_reflections: Vec<ComposesWithReflectionEntry>,
     /// Extra YAML keys not explicitly mapped above, serialised to JSON.
+    /// L2-7: `composes_with_reflections` is re-injected here too so
+    /// pre-L2-7 readers that only consult `metadata` still observe the
+    /// declaration as opaque-but-present data.
     pub metadata: serde_json::Value,
     /// Markdown body after the closing `---` fence.
     pub body: String,

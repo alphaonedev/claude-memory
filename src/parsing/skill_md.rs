@@ -31,7 +31,7 @@
 
 use serde::Deserialize;
 
-use crate::models::skill::SkillManifest;
+use crate::models::skill::{ComposesWithReflectionEntry, SkillManifest};
 
 // ---------------------------------------------------------------------------
 // Internal frontmatter shape (raw deserialization target)
@@ -48,9 +48,27 @@ struct RawFrontmatter {
     compatibility: Option<String>,
     #[serde(default)]
     allowed_tools: Vec<String>,
+    /// v0.7.0 L2-7 (issue #672) — declared composition with reflection
+    /// namespaces. Each entry pairs a namespace with a minimum reflection
+    /// depth floor. Absent for non-composing skills.
+    #[serde(default)]
+    composes_with_reflections: Vec<RawComposesEntry>,
     /// Catch-all for unknown top-level keys in the frontmatter YAML.
     #[serde(flatten)]
     extra: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+/// Raw deserialization shape for a single `composes_with_reflections`
+/// entry. Decoupled from [`ComposesWithReflectionEntry`] so we can
+/// surface targeted validation errors instead of opaque serde messages.
+#[derive(Debug, Deserialize)]
+struct RawComposesEntry {
+    namespace: Option<String>,
+    /// Default `0` mirrors the doc-comment on
+    /// `ComposesWithReflectionEntry::min_depth`: `0` admits all
+    /// reflections at or above the floor.
+    #[serde(default)]
+    min_depth: Option<u32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,14 +233,55 @@ pub fn parse(source: &str) -> Result<SkillManifest, String> {
     };
 
     // -----------------------------------------------------------------------
-    // Build extra metadata from remaining YAML keys
+    // L2-7: Validate + materialise composes_with_reflections.
     // -----------------------------------------------------------------------
-    let metadata = if raw.extra.is_empty() {
+    let mut composes_with_reflections: Vec<ComposesWithReflectionEntry> =
+        Vec::with_capacity(raw.composes_with_reflections.len());
+    for (idx, raw_entry) in raw.composes_with_reflections.iter().enumerate() {
+        let entry_ns = raw_entry
+            .namespace
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "composes_with_reflections[{idx}] missing required field \
+                     'namespace' (v0.7.0 L2-7 issue #672)"
+                )
+            })?;
+        let min_depth = raw_entry.min_depth.unwrap_or(0);
+        composes_with_reflections.push(ComposesWithReflectionEntry {
+            namespace: entry_ns.to_string(),
+            min_depth,
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Build extra metadata from remaining YAML keys.
+    //
+    // L2-7: when the frontmatter declared `composes_with_reflections`, mirror
+    // it back into the JSON metadata blob so pre-L2-7 readers that only
+    // consult `metadata` still see the declaration as opaque-but-present
+    // data. The structured `SkillManifest::composes_with_reflections` field
+    // remains the authoritative parsed form for L2-7-aware code paths.
+    // -----------------------------------------------------------------------
+    let mut metadata = if raw.extra.is_empty() {
         serde_json::Value::Object(serde_json::Map::new())
     } else {
         serde_json::to_value(&raw.extra)
             .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()))
     };
+    if !composes_with_reflections.is_empty() {
+        if let serde_json::Value::Object(ref mut map) = metadata {
+            // Only insert when the key isn't already present in extras;
+            // an out-of-band metadata override would be surprising but
+            // is technically supported by the YAML schema.
+            map.entry("composes_with_reflections".to_string())
+                .or_insert_with(|| {
+                    serde_json::to_value(&composes_with_reflections)
+                        .unwrap_or(serde_json::Value::Array(Vec::new()))
+                });
+        }
+    }
 
     Ok(SkillManifest {
         namespace,
@@ -231,6 +290,7 @@ pub fn parse(source: &str) -> Result<SkillManifest, String> {
         license: raw.license,
         compatibility,
         allowed_tools: raw.allowed_tools,
+        composes_with_reflections,
         metadata,
         body,
     })
@@ -385,5 +445,115 @@ mod tests {
         let doc = "---\nname: ok\ndescription: Desc.\n---\n\nBody.\n";
         let err = parse(doc).unwrap_err();
         assert!(err.contains("namespace"));
+    }
+
+    // ---------------------------------------------------------------------
+    // v0.7.0 L2-7 (issue #672) — composes_with_reflections frontmatter.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn parse_composes_with_reflections() {
+        let doc = "---\n\
+            namespace: skills\n\
+            name: composer\n\
+            description: A composing skill.\n\
+            composes_with_reflections:\n  \
+              - namespace: foo/observations\n    \
+                min_depth: 1\n  \
+              - namespace: foo/decisions\n    \
+                min_depth: 2\n\
+            ---\n\nBody.\n";
+        let m = parse(doc).expect("composes-aware skill parses");
+        assert_eq!(m.composes_with_reflections.len(), 2);
+        assert_eq!(m.composes_with_reflections[0].namespace, "foo/observations");
+        assert_eq!(m.composes_with_reflections[0].min_depth, 1);
+        assert_eq!(m.composes_with_reflections[1].namespace, "foo/decisions");
+        assert_eq!(m.composes_with_reflections[1].min_depth, 2);
+
+        // The declaration is also mirrored into JSON metadata so pre-L2-7
+        // readers that only consult `metadata` see it as opaque data.
+        let mirrored = m.metadata.get("composes_with_reflections").expect(
+            "L2-7 backward-compat: declaration must be mirrored into metadata for pre-L2-7 readers",
+        );
+        assert!(mirrored.is_array(), "metadata mirror is an array");
+        assert_eq!(mirrored.as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn parse_composes_default_min_depth_zero() {
+        let doc = "---\n\
+            namespace: skills\n\
+            name: composer\n\
+            description: A composing skill.\n\
+            composes_with_reflections:\n  \
+              - namespace: foo/observations\n\
+            ---\n\nBody.\n";
+        let m = parse(doc).expect("missing min_depth defaults to 0");
+        assert_eq!(m.composes_with_reflections.len(), 1);
+        assert_eq!(m.composes_with_reflections[0].min_depth, 0);
+    }
+
+    #[test]
+    fn reject_composes_entry_missing_namespace() {
+        let doc = "---\n\
+            namespace: skills\n\
+            name: composer\n\
+            description: A composing skill.\n\
+            composes_with_reflections:\n  \
+              - min_depth: 1\n\
+            ---\n\nBody.\n";
+        let err = parse(doc).expect_err("entry without namespace must fail");
+        assert!(
+            err.contains("composes_with_reflections[0]") && err.contains("namespace"),
+            "error must identify offending entry: {err}"
+        );
+    }
+
+    /// L2-7 backward-compat regression pin: a SKILL.md that does NOT
+    /// declare `composes_with_reflections` must still parse and produce
+    /// an empty Vec — older skills MUST round-trip unchanged.
+    #[test]
+    fn backward_compat_old_skill_md_parses_without_composition() {
+        let doc = "---\n\
+            namespace: skills\n\
+            name: legacy-skill\n\
+            description: A pre-L2-7 skill.\n\
+            license: Apache-2.0\n\
+            ---\n\nLegacy body.\n";
+        let m = parse(doc).expect("legacy SKILL.md must parse");
+        assert!(m.composes_with_reflections.is_empty());
+        // Metadata must not gain a phantom `composes_with_reflections` key.
+        assert!(m.metadata.get("composes_with_reflections").is_none());
+    }
+
+    /// L2-7 backward-compat regression pin: when `composes_with_reflections`
+    /// lives ONLY inside an opaque-metadata object (the "older client wrote
+    /// the field by hand" shape) the parser still accepts the document.
+    /// Older readers that don't recognise the field simply see it as one
+    /// more metadata key — this test pins that contract by writing the
+    /// declaration under both the dedicated YAML key (so the structured
+    /// vector populates) and at least one extra opaque key.
+    #[test]
+    fn backward_compat_extra_metadata_preserved_alongside_composition() {
+        let doc = "---\n\
+            namespace: skills\n\
+            name: hybrid\n\
+            description: A skill with extras.\n\
+            owner: alice\n\
+            composes_with_reflections:\n  \
+              - namespace: foo/observations\n    \
+                min_depth: 1\n\
+            ---\n\nBody.\n";
+        let m = parse(doc).expect("parse hybrid");
+        assert_eq!(m.composes_with_reflections.len(), 1);
+        assert_eq!(
+            m.metadata.get("owner").and_then(|v| v.as_str()),
+            Some("alice"),
+            "L2-7 must not drop other opaque metadata keys when composing"
+        );
+        assert!(
+            m.metadata.get("composes_with_reflections").is_some(),
+            "L2-7 mirror into metadata must be present"
+        );
     }
 }

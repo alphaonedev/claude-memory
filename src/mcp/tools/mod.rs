@@ -54,6 +54,8 @@ pub(super) mod skill_list;
 pub(super) mod skill_get;
 pub(super) mod skill_resource;
 pub(super) mod skill_export;
+// v0.7.0 L2-7 (issue #672) — reflection-skill composition declaration.
+pub(super) mod skill_compositional_context;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
@@ -129,4 +131,5 @@ pub(super) use self::{
     skill_get::handle_skill_get,
     skill_resource::handle_skill_resource,
     skill_export::handle_skill_export,
+    skill_compositional_context::handle_skill_compositional_context,
 };

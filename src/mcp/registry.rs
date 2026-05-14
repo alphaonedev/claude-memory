@@ -1304,6 +1304,19 @@ pub fn tool_definitions() -> Value {
                     },
                     "required": ["skill_id", "target_folder"]
                 }
+            },
+            {
+                "name": "memory_skill_compositional_context",
+                "description": "Get a skill's body plus reflections from the namespaces declared in its composes_with_reflections frontmatter, ranked by recency + recall_count and bounded by max_reflection_depth.",
+                "docs": "v0.7.0 L2-7 (issue #672) — Compose a skill activation with the reflection memories the skill declares an affinity for via its SKILL.md `composes_with_reflections` frontmatter list. Per-entry `min_depth` filters out shallower reflections; per-namespace `max_reflection_depth` (GovernancePolicy::effective_max_reflection_depth) is the authoritative ceiling — composition CANNOT bypass the substrate's bounded-recursion guarantee. Returns body + reflections ranked by (recency + saturating recall_count); applies a `budget_tokens` cap (default 4000, max 32000) to the cumulative reflection content. Skills without a composes_with_reflections declaration return body only.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "skill_id": {"type": "string", "description": "The UUID of the skill to load with composed reflections."},
+                        "budget_tokens": {"type": "integer", "minimum": 0, "description": "Optional cl100k_base token cap on the cumulative reflection content (the skill body is NOT counted). Default 4000, hard-clamped to 32000."}
+                    },
+                    "required": ["skill_id"]
+                }
             }
         ]
     })

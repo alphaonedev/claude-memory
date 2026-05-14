@@ -187,14 +187,15 @@ impl Family {
             | "memory_archive_purge"
             | "memory_archive_restore"
             | "memory_archive_stats" => Some(Self::Archive),
-            // other (7 — v0.7.0 L1-5 adds 5 skill tools)
+            // other (8 — v0.7.0 L1-5 adds 5 skill tools; L2-7 adds 1)
             "memory_list_subscriptions"
             | "memory_notify"
             | "memory_skill_register"
             | "memory_skill_list"
             | "memory_skill_get"
             | "memory_skill_resource"
-            | "memory_skill_export" => Some(Self::Other),
+            | "memory_skill_export"
+            | "memory_skill_compositional_context" => Some(Self::Other),
             _ => None,
         }
     }
@@ -251,7 +252,9 @@ impl Family {
             Self::Power => 13,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
-            Self::Other => 7,
+            // v0.7.0 L2-7 (issue #672) — memory_skill_compositional_context
+            // added → 8.
+            Self::Other => 8,
         }
     }
 
@@ -375,6 +378,8 @@ impl Family {
                 "memory_skill_get",
                 "memory_skill_resource",
                 "memory_skill_export",
+                // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
+                "memory_skill_compositional_context",
             ],
         }
     }
@@ -647,7 +652,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 60,
+            total, 61,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -655,9 +660,10 @@ mod tests {
              + v0.7 K8 `memory_quota_status` + v0.7.0 Task 4/8 \
              `memory_reflect` + v0.7.0 L2-2 `memory_reflection_origin` + \
              v0.7.0 issue #691 `memory_check_agent_action` + \
-             `memory_rule_list` + v0.7.0 L1-5 5×skill tools = 60. \
-             If this drifts, update Family::expected_tool_count and the \
-             family map docs together."
+             `memory_rule_list` + v0.7.0 L1-5 5×skill tools + v0.7.0 L2-7 \
+             `memory_skill_compositional_context` = 61. If this drifts, \
+             update Family::expected_tool_count and the family map docs \
+             together."
         );
     }
 
@@ -744,14 +750,15 @@ mod tests {
     #[test]
     fn profile_full_has_fifty_one_tools() {
         let p = Profile::full();
-        // v0.7.0 L1-5 (post-#691 / L2-2) — full surface = 43 baseline +
+        // v0.7.0 L2-7 (post-L1-5 / #691 / L2-2) — full surface = 43 baseline +
         // memory_replay (I4) + memory_verify (H4) + memory_load_family (B1)
         // + memory_smart_load (B2) + memory_subscription_replay (K7) +
         // memory_subscription_dlq_list (K7) + memory_find_paths (J7) +
         // memory_quota_status (K8) + memory_reflect (Task 4/8) +
         // memory_reflection_origin (L2-2) + memory_check_agent_action +
-        // memory_rule_list (#691) + 5×memory_skill_* (L1-5) = 60.
-        assert_eq!(p.expected_tool_count(), 60);
+        // memory_rule_list (#691) + 5×memory_skill_* (L1-5) +
+        // memory_skill_compositional_context (L2-7) = 61.
+        assert_eq!(p.expected_tool_count(), 61);
 
         // The K7+K8 + Task 4/8 + L2-2 + #691 additions live in
         // Family::Power (operator/governance), so the `power` profile
@@ -945,17 +952,20 @@ mod tests {
             "memory_skill_get",
             "memory_skill_resource",
             "memory_skill_export",
+            // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
+            "memory_skill_compositional_context",
         ];
         assert_eq!(
             baseline.len(),
-            57,
+            58,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
              2 (v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list) + \
              1 (v0.7 J7 memory_find_paths) + 1 (v0.7 K8 memory_quota_status) + \
              1 (v0.7.0 Task 4/8 memory_reflect) + \
-             5 (v0.7.0 L1-5 skill tools) = 57"
+             5 (v0.7.0 L1-5 skill tools) + \
+             1 (v0.7.0 L2-7 memory_skill_compositional_context) = 58"
         );
         for name in baseline {
             assert!(
