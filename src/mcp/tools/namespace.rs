@@ -217,3 +217,301 @@ pub(super) fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespac
 // ---------------------------------------------------------------------------
 // Archive tool handlers
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    //! Coverage C-2 — focused tests for the namespace-standard MCP handlers
+    //! and the private `extract_governance` helper.
+
+    use super::*;
+    use crate::models::{Memory, Tier};
+    use crate::storage as db;
+    use serde_json::json;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn insert_one(conn: &rusqlite::Connection, ns: &str, title: &str) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: format!("body for {title}"),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({}),
+            reflection_depth: 0,
+            memory_kind: crate::models::MemoryKind::Observation,
+        };
+        db::insert(conn, &mem).expect("insert")
+    }
+
+    // set_standard: happy path without governance.
+    #[test]
+    fn set_standard_happy_path() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-a", "standard");
+        let resp = handle_namespace_set_standard(&conn, &json!({"namespace": "ns-a", "id": id}))
+            .expect("ok");
+        assert_eq!(resp["set"], true);
+    }
+
+    // set_standard: with parent.
+    #[test]
+    fn set_standard_with_parent_echoed() {
+        let conn = fresh_conn();
+        // Seed the parent standard first.
+        let parent_id = insert_one(&conn, "parent", "p-standard");
+        db::set_namespace_standard(&conn, "parent", &parent_id, None).unwrap();
+        let id = insert_one(&conn, "child", "c-standard");
+        let resp = handle_namespace_set_standard(
+            &conn,
+            &json!({"namespace": "child", "id": id, "parent": "parent"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["parent"].as_str(), Some("parent"));
+    }
+
+    // set_standard: missing namespace → typed error.
+    #[test]
+    fn set_standard_missing_namespace_errors() {
+        let conn = fresh_conn();
+        let err = handle_namespace_set_standard(&conn, &json!({"id": "x"})).unwrap_err();
+        assert!(err.contains("namespace"), "got: {err}");
+    }
+
+    // set_standard: missing id → typed error.
+    #[test]
+    fn set_standard_missing_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_namespace_set_standard(&conn, &json!({"namespace": "x"})).unwrap_err();
+        assert!(err.contains("id"), "got: {err}");
+    }
+
+    // set_standard: invalid namespace rejected (validate_namespace).
+    #[test]
+    fn set_standard_invalid_namespace_rejected() {
+        let conn = fresh_conn();
+        let err =
+            handle_namespace_set_standard(&conn, &json!({"namespace": "has spaces", "id": "x"}))
+                .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // set_standard: invalid parent namespace rejected.
+    #[test]
+    fn set_standard_invalid_parent_rejected() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-parent-bad", "p");
+        let err = handle_namespace_set_standard(
+            &conn,
+            &json!({"namespace": "ns-parent-bad", "id": id, "parent": "has spaces"}),
+        )
+        .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // set_standard: with governance — merged into metadata + echoed.
+    #[test]
+    fn set_standard_with_governance_merged() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-gov", "p");
+        // GovernancePolicy schema requires `write`; other fields default.
+        let governance = json!({"write": "any"});
+        let resp = handle_namespace_set_standard(
+            &conn,
+            &json!({"namespace": "ns-gov", "id": id, "governance": governance.clone()}),
+        )
+        .expect("ok");
+        assert_eq!(resp["governance"], governance);
+        // The merged metadata must round-trip through db::get.
+        let mem = db::get(&conn, &id).unwrap().unwrap();
+        assert!(mem.metadata.get("governance").is_some());
+    }
+
+    // set_standard: invalid governance (deserialization fails).
+    #[test]
+    fn set_standard_with_invalid_governance_rejected() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-bad-gov", "p");
+        let err = handle_namespace_set_standard(
+            &conn,
+            &json!({
+                "namespace": "ns-bad-gov",
+                "id": id,
+                "governance": "this is not an object",
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid governance"), "got: {err}");
+    }
+
+    // set_standard: governance specified but memory id does not exist.
+    #[test]
+    fn set_standard_with_governance_unknown_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_namespace_set_standard(
+            &conn,
+            &json!({
+                "namespace": "ns-missing-id",
+                "id": "11111111-2222-3333-4444-555555555555",
+                "governance": {"write": "any"},
+            }),
+        )
+        .unwrap_err();
+        assert!(err.contains("memory not found"), "got: {err}");
+    }
+
+    // get_standard: missing namespace → typed error.
+    #[test]
+    fn get_standard_missing_namespace_errors() {
+        let conn = fresh_conn();
+        let err = handle_namespace_get_standard(&conn, &json!({})).unwrap_err();
+        assert!(err.contains("namespace"), "got: {err}");
+    }
+
+    // get_standard: unknown namespace → standard_id null.
+    #[test]
+    fn get_standard_unknown_namespace_returns_null() {
+        let conn = fresh_conn();
+        let resp =
+            handle_namespace_get_standard(&conn, &json!({"namespace": "no-such"})).expect("ok");
+        assert!(resp["standard_id"].is_null());
+    }
+
+    // get_standard: happy path.
+    #[test]
+    fn get_standard_happy_path() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-get", "got");
+        db::set_namespace_standard(&conn, "ns-get", &id, None).unwrap();
+        let resp =
+            handle_namespace_get_standard(&conn, &json!({"namespace": "ns-get"})).expect("ok");
+        assert_eq!(resp["standard_id"].as_str(), Some(id.as_str()));
+        assert_eq!(resp["title"].as_str(), Some("got"));
+        // governance defaults filled in.
+        assert!(resp["governance"].is_object());
+    }
+
+    // get_standard: standard_id present but memory deleted — warning surfaced.
+    #[test]
+    fn get_standard_dangling_id_surfaces_warning() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-dangling", "g");
+        db::set_namespace_standard(&conn, "ns-dangling", &id, None).unwrap();
+        // Now physically delete the memory row.
+        conn.execute("DELETE FROM memories WHERE id = ?1", rusqlite::params![&id])
+            .unwrap();
+        let resp =
+            handle_namespace_get_standard(&conn, &json!({"namespace": "ns-dangling"})).expect("ok");
+        assert!(resp["warning"].is_string());
+    }
+
+    // get_standard: --inherit returns chain + standards array.
+    #[test]
+    fn get_standard_inherit_returns_chain() {
+        let conn = fresh_conn();
+        let global_id = insert_one(&conn, "*", "global");
+        db::set_namespace_standard(&conn, "*", &global_id, None).unwrap();
+        let leaf_id = insert_one(&conn, "leaf-ns", "leaf");
+        db::set_namespace_standard(&conn, "leaf-ns", &leaf_id, None).unwrap();
+        let resp =
+            handle_namespace_get_standard(&conn, &json!({"namespace": "leaf-ns", "inherit": true}))
+                .expect("ok");
+        assert!(resp["chain"].is_array());
+        assert!(resp["count"].as_u64().unwrap() >= 1);
+    }
+
+    // clear_standard: happy.
+    #[test]
+    fn clear_standard_happy() {
+        let conn = fresh_conn();
+        let id = insert_one(&conn, "ns-clear", "c");
+        db::set_namespace_standard(&conn, "ns-clear", &id, None).unwrap();
+        let resp =
+            handle_namespace_clear_standard(&conn, &json!({"namespace": "ns-clear"})).expect("ok");
+        assert_eq!(resp["cleared"], true);
+    }
+
+    // clear_standard: missing namespace → error.
+    #[test]
+    fn clear_standard_missing_namespace_errors() {
+        let conn = fresh_conn();
+        let err = handle_namespace_clear_standard(&conn, &json!({})).unwrap_err();
+        assert!(err.contains("namespace"), "got: {err}");
+    }
+
+    // clear_standard: invalid namespace rejected.
+    #[test]
+    fn clear_standard_invalid_namespace_rejected() {
+        let conn = fresh_conn();
+        let err = handle_namespace_clear_standard(&conn, &json!({"namespace": "has spaces"}))
+            .unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // extract_governance: empty metadata returns default policy.
+    #[test]
+    fn extract_governance_default_when_missing_metadata() {
+        let val = json!({"id": "x"});
+        let gov = extract_governance(&val);
+        assert!(gov.is_object());
+    }
+
+    // extract_governance: full metadata with valid governance.
+    #[test]
+    fn extract_governance_round_trips_valid_policy() {
+        let val = json!({
+            "metadata": {
+                "governance": {"min_priority": 0}
+            }
+        });
+        let gov = extract_governance(&val);
+        assert!(
+            gov.is_object(),
+            "expected default-or-resolved policy object"
+        );
+    }
+
+    // auto_register_path_hierarchy: no-op when parent already set.
+    #[test]
+    fn auto_register_noop_when_parent_already_set() {
+        let conn = fresh_conn();
+        // Seed parent_namespace via direct SQL to bypass auto-detect.
+        conn.execute(
+            "INSERT INTO namespace_meta (namespace, standard_id, updated_at, parent_namespace)
+             VALUES ('child-ns', NULL, '2026-01-01T00:00:00Z', 'set-parent')",
+            [],
+        )
+        .unwrap();
+        // Should be a no-op: assert the function does not panic and the
+        // parent_namespace value survives.
+        auto_register_path_hierarchy(&conn, "child-ns");
+        let p: Option<String> = conn
+            .query_row(
+                "SELECT parent_namespace FROM namespace_meta WHERE namespace = 'child-ns'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(p.as_deref(), Some("set-parent"));
+    }
+
+    // auto_register_path_hierarchy: no namespace_meta row → no-op (no panic).
+    #[test]
+    fn auto_register_handles_missing_row_gracefully() {
+        let conn = fresh_conn();
+        // Should not panic when nothing is set up.
+        auto_register_path_hierarchy(&conn, "non-existent-ns");
+    }
+}

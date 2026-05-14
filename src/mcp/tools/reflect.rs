@@ -263,3 +263,262 @@ pub(super) fn handle_reflect(
         "namespace": outcome.namespace,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage C-2 — focused tests for `handle_reflect`.
+    //!
+    //! Areas covered:
+    //! - argument parsing edge cases (empty array, non-string entry)
+    //! - error mapping: SourceNotFound, Validation, DepthExceeded
+    //! - happy path with mock embedder (post-write embedding store)
+    //! - happy path without embedder (no-op for embedding side effect)
+
+    use super::*;
+    use crate::embeddings::test_support::MockEmbedder;
+    use crate::models::{Memory, MemoryKind};
+    use crate::storage as db;
+    use serde_json::json;
+
+    fn fresh_db() -> (rusqlite::Connection, tempfile::NamedTempFile) {
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        let conn = db::open(tmp.path()).expect("db::open");
+        (conn, tmp)
+    }
+
+    fn seed_observation(conn: &rusqlite::Connection, ns: &str, title: &str) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Mid,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: format!("body for {title}"),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "ai:test"}),
+            reflection_depth: 0,
+            memory_kind: MemoryKind::Observation,
+        };
+        db::insert(conn, &mem).expect("insert")
+    }
+
+    // Validation: source_ids missing.
+    #[test]
+    fn missing_source_ids_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"title": "t", "content": "c"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("source_ids"), "got: {err}");
+    }
+
+    // Validation: empty source_ids.
+    #[test]
+    fn empty_source_ids_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"source_ids": [], "title": "t", "content": "c"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("empty"), "got: {err}");
+    }
+
+    // Validation: non-string source_id entry.
+    #[test]
+    fn non_string_source_id_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"source_ids": ["ok", 42], "title": "t", "content": "c"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("must be a string"), "got: {err}");
+    }
+
+    // Validation: missing title.
+    #[test]
+    fn missing_title_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"source_ids": ["x"], "content": "c"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("title"), "got: {err}");
+    }
+
+    // Validation: missing content.
+    #[test]
+    fn missing_content_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"source_ids": ["x"], "title": "t"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("content"), "got: {err}");
+    }
+
+    // Validation: invalid tier.
+    #[test]
+    fn invalid_tier_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({"source_ids": ["x"], "title": "t", "content": "c", "tier": "bogus"}),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid tier"), "got: {err}");
+    }
+
+    // SourceNotFound: source id not in DB.
+    #[test]
+    fn source_not_found_errors() {
+        let (conn, tmp) = fresh_db();
+        let err = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({
+                "source_ids": ["11111111-2222-3333-4444-555555555555"],
+                "title": "t",
+                "content": "c",
+            }),
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("source memory not found"), "got: {err}");
+    }
+
+    // Happy path without embedder — substrate write succeeds.
+    #[test]
+    fn happy_path_without_embedder() {
+        let (conn, tmp) = fresh_db();
+        let src = seed_observation(&conn, "rfl-ns", "obs");
+        let resp = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({
+                "source_ids": [src],
+                "title": "reflection",
+                "content": "I see the observation",
+            }),
+            None,
+            None,
+            None,
+        )
+        .expect("ok");
+        assert!(resp["id"].is_string());
+        assert_eq!(resp["reflection_depth"].as_i64(), Some(1));
+        assert_eq!(resp["namespace"].as_str(), Some("rfl-ns"));
+    }
+
+    // Happy path with embedder — embedding stored on the reflection memory.
+    #[test]
+    fn happy_path_with_embedder_stores_embedding() {
+        let (conn, tmp) = fresh_db();
+        let src = seed_observation(&conn, "rfl-emb", "obs");
+        let emb = MockEmbedder::new_local().unwrap();
+        let resp = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({
+                "source_ids": [src],
+                "title": "t",
+                "content": "c",
+            }),
+            Some(&emb),
+            None,
+            None,
+        )
+        .expect("ok");
+        let new_id = resp["id"].as_str().unwrap();
+        // Embedding column populated on the new reflection.
+        let has_emb: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE id = ?1 AND embedding IS NOT NULL",
+                rusqlite::params![new_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(has_emb, 1, "embedding must be set");
+    }
+
+    // Approval-gate path: governance threshold triggers the K10 pending queue.
+    #[test]
+    fn approval_gate_above_depth_queues_pending() {
+        let (conn, tmp) = fresh_db();
+        let src = seed_observation(&conn, "rfl-gate", "obs");
+        // Seed a namespace_meta row + standard memory with governance
+        // setting `max_reflection_depth: 5` (compiled default) and
+        // `require_approval_above_depth: 0` so a depth=1 reflection
+        // immediately falls above the threshold.
+        let std_mem_id = seed_observation(&conn, "rfl-gate", "std");
+        // Manually patch metadata.governance with require_approval_above_depth=0
+        let gov_metadata = json!({
+            "governance": {
+                "write": "any",
+                "require_approval_above_depth": 0,
+            },
+        });
+        conn.execute(
+            "UPDATE memories SET metadata = json(?1) WHERE id = ?2",
+            rusqlite::params![gov_metadata.to_string(), &std_mem_id],
+        )
+        .unwrap();
+        db::set_namespace_standard(&conn, "rfl-gate", &std_mem_id, None).unwrap();
+        let resp = handle_reflect(
+            &conn,
+            tmp.path(),
+            &json!({
+                "source_ids": [src],
+                "title": "t",
+                "content": "c",
+                "namespace": "rfl-gate",
+            }),
+            None,
+            None,
+            None,
+        )
+        .expect("ok");
+        // Approval gate fires before substrate write.
+        assert_eq!(resp["status"].as_str(), Some("pending"));
+        assert!(resp["pending_id"].is_string());
+    }
+}

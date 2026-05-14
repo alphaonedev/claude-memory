@@ -193,3 +193,139 @@ pub fn handle_replay(
         "count": transcripts_json.len(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    //! Coverage C-2 — focused tests for `handle_replay`.
+
+    use super::*;
+    use crate::models::{Memory, MemoryKind, Tier};
+    use crate::storage as db;
+    use crate::transcripts;
+    use serde_json::json;
+
+    fn fresh_conn() -> rusqlite::Connection {
+        db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    fn seed_observation(conn: &rusqlite::Connection, ns: &str, title: &str) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Mid,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: format!("body for {title}"),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "ai:test"}),
+            reflection_depth: 0,
+            memory_kind: MemoryKind::Observation,
+        };
+        db::insert(conn, &mem).expect("insert")
+    }
+
+    // Validation: missing memory_id.
+    #[test]
+    fn missing_memory_id_errors() {
+        let conn = fresh_conn();
+        let err = handle_replay(&conn, &json!({}), None).unwrap_err();
+        assert!(err.contains("memory_id"), "got: {err}");
+    }
+
+    // Validation: invalid memory_id.
+    #[test]
+    fn invalid_memory_id_rejected() {
+        let conn = fresh_conn();
+        let err = handle_replay(&conn, &json!({"memory_id": "  "}), None).unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    // Validation: depth must be integer or null.
+    #[test]
+    fn depth_non_integer_rejected() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-ns", "obs");
+        let err = handle_replay(
+            &conn,
+            &json!({"memory_id": mid, "depth": "not-a-number"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("depth must be an integer"), "got: {err}");
+    }
+
+    // Validation: negative depth clamps to 0 (no error).
+    #[test]
+    fn negative_depth_clamped() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-clamp", "obs");
+        let resp = handle_replay(&conn, &json!({"memory_id": mid, "depth": -5}), None).expect("ok");
+        assert_eq!(resp["memory_id"].as_str(), Some(mid.as_str()));
+        assert_eq!(resp["count"].as_u64(), Some(0));
+    }
+
+    // Happy path with no transcripts — count=0, array empty.
+    #[test]
+    fn no_transcripts_returns_empty() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-empty", "obs");
+        let resp = handle_replay(&conn, &json!({"memory_id": mid}), None).expect("ok");
+        assert_eq!(resp["count"].as_u64(), Some(0));
+        assert!(resp["transcripts"].as_array().unwrap().is_empty());
+    }
+
+    // Happy path with a tiny transcript — content surfaced (below threshold).
+    #[test]
+    fn small_transcript_returns_content() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-small", "obs");
+        let t =
+            transcripts::store(&conn, "rp-small", "short transcript content", None).expect("store");
+        transcripts::link_transcript(&conn, &mid, &t.id, None, None).expect("link");
+        let resp = handle_replay(&conn, &json!({"memory_id": mid}), None).expect("ok");
+        assert_eq!(resp["count"].as_u64(), Some(1));
+        let entries = resp["transcripts"].as_array().unwrap();
+        assert!(entries[0]["content"].is_string());
+        // Below the 100 KB threshold, no truncation marker.
+        assert!(entries[0].get("truncated").is_none());
+    }
+
+    // Truncation rule — transcript above the verbose threshold is omitted
+    // unless `verbose=true`.
+    #[test]
+    fn large_transcript_truncated_unless_verbose() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-large", "obs");
+        // 101 KB of content — above the 100 KB threshold.
+        let big = "x".repeat(101 * 1024);
+        let t = transcripts::store(&conn, "rp-large", &big, None).expect("store");
+        transcripts::link_transcript(&conn, &mid, &t.id, None, None).expect("link");
+        let resp = handle_replay(&conn, &json!({"memory_id": mid}), None).expect("ok");
+        let entries = resp["transcripts"].as_array().unwrap();
+        assert_eq!(entries[0]["truncated"], true);
+        assert!(entries[0].get("content").is_none());
+    }
+
+    // verbose=true forces content even on large transcripts.
+    #[test]
+    fn verbose_flag_returns_content_for_large() {
+        let conn = fresh_conn();
+        let mid = seed_observation(&conn, "rp-verbose", "obs");
+        let big = "y".repeat(101 * 1024);
+        let t = transcripts::store(&conn, "rp-verbose", &big, None).expect("store");
+        transcripts::link_transcript(&conn, &mid, &t.id, None, None).expect("link");
+        let resp =
+            handle_replay(&conn, &json!({"memory_id": mid, "verbose": true}), None).expect("ok");
+        let entries = resp["transcripts"].as_array().unwrap();
+        assert!(entries[0]["content"].is_string());
+        assert!(entries[0].get("truncated").is_none());
+    }
+}

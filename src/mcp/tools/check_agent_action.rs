@@ -248,4 +248,232 @@ mod tests {
     fn mutation_disabled_error_string_is_stable() {
         assert!(MCP_MUTATION_DISABLED_ERROR.starts_with("governance.not_available_over_mcp"));
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Coverage C-2 — additional tests for the build_action branch
+    // coverage and the agent_id default.
+
+    // filesystem_write requires `path`.
+    #[test]
+    fn filesystem_write_missing_path_errors() {
+        let conn = fresh_conn();
+        let err =
+            handle_check_agent_action(&conn, &json!({"kind": "filesystem_write"})).unwrap_err();
+        assert!(err.contains("path"), "got: {err}");
+    }
+
+    // filesystem_write happy path with optional byte_estimate.
+    #[test]
+    fn filesystem_write_with_byte_estimate_allows_when_no_rule() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({
+                "kind": "filesystem_write",
+                "path": "/home/test/file.txt",
+                "byte_estimate": 1024u64,
+            }),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // network_request happy path with default scheme.
+    #[test]
+    fn network_request_default_scheme_allows() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "network_request", "host": "example.com"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // network_request with custom scheme.
+    #[test]
+    fn network_request_custom_scheme() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "network_request", "host": "host.local", "scheme": "ssh"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // network_request missing host → error.
+    #[test]
+    fn network_request_missing_host_errors() {
+        let conn = fresh_conn();
+        let err =
+            handle_check_agent_action(&conn, &json!({"kind": "network_request"})).unwrap_err();
+        assert!(err.contains("host"), "got: {err}");
+    }
+
+    // process_spawn happy path with no args.
+    #[test]
+    fn process_spawn_no_args_allows() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "process_spawn", "binary": "/usr/bin/ls"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // process_spawn with args array.
+    #[test]
+    fn process_spawn_with_args() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({
+                "kind": "process_spawn",
+                "binary": "/bin/echo",
+                "args": ["hello", "world"],
+            }),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // process_spawn missing binary → error.
+    #[test]
+    fn process_spawn_missing_binary_errors() {
+        let conn = fresh_conn();
+        let err = handle_check_agent_action(&conn, &json!({"kind": "process_spawn"})).unwrap_err();
+        assert!(err.contains("binary"), "got: {err}");
+    }
+
+    // custom kind with custom_kind field.
+    #[test]
+    fn custom_kind_allows() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "custom", "custom_kind": "my-custom-action"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // custom kind missing custom_kind → error.
+    #[test]
+    fn custom_kind_missing_custom_kind_errors() {
+        let conn = fresh_conn();
+        let err = handle_check_agent_action(&conn, &json!({"kind": "custom"})).unwrap_err();
+        assert!(err.contains("custom_kind"), "got: {err}");
+    }
+
+    // custom kind with `kind_inner` alias.
+    #[test]
+    fn custom_kind_kind_inner_alias() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "custom", "kind_inner": "alias-action"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // Bash with cwd specified.
+    #[test]
+    fn bash_with_cwd_allows() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "bash", "command": "pwd", "cwd": "/tmp"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "allow");
+    }
+
+    // Agent_id provided in arguments — echoed in response.
+    #[test]
+    fn agent_id_echoed_in_response() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({
+                "kind": "bash",
+                "command": "ls",
+                "agent_id": "ai:alice",
+            }),
+        )
+        .expect("ok");
+        assert_eq!(resp["agent_id"].as_str(), Some("ai:alice"));
+    }
+
+    // Default agent_id ("anonymous:mcp") used when omitted.
+    #[test]
+    fn default_agent_id_when_omitted() {
+        let conn = fresh_conn();
+        let resp = handle_check_agent_action(&conn, &json!({"kind": "bash", "command": "ls"}))
+            .expect("ok");
+        assert_eq!(resp["agent_id"].as_str(), Some("anonymous:mcp"));
+    }
+
+    // Warn severity surfaces structured rule_id + reason. The bash
+    // matcher uses the `command_regex` substring key.
+    #[test]
+    fn warn_severity_surfaces_rule_id() {
+        let conn = fresh_conn();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "W001".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"warn-this"}"#.into(),
+                severity: "warn".into(),
+                reason: "warn reason".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "bash", "command": "warn-this please"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "warn");
+        assert_eq!(resp["decision"]["rule_id"], "W001");
+    }
+
+    // Process spawn refusal — assert structured rule_id surfaces.
+    #[test]
+    fn process_spawn_refuses_on_binary_match() {
+        let conn = fresh_conn();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "P002".into(),
+                kind: "process_spawn".into(),
+                matcher: r#"{"binary":"/bin/forbidden"}"#.into(),
+                severity: "refuse".into(),
+                reason: "binary not allowed".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        let resp = handle_check_agent_action(
+            &conn,
+            &json!({"kind": "process_spawn", "binary": "/bin/forbidden"}),
+        )
+        .expect("ok");
+        assert_eq!(resp["decision"]["decision"], "refuse");
+        assert_eq!(resp["decision"]["rule_id"], "P002");
+    }
 }
