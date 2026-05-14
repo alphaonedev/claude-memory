@@ -1219,6 +1219,657 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // C-3 coverage uplift — drive `run()` for every subcommand. The
+    // mutation verbs require an operator keypair on disk under
+    // `<key_dir>/operator.priv` (kp::save layout); the keygen + sign-seed
+    // verbs use the singleton-file layout.
+    // -----------------------------------------------------------------
+
+    /// Set up a tempdir with a `db::open`-initialized SQLite at
+    /// `db_path` and an operator keypair saved under `key_dir`. Returns
+    /// the tempdir guard (must outlive the test) and the two paths.
+    #[cfg(unix)]
+    fn fresh_env_with_operator_key() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf)
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("ai-memory.db");
+        // Initialize the full schema.
+        drop(crate::db::open(&db_path).expect("db::open"));
+        // Save an operator keypair at <key_dir>/operator.{priv,pub}.
+        let kp = kp::generate(OPERATOR_KEY_ID).expect("generate");
+        let key_dir = dir.path().join("keys");
+        std::fs::create_dir_all(&key_dir).expect("mkdir keys");
+        kp::save(&kp, &key_dir).expect("save kp");
+        (dir, db_path, key_dir)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_list_emits_seeded_rules() {
+        // `db::open` runs migration 0024 which seeds R001..R004 disabled.
+        // The list verb returns them with attest_level=unsigned. We pin
+        // the dispatch + JSON envelope shape (not the seed content,
+        // since the migration is owned by L0.7-2).
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::List,
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("list");
+        let s = String::from_utf8(stdout).unwrap();
+        // Envelope wraps the result under "rules.list".
+        assert!(s.contains("\"verb\":\"rules.list\""), "got: {s}");
+        // List result is an array; either empty or pre-seeded.
+        assert!(s.contains("\"result\":["), "got: {s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_list_human_format_emits_pretty_array() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::List,
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        // json=false → emit_ok's pretty-print branch.
+        run(&db_path, args, false, &mut out).expect("list");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("["), "got: {s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_add_without_sign_refuses() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Add {
+                id: "R-test".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^ls"}"#.into(),
+                severity: "refuse".into(),
+                reason: "test".into(),
+                namespace: "_global".into(),
+                disabled: false,
+                sign: false,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("no_operator_key"), "got: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_add_with_sign_persists_signed_rule() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir.clone()),
+            action: RulesAction::Add {
+                id: "R-add-1".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^rm -rf /"}"#.into(),
+                severity: "refuse".into(),
+                reason: "rm-rf is bad".into(),
+                namespace: "_global".into(),
+                disabled: false,
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("add");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.add"), "got: {s}");
+        assert!(s.contains("R-add-1"), "got: {s}");
+        assert!(s.contains("operator_signed"), "got: {s}");
+
+        // Confirm the row landed.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let r = rules_store::get(&conn, "R-add-1").unwrap().unwrap();
+        assert_eq!(r.attest_level, "operator_signed");
+        assert!(r.signature.is_some());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_add_with_bad_matcher_json_errors() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Add {
+                id: "R-bad".into(),
+                kind: "bash".into(),
+                matcher: "{ not json".into(), // malformed
+                severity: "refuse".into(),
+                reason: "x".into(),
+                namespace: "_global".into(),
+                disabled: false,
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("matcher"), "got: {msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_add_disabled_lands_disabled_row() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Add {
+                id: "R-dis".into(),
+                kind: "filesystem_write".into(),
+                matcher: r#"{"glob":"/tmp/**"}"#.into(),
+                severity: "warn".into(),
+                reason: "noisy".into(),
+                namespace: "_global".into(),
+                disabled: true,
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("add");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let r = rules_store::get(&conn, "R-dis").unwrap().unwrap();
+        assert!(!r.enabled, "disabled flag must propagate");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_check_evaluates_action_against_empty_set() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Check {
+                kind: "bash".into(),
+                payload: r#"{"command":"ls"}"#.into(),
+                agent_id: Some("tester".into()),
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("check");
+        let s = String::from_utf8(stdout).unwrap();
+        // Decision JSON envelope — at minimum "rules.check" verb shows up.
+        assert!(s.contains("rules.check"), "got: {s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_check_without_agent_id_uses_default() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Check {
+                kind: "network_request".into(),
+                payload: r#"{"host":"example.com","scheme":"https"}"#.into(),
+                agent_id: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("check");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_enable_unsign_refuses() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Enable {
+                id: "R-x".into(),
+                sign: false,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must refuse");
+        assert!(format!("{err:#}").contains("no_operator_key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_enable_unknown_id_errors() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Enable {
+                id: "R-does-not-exist".into(),
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must error");
+        assert!(format!("{err:#}").contains("no rule with id"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_enable_and_disable_roundtrip() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        // First add a disabled rule.
+        let args = RulesArgs {
+            key_dir: Some(key_dir.clone()),
+            action: RulesAction::Add {
+                id: "R-toggle".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "warn".into(),
+                reason: "toggle me".into(),
+                namespace: "_global".into(),
+                disabled: true,
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("add");
+
+        // Enable.
+        let args = RulesArgs {
+            key_dir: Some(key_dir.clone()),
+            action: RulesAction::Enable {
+                id: "R-toggle".into(),
+                sign: true,
+            },
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("enable");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert!(
+            rules_store::get(&conn, "R-toggle")
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+        drop(conn);
+
+        // Disable.
+        let args = RulesArgs {
+            key_dir: Some(key_dir.clone()),
+            action: RulesAction::Disable {
+                id: "R-toggle".into(),
+                sign: true,
+            },
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("disable");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert!(
+            !rules_store::get(&conn, "R-toggle")
+                .unwrap()
+                .unwrap()
+                .enabled
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_disable_unsign_refuses() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Disable {
+                id: "R-x".into(),
+                sign: false,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must refuse");
+        assert!(format!("{err:#}").contains("no_operator_key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_disable_unknown_id_errors() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Disable {
+                id: "R-missing".into(),
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must error");
+        assert!(format!("{err:#}").contains("no rule with id"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_remove_unsign_refuses() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Remove {
+                id: "R-x".into(),
+                sign: false,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let err = run(&db_path, args, false, &mut out).expect_err("must refuse");
+        assert!(format!("{err:#}").contains("no_operator_key"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_remove_signed_deletes_row() {
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        // Add then remove.
+        let args = RulesArgs {
+            key_dir: Some(key_dir.clone()),
+            action: RulesAction::Add {
+                id: "R-rm".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "warn".into(),
+                reason: "rm me".into(),
+                namespace: "_global".into(),
+                disabled: false,
+                sign: true,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("add");
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::Remove {
+                id: "R-rm".into(),
+                sign: true,
+            },
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("remove");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.remove"), "got: {s}");
+        assert!(s.contains("\"removed\":true"), "got: {s}");
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        assert!(rules_store::get(&conn, "R-rm").unwrap().is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_keygen_writes_keypair_under_explicit_out() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("ai-memory.db");
+        drop(crate::db::open(&db_path).expect("db::open"));
+        let key_path = dir.path().join("op.key");
+        let args = RulesArgs {
+            key_dir: None,
+            action: RulesAction::Keygen {
+                out: Some(key_path.clone()),
+                force: false,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, true, &mut out).expect("keygen");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.keygen"), "got: {s}");
+        assert!(key_path.exists(), "priv key missing");
+        let pub_path = pub_sibling_path(&key_path);
+        assert!(pub_path.exists(), "pub key missing");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_signs_existing_rules() {
+        // Build a fully-initialized DB, add a rule via run(), then call
+        // sign-seed via run() (with --db override + --key explicit).
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        // Add an unsigned-attest-level rule directly so sign_seed_rules
+        // has at least one row to operate on.
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        rules_store::insert(
+            &conn,
+            &Rule {
+                id: "R-ss".into(),
+                kind: "bash".into(),
+                matcher: r#"{"command_regex":"^x"}"#.into(),
+                severity: "refuse".into(),
+                reason: "t".into(),
+                namespace: "_global".into(),
+                created_by: "test".into(),
+                created_at: 0,
+                enabled: true,
+                signature: None,
+                attest_level: "unsigned".into(),
+            },
+        )
+        .unwrap();
+        drop(conn);
+
+        // The sign-seed verb expects the singleton-file layout
+        // (`~/.config/ai-memory/operator.key`). We saved the keypair
+        // in dir-layout for the other tests, so generate a fresh
+        // singleton-file via `keygen_operator` first.
+        let dir2 = tempfile::tempdir().unwrap();
+        let key_file = dir2.path().join("operator.key");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        keygen_operator(&key_file, false, &mut out).unwrap();
+
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: Some(key_file),
+                db: Some(db_path.clone()),
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        // We pass a separate `--db` to drive the dispatch's
+        // `if let Some(db_path) = db` branch (line 350-354).
+        let placeholder_db = tempfile::tempdir().unwrap();
+        let placeholder_path = placeholder_db.path().join("placeholder.db");
+        drop(crate::db::open(&placeholder_path).unwrap());
+        run(&placeholder_path, args, true, &mut out).expect("sign-seed");
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("rules.sign-seed"), "got: {s}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_rules_sign_seed_reuses_open_conn_when_no_db_override() {
+        // Drives the else-branch (line 356) where the top-level
+        // `--db` flag's open connection is reused.
+        let (_dir, db_path, key_dir) = fresh_env_with_operator_key();
+        let dir2 = tempfile::tempdir().unwrap();
+        let key_file = dir2.path().join("operator.key");
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        keygen_operator(&key_file, false, &mut out).unwrap();
+        let args = RulesArgs {
+            key_dir: Some(key_dir),
+            action: RulesAction::SignSeed {
+                key: Some(key_file),
+                db: None,
+            },
+        };
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        run(&db_path, args, false, &mut out).expect("sign-seed reuse");
+    }
+
+    #[test]
+    fn resolve_key_dir_returns_override() {
+        let p = std::path::PathBuf::from("/some/explicit/dir");
+        let out = resolve_key_dir(Some(&p)).unwrap();
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn resolve_operator_key_path_returns_override() {
+        let p = std::path::PathBuf::from("/custom/operator.key");
+        let out = resolve_operator_key_path(Some(&p)).unwrap();
+        assert_eq!(out, p);
+    }
+
+    #[test]
+    fn resolve_operator_key_path_default_includes_ai_memory() {
+        let p = resolve_operator_key_path(None).unwrap();
+        let s = p.display().to_string();
+        assert!(
+            s.contains("ai-memory"),
+            "default path missing ai-memory: {s}"
+        );
+        assert!(s.ends_with("operator.key"), "got: {s}");
+    }
+
+    #[test]
+    fn emit_ok_human_format_emits_pretty_json() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let payload = serde_json::json!({"foo":"bar","n":1});
+        emit_ok(false, &mut out, "test.verb", &payload).unwrap();
+        let s = String::from_utf8(stdout).unwrap();
+        // Pretty-print includes newlines + 2-space indent.
+        assert!(s.contains("\"foo\": \"bar\""), "got: {s}");
+        assert!(s.contains("\n"), "pretty must include newlines: {s}");
+    }
+
+    #[test]
+    fn emit_ok_json_format_envelopes_under_verb() {
+        let mut stdout: Vec<u8> = Vec::new();
+        let mut stderr: Vec<u8> = Vec::new();
+        let mut out = CliOutput {
+            stdout: &mut stdout,
+            stderr: &mut stderr,
+        };
+        let payload = serde_json::json!({"x":1});
+        emit_ok(true, &mut out, "test.verb", &payload).unwrap();
+        let s = String::from_utf8(stdout).unwrap();
+        assert!(s.contains("\"verb\":\"test.verb\""), "got: {s}");
+        assert!(s.contains("\"result\":{\"x\":1}"), "got: {s}");
+    }
+
+    #[test]
+    fn resolve_agent_id_returns_non_empty() {
+        // The fn falls back to `anonymous:pid-<N>` if identity
+        // resolution fails — never returns an empty string.
+        let id = resolve_agent_id();
+        assert!(!id.is_empty());
+    }
+
     #[cfg(unix)]
     #[test]
     fn sign_seed_rules_is_idempotent() {
