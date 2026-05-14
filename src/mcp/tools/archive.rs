@@ -94,3 +94,102 @@ pub(super) fn handle_gc(
     let count = db::gc(conn, archive).map_err(|e| e.to_string())?;
     Ok(json!({"collected": count, "dry_run": false}))
 }
+
+// ---- C-5 (#699): unit coverage for the `pub(super)` handlers. The MCP
+// dispatch layer covers most happy paths; these target the missing-`id`,
+// invalid-id and "not in archive" branches plus the gc dry-run vs.
+// actual-run split that the lib-tier path under-exercises (currently
+// 91.02%). ----
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn open_conn() -> rusqlite::Connection {
+        crate::db::open(std::path::Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    #[test]
+    fn handle_archive_restore_missing_id_errors() {
+        // Hits the `id is required` branch on line 24.
+        let conn = open_conn();
+        let err = handle_archive_restore(&conn, &json!({})).unwrap_err();
+        assert!(err.contains("id"), "got: {err}");
+    }
+
+    #[test]
+    fn handle_archive_restore_invalid_id_maps_validator_error() {
+        // Covers `validate_id(...).map_err(...)` on line 25.
+        let conn = open_conn();
+        let err = handle_archive_restore(&conn, &json!({"id": "not-a-valid-uuid"})).unwrap_err();
+        assert!(!err.is_empty(), "expected non-empty validator error");
+    }
+
+    #[test]
+    fn handle_archive_restore_unknown_uuid_returns_not_found() {
+        // Well-formed UUID but no row exists → line 28 "not found in archive".
+        let conn = open_conn();
+        let err = handle_archive_restore(
+            &conn,
+            &json!({"id": "00000000-0000-0000-0000-000000000000"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+
+    #[test]
+    fn handle_archive_list_default_paging_returns_empty() {
+        // Exercises `params["limit"].as_u64().unwrap_or(50)` and
+        // `params["offset"].as_u64().unwrap_or(0)` defaults on lines 13-14.
+        let conn = open_conn();
+        let result = handle_archive_list(&conn, &json!({})).expect("list ok");
+        assert_eq!(result["count"], 0);
+        assert!(result["archived"].is_array());
+    }
+
+    #[test]
+    fn handle_archive_stats_returns_object() {
+        // Covers the `archive_stats(...).map_err(...)` happy path
+        // (line 73) on an empty DB. The stats schema is an object.
+        let conn = open_conn();
+        let result = handle_archive_stats(&conn).expect("stats ok");
+        assert!(
+            result.is_object(),
+            "archive_stats must return a JSON object on empty DB, got: {result}"
+        );
+    }
+
+    #[test]
+    fn handle_gc_dry_run_on_empty_db_returns_zero() {
+        // Covers the `dry_run = true` branch on lines 82-92.
+        let conn = open_conn();
+        let result = handle_gc(&conn, &json!({"dry_run": true}), false).expect("gc dry-run ok");
+        assert_eq!(result["collected"], 0);
+        assert_eq!(result["dry_run"], true);
+    }
+
+    #[test]
+    fn handle_gc_actual_run_on_empty_db_returns_zero() {
+        // Covers the actual-gc branch on lines 94-95 with archive=true.
+        let conn = open_conn();
+        let result = handle_gc(&conn, &json!({"dry_run": false}), true).expect("gc run ok");
+        assert_eq!(result["collected"], 0);
+        assert_eq!(result["dry_run"], false);
+    }
+
+    #[test]
+    fn handle_archive_purge_default_no_filter_succeeds_on_empty_db() {
+        // Covers the `older_than_days` None path on line 37, and the
+        // permission-Allow happy path (lines 53-54), and the
+        // `purge_archive(...)` success branch on lines 68-69.
+        let conn = open_conn();
+        let result = handle_archive_purge(&conn, &json!({})).expect("purge ok");
+        let purged = &result["purged"];
+        // Single-branch numeric assertion so the `||` short-circuit
+        // doesn't leave the right side unexercised.
+        assert!(
+            purged.is_number(),
+            "expected numeric `purged`, got: {purged}"
+        );
+    }
+}

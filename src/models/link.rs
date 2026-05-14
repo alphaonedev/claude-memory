@@ -575,4 +575,60 @@ mod tests {
             serde_json::Value::String("2026-01-01T00:00:00Z".to_string())
         );
     }
+
+    // ---- C-5 (#699): lift coverage on MemoryLinkRelation parsing/defaults.
+    // Targets uncovered: `MemoryLinkRelation::from_str` unknown branch,
+    // `default_relation`, `Default::default`, `FromStr` wrapper. ----
+
+    #[test]
+    fn memory_link_relation_from_str_returns_none_for_unknown() {
+        // Line 116: `_ => None` arm of the inherent from_str.
+        assert_eq!(MemoryLinkRelation::from_str("bogus"), None);
+        assert_eq!(MemoryLinkRelation::from_str(""), None);
+        assert_eq!(MemoryLinkRelation::from_str("RELATED_TO"), None);
+    }
+
+    #[test]
+    fn memory_link_relation_default_relation_is_related_to() {
+        // Lines 138-140: `default_relation()` associated function.
+        let d = MemoryLinkRelation::default_relation();
+        assert_eq!(d, MemoryLinkRelation::RelatedTo);
+        assert_eq!(d.as_str(), "related_to");
+    }
+
+    #[test]
+    fn memory_link_relation_default_trait_uses_related_to() {
+        // Lines 150-152: `Default::default()` implementation.
+        let d: MemoryLinkRelation = Default::default();
+        assert_eq!(d, MemoryLinkRelation::RelatedTo);
+    }
+
+    #[test]
+    fn memory_link_relation_from_str_trait_round_trips_canonical_strings() {
+        // Lines 158-165: `std::str::FromStr::from_str` wrapper.
+        for (s, v) in [
+            ("related_to", MemoryLinkRelation::RelatedTo),
+            ("supersedes", MemoryLinkRelation::Supersedes),
+            ("contradicts", MemoryLinkRelation::Contradicts),
+            ("derived_from", MemoryLinkRelation::DerivedFrom),
+            ("reflects_on", MemoryLinkRelation::ReflectsOn),
+        ] {
+            // Disambiguate against the inherent `from_str` (which returns
+            // Option) by going through the `FromStr` trait fully qualified.
+            let parsed: MemoryLinkRelation =
+                <MemoryLinkRelation as std::str::FromStr>::from_str(s).unwrap();
+            assert_eq!(parsed, v);
+            // Display impl round-trip.
+            assert_eq!(format!("{v}"), s);
+        }
+    }
+
+    #[test]
+    fn memory_link_relation_from_str_trait_returns_helpful_error_for_unknown() {
+        // Lines 158-165: error arm of the FromStr wrapper.
+        let err = <MemoryLinkRelation as std::str::FromStr>::from_str("nope").unwrap_err();
+        assert!(err.contains("nope"));
+        assert!(err.contains("related_to"));
+        assert!(err.contains("reflects_on"));
+    }
 }

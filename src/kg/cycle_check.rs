@@ -322,4 +322,47 @@ mod tests {
             "walk with depth=5 must detect the cycle"
         );
     }
+
+    // ---- C-5 (#699): close remaining gaps in cycle_check.rs.
+    // Targets: lines 70-73 (direct self-link defensive branch), line 77
+    // (`max_depth == 0` fallback to DEFAULT_MAX_DEPTH). ----
+
+    #[test]
+    fn direct_self_link_returns_cycle_with_two_node_path() {
+        // Lines 70-73: when source_id == target_id, the function bails
+        // immediately with would_cycle = true and a two-node path
+        // `[source, target]`. This is defensive coverage; the validator
+        // also blocks self-links upstream.
+        let conn = open_db();
+        insert_memory(&conn, "self");
+
+        let result = would_create_reflection_cycle(&conn, "self", "self", 8);
+        assert!(
+            result.would_cycle,
+            "direct self-link must be flagged as a cycle"
+        );
+        assert_eq!(
+            result.cycle_path,
+            vec!["self".to_string(), "self".to_string()]
+        );
+    }
+
+    #[test]
+    fn max_depth_zero_falls_back_to_default_bound() {
+        // Line 77: `max_depth == 0` triggers the `DEFAULT_MAX_DEPTH`
+        // fallback. We assert the function still detects a real cycle
+        // when the caller passes the sentinel `0` (i.e. "use default").
+        let conn = open_db();
+        insert_memory(&conn, "a");
+        insert_memory(&conn, "b");
+        add_reflects_on(&conn, "b", "a"); // B reflects_on A
+
+        // Pass 0 to invoke the fallback branch.
+        let result = would_create_reflection_cycle(&conn, "a", "b", 0);
+        assert!(
+            result.would_cycle,
+            "max_depth=0 should fall back to DEFAULT_MAX_DEPTH and still detect the cycle"
+        );
+        assert!(!result.cycle_path.is_empty());
+    }
 }

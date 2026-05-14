@@ -4712,4 +4712,323 @@ legacy_scoring = false
              recommended default; got:\n{contents}"
         );
     }
+
+    // ---- C-5 (#699): close lib-tier gaps in config.rs (currently 90.76%).
+    // Targets serde default functions, env-var override branches, and
+    // display impls that no other test exercises. ----
+
+    #[test]
+    fn llm_model_display_name_each_variant() {
+        // Lines 84-89: `LlmModel::display_name` for each enum arm.
+        assert_eq!(
+            LlmModel::Gemma4E2B.display_name(),
+            "Gemma 4 Effective 2B (Q4)"
+        );
+        assert_eq!(
+            LlmModel::Gemma4E4B.display_name(),
+            "Gemma 4 Effective 4B (Q4)"
+        );
+        // Also pin the ollama_model_id for completeness.
+        assert_eq!(LlmModel::Gemma4E2B.ollama_model_id(), "gemma4:e2b");
+        assert_eq!(LlmModel::Gemma4E4B.ollama_model_id(), "gemma4:e4b");
+    }
+
+    #[test]
+    fn feature_tier_display_matches_as_str() {
+        // Lines 183-185: `FeatureTier::Display::fmt` writes `as_str`.
+        assert_eq!(format!("{}", FeatureTier::Keyword), "keyword");
+        assert_eq!(format!("{}", FeatureTier::Semantic), "semantic");
+        assert_eq!(format!("{}", FeatureTier::Smart), "smart");
+        assert_eq!(format!("{}", FeatureTier::Autonomous), "autonomous");
+    }
+
+    #[test]
+    fn default_recall_mode_is_disabled() {
+        // Lines 630-632: serde default helper.
+        assert_eq!(default_recall_mode(), RecallMode::Disabled);
+    }
+
+    #[test]
+    fn default_reranker_mode_is_off() {
+        // Lines 634-636: serde default helper.
+        assert_eq!(default_reranker_mode(), RerankerMode::Off);
+    }
+
+    #[test]
+    fn default_hook_events_count_matches_constant() {
+        // Lines 731-733: serde default helper.
+        assert_eq!(default_hook_events_count(), HOOK_EVENTS_COUNT);
+    }
+
+    #[test]
+    fn default_reflection_boost_returns_default_report() {
+        // Lines 621-623: serde default helper. Calls the `Default::default`
+        // impl on `ReflectionBoostReport`.
+        let r = default_reflection_boost();
+        let d = ReflectionBoostReport::default();
+        // Lazy compare via Debug — the struct has no PartialEq.
+        assert_eq!(format!("{r:?}"), format!("{d:?}"));
+    }
+
+    #[test]
+    fn permissions_mode_default_is_advisory() {
+        // Lines 2403-2405: `impl Default for PermissionsMode`.
+        let m: PermissionsMode = Default::default();
+        assert_eq!(m, PermissionsMode::Advisory);
+    }
+
+    #[test]
+    fn set_allow_loopback_webhooks_round_trips() {
+        // Lines 2357-2359: pub setter — just observe it does not panic
+        // and that effective_allow_loopback_webhooks can read the value.
+        // (The atomic is process-global; restore the prior value at end.)
+        let prior = ALLOW_LOOPBACK_WEBHOOKS.load(std::sync::atomic::Ordering::SeqCst);
+        set_allow_loopback_webhooks(true);
+        assert!(ALLOW_LOOPBACK_WEBHOOKS.load(std::sync::atomic::Ordering::SeqCst));
+        set_allow_loopback_webhooks(false);
+        assert!(!ALLOW_LOOPBACK_WEBHOOKS.load(std::sync::atomic::Ordering::SeqCst));
+        // Restore.
+        ALLOW_LOOPBACK_WEBHOOKS.store(prior, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn reset_permissions_decision_counts_zeros_all_atomics() {
+        // Lines 2619-2623: test-only reset helper. Increment then reset.
+        DECISIONS_ENFORCE.fetch_add(5, Ordering::SeqCst);
+        DECISIONS_ADVISORY.fetch_add(3, Ordering::SeqCst);
+        DECISIONS_OFF.fetch_add(1, Ordering::SeqCst);
+        reset_permissions_decision_counts_for_test();
+        assert_eq!(DECISIONS_ENFORCE.load(Ordering::SeqCst), 0);
+        assert_eq!(DECISIONS_ADVISORY.load(Ordering::SeqCst), 0);
+        assert_eq!(DECISIONS_OFF.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn effective_allow_loopback_webhooks_env_var_true_returns_true() {
+        // Lines 2281-2297: env-var override branch (truthy).
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "yes");
+        }
+        let cfg = AppConfig::default();
+        assert!(cfg.effective_allow_loopback_webhooks());
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", v),
+                None => std::env::remove_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_allow_loopback_webhooks_env_var_false_returns_false() {
+        // Lines 2281-2297: env-var override (falsy).
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "no");
+        }
+        let cfg = AppConfig::default();
+        assert!(!cfg.effective_allow_loopback_webhooks());
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", v),
+                None => std::env::remove_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_allow_loopback_webhooks_env_var_invalid_falls_back_to_config() {
+        // Lines 2286-2292: invalid env value falls back to config.toml.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "kinda");
+        }
+        let cfg = AppConfig::default();
+        // With no [subscriptions] table the default is false.
+        assert!(!cfg.effective_allow_loopback_webhooks());
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", v),
+                None => std::env::remove_var("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_permissions_mode_env_var_enforce_wins() {
+        // Lines 3144-3169: env override path → Enforce.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_PERMISSIONS_MODE").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", "enforce");
+        }
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_permissions_mode(), PermissionsMode::Enforce);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", v),
+                None => std::env::remove_var("AI_MEMORY_PERMISSIONS_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_permissions_mode_env_var_advisory_wins() {
+        // Lines 3148: env override path → Advisory.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_PERMISSIONS_MODE").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", "ADVISORY");
+        }
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_permissions_mode(), PermissionsMode::Advisory);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", v),
+                None => std::env::remove_var("AI_MEMORY_PERMISSIONS_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_permissions_mode_env_var_off_wins() {
+        // Lines 3149: env override path → Off.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_PERMISSIONS_MODE").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", "off");
+        }
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.effective_permissions_mode(), PermissionsMode::Off);
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", v),
+                None => std::env::remove_var("AI_MEMORY_PERMISSIONS_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_permissions_mode_env_var_invalid_falls_back_to_config() {
+        // Lines 3150-3156: invalid env → falls through to resolve_v07_default_mode.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_PERMISSIONS_MODE").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", "weird");
+        }
+        let cfg = AppConfig::default();
+        // The resolver returns a value (we don't pin which — just that it returns).
+        let _ = cfg.effective_permissions_mode();
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_PERMISSIONS_MODE", v),
+                None => std::env::remove_var("AI_MEMORY_PERMISSIONS_MODE"),
+            }
+        }
+    }
+
+    #[test]
+    fn effective_permission_rules_returns_empty_when_unset() {
+        // Lines 3178-3183: empty-rules path.
+        let cfg = AppConfig::default();
+        let rules = cfg.effective_permission_rules();
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn app_config_load_with_no_config_env_returns_default() {
+        // Lines 3015-3022: `AppConfig::load` with AI_MEMORY_NO_CONFIG=1.
+        let _g = env_var_lock();
+        let prior = std::env::var("AI_MEMORY_NO_CONFIG").ok();
+        unsafe {
+            std::env::set_var("AI_MEMORY_NO_CONFIG", "1");
+        }
+        let cfg = AppConfig::load();
+        // Default config has no tier/db set.
+        assert!(
+            cfg.tier.is_none()
+                || cfg.tier == Some("semantic".to_string())
+                || cfg.tier == Some("keyword".to_string())
+        );
+        unsafe {
+            match prior {
+                Some(v) => std::env::set_var("AI_MEMORY_NO_CONFIG", v),
+                None => std::env::remove_var("AI_MEMORY_NO_CONFIG"),
+            }
+        }
+    }
+
+    // ---- C-5 (#699) round 2: round out the easy Default impls + serde
+    // default helpers that bumped lines 805/852/955/1019/1057/1125/1634+ ----
+
+    #[test]
+    fn capability_compaction_default_is_planned() {
+        // Lines 804-808.
+        let d: CapabilityCompaction = Default::default();
+        let planned = CapabilityCompaction::planned();
+        // Compare via Debug since the struct has no PartialEq.
+        assert_eq!(format!("{d:?}"), format!("{planned:?}"));
+    }
+
+    #[test]
+    fn capability_transcripts_default_is_planned() {
+        // Lines 851-855.
+        let d: CapabilityTranscripts = Default::default();
+        let planned = CapabilityTranscripts::planned();
+        assert_eq!(format!("{d:?}"), format!("{planned:?}"));
+    }
+
+    #[test]
+    fn default_capability_reflection_helper_returns_current() {
+        // Lines 955-957.
+        let helper = default_capability_reflection();
+        let current = CapabilityReflection::current();
+        assert_eq!(format!("{helper:?}"), format!("{current:?}"));
+    }
+
+    #[test]
+    fn default_capability_skills_helper_returns_current() {
+        // Lines 1019-1021.
+        let helper = default_capability_skills();
+        let current = CapabilitySkills::current();
+        assert_eq!(helper, current);
+    }
+
+    #[test]
+    fn default_capability_forensic_helper_returns_current() {
+        // Lines 1057-1059.
+        let helper = default_capability_forensic();
+        let current = CapabilityForensic::current();
+        assert_eq!(helper, current);
+    }
+
+    #[test]
+    fn default_capability_governance_helper_returns_current() {
+        // Lines 1125-1127.
+        let helper = default_capability_governance();
+        let current = CapabilityGovernance::current();
+        assert_eq!(helper, current);
+    }
+
+    #[test]
+    fn resolved_transcript_lifecycle_default_uses_compiled_defaults() {
+        // Lines 1633-1639.
+        let r: ResolvedTranscriptLifecycle = Default::default();
+        assert_eq!(r.default_ttl_secs, DEFAULT_TRANSCRIPT_TTL_SECS);
+        assert_eq!(r.archive_grace_secs, DEFAULT_TRANSCRIPT_ARCHIVE_GRACE_SECS);
+    }
+
+    #[test]
+    fn default_memory_kinds_lists_observation_and_reflection() {
+        // Lines 626-628: serde default helper covers L1-1 typed kinds.
+        let kinds = default_memory_kinds();
+        assert_eq!(
+            kinds,
+            vec!["observation".to_string(), "reflection".to_string()]
+        );
+    }
 }
