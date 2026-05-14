@@ -134,21 +134,40 @@ pub fn install_for_test(hook: WireCheckHook) -> std::result::Result<(), ()> {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+//
+// Note on the OnceLock pattern: GOVERNANCE_PRE_ACTION is a process-wide
+// `OnceLock` — only one hook can be installed per cargo test binary, and
+// other unit tests in the same binary (notably the daemon_runtime tests
+// that call `bootstrap_serve` and install the real check_agent_action_no_audit
+// closure) may win the install race. The unit tests below therefore
+// avoid asserting against `check()` directly. Instead they exercise the
+// `check` / `check_anyhow` plumbing through a per-test mock hook
+// invoked manually — the public path is verified end-to-end by
+// `tests/governance_wire_points.rs` (a SEPARATE cargo test binary
+// whose OnceLock is independent).
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// The `OnceLock` is process-wide so we can only install one hook
-    /// across the whole test binary. To exercise both Allow and Refuse
-    /// shapes deterministically the hook routes by the action's
-    /// `cwd` / `path` / `host` / `binary` field — a sentinel value
-    /// returns `Err`, every other value returns `Ok`. This keeps the
-    /// unit tests inside one cargo test invocation without leaking
-    /// state across runs.
-    fn install_routing_hook() {
-        let _ = install_for_test(Box::new(|action: &AgentAction| match action {
+    /// Local mock that emulates the dispatch logic of [`check`] without
+    /// reading the process-wide [`GOVERNANCE_PRE_ACTION`] OnceLock.
+    /// Keeps the unit tests isolated from other tests in the same
+    /// binary that might have already installed a real hook (e.g. the
+    /// daemon_runtime test suite calling `bootstrap_serve`).
+    fn mock_dispatch(
+        hook: &WireCheckHook,
+        action: &AgentAction,
+    ) -> std::result::Result<(), GovernanceRefusal> {
+        match hook(action) {
+            Ok(()) => Ok(()),
+            Err(reason) => Err(GovernanceRefusal { reason }),
+        }
+    }
+
+    fn refuse_sentinel_hook() -> WireCheckHook {
+        Box::new(|action: &AgentAction| match action {
             AgentAction::Bash { command, .. } if command.contains("__refuse__") => {
                 Err("bash sentinel".to_string())
             }
@@ -167,86 +186,68 @@ mod tests {
                 Err("custom sentinel".to_string())
             }
             _ => Ok(()),
-        }));
+        })
     }
 
     #[test]
-    fn check_no_hook_installed_is_allow() {
-        // If GOVERNANCE_PRE_ACTION is unset (which it is at process
-        // start), every check returns Ok. We can't directly test that
-        // here because earlier-running tests in the same binary may
-        // have installed the routing hook; we instead verify Allow on
-        // a non-sentinel value.
-        install_routing_hook();
-        let action = AgentAction::Bash {
-            command: "ls".into(),
-            cwd: None,
-        };
-        assert!(check(&action).is_ok());
-    }
-
-    #[test]
-    fn check_bash_refuse_path() {
-        install_routing_hook();
+    fn mock_dispatch_bash_refuse() {
+        let hook = refuse_sentinel_hook();
         let action = AgentAction::Bash {
             command: "echo __refuse__".into(),
             cwd: None,
         };
-        let err = check(&action).expect_err("expected refuse");
+        let err = mock_dispatch(&hook, &action).expect_err("expected refuse");
         assert_eq!(err.reason, "bash sentinel");
         assert!(format!("{err}").contains("governance-refused"));
     }
 
     #[test]
-    fn check_filesystem_write_refuse_path() {
-        install_routing_hook();
+    fn mock_dispatch_filesystem_write_refuse() {
+        let hook = refuse_sentinel_hook();
         let action = AgentAction::FilesystemWrite {
             path: PathBuf::from("/scratch/__refuse__.txt"),
             byte_estimate: None,
         };
-        let err = check(&action).expect_err("expected refuse");
+        let err = mock_dispatch(&hook, &action).expect_err("expected refuse");
         assert_eq!(err.reason, "fs sentinel");
     }
 
     #[test]
-    fn check_network_request_refuse_path() {
-        install_routing_hook();
+    fn mock_dispatch_network_request_refuse() {
+        let hook = refuse_sentinel_hook();
         let action = AgentAction::NetworkRequest {
             host: "__refuse__.example.com".into(),
             scheme: "https".into(),
         };
-        let err = check(&action).expect_err("expected refuse");
+        let err = mock_dispatch(&hook, &action).expect_err("expected refuse");
         assert_eq!(err.reason, "net sentinel");
     }
 
     #[test]
-    fn check_process_spawn_refuse_path() {
-        install_routing_hook();
+    fn mock_dispatch_process_spawn_refuse() {
+        let hook = refuse_sentinel_hook();
         let action = AgentAction::ProcessSpawn {
             binary: "__refuse__".into(),
             args: vec!["build".into()],
         };
-        let err = check(&action).expect_err("expected refuse");
+        let err = mock_dispatch(&hook, &action).expect_err("expected refuse");
         assert_eq!(err.reason, "spawn sentinel");
     }
 
     #[test]
-    fn check_anyhow_propagates_refusal() {
-        install_routing_hook();
-        let action = AgentAction::FilesystemWrite {
-            path: PathBuf::from("/__refuse__"),
-            byte_estimate: None,
+    fn mock_dispatch_custom_refuse() {
+        let hook = refuse_sentinel_hook();
+        let action = AgentAction::Custom {
+            custom_kind: "__refuse__-deploy".into(),
+            payload: serde_json::json!({}),
         };
-        let e = check_anyhow(&action).expect_err("expected refuse");
-        let refusal = e
-            .downcast_ref::<GovernanceRefusal>()
-            .expect("downcast to GovernanceRefusal");
-        assert_eq!(refusal.reason, "fs sentinel");
+        let err = mock_dispatch(&hook, &action).expect_err("expected refuse");
+        assert_eq!(err.reason, "custom sentinel");
     }
 
     #[test]
-    fn check_allow_path_non_sentinel() {
-        install_routing_hook();
+    fn mock_dispatch_allow_non_sentinel() {
+        let hook = refuse_sentinel_hook();
         let actions = [
             AgentAction::Bash {
                 command: "true".into(),
@@ -270,8 +271,73 @@ mod tests {
             },
         ];
         for a in &actions {
-            assert!(check(a).is_ok(), "expected allow for {:?}", a.kind());
-            assert!(check_anyhow(a).is_ok());
+            assert!(
+                mock_dispatch(&hook, a).is_ok(),
+                "expected allow for {:?}",
+                a.kind()
+            );
+        }
+    }
+
+    #[test]
+    fn check_no_hook_branch_allow() {
+        // Direct cover of the early-return branch in [`check`] when the
+        // OnceLock holds no hook. We can't unconditionally guarantee
+        // that branch in this binary (another test may have installed
+        // the daemon hook), so we only assert: IF `GOVERNANCE_PRE_ACTION`
+        // happens to be empty, the public `check` returns Ok. If it's
+        // populated, that hook governs the result and this assertion is
+        // skipped. The full no-hook-installed path is covered by
+        // `tests/governance_wire_points.rs` running in a fresh binary.
+        if GOVERNANCE_PRE_ACTION.get().is_none() {
+            let action = AgentAction::Bash {
+                command: "ls".into(),
+                cwd: None,
+            };
+            assert!(check(&action).is_ok());
+            assert!(check_anyhow(&action).is_ok());
+        }
+    }
+
+    #[test]
+    fn check_anyhow_wraps_refusal_into_downcastable_error() {
+        // Direct unit cover for the [`check_anyhow`] wrapper. Build a
+        // refusal manually (matches the same type returned by [`check`]
+        // when the hook fires) and verify the anyhow chain preserves
+        // the `GovernanceRefusal` downcast contract that
+        // `MemoryError::from(anyhow::Error)` in `src/errors.rs`
+        // depends on for the 403 / `GOVERNANCE_REFUSED` HTTP mapping.
+        let refusal = GovernanceRefusal {
+            reason: "unit test reason".to_string(),
+        };
+        let e = anyhow::Error::new(refusal);
+        let downcast = e
+            .downcast_ref::<GovernanceRefusal>()
+            .expect("downcast to GovernanceRefusal");
+        assert_eq!(downcast.reason, "unit test reason");
+        assert!(format!("{e}").contains("governance-refused"));
+    }
+
+    #[test]
+    fn install_for_test_idempotent_after_first_call() {
+        // Whichever test grabs the OnceLock first wins the install;
+        // every subsequent attempt must report Err(()). This shape is
+        // the test-helper contract that lets sibling tests in the
+        // governance_wire_points integration suite call
+        // `install_routing_hook` repeatedly without panicking.
+        let first = install_for_test(Box::new(|_| Ok(())));
+        let second = install_for_test(Box::new(|_| Err("late".into())));
+        // First may have succeeded OR another test (daemon_runtime)
+        // beat us to it — either way, the SECOND attempt must fail.
+        // We assert the harder property: once installed, no further
+        // install succeeds.
+        if first.is_ok() {
+            assert!(second.is_err(), "double-install must fail");
+        } else {
+            assert!(
+                second.is_err(),
+                "if first failed (already installed), second must also fail"
+            );
         }
     }
 }
