@@ -499,6 +499,70 @@ fn emit_check_event(
     Ok(())
 }
 
+/// v0.7.0 L1-6 Deliverable E — read-only variant of [`check_agent_action`]
+/// suitable for the substrate pre-write hook path.
+///
+/// Identical to [`check_agent_action`] except it does NOT emit a
+/// `governance.check` row to `signed_events`. Two reasons the
+/// pre-write hook can't use the full audit path:
+///
+///   1. Re-entrancy. The hook fires INSIDE `storage::insert` —
+///      i.e. while the caller already holds the substrate's
+///      `Connection`. Calling `append_signed_event` on a sibling
+///      connection would race the write lock under WAL; calling it
+///      on the same connection would corrupt the in-flight INSERT's
+///      statement state.
+///   2. Symmetry. The substrate-INTERNAL gate path is already
+///      audited at every callsite (handlers/http.rs and mcp/tools/store.rs
+///      both emit an `AuditAction::Store` row on success / a typed
+///      MemoryError on failure). A second emit here would amplify.
+///
+/// First-refusal-wins combinator: same as the audited path. Returns
+/// `Decision::Refuse { rule_id, reason }` for the first `refuse`
+/// match, `Decision::Warn { rule_id, reason }` for the first `warn`
+/// match when no refusal fires, otherwise `Decision::Allow`.
+///
+/// # Errors
+///
+/// Returns an error if the SQLite query for enabled rules fails.
+pub fn check_agent_action_no_audit(conn: &Connection, action: &AgentAction) -> Result<Decision> {
+    let kind = action.kind();
+    let rules = crate::governance::rules_store::list_enabled_by_kind(conn, kind)
+        .with_context(|| format!("check_agent_action_no_audit: list_enabled_by_kind({kind})"))?;
+
+    let mut first_warn: Option<(String, String)> = None;
+
+    for rule in &rules {
+        if !matcher_applies(rule, action) {
+            continue;
+        }
+        let severity = Severity::from_str(&rule.severity).unwrap_or(Severity::Log);
+        match severity {
+            Severity::Refuse => {
+                return Ok(Decision::Refuse {
+                    rule_id: rule.id.clone(),
+                    reason: rule.reason.clone(),
+                });
+            }
+            Severity::Warn => {
+                if first_warn.is_none() {
+                    first_warn = Some((rule.id.clone(), rule.reason.clone()));
+                }
+            }
+            Severity::Log => {
+                // Log-only — pre-write hook is silent; the post-write
+                // audit chain captures the successful insert via the
+                // handler's `AuditAction::Store` emit. No-op here.
+            }
+        }
+    }
+
+    Ok(match first_warn {
+        Some((rule_id, reason)) => Decision::Warn { rule_id, reason },
+        None => Decision::Allow,
+    })
+}
+
 /// Convenience for tests + the future K10 wiring: count how many
 /// rules match the given action without running side effects.
 /// Skips the audit emit (read-only).
@@ -1002,6 +1066,97 @@ mod tests {
         assert!(most_recent_check(&conn, Some("agent:a")).unwrap().is_some());
         assert!(most_recent_check(&conn, Some("agent:b")).unwrap().is_none());
         assert!(most_recent_check(&conn, None).unwrap().is_some());
+    }
+
+    // -----------------------------------------------------------------
+    // L1-6 Deliverable E — check_agent_action_no_audit coverage
+    // (substrate pre-write hook consults this variant; identical
+    // matching semantics, zero side effects on `signed_events`)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn no_audit_allow_when_no_rule_matches() {
+        let conn = fresh_conn();
+        let action = AgentAction::Bash {
+            command: "ls".into(),
+            cwd: None,
+        };
+        let decision = check_agent_action_no_audit(&conn, &action).unwrap();
+        assert_eq!(decision, Decision::Allow);
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM signed_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0, "no_audit variant must not write audit rows");
+    }
+
+    #[test]
+    fn no_audit_refuses_with_same_shape_as_audited_path() {
+        let conn = fresh_conn();
+        add_rule(
+            &conn,
+            "R-test",
+            "custom",
+            r#"{"kind":"memory_write"}"#,
+            "refuse",
+            true,
+        );
+        let action = AgentAction::Custom {
+            custom_kind: "memory_write".into(),
+            payload: serde_json::json!({"namespace": "secrets/api"}),
+        };
+        let decision = check_agent_action_no_audit(&conn, &action).unwrap();
+        match decision {
+            Decision::Refuse { rule_id, reason } => {
+                assert_eq!(rule_id, "R-test");
+                assert!(reason.contains("R-test"), "reason: {reason}");
+            }
+            other => panic!("expected Refuse, got {other:?}"),
+        }
+        let audit_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM signed_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(audit_count, 0, "refusal in no_audit variant must not write");
+    }
+
+    #[test]
+    fn no_audit_disabled_rule_yields_allow() {
+        let conn = fresh_conn();
+        add_rule(
+            &conn,
+            "R-disabled",
+            "custom",
+            r#"{"kind":"memory_write"}"#,
+            "refuse",
+            false,
+        );
+        let action = AgentAction::Custom {
+            custom_kind: "memory_write".into(),
+            payload: serde_json::json!({}),
+        };
+        let decision = check_agent_action_no_audit(&conn, &action).unwrap();
+        assert_eq!(decision, Decision::Allow);
+    }
+
+    #[test]
+    fn no_audit_warn_returned_when_no_refuse_matches() {
+        let conn = fresh_conn();
+        add_rule(
+            &conn,
+            "W-test",
+            "custom",
+            r#"{"kind":"memory_write"}"#,
+            "warn",
+            true,
+        );
+        let action = AgentAction::Custom {
+            custom_kind: "memory_write".into(),
+            payload: serde_json::json!({}),
+        };
+        let decision = check_agent_action_no_audit(&conn, &action).unwrap();
+        match decision {
+            Decision::Warn { rule_id, .. } => assert_eq!(rule_id, "W-test"),
+            other => panic!("expected Warn, got {other:?}"),
+        }
     }
 
     #[test]

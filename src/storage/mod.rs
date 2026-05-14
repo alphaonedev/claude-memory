@@ -32,6 +32,96 @@ use crate::models::{
     TaxonomyNode, Tier, TierCount, namespace_ancestors,
 };
 
+// ---------------------------------------------------------------------------
+// v0.7.0 L1-6 Deliverable E — governance pre-write hook (issue #691)
+// ---------------------------------------------------------------------------
+//
+// Substrate-internal: layering-preserving insertion point for the
+// agent-action rules engine. The hook is a process-wide `OnceLock`
+// holding an optional closure of the shape
+//
+//     Fn(&Memory) -> Result<(), String> + Send + Sync
+//
+// installed exactly once at daemon `serve` boot (BEFORE binding the
+// listener) and consulted by every substrate write path
+// (`storage::insert`, `storage::insert_with_conflict`,
+// `storage::insert_if_newer`) immediately BEFORE the SQL `INSERT`.
+//
+// Why a `OnceLock` and not a thread-local or `RwLock<Option<_>>`:
+//
+//   1. Operator standing directive: "rules and standards can NEVER be
+//      bypassed by AI/AI Agents — 100% of the time". A `OnceLock`
+//      enforces installation-is-one-shot at the type level — no
+//      reset, no override, no test-only escape hatch reachable from
+//      production code paths.
+//   2. The hook closure is read on every write; an `RwLock` would add
+//      contention on the hot path. `OnceLock::get()` is lock-free.
+//   3. CLI one-shot mode (`ai-memory store …`, `ai-memory mine …`,
+//      etc.) MUST NOT install the hook — the operator's direct
+//      substrate ops stay unimpeded by design. `OnceLock` defaults to
+//      empty, so the CLI path is the no-op default; only the daemon's
+//      `serve` boot reaches the `.set` callsite.
+//
+// Refusal contract: when the hook fires it returns `Err(reason)`.
+// The caller wraps `reason` in a typed [`GovernanceRefusal`] (which
+// implements [`std::error::Error`]) and propagates via `anyhow::Error`.
+// The handler layer's `MemoryError::from(anyhow::Error)` impl
+// downcasts and promotes it to [`crate::errors::MemoryError::RefusedByGovernance`]
+// — see `src/errors.rs` for the 403 / `GOVERNANCE_REFUSED` mapping.
+
+/// Optional governance pre-write hook. When `Some`, every substrate
+/// `INSERT` path consults the closure BEFORE the SQL write; an
+/// `Err(reason)` short-circuits the write with no row touched.
+///
+/// Installation is one-shot (`OnceLock::set`); the daemon `serve`
+/// bootstrap is the only caller in production. CLI one-shot binaries
+/// must leave this empty.
+///
+/// See module-level comment for the full layering rationale.
+pub static GOVERNANCE_PRE_WRITE: std::sync::OnceLock<
+    Box<dyn Fn(&Memory) -> std::result::Result<(), String> + Send + Sync>,
+> = std::sync::OnceLock::new();
+
+/// Typed substrate-layer marker error for the pre-write hook refusal
+/// path. Wrapped in `anyhow::Error` so the existing
+/// `anyhow::Result<String>` return shape of `storage::insert*` stays
+/// unchanged — the handler layer downcasts via
+/// `MemoryError::from(anyhow::Error)` (see `src/errors.rs`) to map
+/// the refusal to HTTP `403 FORBIDDEN` + code `GOVERNANCE_REFUSED`.
+///
+/// Carries the operator-authored `reason` verbatim. The MCP layer
+/// surfaces the same string (audit log + tool error data field).
+#[derive(Debug, Clone)]
+pub struct GovernanceRefusal {
+    pub reason: String,
+}
+
+impl std::fmt::Display for GovernanceRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "governance-refused: {}", self.reason)
+    }
+}
+
+impl std::error::Error for GovernanceRefusal {}
+
+/// Internal helper consulted by every `storage::insert*` path BEFORE
+/// the SQL write. When the [`GOVERNANCE_PRE_WRITE`] hook is unset
+/// (CLI mode or pre-hook-install daemon path), this is a zero-cost
+/// no-op `Ok(())`. When the hook is set, the closure runs and an
+/// `Err(reason)` wraps into a [`GovernanceRefusal`] propagated up the
+/// `anyhow` chain.
+///
+/// The function is hot-path; avoid heap allocation on the Allow leg.
+#[inline]
+fn consult_governance_pre_write(mem: &Memory) -> Result<()> {
+    if let Some(hook) = GOVERNANCE_PRE_WRITE.get() {
+        if let Err(reason) = hook(mem) {
+            return Err(anyhow::Error::new(GovernanceRefusal { reason }));
+        }
+    }
+    Ok(())
+}
+
 /// Computed 4-tuple of visibility prefixes for an agent position (Task 1.5).
 /// Index 0 = agent's own namespace (private), 1 = parent (team),
 /// 2 = grandparent (unit), 3 = great-grandparent (org). Missing = `None`.
@@ -204,6 +294,12 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
 /// and the `SELECT` would return the wrong row id. `SQLite` 3.35+
 /// supports `RETURNING`; it executes atomically within the `INSERT`.
 pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
+    // v0.7.0 L1-6 Deliverable E — substrate governance pre-write
+    // gate. Consults the (optional) `GOVERNANCE_PRE_WRITE` hook
+    // BEFORE any SQL touches the DB; a refusal returns cleanly with
+    // no row written. See module-level comment for layering details.
+    consult_governance_pre_write(mem)?;
+
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(
@@ -344,6 +440,14 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
     match mode {
         ConflictMode::Merge => insert(conn, mem),
         ConflictMode::Error => {
+            // v0.7.0 L1-6 Deliverable E — fire the pre-write governance
+            // hook BEFORE the existence-check `SELECT`. The Merge and
+            // Version branches reach the hook via the `insert(..)`
+            // tail call below; the `Error` branch needs its own gate
+            // because it bypasses `insert` to issue the unannotated
+            // INSERT itself. Refusal here returns no row written and
+            // no SELECT performed — symmetric with the Merge path.
+            consult_governance_pre_write(mem)?;
             // Existence check + INSERT must be atomic against
             // concurrent writers. We rely on the (title, namespace)
             // UNIQUE index — issue a plain INSERT WITHOUT the upsert
@@ -4188,6 +4292,14 @@ pub fn export_links(conn: &Connection) -> Result<Vec<MemoryLink>> {
 /// winners per peer, causing permanent mesh divergence. Adding the
 /// memory.id tiebreaker yields a total order every peer agrees on.
 pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
+    // v0.7.0 L1-6 Deliverable E — substrate governance pre-write
+    // gate. Federation `sync_push` / catchup-loop peer pushes flow
+    // through this entry point; treating them identically to direct
+    // writes is the load-bearing property — an agent that bypasses
+    // a local rule by routing through a peer would otherwise slip
+    // past the gate. The hook fires on every newer-wins merge attempt.
+    consult_governance_pre_write(mem)?;
+
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(

@@ -457,6 +457,21 @@ pub(super) fn handle_store(
             ) {
                 tracing::warn!("quota refund_op failed for agent {}: {}", &agent_id, re);
             }
+            // v0.7.0 L1-6 Deliverable E — surface the substrate
+            // governance pre-write hook's refusal with a clearly-
+            // identifiable wire prefix so MCP clients can distinguish
+            // a policy refusal from a database error. The
+            // `GOVERNANCE_REFUSED:` prefix mirrors the HTTP layer's
+            // `code` field; the operator-authored reason follows
+            // verbatim. Refusals on the MCP path are NOT logged at
+            // ERROR (it's the documented policy outcome, not a fault).
+            if let Some(refusal) = e.downcast_ref::<crate::storage::GovernanceRefusal>() {
+                tracing::info!(
+                    "mcp store refused by substrate governance: {}",
+                    refusal.reason
+                );
+                return Err(format!("GOVERNANCE_REFUSED: {}", refusal.reason));
+            }
             return Err(e.to_string());
         }
     };

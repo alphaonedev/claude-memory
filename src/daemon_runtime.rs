@@ -1889,6 +1889,95 @@ pub async fn bootstrap_serve(
     let archive_on_gc = app_config.effective_archive_on_gc();
     let conn = db::open(db_path)?;
 
+    // v0.7.0 L1-6 Deliverable E (issue #691) — install the substrate
+    // governance pre-write hook BEFORE any write paths come live. The
+    // hook consults the operator-signed `governance_rules` table for
+    // a refusal verdict at every `storage::insert*` callsite; a
+    // refusal short-circuits the SQL `INSERT` cleanly (no row
+    // written, MemoryError::RefusedByGovernance bubbled).
+    //
+    // Layering: the hook is a `OnceLock<Box<Fn>>` in `src/storage/mod.rs`
+    // — installation is one-shot for the process lifetime. CLI
+    // one-shot binaries (`ai-memory store`, `ai-memory mine`, …)
+    // never reach this codepath and so leave the hook empty by
+    // design (operator standing directive: rules gate AGENT writes,
+    // not the operator's direct CLI ops).
+    //
+    // The closure opens a fresh `Connection` per call (via
+    // `db::open` against the same db_path) so it does NOT contend
+    // with the substrate writer's lock held during `storage::insert`.
+    // SQLite WAL mode allows the rule-read to proceed in parallel.
+    // Failure to open the rule-consultation connection degrades to
+    // ALLOW with a WARN: a transient FS issue must not wedge the
+    // write surface, and the operator can detect the degradation
+    // from the log surface.
+    {
+        use crate::governance::agent_action::{
+            AgentAction, Decision as RuleDecision, check_agent_action_no_audit,
+        };
+        let rules_db_path = db_path.to_path_buf();
+        let install_result = crate::storage::GOVERNANCE_PRE_WRITE.set(Box::new(
+            move |mem: &crate::models::Memory| -> std::result::Result<(), String> {
+                let conn_for_check = match db::open(&rules_db_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        tracing::warn!(
+                            "L1-6 governance pre-write: failed to open rules DB at {}: {}; \
+                             degrading to ALLOW for this write",
+                            rules_db_path.display(),
+                            e,
+                        );
+                        return Ok(());
+                    }
+                };
+                let action = AgentAction::Custom {
+                    custom_kind: "memory_write".to_string(),
+                    payload: serde_json::json!({
+                        "namespace": mem.namespace,
+                        "tier": mem.tier.as_str(),
+                        "memory_kind": mem.memory_kind.as_str(),
+                        "title": mem.title,
+                    }),
+                };
+                match check_agent_action_no_audit(&conn_for_check, &action) {
+                    Ok(RuleDecision::Allow | RuleDecision::Warn { .. }) => Ok(()),
+                    Ok(RuleDecision::Refuse { rule_id, reason }) => {
+                        tracing::info!(
+                            "L1-6 governance pre-write refused namespace={:?} rule_id={} reason={}",
+                            mem.namespace,
+                            rule_id,
+                            reason
+                        );
+                        Err(reason)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "L1-6 governance pre-write: rule consultation failed: {}; \
+                             degrading to ALLOW",
+                            e
+                        );
+                        Ok(())
+                    }
+                }
+            },
+        ));
+        if install_result.is_err() {
+            // Already installed — happens if the same process boots
+            // `serve` twice (test reuse via `bootstrap_serve`). The
+            // OnceLock contract guarantees the installed closure
+            // wins; we log and proceed rather than abort.
+            tracing::debug!(
+                "L1-6 governance pre-write hook already installed (process-wide OnceLock); \
+                 the existing hook remains active for this daemon"
+            );
+        } else {
+            tracing::info!(
+                "L1-6 governance pre-write hook installed (substrate-authoritative \
+                 memory_write gate active)"
+            );
+        }
+    }
+
     // Issue #219: build the embedder + HNSW index up front so HTTP write
     // paths can populate them. Previously the daemon never constructed an
     // embedder, silently excluding every HTTP-authored memory from semantic
