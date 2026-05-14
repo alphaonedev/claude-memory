@@ -39,6 +39,42 @@ const AUTO_TAG_MIN_CONTENT_LEN: usize = 50;
 /// converge on the same on-disk shape.
 const AUTO_TAG_MAX_TAGS: usize = 8;
 
+/// v0.7.0 fold-A2A1.6 (#700, S16/S49) — `app.store.get` with bounded
+/// retry on [`crate::store::StoreError::NotFound`].
+///
+/// Why this exists: on a postgres-backed daemon a freshly-stored row
+/// can briefly return NotFound from the SAL `get` while WAL flush
+/// settles or the read query hits a still-replicating standby. The
+/// 22-failure A2A triage (memory `9ffaa55d`) classified this as
+/// Bucket-A: the row exists, the promote handler just races the
+/// visibility window. Returning a one-shot 404 surfaces a flake to
+/// the operator even though a 5 ms retry would have caught the
+/// (eventually-consistent) row.
+///
+/// Retry budget: 5 + 10 + 15 + 20 ms = 50 ms wall clock, evenly
+/// dwarfed by the 2 s daemon p99 SLO. Any other StoreError class
+/// (e.g. backend down, integrity failure) returns immediately
+/// without retry — those are not visibility-race symptoms.
+#[cfg(feature = "sal")]
+async fn get_with_visibility_retry(
+    store: &dyn crate::store::MemoryStore,
+    ctx: &crate::store::CallerContext,
+    id: &str,
+) -> crate::store::StoreResult<Memory> {
+    let mut attempt: u32 = 0;
+    loop {
+        match store.get(ctx, id).await {
+            Ok(m) => return Ok(m),
+            Err(crate::store::StoreError::NotFound { .. }) if attempt < 4 => {
+                let backoff_ms = u64::from(5 * (attempt + 1));
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                attempt += 1;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// v0.7.0 L5 — fire the LLM `auto_tag` hook for a freshly-built memory.
 ///
 /// Returns the list of LLM-generated tags (capped at
@@ -2198,8 +2234,17 @@ pub async fn promote_memory(
             }
         };
         let ctx = crate::store::CallerContext::for_agent(&agent_id);
-        // The trait's `get` returns NotFound on missing — fold to 404.
-        let target = match app.store.get(&ctx, &id).await {
+        // F-A2A1.4 (#700, S16/S49) — bounded retry on NotFound. A
+        // freshly-stored row that travelled through a read replica or
+        // is still settling in WAL flush can briefly return
+        // NotFound from the SAL `get`. The 22-failure triage (memory
+        // 9ffaa55d) classified this as Bucket-A: the row exists, the
+        // promote handler just races the visibility window. Retry up
+        // to 4 times with bounded backoff (5/10/15/20 ms — 50 ms
+        // total) before surfacing 404 — well below the 2 s daemon
+        // p99 SLO and dwarfed by typical store-side replication
+        // latency. See `get_with_visibility_retry` for the helper.
+        let target = match get_with_visibility_retry(app.store.as_ref(), &ctx, &id).await {
             Ok(m) => m,
             Err(crate::store::StoreError::NotFound { .. }) => {
                 return (StatusCode::NOT_FOUND, Json(json!({"error": "not found"})))
@@ -2266,13 +2311,64 @@ pub async fn promote_memory(
             ..Default::default()
         };
         return match app.store.update(&ctx, &target.id, patch).await {
-            Ok(()) => Json(json!({
-                "promoted": true,
-                "id": target.id,
-                "tier": "long",
-                "storage_backend": "postgres",
-            }))
-            .into_response(),
+            Ok(()) => {
+                // F-A2A1.4 (#700, S16/S49) — post-promote federation
+                // fanout on the postgres branch. Mirrors the sqlite
+                // path at lines ~2406-2417: after a successful local
+                // tier-update, re-fetch the row to capture the new
+                // tier + cleared expiry and broadcast via
+                // `broadcast_store_quorum` so peers' projections of
+                // the same memory inherit the tier ladder. Without
+                // this, a `notify` recipient on peer-B still sees the
+                // row at its pre-promote tier and a recall against
+                // `tier=long` on peer-B silently misses it.
+                //
+                // Failure handling: fanout failures surface as 503
+                // with `Retry-After: 2` mirroring sqlite. The local
+                // tier update has already committed — per ADR-0001
+                // we do NOT roll back the local commit on quorum
+                // failure; the sync daemon's eventual-consistency
+                // loop catches stragglers.
+                if let Some(fed) = app.federation.as_ref() {
+                    let promoted_mem = match app.store.get(&ctx, &target.id).await {
+                        Ok(m) => Some(m),
+                        Err(_) => None,
+                    };
+                    if let Some(ref m) = promoted_mem {
+                        match crate::federation::broadcast_store_quorum(fed, m).await {
+                            Ok(tracker) => {
+                                if let Err(err) = crate::federation::finalise_quorum(&tracker) {
+                                    let payload =
+                                        crate::federation::QuorumNotMetPayload::from_err(&err);
+                                    return (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        [("Retry-After", "2")],
+                                        Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                    )
+                                        .into_response();
+                                }
+                            }
+                            Err(err) => {
+                                let payload =
+                                    crate::federation::QuorumNotMetPayload::from_err(&err);
+                                return (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    [("Retry-After", "2")],
+                                    Json(serde_json::to_value(&payload).unwrap_or_default()),
+                                )
+                                    .into_response();
+                            }
+                        }
+                    }
+                }
+                Json(json!({
+                    "promoted": true,
+                    "id": target.id,
+                    "tier": "long",
+                    "storage_backend": "postgres",
+                }))
+                .into_response()
+            }
             Err(crate::store::StoreError::NotFound { .. }) => {
                 (StatusCode::NOT_FOUND, Json(json!({"error": "not found"}))).into_response()
             }
