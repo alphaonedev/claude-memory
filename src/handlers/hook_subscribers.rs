@@ -60,12 +60,16 @@ pub async fn notify(
         }
     };
 
-    // v0.7.0 Wave-3 Continuation 3 (Phase 16) — postgres-backed daemons
-    // route through the SAL `notify` trait method. The cross-namespace
-    // subscription dispatch + federation fanout are sqlite-only (the
-    // `subscriptions` module is rusqlite-coupled); the postgres branch
-    // still returns the new memory id + namespace so callers can poll
-    // the inbox via `GET /api/v1/inbox`.
+    // v0.7.0 fold-A2A1.1 (#700, F-A2A1.1) — postgres-backed daemons
+    // route through the SAL `notify` trait method AND fan the resulting
+    // inbox memory out to peers via the same quorum-write contract the
+    // sqlite branch already uses below. Federation fanout is now backend-
+    // blind: `broadcast_store_quorum` takes a `Memory` + `FederationConfig`
+    // and HTTP-POSTs to each peer's `sync_push` regardless of where the
+    // local row was persisted. Cross-namespace subscription dispatch
+    // is achieved by writing the subscription memory itself through the
+    // shared store (see `subscribe` below) so subscribers on every peer
+    // see the same `_subscriptions/<aid>` namespace.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         let priority_i32 = body.priority.and_then(|p| i32::try_from(p).ok());
@@ -76,7 +80,7 @@ pub async fn notify(
             _ => None,
         };
         let ctx = crate::store::CallerContext::for_agent(&sender);
-        return match app
+        let new_id = match app
             .store
             .notify(
                 &ctx,
@@ -88,18 +92,40 @@ pub async fn notify(
             )
             .await
         {
-            Ok(id) => (
-                StatusCode::CREATED,
-                Json(json!({
-                    "id": id,
-                    "target_agent_id": body.target_agent_id,
-                    "namespace": format!("_inbox/{}", body.target_agent_id),
-                    "storage_backend": "postgres",
-                })),
-            )
-                .into_response(),
-            Err(e) => store_err_to_response(e),
+            Ok(id) => id,
+            Err(e) => return store_err_to_response(e),
         };
+        // Re-fetch the just-written inbox memory so we can hand the full
+        // wire-shape (id + metadata + namespace + ts) to the peers via
+        // `broadcast_store_quorum`. The trait `notify()` returns only
+        // the id; the row materialised on disk is what peers need to
+        // mirror so the recipient's `GET /inbox` against any cluster
+        // member returns the same row.
+        let fanout_mem = match app.store.get(&ctx, &new_id).await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!(
+                    "postgres notify: refetch for fanout failed for {new_id}: {e:?} \
+                     (local commit landed; sync-daemon will catch peers up)"
+                );
+                None
+            }
+        };
+        if let Some(mem) = fanout_mem.as_ref()
+            && let Some(resp) = fanout_or_503(&app, mem).await
+        {
+            return resp;
+        }
+        return (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": new_id,
+                "target_agent_id": body.target_agent_id,
+                "namespace": format!("_inbox/{}", body.target_agent_id),
+                "storage_backend": "postgres",
+            })),
+        )
+            .into_response();
     }
 
     let mut params = json!({
@@ -383,14 +409,18 @@ pub async fn subscribe(
 
     let events = body.events.unwrap_or_else(|| "*".to_string());
 
-    // v0.7.0 Wave-3 Continuation 4 (Bucket B / S33) — postgres-backed
-    // daemons persist subscriptions as memories under `_subscriptions/
-    // <agent_id>` so list_subscriptions can read them back via the SAL
-    // `list` projection. The legacy sqlite `subscriptions` table is
-    // not mirrored on postgres in v0.7.0 (the dispatch loop is
-    // sqlite-bound); the wire envelope round-trips through the SAL
-    // surface so the cert oracle can verify the subscription is
-    // queryable.
+    // v0.7.0 fold-A2A1.1 (#700, F-A2A1.1) — postgres-backed daemons
+    // persist subscriptions as memories under `_subscriptions/<agent_id>`
+    // AND fan the subscription memory out to peers via the same quorum
+    // contract the sqlite branch uses for `_agents` rows. This is what
+    // makes K7-style cross-namespace event-type registration work on
+    // postgres: a subscriber attached on peer-A becomes immediately
+    // visible on peer-B's `_subscriptions/<aid>` namespace via the
+    // sync_push receiver, so an event dispatched on peer-B matches the
+    // subscription registered on peer-A. Historical replay via
+    // `memory_subscription_replay` then operates on the unified store
+    // — the dispatcher reads the same memory row regardless of which
+    // peer originated the subscription.
     #[cfg(feature = "sal")]
     if matches!(app.storage_backend, StorageBackend::Postgres) {
         // Skip SSRF validation for synthetic loopback stubs — they are
@@ -440,24 +470,33 @@ pub async fn subscribe(
             memory_kind: crate::models::MemoryKind::Observation,
         };
         let ctx = crate::store::CallerContext::for_agent(&caller);
-        return match app.store.store(&ctx, &mem).await {
-            Ok(id) => (
-                StatusCode::CREATED,
-                Json(json!({
-                    "id": id,
-                    "url": url,
-                    "events": events,
-                    "namespace": namespace_filter,
-                    "namespace_filter": namespace_filter,
-                    "agent_filter": agent_filter,
-                    "agent_id": caller,
-                    "created_by": caller,
-                    "storage_backend": "postgres",
-                })),
-            )
-                .into_response(),
-            Err(e) => store_err_to_response(e),
+        let stored_id = match app.store.store(&ctx, &mem).await {
+            Ok(id) => id,
+            Err(e) => return store_err_to_response(e),
         };
+        // Fan the freshly-persisted subscription memory out to peers
+        // using the same quorum-write contract as `_agents` /
+        // `_inbox` rows. On quorum miss return 503; on a network
+        // error, swallow (local commit landed). Mirrors the sqlite
+        // branch's `fanout_or_503` call below.
+        if let Some(resp) = fanout_or_503(&app, &mem).await {
+            return resp;
+        }
+        return (
+            StatusCode::CREATED,
+            Json(json!({
+                "id": stored_id,
+                "url": url,
+                "events": events,
+                "namespace": namespace_filter,
+                "namespace_filter": namespace_filter,
+                "agent_filter": agent_filter,
+                "agent_id": caller,
+                "created_by": caller,
+                "storage_backend": "postgres",
+            })),
+        )
+            .into_response();
     }
 
     // Ensure the caller is a registered agent (the MCP tool enforces this).
