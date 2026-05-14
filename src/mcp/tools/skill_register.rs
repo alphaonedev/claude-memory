@@ -242,7 +242,7 @@ pub(super) fn register_core(
 // Handler
 // ---------------------------------------------------------------------------
 
-pub(super) fn handle_skill_register(
+pub fn handle_skill_register(
     conn: &Connection,
     params: &Value,
     active_keypair: Option<&AgentKeypair>,

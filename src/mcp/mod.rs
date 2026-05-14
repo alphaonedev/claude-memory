@@ -350,6 +350,10 @@ mod skill_list;
 mod skill_register;
 #[path = "tools/skill_resource.rs"]
 mod skill_resource;
+// v0.7.0 L2-6 (issue #671) — closing the recursive-learning loop:
+// reflections become skills become reusable knowledge.
+#[path = "tools/skill_promote.rs"]
+mod skill_promote;
 
 // ---------------------------------------------------------------------------
 // Re-exports — preserve exact `crate::mcp::*` pub surface (zero new pub items)
@@ -379,6 +383,13 @@ pub use rule_list::handle_rule_list;
 pub(crate) use session_start::handle_session_start;
 pub(crate) use subscribe::handle_unsubscribe;
 pub use verify::handle_verify;
+// v0.7.0 L1-5 / L2-6 — test-and-integration access to the skill
+// substrate handlers. These are public so the L2-6 regression suite
+// (`tests/skill_promote_test.rs`) can drive the full promote → export
+// → re-register round-trip without needing the stdio JSON-RPC layer.
+pub use skill_export::handle_skill_export;
+pub use skill_promote::handle_skill_promote_from_reflection;
+pub use skill_register::handle_skill_register;
 
 /// v0.7.0 L2-3 (issue #668) — test-only dispatcher into
 /// `handle_link`. Re-exports the handler at a stable
@@ -451,11 +462,13 @@ use promote::handle_promote;
 use reflect::handle_reflect;
 use reflection_origin::handle_reflection_origin;
 use search::handle_search;
-use skill_export::handle_skill_export;
 use skill_get::handle_skill_get;
 use skill_list::handle_skill_list;
-use skill_register::handle_skill_register;
 use skill_resource::handle_skill_resource;
+// handle_skill_export, handle_skill_promote_from_reflection, and
+// handle_skill_register are imported via the `pub use` above so the
+// L1-5 / L2-6 regression suites can drive them directly without going
+// through the stdio JSON-RPC layer.
 use store::handle_store;
 use subscribe::{handle_list_subscriptions, handle_subscribe, handle_subscription_replay};
 use update::handle_update;
@@ -970,6 +983,11 @@ fn handle_request(
                 "memory_skill_get" => handle_skill_get(conn, arguments),
                 "memory_skill_resource" => handle_skill_resource(conn, arguments),
                 "memory_skill_export" => handle_skill_export(conn, arguments, active_keypair),
+                // v0.7.0 L2-6 (issue #671) — closing the loop: reflections
+                // become skills become reusable knowledge.
+                "memory_skill_promote_from_reflection" => {
+                    handle_skill_promote_from_reflection(conn, arguments, active_keypair)
+                }
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
@@ -1453,9 +1471,12 @@ mod tests {
         // v0.7.0 L2-3 (issue #668) adds memory_dependents_of_invalidated
         // (Family::Power) → 61. Read-side surface for the reflection
         // invalidation propagation walker.
+        // v0.7.0 L2-6 (issue #671) adds memory_skill_promote_from_reflection
+        // (Family::Other) → 62 — closes the recursive-learning loop:
+        // reflections become skills become reusable knowledge.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 61);
+        assert_eq!(tools.len(), 62);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1510,7 +1531,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            61,
+            62,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1520,7 +1541,8 @@ mod tests {
              v0.7.0 L2-2 memory_reflection_origin (1) + \
              v0.7.0 L2-3 memory_dependents_of_invalidated (1) + \
              v0.7.0 (issue #691) memory_check_agent_action + memory_rule_list (2) + \
-             v0.7.0 L1-5 5×memory_skill_* (5) = 61"
+             v0.7.0 L1-5 5×memory_skill_* (5) + \
+             v0.7.0 L2-6 memory_skill_promote_from_reflection (1) = 62"
         );
     }
 

@@ -58,6 +58,8 @@ pub(super) mod skill_list;
 pub(super) mod skill_get;
 pub(super) mod skill_resource;
 pub(super) mod skill_export;
+// v0.7.0 L2-6 (issue #671) — closing the loop: reflections become skills.
+pub(super) mod skill_promote;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
@@ -134,4 +136,5 @@ pub(super) use self::{
     skill_get::handle_skill_get,
     skill_resource::handle_skill_resource,
     skill_export::handle_skill_export,
+    skill_promote::handle_skill_promote_from_reflection,
 };

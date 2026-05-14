@@ -5451,6 +5451,56 @@ pub fn resolve_require_approval_above_depth(conn: &Connection, namespace: &str) 
     None
 }
 
+/// v0.7.0 L2-6 — read `governance.skill_promotion_min_depth` from the
+/// namespace's most-specific governance metadata blob, leaf-first.
+///
+/// Mirrors [`resolve_require_approval_above_depth`] in shape and walk
+/// semantics: it's a free function (not a [`GovernancePolicy`] field)
+/// so it can land without churning every `GovernancePolicy { … }`
+/// literal in the codebase, and it's a per-namespace threshold rather
+/// than part of the resolved enforcement policy.
+///
+/// Returns `None` when:
+/// - no namespace standard is configured at any level of the chain, OR
+/// - the standard's `metadata.governance` blob is absent or null, OR
+/// - the blob does not contain a `skill_promotion_min_depth` key, OR
+/// - the key is present but `null`.
+///
+/// Returns `Some(threshold)` when the key is a non-null unsigned integer.
+/// The `memory_skill_promote_from_reflection` MCP tool falls back to the
+/// compiled-in default of `1` when this returns `None` — a reflection
+/// must have at least one level of synthesised insight (depth ≥ 1)
+/// before it can be promoted to a reusable skill.
+pub fn resolve_skill_promotion_min_depth(conn: &Connection, namespace: &str) -> Option<u32> {
+    let chain = build_namespace_chain(conn, namespace);
+    for level in chain.into_iter().rev() {
+        let standard_id = match get_namespace_standard(conn, &level) {
+            Ok(Some(id)) => id,
+            _ => continue,
+        };
+        let mem = match get(conn, &standard_id) {
+            Ok(Some(m)) => m,
+            _ => continue,
+        };
+        let gov = match mem.metadata.get("governance") {
+            Some(g) if !g.is_null() => g,
+            _ => continue,
+        };
+        if let Some(threshold) = gov.get("skill_promotion_min_depth") {
+            if let Some(n) = threshold.as_u64() {
+                return Some(n as u32);
+            }
+            // Key present but null → no override at this level; keep walking.
+        }
+        // Policy found at this level but no skill_promotion_min_depth
+        // key → no override; stop walking (leaf-first-wins semantics).
+        if GovernancePolicy::from_metadata(&mem.metadata).is_some() {
+            return None;
+        }
+    }
+    None
+}
+
 /// Return true if `agent_id` matches a registered agent in `_agents`.
 pub fn is_registered_agent(conn: &Connection, agent_id: &str) -> bool {
     let title = format!("agent:{agent_id}");
