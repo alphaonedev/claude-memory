@@ -150,3 +150,56 @@ pub(super) fn handle_promote(
     );
     Ok(json!({"promoted": true, "mode": "tier", "id": resolved_id, "tier": "long"}))
 }
+
+// ---- C-5 (#699): close lib-tier gaps in promote.rs (currently 93.39%).
+// The MCP envelope path already exercises governance Allow/Deny/Pending,
+// vertical mode, and the tier-promote happy path. These tests bolt down
+// the `id is required` and validator-error branches that the high-level
+// dispatcher tests don't hit at the lib-only tier. ----
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn open_conn() -> rusqlite::Connection {
+        crate::db::open(Path::new(":memory:")).expect("open in-memory db")
+    }
+
+    #[test]
+    fn handle_promote_missing_id_errors() {
+        // Line 16: `id is required`.
+        let conn = open_conn();
+        let err = handle_promote(&conn, Path::new(":memory:"), &json!({}), None).unwrap_err();
+        assert!(err.contains("id"), "got: {err}");
+    }
+
+    #[test]
+    fn handle_promote_invalid_id_maps_validator_error() {
+        // Line 17: `validate_id(id).map_err(...)`. A non-UUID string is
+        // rejected by the validator.
+        let conn = open_conn();
+        let err = handle_promote(
+            &conn,
+            Path::new(":memory:"),
+            &json!({"id": "not-a-uuid"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(!err.is_empty(), "expected non-empty validator error");
+    }
+
+    #[test]
+    fn handle_promote_unknown_uuid_returns_memory_not_found() {
+        // Line 25: `memory not found` when both `db::get` and
+        // `db::get_by_prefix` return None.
+        let conn = open_conn();
+        let err = handle_promote(
+            &conn,
+            Path::new(":memory:"),
+            &json!({"id": "00000000-0000-0000-0000-000000000000"}),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("not found"), "got: {err}");
+    }
+}
