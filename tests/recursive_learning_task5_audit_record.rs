@@ -225,6 +225,7 @@ fn cap_refusal_emits_signed_events_row_with_full_payload() {
         std::slice::from_ref(&src_id),
         "would-be-4th",
         &row.timestamp,
+        None,
     )
     .expect("canonical CBOR encode");
     assert_eq!(
@@ -367,6 +368,7 @@ fn audit_row_payload_includes_all_source_ids_for_multisrc_refusal() {
         &[aid.clone(), bid.clone()],
         "multi-source-refusal",
         &row.timestamp,
+        None,
     )
     .expect("encode");
     assert_eq!(row.payload_hash, payload_hash(&cbor));
@@ -380,6 +382,7 @@ fn audit_row_payload_includes_all_source_ids_for_multisrc_refusal() {
         std::slice::from_ref(&aid),
         "multi-source-refusal",
         &row.timestamp,
+        None,
     )
     .expect("encode");
     assert_ne!(
@@ -432,6 +435,7 @@ fn cap_zero_disable_path_still_emits_audit_row() {
         &[input.source_ids[0].clone()],
         "would-be-d1",
         &row.timestamp,
+        None,
     )
     .expect("encode");
     assert_eq!(row.payload_hash, payload_hash(&cbor));
@@ -539,6 +543,7 @@ fn canonical_cbor_is_deterministic_across_encodes() {
         &["s1".to_string(), "s2".to_string()],
         "title",
         "2026-05-12T12:00:00+00:00",
+        None,
     )
     .expect("encode 1");
     let b = db::canonical_cbor_reflection_depth_exceeded(
@@ -549,6 +554,7 @@ fn canonical_cbor_is_deterministic_across_encodes() {
         &["s1".to_string(), "s2".to_string()],
         "title",
         "2026-05-12T12:00:00+00:00",
+        None,
     )
     .expect("encode 2");
     assert_eq!(a, b, "canonical CBOR must be byte-stable");
@@ -563,7 +569,39 @@ fn canonical_cbor_is_deterministic_across_encodes() {
         &["s2".to_string(), "s1".to_string()],
         "title",
         "2026-05-12T12:00:00+00:00",
+        None,
     )
     .expect("encode 3");
     assert_ne!(a, c, "swapping source_ids must change the bytes");
+
+    // v0.7.0 L2-2 — adding a `peer_origin` claim must change the bytes
+    // (cross-peer refusal payloads are distinguishable from local-only
+    // refusal payloads byte-for-byte).
+    let d = db::canonical_cbor_reflection_depth_exceeded(
+        "ai:a",
+        4,
+        3,
+        "ns",
+        &["s1".to_string(), "s2".to_string()],
+        "title",
+        "2026-05-12T12:00:00+00:00",
+        Some("peer-X"),
+    )
+    .expect("encode 4");
+    assert_ne!(a, d, "adding peer_origin must change canonical CBOR bytes");
+    let d2 = db::canonical_cbor_reflection_depth_exceeded(
+        "ai:a",
+        4,
+        3,
+        "ns",
+        &["s1".to_string(), "s2".to_string()],
+        "title",
+        "2026-05-12T12:00:00+00:00",
+        Some("peer-X"),
+    )
+    .expect("encode 5");
+    assert_eq!(
+        d, d2,
+        "Some(peer_origin) encoding must itself be deterministic"
+    );
 }

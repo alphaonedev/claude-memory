@@ -3401,6 +3401,36 @@ impl PostgresStore {
         // vetoes (Task 6/8 `pre_reflect`) carry their own provenance
         // and are deliberately NOT emitted here.
         if new_depth_u32 > cap {
+            // v0.7.0 L2-2 — surface cross-peer provenance in the audit
+            // row when at least one source memory carries a
+            // `reflection_origin.peer_origin` stamp (i.e. it was
+            // imported via federation `sync_push`). Local cap is
+            // enforced regardless of source origin (territorial
+            // sovereignty); the peer claim only enriches the audit
+            // record so a downstream auditor sees WHERE the depth
+            // came from. Mirrors the SQLite parity path.
+            let cross_peer_refusal =
+                crate::federation::reflection_bookkeeping::enforce_local_cap_on_derived(
+                    new_depth_u32,
+                    cap,
+                    &sources,
+                );
+            let peer_origin: Option<String> = if let Err(ref r) = cross_peer_refusal {
+                if let Some(ref peer) = r.imported_peer {
+                    tracing::warn!(
+                        target: "federation::reflection_bookkeeping",
+                        peer = %peer,
+                        attempted = new_depth_u32,
+                        local_cap = cap,
+                        namespace = %target_namespace,
+                        "L2-2 (pg): refusing derived reflection: {}",
+                        r,
+                    );
+                }
+                r.imported_peer.clone()
+            } else {
+                None
+            };
             self.emit_reflection_depth_exceeded_audit(
                 &input.agent_id,
                 new_depth_u32,
@@ -3408,6 +3438,7 @@ impl PostgresStore {
                 &target_namespace,
                 &input.source_ids,
                 &input.title,
+                peer_origin.as_deref(),
             )
             .await;
             return Err(ReflectError::DepthExceeded {
@@ -3569,6 +3600,7 @@ impl PostgresStore {
         namespace: &str,
         source_ids: &[String],
         proposed_title: &str,
+        peer_origin: Option<&str>,
     ) {
         let created_at_dt = Utc::now();
         let created_at = created_at_dt.to_rfc3339();
@@ -3580,6 +3612,7 @@ impl PostgresStore {
             source_ids,
             proposed_title,
             &created_at,
+            peer_origin,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -3593,6 +3626,15 @@ impl PostgresStore {
         };
         let id = uuid::Uuid::new_v4().to_string();
         let payload_hash = crate::signed_events::payload_hash(&cbor);
+        // v0.7.0 L2-2 — distinguish the audit row's `event_type` so
+        // operators can filter cross-peer refusals from local-only
+        // refusals without re-decoding the CBOR payload. Mirrors the
+        // SQLite parity path.
+        let event_type = if peer_origin.is_some() {
+            "reflection.depth_exceeded.cross_peer"
+        } else {
+            "reflection.depth_exceeded"
+        };
         if let Err(e) = sqlx::query(
             "INSERT INTO signed_events \
                 (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp) \
@@ -3600,7 +3642,7 @@ impl PostgresStore {
         )
         .bind(&id)
         .bind(agent_id)
-        .bind("reflection.depth_exceeded")
+        .bind(event_type)
         .bind(&payload_hash)
         .bind(Option::<Vec<u8>>::None)
         .bind("unsigned")
