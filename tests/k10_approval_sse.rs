@@ -147,7 +147,10 @@ async fn http_sse_endpoint_emits_event_to_attached_client() {
         recall_scope: std::sync::Arc::new(None),
         deferred_audit_queue: std::sync::Arc::new(None),
     };
-    let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+    let api_key_state = ai_memory::handlers::ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let router = ai_memory::build_router(api_key_state, app_state);
 
     // Initiate the SSE request. axum returns immediately with the

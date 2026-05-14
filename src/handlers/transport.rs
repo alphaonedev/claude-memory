@@ -1513,9 +1513,22 @@ fn extract_missing_fields(msg: &str) -> Vec<String> {
 pub(crate) const BULK_FANOUT_CONCURRENCY: usize = 8;
 
 /// Shared state for API key authentication middleware.
-#[derive(Clone)]
+///
+/// v0.7.0 fold-A2A1.4 (#702) — `mtls_enforced` carries whether the
+/// listener this state is mounted on enforces mTLS at the rustls layer
+/// (i.e. `--tls-cert + --tls-key + --mtls-allowlist`). When true, the
+/// federation endpoints (`/api/v1/sync/*`) are allowed without an
+/// `x-api-key` header because the rustls server has already verified
+/// the client cert against the operator-pinned allowlist — adding an
+/// api-key check on top would force every peer to also carry the
+/// shared api-key secret, which is exactly the auth-matrix gap
+/// procurement deployments hit (a peer with valid mTLS but no
+/// `x-api-key` got 401 and quorum never converged across hosts).
+/// Non-federation paths still demand the api-key when configured.
+#[derive(Clone, Default)]
 pub struct ApiKeyState {
     pub key: Option<String>,
+    pub mtls_enforced: bool,
 }
 
 /// Constant-time byte-slice equality. Doesn't short-circuit on the
@@ -1573,6 +1586,24 @@ pub async fn api_key_auth(
 
     // Exempt health endpoint
     if req.uri().path() == "/api/v1/health" {
+        return next.run(req).await.into_response();
+    }
+
+    // v0.7.0 fold-A2A1.4 (#702) — mTLS bypass for federation endpoints.
+    //
+    // The federation peer mesh authenticates via mTLS cert-fingerprint
+    // pinning (see `tls::FingerprintAllowlistVerifier` — rustls rejects
+    // any TLS connect whose client cert isn't on the operator's
+    // allowlist). When that's enforced, a request reaching this
+    // middleware has already cleared a stronger authentication step
+    // than `x-api-key`. Demanding the api-key on top forces every peer
+    // to ALSO carry the shared secret, which causes the cross-host
+    // quorum gap procurement-grade deployments hit (the peer's
+    // outbound forgets the header → 401 → quorum_not_met). The
+    // bypass is scoped to `/api/v1/sync/*` so non-federation surfaces
+    // still require the api-key when configured (defense in depth).
+    let path = req.uri().path();
+    if auth.mtls_enforced && path.starts_with("/api/v1/sync/") {
         return next.run(req).await.into_response();
     }
 

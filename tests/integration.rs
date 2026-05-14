@@ -8829,7 +8829,10 @@ impl OneshotDaemon {
             recall_scope: std::sync::Arc::new(None),
             deferred_audit_queue: std::sync::Arc::new(None),
         };
-        let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+        let api_key_state = ai_memory::handlers::ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = ai_memory::build_router(api_key_state, app_state);
         Self { router }
     }
@@ -10595,6 +10598,7 @@ fn federation_cfg_for_test(
         peers,
         client,
         sender_agent_id: "ai:fed-test".to_string(),
+        api_key: None,
     }
 }
 
@@ -12534,7 +12538,10 @@ fn build_serve_state(
         recall_scope: std::sync::Arc::new(None),
         deferred_audit_queue: std::sync::Arc::new(None),
     };
-    let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
+    let api_key_state = ai_memory::handlers::ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     (api_key_state, app_state)
 }
 

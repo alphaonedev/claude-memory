@@ -14,10 +14,19 @@ impl FederationConfig {
     /// `None` when federation is disabled (`quorum_writes == 0` or the
     /// peer list is empty).
     ///
+    /// `api_key` carries the local daemon's configured `[api] api_key`
+    /// (issue #702, v0.7.0 fold-A2A1.4). When `Some`, every outbound
+    /// federation POST attaches an `x-api-key` header so peers that
+    /// themselves run with api-key auth accept the request. `None`
+    /// preserves the backwards-compatible header set used by mTLS-only
+    /// deployments — outbound POSTs stay unauthenticated at the
+    /// application layer and rely on the TLS layer for trust.
+    ///
     /// # Errors
     ///
     /// Returns an error if the reqwest client cannot be constructed
     /// with the supplied certificate material.
+    #[allow(clippy::too_many_arguments)]
     pub fn build(
         quorum_writes: usize,
         peer_urls: &[String],
@@ -26,6 +35,7 @@ impl FederationConfig {
         client_key_path: Option<&std::path::Path>,
         ca_cert_path: Option<&std::path::Path>,
         sender_agent_id: String,
+        api_key: Option<String>,
     ) -> anyhow::Result<Option<Self>> {
         if quorum_writes == 0 || peer_urls.is_empty() {
             return Ok(None);
@@ -126,6 +136,7 @@ impl FederationConfig {
             peers,
             client,
             sender_agent_id,
+            api_key,
         }))
     }
 

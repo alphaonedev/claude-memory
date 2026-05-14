@@ -1597,6 +1597,7 @@ mod tests {
             None,
             None,
             "ai:bulk-test".to_string(),
+            None,
         )
         .unwrap()
         .expect("federation must be built");
@@ -2478,6 +2479,7 @@ mod tests {
     fn auth_app(api_key: Option<&str>) -> Router {
         let auth_state = ApiKeyState {
             key: api_key.map(String::from),
+            mtls_enforced: false,
         };
         Router::new()
             .route("/api/v1/health", axum_get(dummy_handler))
@@ -9812,6 +9814,7 @@ mod tests {
             None,
             None,
             "ai:h8d-test".to_string(),
+            None,
         )
         .unwrap()
         .expect("federation must be built");

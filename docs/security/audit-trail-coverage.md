@@ -306,7 +306,64 @@ the operator key).
 
 ---
 
-## 9. Forward roadmap
+## 9. Federation auth matrix (v0.7.0 fold-A2A1.4, #702)
+
+Federation endpoints (`/api/v1/sync/push` and `/api/v1/sync/since`)
+authenticate either via mTLS cert-fingerprint pinning, shared
+`x-api-key` secret, or both. The matrix below is the load-bearing
+contract for any procurement-grade deployment that pins cross-host
+quorum behaviour.
+
+| Deployment mode  | Inbound `/api/v1/sync/*` requirement                              | Outbound POST authentication              | Backwards-compat note            |
+|------------------|-------------------------------------------------------------------|-------------------------------------------|----------------------------------|
+| mTLS-only        | rustls verifies client cert against `--mtls-allowlist`            | mTLS identity (`--quorum-client-cert/key`)| Pre-v0.7.0 mTLS behaviour preserved verbatim. |
+| api-key-only     | `x-api-key` header (or `?api_key=` query param) MUST match `[api] api_key` | `x-api-key` header (forwarded automatically from `[api] api_key`) | The fold-A2A1.4 fix — without outbound forwarding, peer 401s and quorum_not_met fires. |
+| mTLS + api-key   | mTLS verifies, api-key check is **skipped on `/api/v1/sync/*`** (mTLS already proves the peer); non-federation paths still require `x-api-key` | mTLS identity AND `x-api-key` (defense-in-depth) | Both auth layers configured. The bypass is scoped to `/api/v1/sync/*` so non-peer surfaces still demand the shared secret. |
+| no-auth (legacy) | Anyone with network reach (operator MUST bind to loopback only)   | (no application-layer auth)               | Pre-v0.6.x default. Refused at boot on non-loopback bind since #248. |
+
+**Why the mTLS bypass on `/api/v1/sync/*`**: the rustls `ClientCertVerifier`
+(`src/tls.rs::FingerprintAllowlistVerifier`) has already verified the
+peer's certificate against the operator-pinned allowlist before any
+request body reaches handler code. Demanding the shared `x-api-key`
+secret on top of that forces every peer to ALSO carry the secret —
+which is exactly the cross-host gap that broke Phase B's test cell:
+the leader's outbound POST forgot the header, the peer 401'd, and
+quorum never converged. Skipping the api-key check on federation
+endpoints when `mtls_enforced` is set restores the orthogonal auth
+model — the mTLS layer authenticates peer-to-peer, the api-key layer
+authenticates everything else.
+
+**Why outbound `x-api-key` forwarding is mandatory**: a peer that
+itself runs with `[api] api_key` configured rejects any POST that
+doesn't carry the matching header. Pre-v0.7.0 the leader's federation
+client built the request without the header even when the operator had
+set `[api] api_key`, so cross-host quorum was unreachable in any
+api-key deployment. The fix threads the leader's configured key into
+`FederationConfig::build` and `post_once` attaches the header on every
+outbound POST plus every catchup batch.
+
+**Test coverage**: `tests/federation_x_api_key.rs` pins each matrix
+row. `federation_outbound_forwards_x_api_key_when_configured` covers
+the api-key-only row; `federation_outbound_omits_x_api_key_when_unconfigured`
+covers the mTLS-only and no-auth rows (backwards-compat);
+`mtls_authenticated_request_bypasses_api_key_check` covers the
+mTLS+api-key row; `cross_host_quorum_w2_n3_with_api_key_converges`
+pins the procurement-grade scenario end-to-end.
+
+**Implementation surface**:
+
+- `FederationConfig::api_key: Option<String>` (`src/federation/mod.rs`).
+- `post_once` / `post_and_classify` / `bulk_catchup_push` attach
+  `x-api-key` when `Some` (`src/federation/sync.rs`).
+- `ApiKeyState::mtls_enforced: bool` (`src/handlers/transport.rs`) —
+  true when the daemon was started with `--tls-cert` + `--tls-key` +
+  `--mtls-allowlist`. `api_key_auth` skips the key check on
+  `/api/v1/sync/*` when this is true.
+- Threaded at boot in `src/daemon_runtime.rs::bootstrap_serve`.
+
+---
+
+## 10. Forward roadmap
 
 Eight sub-tasks under **#697** drive 100% coverage. Each closes one
 row in §2:

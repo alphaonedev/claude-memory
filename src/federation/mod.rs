@@ -57,6 +57,15 @@ pub struct FederationConfig {
     pub peers: Vec<PeerEndpoint>,
     pub client: reqwest::Client,
     pub sender_agent_id: String,
+    /// v0.7.0 fold-A2A1.4 (#702) — the operator-configured `[api] api_key`
+    /// from the local daemon's `AppConfig`, threaded here so outbound
+    /// federation POSTs can attach the `x-api-key` header. Without this,
+    /// a peer that itself runs with `api_key` set rejects every fanout
+    /// with 401 and quorum can never converge across hosts. `None` means
+    /// the local daemon doesn't run with api-key auth — outbound headers
+    /// stay unmodified (backwards-compatible with mTLS-only deployments
+    /// and the v0.6.x default-off auth posture).
+    pub api_key: Option<String>,
 }
 
 /// A single peer in the quorum mesh. The `id` is what we record in
@@ -200,6 +209,7 @@ mod tests {
                 .collect(),
             client,
             sender_agent_id: "ai:fed-test".to_string(),
+            api_key: None,
         }
     }
 
@@ -435,6 +445,7 @@ mod tests {
             None,
             None,
             "ai:test".to_string(),
+            None,
         )
         .unwrap();
         assert!(cfg.is_none());
@@ -450,6 +461,7 @@ mod tests {
             None,
             None,
             "ai:test".to_string(),
+            None,
         )
         .unwrap();
         assert!(cfg.is_none());
@@ -901,6 +913,7 @@ mod tests {
             None,
             None,
             "ai:builder".to_string(),
+            None,
         )
         .unwrap()
         .expect("config should be Some when w>0 and peers nonempty");
@@ -932,6 +945,7 @@ mod tests {
             None,
             None,
             "ai:builder".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("expected duplicate-URL rejection"),
@@ -956,6 +970,7 @@ mod tests {
             None,
             Some(&bogus),
             "ai:builder".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("expected ca-cert read error"),
@@ -982,6 +997,7 @@ mod tests {
             None,
             Some(&bad),
             "ai:builder".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("expected ca-cert parse error"),
@@ -1006,6 +1022,7 @@ mod tests {
             Some(&bogus_key),
             None,
             "ai:builder".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("expected client-cert read error"),
@@ -1291,6 +1308,7 @@ mod tests {
             }],
             client,
             sender_agent_id: "ai:catchup-test".to_string(),
+            api_key: None,
         }
     }
 
@@ -1621,6 +1639,7 @@ mod tests {
             Some(&key),
             None,
             "ai:builder".to_string(),
+            None,
         );
         let cfg = match result {
             Ok(Some(c)) => c,
@@ -1652,6 +1671,7 @@ mod tests {
             Some(&bogus_key),
             None,
             "ai:builder".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("expected client-key read error"),
@@ -1707,7 +1727,8 @@ mod tests {
         let body = serde_json::json!({"sender_agent_id":"ai:test","memories":[]});
         let target = format!("{url}/api/v1/sync/push");
 
-        let outcome = post_and_classify(&client, &target, &body, "mem-x", Some("mem-x")).await;
+        let outcome =
+            post_and_classify(&client, &target, &body, "mem-x", Some("mem-x"), None).await;
         match outcome {
             AckOutcome::Fail(reason) => {
                 assert!(
@@ -1764,7 +1785,7 @@ mod tests {
             .build()
             .unwrap();
         let body = serde_json::json!({"sender_agent_id":"ai:test","memories":[]});
-        let outcome = post_and_classify(&client, &url, &body, "mem-x", Some("mem-x")).await;
+        let outcome = post_and_classify(&client, &url, &body, "mem-x", Some("mem-x"), None).await;
         assert!(
             matches!(outcome, AckOutcome::IdDrift),
             "expected IdDrift, got {outcome:?}"
@@ -1793,6 +1814,7 @@ mod tests {
             peers: Vec::new(),
             client,
             sender_agent_id: "ai:no-peers".to_string(),
+            api_key: None,
         };
         // Non-empty memories list — the shortcut should still fire because
         // the peer list is empty.
@@ -1926,6 +1948,7 @@ mod tests {
             None,
             None,
             "ai:dup-test".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("trailing-slash dup must be rejected"),
@@ -1954,6 +1977,7 @@ mod tests {
             None,
             None,
             "ai:dup-case-test".to_string(),
+            None,
         );
         let err = match result {
             Ok(_) => panic!("case-only dup must be rejected"),
@@ -2054,6 +2078,7 @@ mod tests {
             }],
             client,
             sender_agent_id: "ai:no-suffix".to_string(),
+            api_key: None,
         };
         let db = build_test_db();
         catchup_once(&cfg, &db).await;

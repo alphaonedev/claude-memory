@@ -112,7 +112,10 @@ async fn serve_postgres_smoke_round_trip() {
 
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let api_key_state = ApiKeyState { key: None };
+    let api_key_state = ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let app_state = build_postgres_app_state(&url).await;
 
     // Spin up the daemon in-process. The shared `build_router` is the

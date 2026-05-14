@@ -2136,6 +2136,12 @@ pub async fn bootstrap_serve(
         args.quorum_client_key.as_deref(),
         args.quorum_ca_cert.as_deref(),
         format!("host:{}", gethostname::gethostname().to_string_lossy()),
+        // v0.7.0 fold-A2A1.4 (#702) — thread the operator-configured
+        // `[api] api_key` into federation outbound so peer POSTs carry
+        // `x-api-key`. Without this, cross-host federation BREAKS when
+        // any peer runs with api-key auth (peer returns 401 → quorum
+        // never converges). `None` keeps the prior behaviour unchanged.
+        app_config.api_key.clone(),
     )
     .context("federation config")?;
 
@@ -2457,11 +2463,28 @@ pub async fn bootstrap_serve(
         Duration::from_secs(AGENT_QUOTA_RESET_INTERVAL_SECS),
     ));
 
+    // v0.7.0 fold-A2A1.4 (#702) — mtls_enforced is true when the
+    // operator configured the full TLS+mTLS stack (cert+key+allowlist).
+    // The api_key_auth middleware uses this to bypass the `x-api-key`
+    // requirement on `/api/v1/sync/*` paths, because rustls has already
+    // verified the client cert against the operator-pinned allowlist
+    // — adding a shared-secret check on top is redundant and breaks
+    // cross-host federation when the peer doesn't carry the secret.
+    let mtls_enforced =
+        args.tls_cert.is_some() && args.tls_key.is_some() && args.mtls_allowlist.is_some();
     let api_key_state = ApiKeyState {
         key: app_config.api_key.clone(),
+        mtls_enforced,
     };
     if api_key_state.key.is_some() {
-        tracing::info!("API key authentication enabled");
+        if mtls_enforced {
+            tracing::info!(
+                "API key authentication enabled — federation endpoints (/api/v1/sync/*) \
+                 bypass api-key check because mTLS allowlist is configured"
+            );
+        } else {
+            tracing::info!("API key authentication enabled");
+        }
     }
 
     Ok(ServeBootstrap {
@@ -3313,7 +3336,10 @@ mod tests {
     async fn test_router_has_health_endpoint() {
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = build_router(app_state, api_key_state);
         let resp = router
             .oneshot(
@@ -3332,7 +3358,10 @@ mod tests {
     async fn test_router_has_metrics_at_both_paths() {
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         // /metrics
         let r1 = build_router(app_state.clone(), api_key_state.clone())
             .oneshot(
@@ -3363,7 +3392,10 @@ mod tests {
     async fn test_router_lists_all_v1_memory_routes() {
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = build_router(app_state, api_key_state);
         let resp = router
             .oneshot(
@@ -3386,6 +3418,7 @@ mod tests {
         let app_state = keyword_app_state(&env.db_path);
         let api_key_state = ApiKeyState {
             key: Some("s3cret".to_string()),
+            mtls_enforced: false,
         };
         let router = build_router(app_state, api_key_state);
         let resp = router
@@ -3405,7 +3438,10 @@ mod tests {
     async fn test_router_skips_api_key_middleware_when_key_none() {
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = build_router(app_state, api_key_state);
         let resp = router
             .oneshot(
@@ -4370,7 +4406,10 @@ mod tests {
     async fn test_serve_http_with_shutdown_future_serves_then_stops() {
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         // Pick a free port via a transient bind.
         let port = {
             let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -4416,7 +4455,10 @@ mod tests {
         // `with_context` path on the TcpListener::bind line.
         let env = TestEnv::fresh();
         let app_state = keyword_app_state(&env.db_path);
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         // 0.0.0.0:0 succeeds; we want a guaranteed failure. Bind to
         // port 1 which requires privileged perms — except on macOS in
         // some configs that may succeed. Use a clearly invalid address

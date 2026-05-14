@@ -99,7 +99,10 @@ fn build_sqlite_app_state() -> (AppState, tempfile::NamedTempFile) {
 async fn s75_capabilities_surfaces_runtime_db_schema_version() {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let api_key_state = ApiKeyState { key: None };
+    let api_key_state = ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let (app_state, _tmp) = build_sqlite_app_state();
 
     let shutdown = Arc::new(Notify::new());

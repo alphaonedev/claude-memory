@@ -110,7 +110,10 @@ impl HttpHarness {
             recall_scope: Arc::new(None),
             deferred_audit_queue: Arc::new(None),
         };
-        let api_key_state = ApiKeyState { key: None };
+        let api_key_state = ApiKeyState {
+            key: None,
+            mtls_enforced: false,
+        };
         let router = ai_memory::build_router(api_key_state, app_state);
 
         Self {

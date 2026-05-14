@@ -102,7 +102,10 @@ async fn spawn_daemon(
 ) {
     let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let api_key_state = ApiKeyState { key: None };
+    let api_key_state = ApiKeyState {
+        key: None,
+        mtls_enforced: false,
+    };
     let app_state = build_postgres_app_state(url).await;
     let shutdown = Arc::new(Notify::new());
     let shutdown_for_daemon = shutdown.clone();

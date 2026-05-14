@@ -25,12 +25,20 @@ pub(super) enum AckOutcome {
 /// Single-attempt POST to a peer, classifying the response into an
 /// `AckOutcome`. No retries — callers that want retry-on-transient-fail
 /// should use [`post_and_classify`].
+///
+/// `api_key` (v0.7.0 fold-A2A1.4, #702) is the operator-configured
+/// `[api] api_key` from the local daemon's `AppConfig`. When `Some`,
+/// an `x-api-key: <value>` header is attached so peers that themselves
+/// run with api-key auth accept the outbound POST. When `None`, no
+/// header is attached — backwards-compatible with mTLS-only and
+/// no-auth deployments.
 pub(super) async fn post_once(
     client: &reqwest::Client,
     url: &str,
     body: &serde_json::Value,
     expected_id: &str,
     idempotency_key: Option<&str>,
+    api_key: Option<&str>,
 ) -> AckOutcome {
     // Ultrareview #346: attach an idempotency key so peers can dedupe
     // on retry. If a tokio::timeout fires locally but the HTTP POST
@@ -68,6 +76,14 @@ pub(super) async fn post_once(
     let mut req = client.post(url).json(body);
     if let Some(key) = idempotency_key {
         req = req.header("Idempotency-Key", key);
+    }
+    // v0.7.0 fold-A2A1.4 (#702) — forward the operator-configured
+    // `[api] api_key` on every outbound federation POST. Peers that
+    // themselves run with api-key auth otherwise reject with 401 and
+    // cross-host quorum can never converge. Backwards-compatible:
+    // `None` means no header attached.
+    if let Some(key) = api_key {
+        req = req.header("x-api-key", key);
     }
     match req.send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -126,13 +142,14 @@ pub(super) async fn post_and_classify(
     body: &serde_json::Value,
     expected_id: &str,
     idempotency_key: Option<&str>,
+    api_key: Option<&str>,
 ) -> AckOutcome {
-    match post_once(client, url, body, expected_id, idempotency_key).await {
+    match post_once(client, url, body, expected_id, idempotency_key, api_key).await {
         AckOutcome::Ack => AckOutcome::Ack,
         AckOutcome::IdDrift => AckOutcome::IdDrift,
         AckOutcome::Fail(first_reason) => {
             tokio::time::sleep(FANOUT_RETRY_BACKOFF).await;
-            match post_once(client, url, body, expected_id, idempotency_key).await {
+            match post_once(client, url, body, expected_id, idempotency_key, api_key).await {
                 AckOutcome::Ack => {
                     tracing::debug!(
                         "federation: peer POST retry succeeded for {expected_id} (first attempt: {first_reason})"
@@ -191,8 +208,17 @@ pub async fn broadcast_store_quorum(
         let id = peer.id.clone();
         let mem_id = mem.id.clone();
         let payload = body.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &mem_id, Some(&mem_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &mem_id,
+                Some(&mem_id),
+                api_key.as_deref(),
+            )
+            .await;
             (id, outcome)
         });
     }
@@ -358,9 +384,17 @@ pub async fn broadcast_delete_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = id.to_string();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -446,9 +480,17 @@ pub async fn broadcast_archive_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = id.to_string();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -535,9 +577,17 @@ pub async fn broadcast_restore_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = id.to_string();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -619,8 +669,17 @@ pub async fn broadcast_link_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let log_id = log_id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &log_id, Some(&log_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &log_id,
+                Some(&log_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -702,9 +761,17 @@ pub async fn broadcast_consolidate_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = new_mem.id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -791,9 +858,17 @@ pub async fn broadcast_pending_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = pending.id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -879,9 +954,17 @@ pub async fn broadcast_pending_decision_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target_id = decision.id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome =
-                post_and_classify(&client, &url, &payload, &target_id, Some(&target_id)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target_id,
+                Some(&target_id),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -969,8 +1052,17 @@ pub async fn broadcast_namespace_meta_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target = target_id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &target, Some(&target)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target,
+                Some(&target),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -1062,8 +1154,17 @@ pub async fn broadcast_namespace_meta_clear_quorum(
         let peer_id = peer.id.clone();
         let payload = body.clone();
         let target = target_id.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
-            let outcome = post_and_classify(&client, &url, &payload, &target, Some(&target)).await;
+            let outcome = post_and_classify(
+                &client,
+                &url,
+                &payload,
+                &target,
+                Some(&target),
+                api_key.as_deref(),
+            )
+            .await;
             (peer_id, outcome)
         });
     }
@@ -1169,12 +1270,20 @@ pub async fn bulk_catchup_push(
         let url = peer.sync_push_url.clone();
         let id = peer.id.clone();
         let payload = body.clone();
+        let api_key = config.api_key.clone();
         joins.spawn(async move {
             let mut req = client.post(&url).json(&payload);
             // No Idempotency-Key on the batch — the batch is itself an
             // idempotent replay, and the peer's `insert_if_newer`
             // dedupes per row by (id, updated_at).
             req = req.header("X-Catchup", "bulk");
+            // v0.7.0 fold-A2A1.4 (#702) — forward the operator-configured
+            // `x-api-key` on the catchup batch as well. Without this, a
+            // catchup against a peer that runs with api-key auth fails
+            // 401 and the row gap stays open.
+            if let Some(key) = api_key.as_deref() {
+                req = req.header("x-api-key", key);
+            }
             let outcome = match req.send().await {
                 Ok(resp) if resp.status().is_success() => Ok(()),
                 Ok(resp) => Err(format!("http {}", resp.status())),
