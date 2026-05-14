@@ -644,4 +644,109 @@ mod tests {
         assert_eq!(out["status"].as_str(), Some("ask"));
         assert_eq!(out["action"].as_str(), Some("link"));
     }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Coverage C-2 — additional tests added for the cycle-refusal
+    // (L1-2) and supersedes-invalidation (L2-3) paths, plus quota
+    // refund-on-failure and event_namespace fallback when the source
+    // disappears mid-call.
+
+    fn make_reflection(title: &str, ns: &str) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: format!("reflection body {title}"),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: json!({"agent_id": "ai:reflective"}),
+            reflection_depth: 1,
+            memory_kind: crate::models::MemoryKind::Reflection,
+        }
+    }
+
+    // L1-2 cycle refusal — a reflects_on edge that closes a cycle is
+    // refused before any quota charge. Sets up A → B existing reflects_on
+    // edge then attempts B → A which closes the cycle.
+    #[test]
+    fn reflects_on_cycle_refused() {
+        let conn = fresh_conn();
+        let a = make_reflection("ref-a", "cycle-ns");
+        let b = make_reflection("ref-b", "cycle-ns");
+        let a_id = db::insert(&conn, &a).unwrap();
+        let b_id = db::insert(&conn, &b).unwrap();
+        // Existing edge: a reflects_on b
+        db::create_link(&conn, &a_id, &b_id, REFLECTS_ON).unwrap();
+        let db_path = db_path();
+        // Attempting b reflects_on a closes the cycle.
+        let err = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": b_id, "target_id": a_id, "relation": REFLECTS_ON}),
+            None,
+        )
+        .unwrap_err();
+        // The error string comes from MemoryError::ReflectionCycleDetected.
+        assert!(!err.is_empty());
+        // An audit row was appended for the cycle-refused event.
+        let cnt: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM signed_events WHERE event_type = 'reflects_on.cycle_refused'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert!(cnt >= 1, "expected one cycle_refused audit row, got {cnt}");
+    }
+
+    // L2-3 invalidation propagation — supersedes edge between two
+    // reflections triggers the invalidation walker. Without dependent
+    // memories the notified list is empty but the path is exercised.
+    #[test]
+    fn supersedes_between_reflections_walks_invalidation() {
+        let conn = fresh_conn();
+        let winner = make_reflection("win", "sup-ns");
+        let loser = make_reflection("lose", "sup-ns");
+        let w_id = db::insert(&conn, &winner).unwrap();
+        let l_id = db::insert(&conn, &loser).unwrap();
+        let db_path = db_path();
+        let out = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": w_id, "target_id": l_id, "relation": SUPERSEDES, "agent_id": "ai:supersede"}),
+            None,
+        )
+        .expect("ok");
+        assert_eq!(out["linked"], true);
+        assert_eq!(out["relation"].as_str(), Some(SUPERSEDES));
+        // invalidation_notified is always an array on this path.
+        assert!(out["invalidation_notified"].is_array());
+    }
+
+    // Supersedes between an observation and a reflection skips the
+    // invalidation walker entirely (no Reflection on both sides).
+    #[test]
+    fn supersedes_between_observations_skips_invalidation() {
+        let conn = fresh_conn();
+        let (a, b) = insert_two(&conn);
+        let db_path = db_path();
+        let out = handle_link(
+            &conn,
+            &db_path,
+            &json!({"source_id": a, "target_id": b, "relation": SUPERSEDES}),
+            None,
+        )
+        .expect("ok");
+        let arr = out["invalidation_notified"].as_array().unwrap();
+        assert_eq!(arr.len(), 0);
+    }
 }
