@@ -335,6 +335,41 @@ live PG.
 - Phase 2 federation cell pushes real envelopes from peers against a PG
   store.
 
+### v0.7.0 C-3 #699 — `src/cli/schema_init.rs` (STRUCTURAL CEILING — PG init body)
+
+The `schema-init` CLI verb dispatches on URL scheme. The SQLite branch is
+exercised end-to-end (init + enumerate + JSON / human render + idempotent
+re-run) by both lib unit tests and `tests/cli_schema_init.rs`. The
+Postgres branch (`init_and_enumerate_postgres` at lines 380-401,
+`enumerate_postgres` at lines 405-523, `bootstrap_memory_graph` at lines
+532-585, plus the `--ignored` integration test body at lines 767-826)
+sits behind `PostgresStore::connect_with_dim(url, dim).await?` which
+errors out immediately when no Postgres is reachable. Coverage of the
+post-connect lines requires a live Postgres + pgvector + (for AGE)
+the Apache AGE extension.
+
+Current measured: 72.91% (was 68.46% at L0.7-7; C-3 #699 uplift added
+the unreachable-PG early-error paths plus the SQLite-side enumeration
+helpers). The unit-testable surface (URL classification,
+`sqlite_path_from_url`, `enumerate_sqlite`, `read_schema_version_sqlite`,
+`render_human` arms, dispatch refusal for unknown schemes) is at 100%
+coverage.
+
+**Ship-gate compensation**:
+
+- The `#[ignore]`d `schema_init_postgres_embedding_dim_conversion` test
+  drives the full init → enumerate → v29-conversion → idempotence loop
+  against `AI_MEMORY_TEST_POSTGRES_URL` in Phase 1 Postgres cell.
+- `tests/cli_schema_init.rs::schema_init_postgres_emits_json` (gated on
+  the same env var) pins the JSON wire shape.
+- Ship-gate Phase 1 runs both against the
+  `packaging/docker-compose.postgres.yml` fixture.
+
+**v0.8.0 raise target**: 95% (Tier B) — gated on a coverage roll-up that
+includes the postgres ship-gate cell's per-module measurement, OR
+shipping a mock `PostgresStore::connect_with_dim` injection helper that
+can return synthetic enumerate-row fixtures for unit tests.
+
 ### L0.7-3 chunk-C structural ceilings (Tier B — PARTIAL EXCEPTIONS)
 
 Six MCP tool modules carry **defensive-closure ceilings**. Each has a

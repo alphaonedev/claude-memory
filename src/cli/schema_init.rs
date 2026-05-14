@@ -989,6 +989,98 @@ mod tests {
         assert!(s.contains("age_projection: skipped"));
     }
 
+    // -----------------------------------------------------------------
+    // C-3 coverage uplift — additional dispatch + branch tests. The
+    // postgres init body (lines 388-401) only lights up against a live
+    // Postgres instance; covered by the `#[ignore]`d
+    // `schema_init_postgres_embedding_dim_conversion` and by the
+    // `cli_schema_init` integration tests. The structural ceiling is
+    // tracked in `coverage/policy.md`.
+    // -----------------------------------------------------------------
+
+    #[cfg(feature = "sal-postgres")]
+    #[tokio::test]
+    async fn enumerate_postgres_unreachable_returns_connect_error() {
+        // Drives `enumerate_postgres`'s connect call (lines 412-417).
+        // Pointing at a non-routable port surfaces the
+        // `connect postgres for enumeration` context on the way out.
+        let err = enumerate_postgres("postgres://x:y@127.0.0.1:1/nope")
+            .await
+            .expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("connect postgres for enumeration")
+                || msg.contains("connect")
+                || msg.contains("refused")
+                || msg.contains("postgres"),
+            "got: {msg}"
+        );
+    }
+
+    #[cfg(feature = "sal-postgres")]
+    #[tokio::test]
+    async fn init_and_enumerate_postgres_unreachable_returns_open_error() {
+        // Drives `init_and_enumerate_postgres`'s connect call (380-382)
+        // — same early-return semantics.
+        let err = init_and_enumerate_postgres("postgres://x:y@127.0.0.1:1/no_db", 384)
+            .await
+            .expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("open store at") || msg.contains("connect") || msg.contains("postgres"),
+            "got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn enumerate_sqlite_returns_populated_report() {
+        // Drives `enumerate_sqlite` directly — the file open / sqlite
+        // master walk / schema_version read. Already exercised end-to-
+        // end via run_sqlite_emits_json_with_expected_fields, but here
+        // we pin the helper's return shape on its own.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_string_lossy().to_string();
+        let url = format!("sqlite://{path}");
+        // Trigger init by opening through migrate first.
+        let _store = crate::migrate::open_store(&url).await.expect("open");
+        let r = enumerate_sqlite(&url).expect("enumerate");
+        assert_eq!(r.kind, "sqlite");
+        assert!(
+            r.tables.iter().any(|t| t == "memories"),
+            "tables: {:?}",
+            r.tables
+        );
+        assert!(r.schema_version > 0, "version: {}", r.schema_version);
+    }
+
+    #[tokio::test]
+    async fn enumerate_sqlite_returns_error_on_missing_file() {
+        // Drives the `with_context(...)` arm at line 277.
+        let err =
+            enumerate_sqlite("sqlite:///nonexistent-parent-xyz/missing.db").expect_err("must fail");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("open sqlite for enumeration"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn read_schema_version_falls_back_to_zero_on_missing_table() {
+        // Drives the `.unwrap_or(0)` branch at line 282.
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        // No `schema_version` table — the helper's query errors and
+        // the caller substitutes 0.
+        // (We do not assert on the error directly since this helper is
+        // private; instead we observe the caller's substitution via a
+        // fresh enumerate_sqlite call against a freshly-opened-but-not-
+        // migrated path.)
+        drop(conn);
+        // sqlite_master is empty here so list_* helpers return [].
+        // The schema_version read errors — the caller maps to 0.
+        let url = format!("sqlite://{}", tmp.path().display());
+        let r = enumerate_sqlite(&url).expect("enumerate");
+        assert_eq!(r.schema_version, 0);
+    }
+
     #[tokio::test]
     async fn render_human_no_age_line_for_sqlite_kind() {
         // The age_projection footer fires only for `kind == "postgres"`
