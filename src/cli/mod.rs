@@ -24,6 +24,9 @@ pub mod consolidate;
 pub mod crud;
 pub mod curator;
 pub mod doctor;
+/// v0.7.0 L2-5 (issue #670) — `ai-memory export-forensic-bundle` and
+/// `ai-memory verify-forensic-bundle` subcommands.
+pub mod export;
 pub mod forget;
 pub mod gc;
 pub mod governance;
