@@ -1124,8 +1124,11 @@ mod tests {
         let conn = fresh_conn();
         let db_path = db_path();
         let ttl = ResolvedTtl::default();
-        // Stub LLM via OllamaClient::new (constructor doesn't need server).
-        let llm = crate::llm::OllamaClient::new("dummy-model").ok();
+        // Stub LLM via `new_for_testing` (no Ollama liveness check, so the
+        // test runs in CI without an Ollama daemon). The skip-reason
+        // waterfall returns `content_too_short` BEFORE any RPC fires, so
+        // the client itself never touches the network.
+        let llm = Some(crate::llm::OllamaClient::new_for_testing("dummy-model"));
         let resp = handle_store(
             &conn,
             &db_path,
@@ -1155,7 +1158,7 @@ mod tests {
         let conn = fresh_conn();
         let db_path = db_path();
         let ttl = ResolvedTtl::default();
-        let llm = crate::llm::OllamaClient::new("dummy-model").ok();
+        let llm = Some(crate::llm::OllamaClient::new_for_testing("dummy-model"));
         let resp = handle_store(
             &conn,
             &db_path,
