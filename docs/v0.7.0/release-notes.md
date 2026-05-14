@@ -334,6 +334,146 @@ the v0.7.0 `memory_reflect` MCP handler ships an unreachable
 compatible without yet emitting hook events from the production
 handler. ([commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit/fbf093c).)
 
+### Substrate-Native Recursive Learning Grand-Slam (NEW)
+
+> **Operator-level summary.** The v0.7.0 grand-slam wave extends the
+> recursive-learning substrate primitive (issue [#655](https://github.com/alphaonedev/ai-memory-mcp/issues/655))
+> from "an MCP verb that mints a reflection memory" into a complete
+> substrate-native learning loop: a curator that reflects across a
+> namespace asynchronously, federation-aware cross-peer depth
+> bookkeeping, invalidation propagation, transcript replay union,
+> procurement-grade forensic export, reflection-to-skill promotion,
+> skill ↔ reflection composition, and a reflection-aware reranker
+> boost. The L1-6 substrate rules-enforcement engine ships the
+> operator-keypair-signed rule store and the bypass-impossibility
+> test fleet. Schema bumps to v33 (CHECK constraint on
+> `memory_links.relation`) per the v0.7.1-fold decision
+> (`05e0cb9a`). The MCP tool count moves from 60 → 63 over the L2
+> wave; the full reflection narrative lives in
+> [`docs/RECURSIVE_LEARNING.md`](../RECURSIVE_LEARNING.md), the
+> Agent Skills surface in [`docs/agent-skills.md`](../agent-skills.md),
+> and the forensic-export surface in
+> [`docs/forensic-export.md`](../forensic-export.md).
+
+#### Schema and tool-surface deltas
+
+- **Schema v33 (sqlite).** CHECK constraint on
+  `memory_links.relation` promoted from the v23 trigger to a SQL-side
+  CHECK clause covering `related_to | supersedes | contradicts |
+  derived_from | reflects_on`. Postgres parity migration mirrors the
+  same constraint. Per `05e0cb9a` v0.7.1-fold decision (no separate
+  v0.7.1 release; the constraint lands in the v0.7.0 tag).
+  ([`src/storage/migrations.rs`](../../src/storage/migrations.rs)
+  `CURRENT_SCHEMA_VERSION = 33`.)
+- **MCP tool count 60 → 63.** The L2 wave added three tools:
+  `memory_dependents_of_invalidated` (L2-3 / #668),
+  `memory_skill_promote_from_reflection` (L2-6 / #671), and
+  `memory_skill_compositional_context` (L2-7 / #672). The L1-5
+  Agent Skills substrate added 5 tools (`memory_skill_register`,
+  `_list`, `_get`, `_resource`, `_export`) earlier in the grand-slam
+  branch. The L2-2 federation-aware reflection coordination added
+  `memory_reflection_origin`. See [`docs/agent-skills.md`](../agent-skills.md)
+  for the per-tool wire surface.
+
+#### L1-6 substrate rules engine (issues [#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691), [#693](https://github.com/alphaonedev/ai-memory-mcp/issues/693))
+
+The v0.7.0 Option B substrate-authority foundation:
+
+- **Operator-keypair-signed seed rules.** Every seeded rule
+  (`R001..R004`) is signed with the operator's Ed25519 private key
+  via the new `ai-memory rules sign` CLI; the daemon verifies the
+  signature on load and refuses to start when a rule's
+  `attest_level = "signed"` but the signature does not verify
+  against the enrolled operator public key.
+  ([`src/cli/rules.rs`](../../src/cli/rules.rs),
+  [`src/governance/rules_store.rs`](../../src/governance/rules_store.rs).)
+- **Bypass-impossibility integration tests.** A dedicated test
+  fleet (`tests/governance/`, commit
+  [`6038f85`](https://github.com/alphaonedev/ai-memory-mcp/commit/6038f85))
+  exercises every adapter write path that goes through the substrate
+  `storage::insert` pre-write hook and asserts the rule corpus is
+  consulted on each call. The fleet is the regression anchor for
+  the v0.8.0 "100% coverage" epic.
+- **MCP read-only inspection.** `memory_rule_list` and
+  `memory_check_agent_action` provide structured read access to the
+  rule corpus and a dry-run rule check. Per design revision
+  2026-05-13, **mutation is operator-only** via CLI/HTTP with the
+  signed operator key — the MCP surface cannot add, remove, enable,
+  or disable rules.
+- **Pre-write hook on `storage::insert`.** L1-6 Deliverable E
+  ([commit `1b877ce`](https://github.com/alphaonedev/ai-memory-mcp/commit/1b877ce),
+  [#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691))
+  wires `check_agent_action` into the `storage::insert` pre-write
+  path. The HTTP handler surfaces the structured refusal via the
+  new `RuleRefused` error variant
+  ([`src/errors.rs`](../../src/errors.rs)). Other adapter write
+  paths (link insert, consolidate, reflect, federation receive)
+  continue to enforce reflection-specific authority via the
+  existing reflection-depth cap; the v0.8.0 epic
+  ([#697](https://github.com/alphaonedev/ai-memory-mcp/issues/697))
+  is where the rule engine wires into 100% of write paths.
+
+**Audit-honest framing.** Substrate authority is a **foundation in
+v0.7.0, a complete cover in v0.8.0**. Operators evaluating the
+authority claim today should read
+[`docs/RECURSIVE_LEARNING.md` §Substrate authority claim](../RECURSIVE_LEARNING.md#substrate-authority-claim--v070-option-b-foundation)
+alongside this section. Any "100% substrate authority" marketing
+that elides the wiring gap is inaccurate.
+
+#### L2 wave — what landed
+
+| Task | Commit | Issue | Headline |
+|---|---|---|---|
+| L2-1 reflection-pass curator | [`c3f6e82`](https://github.com/alphaonedev/ai-memory-mcp/commit/c3f6e82) | [#666](https://github.com/alphaonedev/ai-memory-mcp/issues/666) | Asynchronous curator clusters `Observation`-kind memories and mints reflections via the substrate path. Opt-in per namespace; honors the substrate cap; one level of reflection per pass. |
+| L2-2 federation reflection coordination | [`0b1c9cc`](https://github.com/alphaonedev/ai-memory-mcp/commit/0b1c9cc) | [#667](https://github.com/alphaonedev/ai-memory-mcp/issues/667) | Cross-peer depth bookkeeping. Receivers stamp `metadata.reflection_origin = {peer_origin, original_depth, local_depth_at_arrival}` on import and enforce the **local** cap on derived writes — federation cannot launder depth. `memory_reflection_origin` MCP tool. |
+| L2-3 invalidation propagation | [`3f419be`](https://github.com/alphaonedev/ai-memory-mcp/commit/3f419be) | [#668](https://github.com/alphaonedev/ai-memory-mcp/issues/668) | A Reflection→Reflection `supersedes` edge fires the walker; one notification memory is written per dependent under `<dependent.namespace>/_invalidations`. **Notification, NOT cascade.** Cascade rollback is v0.8.0 Pillar 2.5. |
+| L2-4 transcript replay union | [`a50b34c`](https://github.com/alphaonedev/ai-memory-mcp/commit/a50b34c) | [#669](https://github.com/alphaonedev/ai-memory-mcp/issues/669) | `memory_replay` on a reflection memory returns the **union** of transcripts reachable by walking `reflects_on` to the source observations. Caller controls the walk depth (`depth=N`); `depth=0` reproduces the pre-L2-4 shape. |
+| L2-5 forensic bundle | [`bb870b3`](https://github.com/alphaonedev/ai-memory-mcp/commit/bb870b3) | [#670](https://github.com/alphaonedev/ai-memory-mcp/issues/670) | `ai-memory export-forensic-bundle` + `verify-forensic-bundle`: deterministic POSIX-ustar tar, byte-identical mod timestamp, operator-signed when keypair is on disk. AgenticMem Attest tier integration. See [`docs/forensic-export.md`](../forensic-export.md). |
+| L2-6 reflection-as-skill | [`505c538`](https://github.com/alphaonedev/ai-memory-mcp/commit/505c538) | [#671](https://github.com/alphaonedev/ai-memory-mcp/issues/671) | `memory_skill_promote_from_reflection` promotes a reflection (depth ≥ 1) to a SKILL.md-format Agent Skill. Each `reflects_on` source becomes a `references/source_{i}.md` resource. Round-trip digest-identical to a hand-authored SKILL.md. Closes the recursive-learning loop. |
+| L2-7 skill composition | [`0966b57`](https://github.com/alphaonedev/ai-memory-mcp/commit/0966b57) | [#672](https://github.com/alphaonedev/ai-memory-mcp/issues/672) | `composes_with_reflections` SKILL.md frontmatter declares a skill's affinity for one or more reflection-bearing namespaces. `memory_skill_compositional_context` returns the body + bounded reflection set ranked by recency + recall_count. Per-namespace `max_reflection_depth` is the authoritative ceiling — composition cannot bypass the cap. |
+| L2-8 reflection-aware reranker boost | [`90291c0`](https://github.com/alphaonedev/ai-memory-mcp/commit/90291c0) | [#673](https://github.com/alphaonedev/ai-memory-mcp/issues/673) | Reranker applies `boost * (1 + per_depth_increment * min(depth, cap))` to `Reflection`-kind memories AFTER the cross-encoder blend. Defaults `1.2` / `0.05` / `3`. `boost = 1.0` is the documented kill-switch. |
+
+#### Agent Skills (Pillar 1.5)
+
+The L1-5 Agent Skills ingestion substrate landed on the grand-slam
+branch as the substrate path for
+[agentskills.io](https://agentskills.io/)-compliant `SKILL.md`
+modules:
+
+- **7 MCP tools** in the `memory_skill_*` family. See
+  [`docs/agent-skills.md`](../agent-skills.md) for the per-tool
+  wire surface.
+- **Round-trip digest guarantee** — register → export → re-register
+  produces the identical SHA-256 digest. Survives transport,
+  federation, and the v0.7 → v0.8 schema revision.
+- **Ed25519 attestation** on every signed row when an operator
+  keypair is on disk.
+- **SKILL.md format** with `composes_with_reflections` frontmatter
+  field (L2-7) — declares a skill's affinity for reflection
+  namespaces with a per-entry `min_depth` floor.
+
+The closing-loop bridge: a reflection memory ↔ a skill manifest.
+Operators codify learnings into skills via
+`memory_skill_promote_from_reflection`, then activate them on
+demand with `memory_skill_compositional_context` returning a
+bounded reflection context alongside the skill body.
+
+#### Forensic export (AgenticMem Attest)
+
+The L1-3 `verify-reflection-chain` and L2-5
+`export-forensic-bundle` / `verify-forensic-bundle` triad ships the
+procurement-grade evidence path. Full surface in
+[`docs/forensic-export.md`](../forensic-export.md). Headlines:
+
+- **Deterministic tar bundle.** Byte-identical mod timestamp.
+- **In-process POSIX ustar.** No `tar` crate dependency.
+- **Manifest carries per-file SHA-256 + optional Ed25519
+  signature.** Auditor re-verifies with no daemon state and no
+  network.
+- **`AgenticMem Attest` evidence tier.** The OSS-side artefact
+  pairs with the operator-keypair attestation chain to deliver the
+  full Attest-tier evidence packet on demand.
+
 ### Quality
 
 - **Hard coverage gate ≥ 93%.** CI fails any PR below the line floor.
@@ -452,6 +592,10 @@ Follow [`docs/migration-v0.7.0-postgres.md`](../migration-v0.7.0-postgres.md):
 - **What's new (visual):** [`docs/whats-new-v07.html`](../whats-new-v07.html)
 - **v0.7.0 → v0.6.4 surface delta:** [`docs/MIGRATION_v0.7.md`](../MIGRATION_v0.7.md)
 - **RFC (design rationale):** [`docs/v0.7/rfc-attested-cortex.md`](../v0.7/rfc-attested-cortex.md)
+- **Recursive learning primer:** [`docs/RECURSIVE_LEARNING.md`](../RECURSIVE_LEARNING.md)
+- **Agent Skills primer:** [`docs/agent-skills.md`](../agent-skills.md)
+- **Forensic export primer:** [`docs/forensic-export.md`](../forensic-export.md)
+- **Curator soak runbook:** [`docs/RUNBOOK-curator-soak.md`](../RUNBOOK-curator-soak.md)
 - **A2A campaign Pages:** https://alphaonedev.github.io/ai-memory-a2a-v0.7.0/
 - **Test Hub Pages:** https://alphaonedev.github.io/ai-memory-test-hub/
 
