@@ -776,12 +776,13 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_replay",
                 "description": "Reconstruct the conversation transcript chain that produced a memory.",
-                "docs": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript. v0.7.0 I4 — when verbose=false (default), transcripts >100KB have content omitted with truncated=true; opt into verbose=true for the full multi-MB dump.",
+                "docs": "Reconstruct the conversation transcript chain that produced this memory. Returns decompressed text + span metadata for each linked transcript. v0.7.0 I4 — when verbose=false (default), transcripts >100KB have content omitted with truncated=true; opt into verbose=true for the full multi-MB dump. v0.7.0 L2-4 (issue #669) — when the input memory is a reflection (memory_kind='reflection'), the replay returns the UNION of transcripts reachable by walking `reflects_on` edges to the source observations. Cap the walk with `depth=N` (full chain by default; `0` returns the reflection's own transcripts only — the pre-L2-4 shape). Each entry carries a `source_memory_id` so callers can see which ancestor anchored each transcript. Non-reflection memories ignore `depth`; their reply shape is unchanged from the pre-L2-4 I4 behaviour.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
                         "memory_id": {"type": "string", "description": "Memory ID whose transcript chain should be reconstructed."},
-                        "verbose": {"type": "boolean", "default": false, "description": "v0.7.0 I4 — when false (default), any single transcript exceeding 100KB has its content omitted and is flagged with truncated=true. Set to true to opt into a full dump (use with care: transcripts can be multi-MB)."}
+                        "verbose": {"type": "boolean", "default": false, "description": "v0.7.0 I4 — when false (default), any single transcript exceeding 100KB has its content omitted and is flagged with truncated=true. Set to true to opt into a full dump (use with care: transcripts can be multi-MB)."},
+                        "depth": {"type": ["integer", "null"], "minimum": 0, "default": null, "description": "v0.7.0 L2-4 — optional cap on the reflection-union walk over `reflects_on` edges. `null` (default) walks the full chain; `0` returns the reflection's own transcripts only (matches the pre-L2-4 I4 shape); `N>=1` returns self plus N hops of ancestors. Ignored for non-reflection memories."}
                     },
                     "required": ["memory_id"]
                 }

@@ -40,10 +40,14 @@ modules = [
     "storage/migrations.rs",  # current  86.6%, gap  11.4%
     "toon.rs",  # current  99.1% (above target)
     "transcripts/mod.rs",  # current 100.0% (above target)
-    # transcripts/replay.rs RECLASSIFIED Tier A -> Tier F 2026-05-13
-    # (L0.5.5-3 placeholder for L2-4 transcript replay reflection union;
-    # symmetric with federation/reflection_bookkeeping.rs already in tier_F.
-    # See _v070_grand_slam/layer_0_7/bugs_surfaced/1a2a5a8a.)
+    # transcripts/replay.rs RE-ELEVATED Tier F -> Tier A 2026-05-13
+    # (L2-4 landed the reflection-union walker + handler integration,
+    # restoring the file to a real module with substrate-level unit tests
+    # and integration acceptance tests. Original placeholder reclassification
+    # (1a2a5a8a) is now resolved per its §RESOLUTION step 3 — "when L2-4
+    # implements the reflection-union logic, that task's acceptance criteria
+    # add tests and reclassify replay.rs back to Tier A").
+    "transcripts/replay.rs",  # L2-4 acceptance — new module with substrate tests
     "transcripts/storage.rs",  # current  94.7%, gap   3.3%
     "validate.rs",  # current  97.0%, gap   1.0%
 ]
@@ -176,7 +180,6 @@ modules = [
 target_line_coverage_pct = 0
 modules = [
     "federation/reflection_bookkeeping.rs",  # current   0.0% (above target)
-    "transcripts/replay.rs",  # current   0.0% (above target — L0.5.5-3 placeholder for L2-4; reclassified 2026-05-13)
     "lib.rs",  # current  95.2% (above target)
     "main.rs",  # current  94.3% (above target)
 ]

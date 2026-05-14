@@ -3,6 +3,7 @@
 
 //! MCP `memory_replay` handler.
 
+use crate::transcripts::replay::{ReplayEntry, replay_transcript_union};
 use crate::validate;
 use serde_json::{Value, json};
 
@@ -14,7 +15,7 @@ use serde_json::{Value, json};
 /// truncation surprise.
 pub(super) const REPLAY_VERBOSE_THRESHOLD_BYTES: i64 = 100 * 1024;
 
-/// v0.7.0 I4 — `memory_replay(memory_id, verbose=false)`.
+/// v0.7.0 I4 + L2-4 — `memory_replay(memory_id, verbose=false, depth=null)`.
 ///
 /// Walks the I2 `memory_transcript_links` join table for `memory_id`,
 /// fetches each linked transcript via I1's [`crate::transcripts::fetch`]
@@ -22,11 +23,29 @@ pub(super) const REPLAY_VERBOSE_THRESHOLD_BYTES: i64 = 100 * 1024;
 /// chronologically-sorted JSON array of transcripts with their span
 /// metadata.
 ///
+/// ## L2-4 (issue #669) — reflection union
+///
+/// When the input memory's `memory_kind` is `Reflection` (L1-1), the
+/// replay reads the **union** of every transcript reachable by
+/// walking `reflects_on` edges from the input. The walk is BFS over
+/// the I2 + reflects_on adjacency; depth-capped at `depth` hops when
+/// the caller passes the optional parameter, otherwise unbounded
+/// ("full chain", the default per the #669 contract).
+///
+/// `depth = 0` returns the reflection's own transcripts only —
+/// identical shape to the pre-L2-4 I4 read. `depth = N >= 1` returns
+/// self plus N hops of ancestors.
+///
+/// Non-reflection memories ignore the `depth` parameter entirely;
+/// their replay shape is unchanged from the pre-L2-4 I4 behaviour
+/// (pinned by the #669 acceptance criterion "existing memory_replay
+/// for non-reflection memories MUST be unchanged").
+///
 /// Sort order: ascending `created_at` so the replay reads as the
-/// memory's source chain in the order the conversation actually
-/// happened. The I2 helper [`crate::transcripts::transcripts_for_memory`]
-/// orders by `transcript_id` (deterministic but arbitrary), so this
-/// handler re-sorts after pulling per-transcript metadata.
+/// source chain in the order the conversations actually happened.
+/// Ties on `created_at` fall back to `transcript_id` for deterministic
+/// output even when two transcripts land in the same RFC3339
+/// millisecond.
 ///
 /// Truncation rule: when `verbose=false` (default) and a transcript's
 /// `original_size` exceeds [`REPLAY_VERBOSE_THRESHOLD_BYTES`], its
@@ -34,9 +53,10 @@ pub(super) const REPLAY_VERBOSE_THRESHOLD_BYTES: i64 = 100 * 1024;
 /// operators to opt into `verbose=true` for multi-MB dumps so an
 /// accidental call from a small-context client doesn't blow the
 /// session budget. The metadata block (`compressed_size`,
-/// `original_size`, `span_start`, `span_end`, `created_at`) is always
-/// returned regardless of truncation so the caller can decide whether
-/// to re-issue with `verbose=true`.
+/// `original_size`, `span_start`, `span_end`, `created_at`,
+/// `source_memory_id`) is always returned regardless of truncation so
+/// the caller can decide whether to re-issue with `verbose=true`.
+///
 /// `pub` so the v0.7.0 #628 H6 cross-tenant test in
 /// `tests/i4_memory_replay_authz.rs` can drive the handler directly.
 /// Other handlers in this module remain private; the dispatcher is
@@ -56,38 +76,28 @@ pub fn handle_replay(
         .and_then(Value::as_bool)
         .unwrap_or(false);
 
-    // I2 substrate — pull every (transcript_id, span_start, span_end)
-    // row tied to this memory. The helper orders by `transcript_id` for
-    // determinism; we re-order by `created_at` below for chronological
-    // replay semantics.
-    let links = crate::transcripts::transcripts_for_memory(conn, memory_id)
-        .map_err(|e| format!("transcripts_for_memory failed: {e}"))?;
+    // L2-4 — optional depth cap on the reflection union walk. `null`
+    // (or absent) means "full chain"; an integer `>=0` becomes the
+    // hop cap on the BFS over `reflects_on` edges. We accept any
+    // i64 the JSON layer surfaces, clamp at 0, and cast to u32 (the
+    // substrate signature). Negative values are treated as `0`
+    // (self-only) rather than rejected so a sloppy client doesn't
+    // need to special-case the floor.
+    let depth: Option<u32> = match params.get("depth") {
+        None | Some(Value::Null) => None,
+        Some(v) => match v.as_i64() {
+            Some(n) if n < 0 => Some(0),
+            Some(n) => Some(u32::try_from(n).unwrap_or(u32::MAX)),
+            None => return Err("depth must be an integer or null".to_string()),
+        },
+    };
 
-    // (link, metadata) pairs — `fetch_metadata` is the cheap path that
-    // skips the BLOB. We keep links whose transcript row has vanished
-    // (e.g. pruned by I3 between the join-table read and now) out of
-    // the response so callers never see an id they can't fetch back.
-    let mut entries: Vec<(
-        crate::transcripts::TranscriptLink,
-        crate::transcripts::Transcript,
-    )> = Vec::with_capacity(links.len());
-    for link in links {
-        match crate::transcripts::fetch_metadata(conn, &link.transcript_id) {
-            Ok(Some(meta)) => entries.push((link, meta)),
-            Ok(None) => {
-                // I3 may have pruned the transcript out from under us
-                // since the link row was written. Drop it silently —
-                // surfacing a dangling id to the caller is worse than
-                // returning the live subset.
-                tracing::warn!(
-                    target: "memory_replay",
-                    "dangling transcript_id {} for memory {memory_id}",
-                    link.transcript_id
-                );
-            }
-            Err(e) => return Err(format!("fetch_metadata failed: {e}")),
-        }
-    }
+    // L2-4 substrate read — returns the union for reflections,
+    // single-memory transcripts for observations. Ordering and
+    // dedup live in the substrate so the handler stays a thin
+    // serialisation wrapper.
+    let entries: Vec<ReplayEntry> = replay_transcript_union(conn, memory_id, depth)
+        .map_err(|e| format!("replay_transcript_union failed: {e}"))?;
 
     // v0.7.0 #628 H6 — authorise the replay against EACH transcript's
     // namespace before any decompressed content leaves the daemon. K9
@@ -101,15 +111,16 @@ pub fn handle_replay(
     // approval pipeline. Allow / Modify let the read proceed.
     let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), mcp_client)
         .map_err(|e| e.to_string())?;
-    for (_, meta) in &entries {
+    for entry in &entries {
         use crate::permissions::{Op, PermissionContext, Permissions};
         let ctx = PermissionContext {
             op: Op::MemoryReplay,
-            namespace: meta.namespace.clone(),
+            namespace: entry.meta.namespace.clone(),
             agent_id: agent_id.clone(),
             payload: json!({
                 "memory_id": memory_id,
-                "transcript_id": meta.id,
+                "transcript_id": entry.meta.id,
+                "source_memory_id": entry.memory_id,
             }),
         };
         match Permissions::evaluate(&ctx, &[]) {
@@ -128,17 +139,13 @@ pub fn handle_replay(
         }
     }
 
-    // Chronological order (oldest first). Ties on `created_at` fall
-    // back to `transcript_id` so the result is fully deterministic
-    // even when two transcripts land in the same RFC3339 millisecond.
-    entries.sort_by(|a, b| {
-        a.1.created_at
-            .cmp(&b.1.created_at)
-            .then_with(|| a.1.id.cmp(&b.1.id))
-    });
-
     let mut transcripts_json: Vec<Value> = Vec::with_capacity(entries.len());
-    for (link, meta) in entries {
+    for entry in entries {
+        let ReplayEntry {
+            memory_id: src_mid,
+            link,
+            meta,
+        } = entry;
         let truncate = !verbose && meta.original_size > REPLAY_VERBOSE_THRESHOLD_BYTES;
         let mut obj = serde_json::Map::new();
         obj.insert("id".into(), Value::String(meta.id.clone()));
@@ -155,6 +162,12 @@ pub fn handle_replay(
             link.span_end
                 .map_or(Value::Null, |v| Value::Number(v.into())),
         );
+        // L2-4 — surface the anchor memory id so callers viewing a
+        // reflection union know which ancestor each transcript came
+        // from. For a non-reflection replay this is always equal to
+        // the input `memory_id`, but emitting it unconditionally
+        // keeps the wire shape uniform.
+        obj.insert("source_memory_id".into(), Value::String(src_mid));
         if truncate {
             // Honest gate: announce the omission so the caller knows to
             // re-issue with `verbose=true` rather than silently
