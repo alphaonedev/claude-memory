@@ -1,21 +1,26 @@
 # Policy Engine Architecture
 
-**Status as of branch `docs/policy-engine-architecture` (HEAD `c359e89`,
-2026-05-14).** Documents what ships in v0.7.0 Option B, what is in flight,
-and what is explicitly v0.8.0 future scope.
+**Status as of branch `feat/v0.7.0-grand-slam` (HEAD `12a7f29`,
+2026-05-14, post fold-J/roadmap-audit pass).** Documents what ships in
+v0.7.0 Option B (PE-1 / PE-2 / PE-3 all merged on grand-slam) and what
+is explicitly v0.8.0 future scope (epic #697 with 8 sub-tasks
+V08-PE-1 … V08-PE-8).
 
-**Audit honesty.** Every capability described in the present tense maps to
-shipped code at the HEAD above. Every "in flight" item names the issue
-that tracks merge. Every "future scope" item names the v0.8.0 epic
-sub-task and never reads as a present-tense claim.
+**Audit honesty.** Every capability described in the present tense maps
+to shipped code at HEAD `12a7f29`. Every "future scope" item names the
+v0.8.0 epic sub-task and never reads as a present-tense claim. The
+historical "in flight" framing in §3.2 / §4.3 (preserved verbatim for
+trace-back) reflects the doc's authoring point at HEAD `c359e89`; the
+fold-J audit pass updated §3 status to reflect the merged code at HEAD
+`12a7f29`.
 
 Cross-references throughout:
 
-- **#691** — substrate rules engine v2 (base layer; L1-6 A–E shipped).
+- **#691** — substrate rules engine v2 (base layer; L1-6 A–E shipped at HEAD `12a7f29`).
 - **#693** — v0.7.0 Policy Engine Completion (Option B parent meta).
-- **#694** — PE-1 universal `AgentAction` wire-point coverage (in flight).
-- **#695** — PE-2 Claude Code PreToolUse harness hook installer (in flight).
-- **#696** — PE-3 deferred audit-log queue (in flight).
+- **#694** — PE-1 universal `AgentAction` wire-point coverage (**merged at HEAD `12a7f29`**, commit `cb6cca9`).
+- **#695** — PE-2 Claude Code PreToolUse harness hook installer (**merged at HEAD `12a7f29`**, commit `5392162`).
+- **#696** — PE-3 deferred audit-log queue (**merged at HEAD `12a7f29`**, commit `07b4957`).
 - **#697** — v0.8.0 100% Cryptographic Forensic Audit Trail closeout (epic).
 
 ---
@@ -145,10 +150,11 @@ combinator, **no** `signed_events` emit. Two reasons:
 PE-3 (**#696**) adds a deferred audit-log queue so refusals on this
 path are still chain-logged — see §2.6.
 
-### 2.6 `check_agent_action_deferred` — PE-3 deferred audit queue (in flight, **#696**)
+### 2.6 `check_agent_action_deferred` — PE-3 deferred audit queue (**shipped at HEAD `12a7f29`**, **#696**)
 
-**Status: not merged at HEAD `c359e89`.** Tracked at issue **#696**;
-target branch `policy-engine/deferred-audit-log`. The function is the
+**Status: MERGED at HEAD `12a7f29`** (commit `07b4957`). Issue
+**#696** awaiting epic-level closure. Live code at
+`src/governance/deferred_audit.rs` (~1120 LoC). The function is the
 audit-emitting variant of `check_agent_action_no_audit`: the rule
 combinator runs synchronously inside the storage write path, but the
 `signed_events` row is enqueued onto a process-local channel and
@@ -217,18 +223,20 @@ the **same `governance_rules` table**. The audit emit differs only
 between the substrate-internal pre-write path (deferred via PE-3 once
 merged) and the agent-external paths (audited synchronously today).
 
-### 3.2 In-flight at v0.7.0 Option B
+### 3.2 In-flight at v0.7.0 Option B (historical — all three shipped by HEAD `12a7f29`)
 
-| Wire-point | Issue | Status |
-|---|---|---|
-| PE-1: universal `AgentAction` wire-point coverage — extends the construction surface so every harness-visible tool maps to an `AgentAction` variant | **#694** | Branch `policy-engine/wire-points`, not merged at `c359e89` |
-| PE-2: Claude Code PreToolUse harness hook installer — `ai-memory install --harness claude-code --enforce-policy` configures the hook so the harness consults `memory_check_agent_action` before every Bash / Write / NetworkRequest / Process spawn | **#695** | Branch `policy-engine/harness-hook`, not merged at `c359e89` |
-| PE-3: deferred audit-log queue — adds `check_agent_action_deferred` for the substrate pre-write hook so storage refusals are chain-logged | **#696** | Branch `policy-engine/deferred-audit-log`, not merged at `c359e89` |
+| Wire-point | Issue | Status at `c359e89` | Status at `12a7f29` (fold-J audit) |
+|---|---|---|---|
+| PE-1: universal `AgentAction` wire-point coverage — extends the construction surface so every harness-visible tool maps to an `AgentAction` variant | **#694** | Branch `policy-engine/wire-points`, not merged | **MERGED** (commit `cb6cca9`); `GOVERNANCE_PRE_ACTION` installed in `src/daemon_runtime.rs:2050`; covers `MCP skill_export`, `federation::sync`, `hooks::executor`, and the LLM client |
+| PE-2: Claude Code PreToolUse harness hook installer — `ai-memory install --harness claude-code --enforce-policy` configures the hook so the harness consults `memory_check_agent_action` before every Bash / Write / NetworkRequest / Process spawn | **#695** | Branch `policy-engine/harness-hook`, not merged | **MERGED** (commit `5392162`); installer wires PreToolUse hook into harness `settings.json` |
+| PE-3: deferred audit-log queue — adds `check_agent_action_deferred` for the substrate pre-write hook so storage refusals are chain-logged | **#696** | Branch `policy-engine/deferred-audit-log`, not merged | **MERGED** (commit `07b4957`); `install_deferred_audit_drainer` wired in `src/daemon_runtime.rs:1946`; process-local tokio drain writes `governance.refusal` rows to `signed_events` |
 
 This document is the v0.7.0 single source of truth for these
-boundaries. When the sibling branches merge, the **Status** column in
-the table above flips and the wire-point row migrates from §3.2 to
-§3.1. Do not pre-claim merged behavior — Codex will read this.
+boundaries. The fold-J audit pass (2026-05-14, HEAD `12a7f29`)
+recorded the merge state of PE-1 / PE-2 / PE-3 in the "Status at
+`12a7f29`" column above. The substrate behavior described in §3.1
+and the audit-trail coverage matrix in §8 / `docs/security/audit-trail-coverage.md`
+reflect this terminal v0.7.0 ship state.
 
 ---
 
@@ -306,10 +314,13 @@ no test-only escape hatch reachable from production. The hook
 closure is consulted by every substrate write path; it cannot be
 worked around without modifying the substrate source.**
 
-### 4.3 PE-3 deferred-audit-log tests (in flight, **#696**)
+### 4.3 PE-3 deferred-audit-log tests (**merged at HEAD `12a7f29`**, **#696**)
 
-Five tests on branch `policy-engine/deferred-audit-log`, target merge
-under issue **#696**:
+Five tests landed on `feat/v0.7.0-grand-slam` via commit `07b4957`
+under issue **#696**, plus the V-4 deferred-audit soak test
+(`tests/deferred_audit_soak.rs`, commit `9ebc9e0`) asserting the V-4
+cross-row hash chain holds after 5K concurrent inserts through the
+drainer:
 
 1. Deferred refusal eventually emits `governance.check` row with
    identical canonical-bytes / `payload_hash` as the audited path.
@@ -327,9 +338,12 @@ under issue **#696**:
    chain-logged via the same `signed_events` table the agent-external
    path uses today.**
 
-When PE-3 merges, the §3.2 row migrates to §3.1 and the audit-trail
-coverage matrix in `docs/security/audit-trail-coverage.md` flips the
-"deferred chain-log" row from in-flight to shipped.
+PE-3 merged at HEAD `12a7f29` (commit `07b4957`); the §3.2 row has
+been migrated to §3.1 above with the merge-state column added, and
+the audit-trail coverage matrix in
+`docs/security/audit-trail-coverage.md` has been updated by the fold-J
+audit pass (2026-05-14) to flip the "deferred chain-log" row from
+in-flight to shipped.
 
 ---
 

@@ -106,7 +106,7 @@ release-notes intro lives under `docs/v0.7.0/release-notes.md`
 
 **ai-memory** is a Rust-based persistent memory system exposing three interfaces over a shared SQLite database layer:
 
-1. **MCP Server** (`src/mcp.rs`) — stdio JSON-RPC 2.0 with 43 tools + 2 prompts
+1. **MCP Server** (`src/mcp/`) — stdio JSON-RPC 2.0 with 63 tools at full profile (5 default per v0.6.4 `--profile core`) + 2 prompts
 2. **HTTP API** (`src/handlers.rs`) — Axum REST server on port 9077, 50 endpoints at `/api/v1/`
 3. **CLI** (`src/main.rs`) — clap-based, 40 subcommands with optional `--json` output
 

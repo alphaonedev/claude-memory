@@ -1,7 +1,9 @@
 # Cryptographic Forensic Audit Trail — Coverage Matrix
 
-**Status as of branch `docs/policy-engine-architecture` (HEAD `c359e89`,
-2026-05-14).**
+**Status as of branch `feat/v0.7.0-grand-slam` (HEAD `12a7f29`,
+2026-05-14, post fold-J audit pass).** Updated to reflect that PE-1
+(#694) / PE-2 (#695) / PE-3 (#696) all merged on the grand-slam branch
+(commits `cb6cca9` / `5392162` / `07b4957` respectively).
 
 This doc is the v0.7.0 honest single source of truth for the
 cryptographic forensic audit trail. It is the substrate-side companion
@@ -53,7 +55,7 @@ and read-action visibility. See §4.
 | Memory writes (`store` / `update` / `link` / `delete` / `archive` / `consolidate`) | **Chain-logged today** via `signed_events.append` (`src/signed_events.rs`) on every successful substrate write | `event_type = "memory.<verb>"`, `payload_hash` over canonical-JSON of the post-write row, `signature` (Ed25519 over `payload_hash`), `attest_level` ∈ {`unsigned`, `signed`} | none for the success leg | — |
 | Reflection writes | **Chain-logged today** with `peer_origin` for cross-peer paths (L2-2 commit `2aef248`) | `event_type = "reflection.write"`, payload binds `(source_ids, depth, peer_origin)` | none | — |
 | Governance refusals on agent-EXTERNAL surface (Bash / Write / Network / ProcessSpawn / Custom) via `check_agent_action` (audited path) | **Chain-logged today** synchronously, every call | `event_type = "governance.check"`, `payload_hash` over canonical `{action, decision}` JSON, `agent_id` carrier set | none | — |
-| Governance refusals on substrate-INTERNAL pre-write hook (`check_agent_action_no_audit`) | **In flight** via PE-3 deferred queue | identical shape to the audited path — same canonical bytes / payload hash; emit deferred via tokio drain task | hard-crash drainer loss (process-local queue); see V08-PE-4 | **#696** (in flight); **#697** V08-PE-4 closes durability |
+| Governance refusals on substrate-INTERNAL pre-write hook (`check_agent_action_no_audit`) | **Chain-logged today** via PE-3 deferred queue (merged commit `07b4957`) | identical shape to the audited path — same canonical bytes / payload hash; emit deferred via tokio drain task in `src/governance/deferred_audit.rs::install_deferred_audit_drainer` | hard-crash drainer loss (process-local queue); see V08-PE-4 | **#697** V08-PE-4 closes durability (V08 closeout) |
 | Approval-API decisions (L1-8) | **Chain-logged today** | `event_type = "approval.<decision>"`, binds approver identity + decision + correlation id | none | — |
 | Schema migrations | **Chain-logged today** at boot | `event_type = "schema.migration"`, binds from-version + to-version + migration filename hash | none | — |
 | Read actions (`memory_recall` / `memory_search` / `memory_list` / `memory_get` / `memory_session_boot`) | **NOT chain-logged** at engine level. Handler-layer `AuditAction::Recall` etc. row is emitted to the JSON audit log per [`audit-trail.md`](./audit-trail.md), but no `signed_events` row | n/a — v0.8.0 adds `event_type = "governance.read_check"` once V08-PE-2 lands | engine has no `AgentAction::Read` variant at HEAD | **#697** V08-PE-2 |
@@ -208,15 +210,18 @@ Cold-honest gaps, every one tracked at **#697**:
   PreToolUse hook is uninstalled); V08-PE-6 TPM-bound binary
   integrity (daemon attests the shipping binary against a signed
   manifest at boot).
-- **Storage-hook refusals before PE-3 merges (#696).** At HEAD
-  `c359e89`, a refusal at the `storage::insert` pre-write hook
-  short-circuits the SQL with no row written and emits
-  `MemoryError::RefusedByGovernance` to the caller — but does **not**
-  emit a `signed_events` row, by design (re-entrancy on the
-  substrate writer's connection). PE-3 (**#696**) makes this typed
-  AND chain-logged via the deferred queue. The handler-layer
-  `AuditAction::Store` row on the failure leg is still emitted to
-  the JSON audit log per [`audit-trail.md`](./audit-trail.md).
+- **Storage-hook refusals — PE-3 merged at HEAD `12a7f29` (#696,
+  commit `07b4957`).** A refusal at the `storage::insert` pre-write
+  hook short-circuits the SQL with no row written and emits
+  `MemoryError::RefusedByGovernance` to the caller; PE-3 makes this
+  refusal also typed AND chain-logged via the deferred queue
+  (`src/governance/deferred_audit.rs::install_deferred_audit_drainer`)
+  — the in-flight write transaction releases its lock before the
+  audit row writes so deadlock is structurally impossible. The
+  handler-layer `AuditAction::Store` row on the failure leg is also
+  emitted to the JSON audit log per [`audit-trail.md`](./audit-trail.md).
+  Hard-crash loss is the only remaining gap (process-local queue),
+  closed by V08-PE-4 in v0.8.0.
 - **Hard-crash-lost deferred events.** PE-3's queue is
   process-local. A SIGKILL / OOM / power loss between the verdict
   and the drain task's `append_signed_event` call loses pending

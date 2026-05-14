@@ -16,18 +16,23 @@
 ## Headline
 
 v0.7.0 closes the `attested-cortex` epic — **69/69 tasks across 11 tracks**
-(A/B/C/D/E/F/G/H/I/J/K) — and ships **postgres + Apache AGE as a
-first-class storage backend** including live daemon support
+(A/B/C/D/E/F/G/H/I/J/K) plus the grand-slam recursive-learning + Agent
+Skills + L1-6 substrate-rules wave (and the V-4 closeout #698 cross-row
+hash chain) — and ships **postgres + Apache AGE as a first-class storage
+backend** including live daemon support
 (`ai-memory serve --store-url postgres://…`), full schema parity with
-sqlite (v15 → v28 port), 6-factor recall scoring parity, link
-migration, and a new `ai-memory schema-init` CLI verb.
+sqlite (Wave 1-4 narrative v15 → v28 port; terminal v0.7.0 ship is
+sqlite v34 / postgres v33 after L0.7 + L2 wave + V-4 closeout), 6-factor
+recall scoring parity, link migration, and a new `ai-memory schema-init`
+CLI verb.
 
 The substrate becomes both **more articulate** (capabilities v3 with
 pre-computed calibration strings, named loaders, 52% MCP-tool token
 reduction on the full profile) and **cryptographically trustworthy**
 (per-agent Ed25519 attestation with append-only `signed_events` audit
-chain, sidechain transcripts with `memory_replay`, programmable
-20-event hook pipeline, opt-in Apache AGE acceleration, K1/G1
+chain — with V-4 cross-row hash chain at v34 (#698) — sidechain
+transcripts with `memory_replay`, programmable
+25-event hook pipeline, opt-in Apache AGE acceleration, K1/G1
 namespace-inheritance enforcement, real permission system with
 deny-first semantics, A2A maturity).
 
@@ -121,7 +126,7 @@ deny-first semantics, A2A maturity).
   cells; T0 orchestration script; post-ship convergence verification.
 - **Track F — Docs + release (6 tasks).** Migration guide, what's-new
   page, RFC, README updates, top-nav badges, this release-cut PR.
-- **Track G — Hook Pipeline (11 tasks).** 20 lifecycle event types;
+- **Track G — Hook Pipeline (11 tasks).** 25 lifecycle event types (20 Track G baseline + `pre_recall_expand` G10 + `pre_reflect`/`post_reflect` recursive-learning Task 6/8 + `pre_compaction`/`on_compaction_rollback` L1-7);
   `ExecExecutor` + `DaemonExecutor`; decision types
   (`Allow`/`Deny`/`Modify`/`Defer`); chain ordering; per-event
   timeouts; hot reload on `hooks.toml` mtime change;
@@ -346,10 +351,13 @@ handler. ([commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit
 > skill ↔ reflection composition, and a reflection-aware reranker
 > boost. The L1-6 substrate rules-enforcement engine ships the
 > operator-keypair-signed rule store and the bypass-impossibility
-> test fleet. Schema bumps to v33 (CHECK constraint on
-> `memory_links.relation`) per the v0.7.1-fold decision
-> (`05e0cb9a`). The MCP tool count moves from 60 → 63 over the L2
-> wave; the full reflection narrative lives in
+> test fleet. Schema bumps to v33 (L2 wave CHECK constraint on
+> `memory_links.relation`) and then v34 (V-4 closeout #698: `signed_events`
+> cross-row hash chain — `prev_hash BLOB` + `sequence INTEGER`) per the
+> v0.7.1-fold decision (`05e0cb9a`). Postgres parity is at v33 (the V-4
+> closeout maps to postgres v33 since the postgres ladder ran one step
+> behind). The MCP tool count moves from 60 → 63 over the L2 wave; the
+> full reflection narrative lives in
 > [`docs/RECURSIVE_LEARNING.md`](../RECURSIVE_LEARNING.md), the
 > Agent Skills surface in [`docs/agent-skills.md`](../agent-skills.md),
 > and the forensic-export surface in
@@ -357,13 +365,20 @@ handler. ([commit `fbf093c`](https://github.com/alphaonedev/ai-memory-mcp/commit
 
 #### Schema and tool-surface deltas
 
-- **Schema v33 (sqlite).** CHECK constraint on
-  `memory_links.relation` promoted from the v23 trigger to a SQL-side
-  CHECK clause covering `related_to | supersedes | contradicts |
-  derived_from | reflects_on`. Postgres parity migration mirrors the
-  same constraint. Per `05e0cb9a` v0.7.1-fold decision (no separate
-  v0.7.1 release; the constraint lands in the v0.7.0 tag).
+- **Schema v34 (sqlite) / v33 (postgres) — terminal v0.7.0 ship.** The
+  L2 wave first bumped sqlite to v33 (`memory_links.relation` CHECK
+  constraint promoted from v23 trigger to SQL-side CHECK covering
+  `related_to | supersedes | contradicts | derived_from | reflects_on`);
+  the V-4 closeout (#698) then added migration 0028
+  (`signed_events.prev_hash BLOB` + `signed_events.sequence INTEGER`
+  + UNIQUE index — the SQL-side cross-row hash chain that flips the
+  V-4 validation from YELLOW to GREEN) for the final sqlite v34 floor.
+  Postgres parity mirror lands at v33 (postgres ran one step behind
+  the sqlite ladder). Per `05e0cb9a` v0.7.1-fold decision (no separate
+  v0.7.1 release; both bumps land in the v0.7.0 tag).
   ([`src/storage/migrations.rs`](../../src/storage/migrations.rs)
+  `CURRENT_SCHEMA_VERSION = 34`;
+  [`src/store/postgres.rs`](../../src/store/postgres.rs)
   `CURRENT_SCHEMA_VERSION = 33`.)
 - **MCP tool count 60 → 63.** The L2 wave added three tools:
   `memory_dependents_of_invalidated` (L2-3 / #668),
@@ -503,9 +518,13 @@ procurement-grade evidence path. Full surface in
 - **Postgres backend** is opt-in. `ai-memory serve` without
   `--store-url` continues to use sqlite. Default builds without
   `--features sal-postgres` are unchanged byte-for-byte.
-- **Schema migrations** v20 → v28 run automatically on first start of
-  a sqlite-backed daemon and are idempotent. Postgres schema
-  bootstrap is via `ai-memory schema-init` per the migration guide.
+- **Schema migrations** v20 → v34 run automatically on first start of
+  a sqlite-backed daemon and are idempotent (the Wave 1-4 v15 → v28
+  port was the initial postgres+AGE land; subsequent in-flight v0.7.0
+  work added v29-v30 for L0.7-1/L1-1 recursive-learning, v33 for the
+  L2 wave `memory_links.relation` CHECK, and v34 for the V-4 closeout
+  #698 `signed_events` cross-row hash chain). Postgres schema bootstrap
+  is via `ai-memory schema-init` per the migration guide.
 
 ## Breaking changes
 
@@ -554,9 +573,12 @@ ai-memory forget --pattern 'PII:.*' --confirm-global
 1. Backup `~/.local/share/ai-memory/memory.db`.
 2. Install v0.7.0 (`brew upgrade ai-memory` / `cargo install ai-memory`
    / your distro path).
-3. First start auto-migrates v20 → v28 (transcripts, signed_events,
-   audit chain, attest_level on memory_links, …). Watch the daemon
-   log for `schema migration: v20 → v28 complete`.
+3. First start auto-migrates v20 → v34 (transcripts, signed_events,
+   audit chain, attest_level on memory_links, recursive-learning
+   `reflection_depth`, `memory_links.relation` SQL-side CHECK, and the
+   V-4 closeout `signed_events.prev_hash` + `sequence` cross-row hash
+   chain). Watch the daemon log for `schema migration: v20 → v34
+   complete`.
 4. Read `docs/MIGRATION_v0.7.md` for the v0.6.4 → v0.7.0 surface
    changes (permissions.mode, forget safety, new MCP tools).
 
@@ -577,7 +599,8 @@ Follow [`docs/migration-v0.7.0-postgres.md`](../migration-v0.7.0-postgres.md):
 ### From v0.7-alpha (postgres at schema v15)
 
 1. `ai-memory schema-init --store-url postgres://… --upgrade` to walk
-   v15 → v28 idempotently.
+   v15 → v33 idempotently (Wave 1-4 ported v15 → v28; subsequent
+   L0.7 / L2 wave / V-4 closeout added v29-v33 on the postgres side).
 2. Restart the daemon.
 3. (Optional) Re-run the migration tool to backfill links if your
    v0.7-alpha migration predated the Wave 1 link-walk fix:
