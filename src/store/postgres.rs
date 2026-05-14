@@ -2011,9 +2011,31 @@ impl PostgresStore {
         // is available. AGE's coverage is the "current view" hot
         // path — historical traversal is a smaller niche and lives on
         // the CTE.
+        // v0.7.0 fold-A2A1.3 (#700) — runtime AGE→CTE graceful
+        // fallback. Boot-time `detect_kg_backend` is already graceful
+        // for the missing-extension case, but a `LOAD 'age'` /
+        // `cypher()` call can still fail at request time (DROP
+        // EXTENSION between boot and now, projection missing, role
+        // permissions on `ag_catalog`, transient pool error). Rather
+        // than propagate `BackendUnavailable` to the four KG MCP
+        // handlers — which historically materialised as a hard 503 on
+        // `kg_query` / `kg_timeline` / `kg_invalidate` /
+        // `find_paths` — we catch the AGE-side failure, log a
+        // structured warning, and re-issue via the relational CTE so
+        // operators see a degraded but functional KG surface. Each
+        // request retries AGE first; we don't latch the backend
+        // permanently in case the operator restores AGE behind us.
         match self.kg_backend {
             KgBackend::Age if !include_invalidated => {
-                self.kg_query_cypher(source_id, max_depth).await
+                match self.kg_query_cypher(source_id, max_depth).await {
+                    Ok(rows) => Ok(rows),
+                    Err(err) if is_age_runtime_failure(&err) => {
+                        warn_age_fallback("kg_query", source_id, &err);
+                        self.kg_query_cte_filtered(source_id, max_depth, include_invalidated)
+                            .await
+                    }
+                    Err(err) => Err(err),
+                }
             }
             _ => {
                 self.kg_query_cte_filtered(source_id, max_depth, include_invalidated)
@@ -2279,10 +2301,25 @@ impl PostgresStore {
         // deployments keep the relational CTE. The dual-path
         // discipline (#648) holds for the timeline shape too —
         // `tests/postgres_kg_age_cte_parity.rs` exercises both.
+        // v0.7.0 fold-A2A1.3 (#700) — runtime AGE→CTE graceful
+        // fallback; see `kg_query_with_history` for rationale. Same
+        // pattern applied to the timeline dispatcher so an
+        // AGE-side cypher failure degrades to the relational walk
+        // instead of surfacing as a 503 to the `memory_kg_timeline`
+        // MCP handler.
         match self.kg_backend {
             KgBackend::Age => {
-                self.kg_timeline_cypher(source_id, since, until, limit)
+                match self
+                    .kg_timeline_cypher(source_id, since, until, limit)
                     .await
+                {
+                    Ok(rows) => Ok(rows),
+                    Err(err) if is_age_runtime_failure(&err) => {
+                        warn_age_fallback("kg_timeline", source_id, &err);
+                        self.kg_timeline_cte(source_id, since, until, limit).await
+                    }
+                    Err(err) => Err(err),
+                }
             }
             KgBackend::Cte => self.kg_timeline_cte(source_id, since, until, limit).await,
         }
@@ -2617,10 +2654,27 @@ impl PostgresStore {
         // so the property-graph projection stays in sync with
         // `memory_links`; otherwise we update the relational table
         // directly.
+        // v0.7.0 fold-A2A1.3 (#700) — runtime AGE→CTE graceful
+        // fallback for the invalidation path. The CTE branch also
+        // performs an idempotent UPDATE so a re-issue against the
+        // relational table after an AGE-side failure is safe — and
+        // `kg_invalidate_cypher` mirrors its SET back into
+        // `memory_links` so the CTE branch returns the same
+        // `previous_valid_until` shape on a retry.
         match self.kg_backend {
             KgBackend::Age => {
-                self.kg_invalidate_cypher(source_id, target_id, relation, valid_until)
+                match self
+                    .kg_invalidate_cypher(source_id, target_id, relation, valid_until)
                     .await
+                {
+                    Ok(row) => Ok(row),
+                    Err(err) if is_age_runtime_failure(&err) => {
+                        warn_age_fallback("kg_invalidate", source_id, &err);
+                        self.kg_invalidate_cte(source_id, target_id, relation, valid_until)
+                            .await
+                    }
+                    Err(err) => Err(err),
+                }
             }
             KgBackend::Cte => {
                 self.kg_invalidate_cte(source_id, target_id, relation, valid_until)
@@ -2897,10 +2951,25 @@ impl PostgresStore {
         max_depth: Option<usize>,
         max_results: Option<usize>,
     ) -> StoreResult<Vec<Vec<String>>> {
+        // v0.7.0 fold-A2A1.3 (#700) — runtime AGE→CTE graceful
+        // fallback for `find_paths`. Same shape as the other three
+        // dispatchers; the CTE enumeration produces the same
+        // `Vec<Vec<String>>` shape so the upper-layer handler stays
+        // backend-blind.
         match self.kg_backend {
             KgBackend::Age => {
-                self.find_paths_cypher(source_id, target_id, max_depth, max_results)
+                match self
+                    .find_paths_cypher(source_id, target_id, max_depth, max_results)
                     .await
+                {
+                    Ok(paths) => Ok(paths),
+                    Err(err) if is_age_runtime_failure(&err) => {
+                        warn_age_fallback_pair("find_paths", source_id, target_id, &err);
+                        self.find_paths_cte(source_id, target_id, max_depth, max_results)
+                            .await
+                    }
+                    Err(err) => Err(err),
+                }
             }
             KgBackend::Cte => {
                 self.find_paths_cte(source_id, target_id, max_depth, max_results)
@@ -3898,6 +3967,64 @@ fn to_store_err(what: &str, e: sqlx::Error) -> StoreError {
         backend: "postgres".to_string(),
         detail: format!("{what}: {e}"),
     }
+}
+
+/// v0.7.0 fold-A2A1.3 (#700) — AGE-side runtime failure classifier.
+///
+/// Decides whether a `StoreError` returned from one of the
+/// `*_cypher` methods is an *AGE substrate* failure that should fall
+/// through to the CTE branch, vs an upstream concern that the caller
+/// must see (invalid input, integrity error, etc.).
+///
+/// We treat every `BackendUnavailable` from an AGE method as a
+/// runtime AGE failure: the cypher path's call sites (`LOAD 'age'`,
+/// `SET search_path`, the `cypher()` SRF) all funnel their errors
+/// through [`to_store_err`] which maps to `BackendUnavailable`, so
+/// any of these failing — extension dropped, projection missing,
+/// connection killed mid-tx — counts. `InvalidInput`,
+/// `IntegrityFailed`, `NotFound`, `Conflict`, `PermissionDenied`,
+/// `UnsupportedCapability` and `Backend` all bubble up unchanged
+/// because they reflect either caller bugs or non-AGE issues the
+/// CTE branch can't paper over.
+fn is_age_runtime_failure(err: &StoreError) -> bool {
+    matches!(err, StoreError::BackendUnavailable { .. })
+}
+
+/// v0.7.0 fold-A2A1.3 (#700) — structured warning emitted when a
+/// single-source KG operation falls back from AGE to the relational
+/// CTE at runtime. Operators monitoring the daemon's `tracing`
+/// stream see the per-request degradation event with enough
+/// structured fields to grep for: which KG op fired, which source
+/// id, and the underlying AGE error string.
+///
+/// The matching operator-side surface is documented in
+/// `docs/kg-backend-fallback.md`.
+fn warn_age_fallback(op: &str, source_id: &str, err: &StoreError) {
+    tracing::warn!(
+        target = "store::postgres::kg",
+        op = op,
+        source_id = source_id,
+        backend = "age",
+        fallback = "cte",
+        error = %err,
+        "AGE backend unreachable; falling back to CTE for kg_{op}=<{source_id}>"
+    );
+}
+
+/// v0.7.0 fold-A2A1.3 (#700) — variant of [`warn_age_fallback`] for
+/// the two-id `find_paths` operation, where the structured event
+/// needs both `source_id` and `target_id`.
+fn warn_age_fallback_pair(op: &str, source_id: &str, target_id: &str, err: &StoreError) {
+    tracing::warn!(
+        target = "store::postgres::kg",
+        op = op,
+        source_id = source_id,
+        target_id = target_id,
+        backend = "age",
+        fallback = "cte",
+        error = %err,
+        "AGE backend unreachable; falling back to CTE for kg_{op}=<{source_id}->{target_id}>"
+    );
 }
 
 /// Issue an `ALTER TABLE ... ADD COLUMN` only when the column is not
