@@ -37,7 +37,12 @@ pub(crate) mod cluster;
 pub(crate) mod compaction;
 pub(crate) mod persist;
 pub(crate) mod pipeline;
-pub(crate) mod reflection_pass;
+// v0.7.0 L2-1 — `reflection_pass` exposes a small public surface
+// (`ReflectionPassConfig`, `ReflectionPassReport`, `DryRunProposal`,
+// `run_reflection_pass`) consumed by the integration test crate plus
+// the CLI's `--reflect` mode. Items inside the module that should
+// stay crate-private use `pub(crate)` directly.
+pub mod reflection_pass;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -86,6 +91,15 @@ pub struct CompactionConfig {
     /// Defaults to `0.75` when omitted.
     #[serde(default = "default_cosine_threshold")]
     pub cosine_threshold: f32,
+    /// v0.7.0 L2-1 — per-namespace reflection-pass configuration.
+    /// Defaults to `enabled = false` per #666 acceptance: the
+    /// reflection pass is opt-in because (a) it depends on the Ollama
+    /// LLM being available at the time the pass runs, and (b) it
+    /// writes typed Reflection memories to the namespace which
+    /// operators may want to gate per-namespace rather than enable
+    /// globally.
+    #[serde(default)]
+    pub reflection_pass: reflection_pass::ReflectionPassConfig,
 }
 
 fn default_cosine_threshold() -> f32 {
@@ -97,6 +111,7 @@ impl Default for CompactionConfig {
         Self {
             enabled: false,
             cosine_threshold: default_cosine_threshold(),
+            reflection_pass: reflection_pass::ReflectionPassConfig::default(),
         }
     }
 }
