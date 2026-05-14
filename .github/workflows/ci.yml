@@ -198,6 +198,47 @@ jobs:
           AI_MEMORY_TEST_POSTGRES_URL: postgres://ai_memory:ai_memory_ci@localhost:5432/ai_memory_ci
         run: cargo test --features sal-postgres --lib
 
+  # v0.7.0 Phase D regression closeout — `sal`-only feature gate. The
+  # `check` matrix above builds the default (sqlite-bundled only) and
+  # `postgres-feature` builds `sal-postgres` (which transitively enables
+  # sal). Neither exercises the `sqlite-bundled + sal` combination —
+  # the exact build config the A2A campaign workflow + most production
+  # daemons use (`cargo build --release --features sal`). A Phase D
+  # round caught a real regression here at run 25890925457: two
+  # postgres-fanout wire-points were gated `#[cfg(feature = "sal")]`
+  # instead of `#[cfg(feature = "sal-postgres")]`, so they compiled
+  # under `sal-postgres` (where the symbol exists) AND default (where
+  # the cfg gate skips them) but FAILED to compile under sal-only.
+  # This job closes that observability gap by exercising the same
+  # cargo invocation the A2A workflow uses, plus the four standard
+  # gates (clippy / build / lib tests) at the same feature combo.
+  # Skipped on docs-only PRs alongside the rest of the heavy matrix.
+  sal-feature:
+    name: SAL-only feature gate
+    needs: classify
+    if: needs.classify.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Clippy (sal feature)
+        run: cargo clippy --features sal -- -D warnings -D clippy::all -D clippy::pedantic
+
+      - name: Build release (sal feature)
+        run: cargo build --release --features sal
+
+      - name: Run lib tests (sal feature)
+        env:
+          AI_MEMORY_NO_CONFIG: "1"
+        run: cargo test --features sal --lib
+
   release:
     name: Release (${{ matrix.target }})
     needs: check
