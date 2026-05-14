@@ -256,6 +256,10 @@ impl TierConfig {
                 // failed to materialize; `neural` means the BERT
                 // cross-encoder is loaded.
                 reranker_active: RerankerMode::Off,
+                // v0.7.0 L2-8 — default reflection boost (1.2, +0.05/depth,
+                // cap=3). The MCP/HTTP wrapper overlays the live wrapper
+                // config when a `BatchedReranker` handle is available.
+                reflection_boost: ReflectionBoostReport::default(),
             },
             models: CapabilityModels {
                 embedding: self
@@ -568,6 +572,54 @@ pub struct CapabilityFeatures {
     /// Reflects the live `CrossEncoder` variant. See [`RerankerMode`].
     #[serde(default = "default_reranker_mode")]
     pub reranker_active: RerankerMode,
+    /// v0.7.0 L2-8 — reflection-aware reranker boost configuration.
+    /// `boost = 1.0` means the boost is disabled and the reranker
+    /// reproduces its pre-L2-8 behavior. Default (`1.2`) is the value
+    /// the daemon ships with; operators can inspect this to verify
+    /// the live boost matches their configured policy. Skipped from
+    /// the wire when serialising a pre-L2-8 default so older
+    /// capabilities consumers round-trip cleanly.
+    #[serde(default = "default_reflection_boost")]
+    pub reflection_boost: ReflectionBoostReport,
+}
+
+/// v0.7.0 L2-8 — per-field report of the reflection-aware reranker
+/// boost surfaced through `memory_capabilities`. Mirrors
+/// [`crate::reranker::ReflectionBoostConfig`] but expressed in
+/// capability-report shape (serde-friendly, schema-tagged).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct ReflectionBoostReport {
+    /// Multiplicative boost applied to reflection-kind memories.
+    /// `1.0` disables; default `1.2`.
+    pub boost: f32,
+    /// Per-depth additional multiplier increment. Default `0.05`.
+    pub per_depth_increment: f32,
+    /// Depth cap for the per-depth multiplier. Default `3`.
+    pub max_depth_cap: u32,
+}
+
+impl Default for ReflectionBoostReport {
+    fn default() -> Self {
+        Self {
+            boost: crate::reranker::DEFAULT_REFLECTION_BOOST,
+            per_depth_increment: crate::reranker::DEFAULT_REFLECTION_PER_DEPTH_INCREMENT,
+            max_depth_cap: crate::reranker::DEFAULT_REFLECTION_MAX_DEPTH_CAP,
+        }
+    }
+}
+
+impl From<&crate::reranker::ReflectionBoostConfig> for ReflectionBoostReport {
+    fn from(cfg: &crate::reranker::ReflectionBoostConfig) -> Self {
+        Self {
+            boost: cfg.boost,
+            per_depth_increment: cfg.per_depth_increment,
+            max_depth_cap: cfg.max_depth_cap,
+        }
+    }
+}
+
+fn default_reflection_boost() -> ReflectionBoostReport {
+    ReflectionBoostReport::default()
 }
 
 /// L1-1 default: the two typed memory kinds shipping in v0.7.0.

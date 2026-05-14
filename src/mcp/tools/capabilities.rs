@@ -198,6 +198,12 @@ fn build_capabilities_overlay(
         None => RerankerMode::Off,
     };
 
+    // --- Reflection-aware boost live state (v0.7.0 L2-8) ---
+    if let Some(ce) = reranker {
+        caps.features.reflection_boost =
+            crate::config::ReflectionBoostReport::from(ce.reflection_boost());
+    }
+
     // --- Embedder live state (P1, S18) ---
     caps.features.embedder_loaded = embedder_loaded;
     caps.features.recall_mode_active = compute_recall_mode(tier_config, embedder_loaded);
