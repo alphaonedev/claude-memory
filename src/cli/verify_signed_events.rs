@@ -199,4 +199,139 @@ mod tests {
     // `UPDATE signed_events` from a `src/` file (even under `#[cfg(test)]`)
     // would trip the `append_only_invariant_no_mutators_in_src`
     // guard in `signed_events.rs`.
+
+    // ----------------------------------------------------------------
+    // C-3 coverage uplift — drive `since > 0` branch (line 80) and the
+    // FAIL render path (lines 109-118). We trigger a chain break with
+    // a raw INSERT that supplies a wrong sequence — pure INSERTs are
+    // not flagged by the append-only invariant guard which scans for
+    // UPDATE/DELETE only.
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn since_filter_excludes_lower_sequences() {
+        // Drives the `since > 0` -> `Some(...)` arm at line 80.
+        let (_dir, path) = temp_db();
+        {
+            let conn = crate::db::open(&path).expect("open");
+            for i in 0..3 {
+                append_signed_event(&conn, &fixture_event(format!("p-{i}").as_bytes()))
+                    .expect("append");
+            }
+        }
+        let args = VerifySignedEventsChainArgs {
+            since: 1,
+            format: "json".to_string(),
+        };
+        let mut buf_out = Vec::<u8>::new();
+        let mut buf_err = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut buf_out, &mut buf_err);
+        let code = run(&path, &args, &mut out).expect("run");
+        assert_eq!(code, 0, "filtered chain still holds");
+        let s = String::from_utf8(buf_out).expect("utf-8");
+        // We skipped sequence=1, so 2 rows walked.
+        assert!(s.contains("\"rows_checked\": 2"), "got: {s}");
+    }
+
+    #[test]
+    fn broken_chain_text_format_reports_fail_with_sequence() {
+        // Drives lines 99-118: the text-format FAIL branch with a real
+        // chain break and the `where_` resolution from `chain_break`.
+        let (_dir, path) = temp_db();
+        {
+            let conn = crate::db::open(&path).expect("open");
+            // Seed two clean rows.
+            append_signed_event(&conn, &fixture_event(b"p-0")).expect("append-1");
+            append_signed_event(&conn, &fixture_event(b"p-1")).expect("append-2");
+            // Insert a tampered row that lies about its sequence to
+            // create a gap. INSERT only — does not trip the append-only
+            // mutator scan (UPDATE/DELETE).
+            conn.execute(
+                "INSERT INTO signed_events \
+                 (id, agent_id, event_type, payload_hash, signature, attest_level, \
+                  timestamp, prev_hash, sequence) \
+                 VALUES (?1, ?2, ?3, ?4, NULL, 'unsigned', ?5, X'00', 99)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    "alice",
+                    "memory_link.created",
+                    payload_hash(b"p-99"),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .expect("raw INSERT tampered row");
+        }
+        let args = VerifySignedEventsChainArgs {
+            since: 0,
+            format: "text".to_string(),
+        };
+        let mut buf_out = Vec::<u8>::new();
+        let mut buf_err = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut buf_out, &mut buf_err);
+        let code = run(&path, &args, &mut out).expect("run");
+        assert_eq!(code, 1, "chain break must produce exit code 1");
+        let s = String::from_utf8(buf_out).expect("utf-8");
+        assert!(s.contains("FAIL"), "must say FAIL; got: {s}");
+        assert!(
+            s.contains("chain break at sequence="),
+            "must surface break; got: {s}"
+        );
+    }
+
+    #[test]
+    fn broken_chain_json_format_carries_chain_break() {
+        // Drives the JSON-format FAIL summary (the JSON arm
+        // independent of holds=true/false).
+        let (_dir, path) = temp_db();
+        {
+            let conn = crate::db::open(&path).expect("open");
+            append_signed_event(&conn, &fixture_event(b"p-0")).expect("append-1");
+            conn.execute(
+                "INSERT INTO signed_events \
+                 (id, agent_id, event_type, payload_hash, signature, attest_level, \
+                  timestamp, prev_hash, sequence) \
+                 VALUES (?1, ?2, ?3, ?4, NULL, 'unsigned', ?5, X'00', 42)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    "alice",
+                    "memory_link.created",
+                    payload_hash(b"p-42"),
+                    chrono::Utc::now().to_rfc3339(),
+                ],
+            )
+            .expect("raw INSERT");
+        }
+        let args = VerifySignedEventsChainArgs {
+            since: 0,
+            format: "json".to_string(),
+        };
+        let mut buf_out = Vec::<u8>::new();
+        let mut buf_err = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut buf_out, &mut buf_err);
+        let code = run(&path, &args, &mut out).expect("run");
+        assert_eq!(code, 1);
+        let s = String::from_utf8(buf_out).expect("utf-8");
+        assert!(s.contains("\"chain_holds\": false"), "got: {s}");
+        // chain_break carries the offending sequence (one of 2 or 42).
+        assert!(s.contains("\"chain_break\":"), "got: {s}");
+    }
+
+    #[test]
+    fn default_format_falls_back_to_text() {
+        // The `_ =>` arm at line 99 fires for any non-`json` value —
+        // including an empty string, "yaml", or the actual default
+        // "text". Confirms the default-arm dispatch.
+        let (_dir, path) = temp_db();
+        let args = VerifySignedEventsChainArgs {
+            since: 0,
+            format: "yaml-unrecognised".to_string(),
+        };
+        let mut buf_out = Vec::<u8>::new();
+        let mut buf_err = Vec::<u8>::new();
+        let mut out = CliOutput::from_std(&mut buf_out, &mut buf_err);
+        let code = run(&path, &args, &mut out).expect("run");
+        assert_eq!(code, 0);
+        let s = String::from_utf8(buf_out).expect("utf-8");
+        assert!(s.contains("OK"), "must hit text branch; got: {s}");
+    }
 }
