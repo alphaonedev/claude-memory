@@ -86,6 +86,16 @@ pub struct SignedEventSummary {
 /// packet.
 #[derive(Debug, Serialize)]
 pub struct ChainReport {
+    /// v0.7.0 G-PHASE-E-4 (#709) — top-line PASS/FAIL flag for the
+    /// chain. `true` when every edge verified AND no namespace
+    /// exceeded its governance cap. Surfaced as the first field on
+    /// the JSON wire shape so external auditors / CI scripts can
+    /// `jq '.ok'` instead of recomputing the predicate from `edges_failed`
+    /// + `bounded_status`. The shell exit code mirrors this field: `0`
+    /// when `ok = true`, `2` when `ok = false` (matching the
+    /// `verify-forensic-bundle` exit convention, also raised to `2`
+    /// in #709).
+    pub ok: bool,
     /// Root memory id supplied on the command line.
     pub root_id: String,
     /// Total number of distinct memories visited (root + ancestors).
@@ -355,7 +365,13 @@ pub fn build_chain_report_at(
         Vec::new()
     };
 
+    // v0.7.0 G-PHASE-E-4 (#709) — derive the top-line `ok` flag from
+    // the same predicate the exit code uses (`edges_failed == 0 &&
+    // bounded_status != "exceeded_cap"`). Kept here so callers reading
+    // the JSON wire shape don't have to re-derive it.
+    let ok = edges_failed == 0 && bounded_status != "exceeded_cap";
     Ok(ChainReport {
+        ok,
         root_id: root_id.to_string(),
         n_memories: visited.len(),
         chain_depth,
@@ -517,8 +533,15 @@ pub(super) fn render_text(report: &ChainReport, out: &mut CliOutput<'_>) -> Resu
 // ─────────────────────────────────────────────────────────────────────
 
 /// Run the `verify-reflection-chain` subcommand against the SQLite DB at
-/// `db_path`. Returns an exit code: `0` if the chain is intact,
-/// `1` otherwise.
+/// `db_path`. Returns an exit code: `0` if the chain is intact, `2`
+/// otherwise.
+///
+/// v0.7.0 G-PHASE-E-4 (#709) — raised the failure exit code from `1`
+/// to `2`. The previous `1` was indistinguishable from CLI argument
+/// errors / unwrap panics under shell error trapping; `2` is the
+/// conventional "verification failed" code (matches the convention
+/// raised on `verify-forensic-bundle` in the same fold) and aligns
+/// with the new top-line `ok` field in [`ChainReport`].
 ///
 /// # Errors
 ///
@@ -536,12 +559,10 @@ pub fn run(db_path: &Path, args: &VerifyChainArgs, out: &mut CliOutput<'_>) -> R
         render_text(&report, out)?;
     }
 
-    // Exit non-zero when any edge failed or the chain exceeded its cap.
-    if report.edges_failed > 0 || report.bounded_status == "exceeded_cap" {
-        Ok(1)
-    } else {
-        Ok(0)
-    }
+    // Exit code mirrors `report.ok`. The predicate is
+    // `edges_failed == 0 && bounded_status != "exceeded_cap"`, which is
+    // already cached on `report.ok` at construction time.
+    if report.ok { Ok(0) } else { Ok(2) }
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -885,6 +906,7 @@ mod tests {
         ns.insert("ns-one".to_string(), 3);
         ns.insert("ns-two".to_string(), 1);
         let report = ChainReport {
+            ok: false,
             root_id: "0123456789abcdef0123".to_string(),
             n_memories: 2,
             chain_depth: 1,
@@ -928,6 +950,7 @@ mod tests {
     fn render_text_signed_event_without_signature_says_no() {
         // Drives the `if ev.signature_present` else branch (line 508).
         let report = ChainReport {
+            ok: true,
             root_id: "root-id-here".to_string(),
             n_memories: 1,
             chain_depth: 0,
@@ -1027,7 +1050,8 @@ mod tests {
         let mut stderr = Vec::<u8>::new();
         let mut out = crate::cli::CliOutput::from_std(&mut stdout, &mut stderr);
         let code = run(&db_path, &args, &mut out).expect("run");
-        assert_eq!(code, 1, "exceeded cap must exit 1");
+        // v0.7.0 G-PHASE-E-4 (#709) — failure exit code raised from 1 to 2.
+        assert_eq!(code, 2, "exceeded cap must exit 2");
     }
 
     #[test]

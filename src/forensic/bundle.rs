@@ -860,6 +860,12 @@ pub fn run_export(
 /// Propagates I/O / parse errors. Verification *failure* (the bundle
 /// was parseable but didn't pass integrity checks) returns
 /// `Ok(non-zero exit code)` rather than an error.
+///
+/// v0.7.0 G-PHASE-E-4 (#709) — raised the failure exit code from `1`
+/// to `2`. `1` was indistinguishable from CLI argument errors / unwrap
+/// panics under shell error trapping; `2` is the conventional
+/// "verification failed" code (matches the new convention on
+/// `verify-reflection-chain`).
 pub fn run_verify(args: &VerifyForensicBundleArgs, out: &mut CliOutput<'_>) -> Result<i32> {
     let report = verify(&args.bundle_path)?;
     let payload = serde_json::to_string_pretty(&report).context("serialise VerificationReport")?;
@@ -869,7 +875,7 @@ pub fn run_verify(args: &VerifyForensicBundleArgs, out: &mut CliOutput<'_>) -> R
         Ok(0)
     } else {
         writeln!(out.stdout, "verification FAILED")?;
-        Ok(1)
+        Ok(2)
     }
 }
 
