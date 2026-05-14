@@ -361,4 +361,334 @@ mod tests {
         assert!(tier_rank(&Tier::Short) < tier_rank(&Tier::Mid));
         assert!(tier_rank(&Tier::Mid) < tier_rank(&Tier::Long));
     }
+
+    // ---- ConsolidationPass full trait coverage ------------------------------
+
+    use anyhow::Result;
+    use std::sync::Mutex;
+
+    /// Deterministic LLM stub mirroring `ReflectionPass::tests::StubLlm`.
+    struct StubLlm {
+        summary: String,
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl StubLlm {
+        fn new(summary: &str) -> Self {
+            Self {
+                summary: summary.to_string(),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AutonomyLlm for StubLlm {
+        fn auto_tag(&self, _title: &str, _content: &str) -> Result<Vec<String>> {
+            Ok(vec![])
+        }
+        fn detect_contradiction(&self, _a: &str, _b: &str) -> Result<bool> {
+            Ok(false)
+        }
+        fn summarize_memories(&self, memories: &[(String, String)]) -> Result<String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push(format!("summarize:{}", memories.len()));
+            Ok(self.summary.clone())
+        }
+    }
+
+    /// Open a fresh DB at a path beneath a TempDir; the TempDir is
+    /// returned so the caller keeps it alive for the test.
+    fn open_db() -> (rusqlite::Connection, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.db");
+        let conn = crate::db::open(&path).expect("db::open");
+        (conn, dir)
+    }
+
+    fn make_memory_full(
+        id: &str,
+        ns: &str,
+        title: &str,
+        content: &str,
+        tier: Tier,
+        priority: i32,
+    ) -> Memory {
+        let now = chrono::Utc::now().to_rfc3339();
+        Memory {
+            id: id.to_string(),
+            tier,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata: serde_json::json!({}),
+            reflection_depth: 0,
+            memory_kind: crate::models::MemoryKind::Observation,
+        }
+    }
+
+    #[test]
+    fn pass_name_is_consolidation() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        assert_eq!(pass.name(), "consolidation");
+    }
+
+    #[test]
+    fn cluster_via_jaccard_fallback_returns_clusters() {
+        // No embedder → cosine returns empty → falls back to Jaccard.
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m1 = make_memory_full(
+            "a",
+            "ns",
+            "t",
+            "kubernetes rolling canary deploy strategy",
+            Tier::Mid,
+            5,
+        );
+        let m2 = make_memory_full(
+            "b",
+            "ns",
+            "t",
+            "kubernetes rolling canary deploy strategy",
+            Tier::Mid,
+            5,
+        );
+        let clusters = pass.cluster(&[m1, m2]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].len(), 2);
+    }
+
+    #[test]
+    fn cluster_empty_returns_no_groups() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let clusters = pass.cluster(&[]);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn eligible_accepts_valid_cluster() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m1 = make_memory_full("a", "ns", "t1", "c1", Tier::Long, 5);
+        let m2 = make_memory_full("b", "ns", "t2", "c2", Tier::Long, 5);
+        assert!(pass.eligible(&[m1, m2]));
+    }
+
+    #[test]
+    fn eligible_rejects_singleton_via_pass() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m = make_memory_full("a", "ns", "t", "c", Tier::Long, 5);
+        assert!(!pass.eligible(&[m]));
+    }
+
+    #[test]
+    fn eligible_rejects_reserved_namespace_via_pass() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m1 = make_memory_full("a", "_curator", "t", "c", Tier::Long, 5);
+        let m2 = make_memory_full("b", "_curator", "t", "c", Tier::Long, 5);
+        assert!(!pass.eligible(&[m1, m2]));
+    }
+
+    #[test]
+    fn eligible_rejects_mixed_ns_via_pass() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m1 = make_memory_full("a", "ns1", "t", "c", Tier::Long, 5);
+        let m2 = make_memory_full("b", "ns2", "t", "c", Tier::Long, 5);
+        assert!(!pass.eligible(&[m1, m2]));
+    }
+
+    #[test]
+    fn summarize_returns_consolidated_memory() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synthesised summary");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m1 = make_memory_full("a", "ns", "First", "c1", Tier::Mid, 3);
+        let m2 = make_memory_full("b", "ns", "Second", "c2", Tier::Long, 7);
+        let summary = pass.summarize(&[m1, m2]).unwrap();
+        assert!(summary.title.starts_with("[consolidated]"));
+        assert_eq!(summary.namespace, "ns");
+        assert_eq!(summary.content, "synthesised summary");
+        assert_eq!(summary.tier, Tier::Long); // max
+        assert_eq!(summary.priority, 7); // max
+        assert_eq!(summary.source, "ai-memory curator (compaction)");
+    }
+
+    #[test]
+    fn summarize_empty_cluster_errors() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let err = pass.summarize(&[]).unwrap_err().to_string();
+        assert!(err.contains("empty cluster"));
+    }
+
+    #[test]
+    fn persist_dry_run_is_noop() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, true /* dry_run */);
+        let summary = make_memory_full("s", "ns", "t", "c", Tier::Mid, 5);
+        // dry_run=true → persist short-circuits regardless of sources.
+        pass.persist(&summary, &["x".to_string(), "y".to_string()])
+            .unwrap();
+    }
+
+    #[test]
+    fn persist_empty_sources_is_noop() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let summary = make_memory_full("s", "ns", "t", "c", Tier::Mid, 5);
+        pass.persist(&summary, &[]).unwrap();
+    }
+
+    #[test]
+    fn persist_writes_consolidated_memory() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synth");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        // Insert two source memories.
+        let m1 = make_memory_full(
+            &uuid::Uuid::new_v4().to_string(),
+            "ns",
+            "t1",
+            "Some keyword content alpha",
+            Tier::Mid,
+            5,
+        );
+        let m2 = make_memory_full(
+            &uuid::Uuid::new_v4().to_string(),
+            "ns",
+            "t2",
+            "Some keyword content beta",
+            Tier::Mid,
+            5,
+        );
+        let id1 = crate::db::insert(&conn, &m1).unwrap();
+        let id2 = crate::db::insert(&conn, &m2).unwrap();
+        let summary = make_memory_full(
+            "s",
+            "ns",
+            "[consolidated] title",
+            "consolidated body",
+            Tier::Long,
+            5,
+        );
+        pass.persist(&summary, &[id1, id2]).unwrap();
+        // Verify the consolidated row is queryable in the namespace.
+        let by_title =
+            crate::db::list(&conn, Some("ns"), None, 16, 0, None, None, None, None, None).unwrap();
+        let titles: Vec<&str> = by_title.iter().map(|m| m.title.as_str()).collect();
+        assert!(titles.iter().any(|t| t.contains("[consolidated]")));
+    }
+
+    #[test]
+    fn verify_missing_id_returns_error() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let err = pass
+            .verify("no-such-id".to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found in DB"));
+    }
+
+    #[test]
+    fn verify_existing_id_ok() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let m = make_memory_full(
+            &uuid::Uuid::new_v4().to_string(),
+            "ns",
+            "t",
+            "c",
+            Tier::Mid,
+            5,
+        );
+        let id = crate::db::insert(&conn, &m).unwrap();
+        pass.verify(id).unwrap();
+    }
+
+    #[test]
+    fn stub_llm_auto_tag_and_contradiction_paths() {
+        // Exercises StubLlm::auto_tag + detect_contradiction methods.
+        let stub = StubLlm::new("S");
+        assert!(stub.auto_tag("t", "c").unwrap().is_empty());
+        assert!(!stub.detect_contradiction("a", "b").unwrap());
+    }
+
+    #[test]
+    fn cluster_via_cosine_primary_when_embedder_available() {
+        // Drives line 106 (cosine-clusters early-return). Requires a real
+        // Embedder — skip if HF model not cached.
+        let Some(embedder) = crate::embeddings::Embedder::new_local().ok() else {
+            return;
+        };
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, Some(embedder), false);
+        let m1 = make_memory_full(
+            "a",
+            "ns",
+            "t",
+            "kubernetes rolling canary deploy strategy",
+            Tier::Mid,
+            5,
+        );
+        let m2 = make_memory_full(
+            "b",
+            "ns",
+            "t",
+            "kubernetes rolling canary deploy strategy",
+            Tier::Mid,
+            5,
+        );
+        let clusters = pass.cluster(&[m1, m2]);
+        assert_eq!(clusters.len(), 1);
+    }
+
+    #[test]
+    fn persist_propagates_db_consolidate_failure() {
+        // Drives line 203 (`?` propagation). Pass non-existent source ids
+        // and an empty title — db::consolidate will fail on the missing
+        // source rows.
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ConsolidationPass::new(&conn, &llm, None, false);
+        let summary = make_memory_full("s", "ns", "[consolidated] x", "c", Tier::Mid, 5);
+        // Non-existent source IDs → db::consolidate should error.
+        let res = pass.persist(
+            &summary,
+            &["nope-id-1".to_string(), "nope-id-2".to_string()],
+        );
+        assert!(
+            res.is_err(),
+            "expected db::consolidate to fail on missing sources"
+        );
+    }
 }

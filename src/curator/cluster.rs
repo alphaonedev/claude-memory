@@ -391,4 +391,140 @@ mod tests {
         // No embedder → empty result; caller falls back to Jaccard.
         assert!(clusters.is_empty());
     }
+
+    // ---- Jaccard edge cases that hit specific branches ---------------------
+
+    #[test]
+    fn jaccard_clustering_with_empty_input_returns_empty() {
+        let strategy = JaccardClustering::default();
+        let clusters = strategy.cluster_memories(&[]);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn jaccard_clustering_skips_already_used_member() {
+        // Hits the inner `if used[j] { continue; }` branch (line 106).
+        // Construct 3 memories: a, b, c.
+        // a≈b strong match — they cluster. Then when scanning b's row,
+        // both b and a are `used` so the `if used[j]` early-`continue`
+        // triggers.
+        let strategy = JaccardClustering {
+            threshold: 0.3,
+            max_cluster_size: 10,
+        };
+        let s = "shared keyword tokens deployment plan strategy";
+        let m1 = make_memory("a", "ns", s);
+        let m2 = make_memory("b", "ns", s);
+        let m3 = make_memory("c", "ns", s);
+        let clusters = strategy.cluster_memories(&[m1, m2, m3]);
+        // One cluster of size 3.
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].len(), 3);
+    }
+
+    // ---- CosineClustering with a real Embedder (skip if HF model missing) --
+
+    /// Attempt to build a real local Embedder. Returns `None` when the
+    /// HuggingFace model is not in the host's cache (offline CI worker);
+    /// callers MUST early-return cleanly in that case so the test still
+    /// passes — the coverage uplift only happens on hosts where the
+    /// model cache is pre-warmed.
+    fn try_local_embedder() -> Option<Embedder> {
+        Embedder::new_local().ok()
+    }
+
+    #[test]
+    fn cosine_clustering_with_embedder_clusters_similar_content() {
+        let Some(embedder) = try_local_embedder() else {
+            return;
+        };
+        let strategy = CosineClustering::new(Some(embedder));
+        // Two near-identical contents → cosine similarity ≥ 0.75 → cluster.
+        let m1 = make_memory(
+            "a",
+            "ns",
+            "Kubernetes rolling canary deployment strategy notes",
+        );
+        let m2 = make_memory(
+            "b",
+            "ns",
+            "Kubernetes rolling canary deployment strategy notes",
+        );
+        let clusters = strategy.cluster_memories(&[m1, m2]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].len(), 2);
+    }
+
+    #[test]
+    fn cosine_clustering_never_merges_across_namespaces() {
+        let Some(embedder) = try_local_embedder() else {
+            return;
+        };
+        let strategy = CosineClustering::new(Some(embedder));
+        let m1 = make_memory("a", "ns1", "identical content for both rows");
+        let m2 = make_memory("b", "ns2", "identical content for both rows");
+        let clusters = strategy.cluster_memories(&[m1, m2]);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn cosine_clustering_skips_internal_namespaces() {
+        let Some(embedder) = try_local_embedder() else {
+            return;
+        };
+        let strategy = CosineClustering::new(Some(embedder));
+        let m1 = make_memory("a", "_curator", "shared content tokens");
+        let m2 = make_memory("b", "_curator", "shared content tokens");
+        let clusters = strategy.cluster_memories(&[m1, m2]);
+        assert!(clusters.is_empty());
+    }
+
+    #[test]
+    fn cosine_clustering_respects_max_cluster_size() {
+        let Some(embedder) = try_local_embedder() else {
+            return;
+        };
+        let strategy = CosineClustering {
+            threshold: 0.5,
+            max_cluster_size: 2,
+            embedder: Some(embedder),
+        };
+        let s = "identical clustering content goes here always";
+        let mems: Vec<Memory> = (0..6)
+            .map(|i| make_memory(&format!("m{i}"), "ns", s))
+            .collect();
+        let clusters = strategy.cluster_memories(&mems);
+        for c in &clusters {
+            assert!(c.len() <= 2, "cluster size {}", c.len());
+        }
+    }
+
+    #[test]
+    fn cosine_clustering_drops_low_similarity_singletons() {
+        let Some(embedder) = try_local_embedder() else {
+            return;
+        };
+        let strategy = CosineClustering::new(Some(embedder));
+        // Six completely different topics → no pair clusters.
+        let topics = [
+            "Python list comprehension idioms for filtering",
+            "Reverse-engineering binary protocols on the wire",
+            "Cherry-picking commits across forked git branches",
+            "Distributed consensus by Raft leader election",
+            "Cuisine of southern Italy and Sicilian olive oil",
+            "Quantum-mechanical interpretation of double-slit experiment",
+        ];
+        let mems: Vec<Memory> = topics
+            .iter()
+            .enumerate()
+            .map(|(i, t)| make_memory(&format!("m{i}"), "ns", t))
+            .collect();
+        let clusters = strategy.cluster_memories(&mems);
+        // Either zero clusters (most likely) OR small clusters of length
+        // >= 2. We just want the code path executed; assert NO cluster
+        // has length 1 (those are discarded by the strategy).
+        for c in &clusters {
+            assert!(c.len() >= 2);
+        }
+    }
 }

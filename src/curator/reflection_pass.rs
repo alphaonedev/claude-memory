@@ -1082,4 +1082,617 @@ mod tests {
         let back: ReflectionPassReport = serde_json::from_str(&json).unwrap();
         assert_eq!(back.observations_scanned, 30);
     }
+
+    // ---- ReflectionPass trait coverage (with real DB) ---------------------
+
+    fn open_db() -> (rusqlite::Connection, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("test.db");
+        let conn = crate::db::open(&path).expect("db::open");
+        (conn, dir)
+    }
+
+    fn insert_observation(
+        conn: &rusqlite::Connection,
+        ns: &str,
+        title: &str,
+        content: &str,
+        access_count: i64,
+    ) -> String {
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = crate::models::default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String("test-agent".to_string()),
+            );
+        }
+        let mem = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Long,
+            namespace: ns.to_string(),
+            title: title.to_string(),
+            content: content.to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 0,
+            memory_kind: MemoryKind::Observation,
+        };
+        crate::db::insert(conn, &mem).unwrap()
+    }
+
+    #[test]
+    fn pass_name_is_reflection() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        assert_eq!(pass.name(), "reflection");
+    }
+
+    #[test]
+    fn agent_id_falls_back_to_ai_curator_without_keypair() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        assert_eq!(pass.agent_id(), "ai:curator");
+    }
+
+    #[test]
+    fn agent_id_uses_keypair_when_provided() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let mut rng = rand_core::OsRng;
+        let sk = SigningKey::generate(&mut rng);
+        let vk: VerifyingKey = (&sk).into();
+        let kp = AgentKeypair {
+            agent_id: "test:agent-x".to_string(),
+            public: vk,
+            private: Some(sk),
+        };
+        let pass = ReflectionPass::new(&conn, &llm, Some(&kp), None, false);
+        assert_eq!(pass.agent_id(), "test:agent-x");
+    }
+
+    #[test]
+    fn cluster_excludes_zero_access_observations() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let m1 = make_obs("a", "ns", "t", "shared keyword tokens here", 0); // 0 access → skipped
+        let m2 = make_obs("b", "ns", "t", "shared keyword tokens here", 5);
+        let m3 = make_obs("c", "ns", "t", "shared keyword tokens here", 5);
+        let m4 = make_obs("d", "ns", "t", "shared keyword tokens here", 5);
+        let clusters = pass.cluster(&[m1, m2, m3, m4]);
+        assert_eq!(clusters.len(), 1);
+        assert_eq!(clusters[0].len(), 3);
+    }
+
+    #[test]
+    fn cluster_caps_at_max_cluster_size() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        // 15 mems with shared tokens → cluster capped at MAX_CLUSTER_SIZE = 12.
+        let mems: Vec<Memory> = (0..15)
+            .map(|i| {
+                make_obs(
+                    &format!("m{i:02}"),
+                    "ns",
+                    "t",
+                    "shared keyword tokens here pattern",
+                    1,
+                )
+            })
+            .collect();
+        let clusters = pass.cluster(&mems);
+        // First-seed cluster grows up to MAX_CLUSTER_SIZE.
+        for c in &clusters {
+            assert!(c.len() <= MAX_CLUSTER_SIZE);
+        }
+    }
+
+    #[test]
+    fn eligible_pass_method_accepts_valid() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let cluster: Vec<Memory> = (0..MIN_CLUSTER_SIZE)
+            .map(|i| make_obs(&format!("m{i}"), "ns", "t", "c", 1))
+            .collect();
+        assert!(pass.eligible(&cluster));
+    }
+
+    #[test]
+    fn eligible_pass_method_rejects_oversize() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let cluster: Vec<Memory> = (0..(MAX_CLUSTER_SIZE + 1))
+            .map(|i| make_obs(&format!("m{i:02}"), "ns", "t", "c", 1))
+            .collect();
+        assert!(!pass.eligible(&cluster));
+    }
+
+    #[test]
+    fn eligible_pass_method_rejects_reflection_member() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let mut cluster: Vec<Memory> = (0..MIN_CLUSTER_SIZE)
+            .map(|i| make_obs(&format!("m{i}"), "ns", "t", "c", 1))
+            .collect();
+        cluster[0].memory_kind = MemoryKind::Reflection;
+        assert!(!pass.eligible(&cluster));
+    }
+
+    #[test]
+    fn eligible_pass_method_rejects_zero_access() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let mut cluster: Vec<Memory> = (0..MIN_CLUSTER_SIZE)
+            .map(|i| make_obs(&format!("m{i}"), "ns", "t", "c", 1))
+            .collect();
+        cluster[1].access_count = 0;
+        assert!(!pass.eligible(&cluster));
+    }
+
+    #[test]
+    fn summarize_below_min_errors() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let cluster: Vec<Memory> = (0..(MIN_CLUSTER_SIZE - 1))
+            .map(|i| make_obs(&format!("m{i}"), "ns", "t", "c", 1))
+            .collect();
+        let err = pass.summarize(&cluster).unwrap_err().to_string();
+        assert!(err.contains("< MIN_CLUSTER_SIZE"));
+    }
+
+    #[test]
+    fn summarize_returns_reflection_typed_memory() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synth pattern");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let cluster: Vec<Memory> = (0..MIN_CLUSTER_SIZE)
+            .map(|i| {
+                let mut m = make_obs(&format!("m{i}"), "ns", "Title-A", "shared content", 2);
+                m.tier = if i == 0 { Tier::Long } else { Tier::Mid };
+                m.priority = 5 + i32::try_from(i).unwrap();
+                m
+            })
+            .collect();
+        let summary = pass.summarize(&cluster).unwrap();
+        assert_eq!(summary.memory_kind, MemoryKind::Reflection);
+        assert!(summary.title.starts_with("[reflection]"));
+        assert_eq!(summary.content, "synth pattern");
+        assert_eq!(summary.tier, Tier::Long);
+        assert_eq!(summary.source, "system");
+        assert_eq!(summary.namespace, "ns");
+        // Priority = max of source priorities.
+        assert_eq!(
+            summary.priority,
+            5 + i32::try_from(MIN_CLUSTER_SIZE - 1).unwrap()
+        );
+    }
+
+    #[test]
+    fn persist_dry_run_is_noop() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, true);
+        let summary = make_obs("s", "ns", "[reflection]", "c", 1);
+        pass.persist(&summary, &["x".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn persist_empty_sources_is_noop() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let summary = make_obs("s", "ns", "[reflection]", "c", 1);
+        pass.persist(&summary, &[]).unwrap();
+    }
+
+    #[test]
+    fn persist_refuses_when_max_depth_exceeded() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        // Pass max_depth=1; insert source at reflection_depth=1 → new depth = 2 → refused.
+        let pass = ReflectionPass::new(&conn, &llm, None, Some(1), false);
+        let mut source = make_obs("src", "ns", "t", "c", 1);
+        source.reflection_depth = 1;
+        let src_id = crate::db::insert(&conn, &source).unwrap();
+        let summary = make_obs("s", "ns", "[reflection]", "c", 0);
+        let err = pass.persist(&summary, &[src_id]).unwrap_err().to_string();
+        assert!(err.contains("exceeds"));
+        assert!(err.contains("--max-depth"));
+    }
+
+    #[test]
+    fn persist_writes_reflection_into_db() {
+        // Full happy-path: real sources, real reflect_with_hooks insert.
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synthesised pattern");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        // Seed three observations in namespace 'app'.
+        let s1 = insert_observation(&conn, "app", "T1", "kubernetes deploy strategy notes", 2);
+        let s2 = insert_observation(&conn, "app", "T2", "kubernetes rolling deploy approach", 3);
+        let s3 = insert_observation(&conn, "app", "T3", "kubernetes canary deploy strategy", 1);
+        let summary = pass
+            .summarize(&[
+                crate::db::get(&conn, &s1).unwrap().unwrap(),
+                crate::db::get(&conn, &s2).unwrap().unwrap(),
+                crate::db::get(&conn, &s3).unwrap().unwrap(),
+            ])
+            .unwrap();
+        pass.persist(&summary, &[s1.clone(), s2.clone(), s3.clone()])
+            .unwrap();
+
+        // Find the freshly-written reflection in the 'app' namespace.
+        let listed = crate::db::list(
+            &conn,
+            Some("app"),
+            None,
+            32,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refl = listed
+            .iter()
+            .find(|m| m.memory_kind == MemoryKind::Reflection)
+            .expect("expected one reflection");
+        // verify() should succeed on it.
+        pass.verify(refl.id.clone()).unwrap();
+    }
+
+    #[test]
+    fn verify_missing_id_errors() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let err = pass.verify("no-such".to_string()).unwrap_err().to_string();
+        assert!(err.contains("not found in DB"));
+    }
+
+    #[test]
+    fn verify_wrong_kind_errors() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        // Insert an Observation and verify against its id — must error.
+        let id = insert_observation(&conn, "ns", "T", "c", 1);
+        let err = pass.verify(id).unwrap_err().to_string();
+        assert!(err.contains("expected Reflection"));
+    }
+
+    #[test]
+    fn verify_reflection_without_edges_errors() {
+        // Insert a Reflection directly via db::insert (no reflects_on links)
+        // and verify against it — must error with "no reflects_on edge".
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = crate::models::default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String("test-agent".to_string()),
+            );
+        }
+        let m = Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: Tier::Mid,
+            namespace: "ns".to_string(),
+            title: "[reflection] orphan".to_string(),
+            content: "c".to_string(),
+            tags: vec![],
+            priority: 5,
+            confidence: 1.0,
+            source: "system".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 1,
+            memory_kind: MemoryKind::Reflection,
+        };
+        let id = crate::db::insert(&conn, &m).unwrap();
+        let err = pass.verify(id).unwrap_err().to_string();
+        assert!(err.contains("no reflects_on edge"));
+    }
+
+    // ---- run_reflection_pass driver -------------------------------------
+
+    #[test]
+    fn run_reflection_pass_empty_db_dry_run_namespace() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let report =
+            run_reflection_pass(&conn, &llm, None, Some("nope"), None, true, |_| true).unwrap();
+        assert!(report.dry_run);
+        assert_eq!(report.namespaces_visited, 1);
+        assert_eq!(report.clusters_formed, 0);
+        assert_eq!(report.reflections_persisted, 0);
+    }
+
+    #[test]
+    fn run_reflection_pass_all_namespaces_with_disabled_check() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        // Seed an observation so list_namespaces sees one ns.
+        insert_observation(&conn, "ns1", "t", "shared content tokens here", 2);
+        let report = run_reflection_pass(&conn, &llm, None, None, None, true, |_| false).unwrap();
+        // namespace is enumerated but enabled_check returns false → no work.
+        assert_eq!(report.observations_scanned, 0);
+    }
+
+    #[test]
+    fn run_reflection_pass_dry_run_reports_proposals() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synth");
+        // Seed three observations that should cluster.
+        insert_observation(
+            &conn,
+            "app",
+            "T1",
+            "kubernetes rolling deploy strategy notes",
+            2,
+        );
+        insert_observation(
+            &conn,
+            "app",
+            "T2",
+            "kubernetes rolling deploy strategy canary",
+            3,
+        );
+        insert_observation(
+            &conn,
+            "app",
+            "T3",
+            "kubernetes canary deploy strategy rolling",
+            1,
+        );
+        let report =
+            run_reflection_pass(&conn, &llm, None, Some("app"), None, true, |_| true).unwrap();
+        assert!(report.dry_run);
+        assert!(report.observations_scanned >= 3);
+        assert!(report.clusters_eligible >= 1);
+        assert!(!report.dry_run_proposals.is_empty());
+        assert_eq!(report.reflections_persisted, 0);
+    }
+
+    #[test]
+    fn run_reflection_pass_persists_reflections() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("persisted pattern");
+        insert_observation(&conn, "app", "T1", "shared keyword token strategy notes", 2);
+        insert_observation(&conn, "app", "T2", "shared keyword token strategy plan", 3);
+        insert_observation(
+            &conn,
+            "app",
+            "T3",
+            "shared keyword token strategy canary",
+            1,
+        );
+        let report =
+            run_reflection_pass(&conn, &llm, None, Some("app"), None, false, |_| true).unwrap();
+        assert_eq!(report.dry_run, false);
+        assert!(report.reflections_persisted >= 1);
+    }
+
+    #[test]
+    fn run_reflection_pass_depth_refusal_increments_counter() {
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("synth");
+        // Seed observations at depth=2 so a new reflection (depth=3)
+        // would exceed our curator max_depth=2.
+        let now = chrono::Utc::now().to_rfc3339();
+        for i in 0..3 {
+            let mut metadata = crate::models::default_metadata();
+            if let Some(obj) = metadata.as_object_mut() {
+                obj.insert(
+                    "agent_id".to_string(),
+                    serde_json::Value::String("test-agent".to_string()),
+                );
+            }
+            let m = Memory {
+                id: uuid::Uuid::new_v4().to_string(),
+                tier: Tier::Long,
+                namespace: "deep".to_string(),
+                title: format!("Tdeep-{i}"),
+                content: "shared keyword token deep strategy".to_string(),
+                tags: vec![],
+                priority: 5,
+                confidence: 1.0,
+                source: "test".to_string(),
+                access_count: 2,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+                last_accessed_at: None,
+                expires_at: None,
+                metadata,
+                reflection_depth: 2,
+                memory_kind: MemoryKind::Observation,
+            };
+            crate::db::insert(&conn, &m).unwrap();
+        }
+        let report = run_reflection_pass(
+            &conn,
+            &llm,
+            None,
+            Some("deep"),
+            Some(2), // cap=2; new depth would be 3 → refuse
+            false,
+            |_| true,
+        )
+        .unwrap();
+        assert!(report.depth_refusals >= 1);
+        // No reflection persisted.
+        assert_eq!(report.reflections_persisted, 0);
+    }
+
+    #[test]
+    fn dry_run_proposal_serialises() {
+        let p = DryRunProposal {
+            namespace: "ns".into(),
+            proposed_title: "[reflection] x".into(),
+            source_ids: vec!["a".into(), "b".into()],
+        };
+        let j = serde_json::to_string(&p).unwrap();
+        assert!(j.contains("source_ids"));
+        let back: DryRunProposal = serde_json::from_str(&j).unwrap();
+        assert_eq!(back.namespace, "ns");
+    }
+
+    // ---- pair_co_occurs unparseable timestamps fall through ----
+
+    #[test]
+    fn pair_co_occurs_unparseable_timestamps_still_checks_jaccard() {
+        let mut a = make_obs("a", "ns", "t", "shared content tokens here", 1);
+        let mut b = make_obs("b", "ns", "t", "shared content tokens here", 1);
+        a.created_at = "not-a-timestamp".to_string();
+        b.created_at = "also-invalid".to_string();
+        // With invalid timestamps, the temporal check is skipped — Jaccard
+        // alone decides. These share tokens → co-occur returns true.
+        assert!(pair_co_occurs(&a, &b));
+    }
+
+    // ---- Additional coverage: trait impls + edge branches ----
+
+    #[test]
+    fn stub_llm_auto_tag_and_contradiction_paths() {
+        let stub = StubLlm::new("S");
+        let tags = stub.auto_tag("t", "c").unwrap();
+        assert!(tags.is_empty());
+        let conflict = stub.detect_contradiction("a", "b").unwrap();
+        assert!(!conflict);
+    }
+
+    #[test]
+    fn eligible_pass_rejects_internal_namespace_directly() {
+        // Drives line 279 — internal namespace early-return.
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        let cluster: Vec<Memory> = (0..MIN_CLUSTER_SIZE)
+            .map(|i| make_obs(&format!("m{i}"), "_curator", "t", "c", 1))
+            .collect();
+        assert!(!pass.eligible(&cluster));
+    }
+
+    #[test]
+    fn jaccard_similarity_zero_union_returns_zero() {
+        // The else-branch where `union == 0`: ta non-empty but tb is — no.
+        // Actually if either has >=3 chars words there will be union.
+        // Build inputs where tokens are stripped to nothing.
+        let a = "a b c"; // every token <3 chars → tokens set is empty
+        let b = "x";
+        assert_eq!(jaccard_similarity(a, b), 0.0);
+    }
+
+    #[test]
+    fn tier_rank_all_variants() {
+        // Drives all three match arms.
+        assert_eq!(tier_rank(&Tier::Short), 0);
+        assert_eq!(tier_rank(&Tier::Mid), 1);
+        assert_eq!(tier_rank(&Tier::Long), 2);
+    }
+
+    #[test]
+    fn parse_rfc3339_invalid_returns_none() {
+        assert!(parse_rfc3339("garbage").is_none());
+        assert!(parse_rfc3339("2026-01-01T00:00:00Z").is_some());
+    }
+
+    #[test]
+    fn verify_skips_inbound_links() {
+        // verify() walks all links but `continue`s when source_id != summary_id.
+        // This exercises the `continue` branch at line 468.
+        let (conn, _dir) = open_db();
+        let llm = StubLlm::new("S");
+        let pass = ReflectionPass::new(&conn, &llm, None, None, false);
+        // Seed the reflection target via the full persist path.
+        let s1 = insert_observation(&conn, "vrf", "T1", "shared keyword pattern tokens here", 2);
+        let s2 = insert_observation(&conn, "vrf", "T2", "shared keyword pattern tokens here", 2);
+        let s3 = insert_observation(&conn, "vrf", "T3", "shared keyword pattern tokens here", 2);
+        let summary = pass
+            .summarize(&[
+                crate::db::get(&conn, &s1).unwrap().unwrap(),
+                crate::db::get(&conn, &s2).unwrap().unwrap(),
+                crate::db::get(&conn, &s3).unwrap().unwrap(),
+            ])
+            .unwrap();
+        pass.persist(&summary, &[s1.clone(), s2.clone(), s3.clone()])
+            .unwrap();
+        let listed = crate::db::list(
+            &conn,
+            Some("vrf"),
+            None,
+            32,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let refl_id = listed
+            .iter()
+            .find(|m| m.memory_kind == MemoryKind::Reflection)
+            .unwrap()
+            .id
+            .clone();
+        // Create a foreign link with this reflection as TARGET (not source).
+        // verify() should still succeed because it ignores inbound links.
+        let _ = crate::db::create_link(&conn, &s1, &refl_id, "related_to");
+        pass.verify(refl_id).unwrap();
+    }
+
+    #[test]
+    fn run_reflection_pass_summarize_error_recorded() {
+        // Drive lines 640-644 (summarize failure path). Use a StubLlm that
+        // fails summarize. We need it implementing AutonomyLlm with an
+        // error return.
+        struct FailingLlm;
+        impl AutonomyLlm for FailingLlm {
+            fn auto_tag(&self, _t: &str, _c: &str) -> Result<Vec<String>> {
+                Ok(vec![])
+            }
+            fn detect_contradiction(&self, _a: &str, _b: &str) -> Result<bool> {
+                Ok(false)
+            }
+            fn summarize_memories(&self, _m: &[(String, String)]) -> Result<String> {
+                anyhow::bail!("forced llm failure")
+            }
+        }
+        let (conn, _dir) = open_db();
+        let llm = FailingLlm;
+        insert_observation(&conn, "ns", "T1", "shared keyword pattern tokens here", 2);
+        insert_observation(&conn, "ns", "T2", "shared keyword pattern tokens here", 2);
+        insert_observation(&conn, "ns", "T3", "shared keyword pattern tokens here", 2);
+        let report =
+            run_reflection_pass(&conn, &llm, None, Some("ns"), None, false, |_| true).unwrap();
+        // Summarize error was caught and recorded.
+        assert!(report.errors.iter().any(|e| e.contains("summarize failed")));
+        assert_eq!(report.reflections_persisted, 0);
+    }
 }
