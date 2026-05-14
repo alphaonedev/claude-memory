@@ -161,6 +161,7 @@ recipe's snippets and `ai-memory wrap <agent>` (PR-6).
 | [`grok-and-xai.md`](grok-and-xai.md) | xAI Grok | 3 (programmatic) | n/a (programmatic) | recipe |
 | [`local-models.md`](local-models.md) | Hermes, Llama, Mistral, etc. via LM Studio / Ollama / vLLM | 3 (programmatic) | n/a (programmatic) | recipe |
 | [`platforms.md`](platforms.md) | macOS / Linux / Windows / WSL / Docker / Kubernetes / ARM Linux / commercial Unix / embedded Linux / BSD platform notes | n/a | n/a | reference |
+| [`networking.md`](networking.md) | macOS + Tailscale / VPN per-app intercept gotchas (#704) and tailnet-IP workarounds | n/a | n/a | reference |
 | [`global-claude-md-template.md`](global-claude-md-template.md) | `~/.claude/CLAUDE.md` belt-and-suspenders snippet | 1 fallback | n/a | reference |
 | [`v0.6.4-system-prompt-snippet.md`](v0.6.4-system-prompt-snippet.md) | v0.6.4 discovery-aware NHI bootstrap (drop-in for any harness) | n/a | n/a | reference |
 
