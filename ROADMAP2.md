@@ -68,7 +68,7 @@ This is the floor every plan below builds on. Numbers are sourced from the publi
 | Modules ≥ 90% coverage (v0.6.3 baseline) | 39 of 47 (7 at 100%) | evidence.html |
 | Platform CI matrix | ubuntu-latest, macos-latest, windows-latest | evidence.html |
 | Schema version (v0.6.3.1) | v19 (was v15 on v0.6.3; ladder v15→v17→v18→v19) | release notes |
-| Schema version (v0.7.0 in-flight, as of L1-5 `3aa00c5`) | **v30** (sqlite) — ladder v19 → v20 (v0.6.4 audit log) → v22 (v0.7.0 RC: attestation + recursive-learning inclusion) → v29 (L0.7-1 base, recursive-learning Task 1/8 reflection_depth) → v30 (L1-1) → further bumps queued for B1 CHECK constraints + A4 L1-6 Goal | commit log on `feat/v0.7.0-layer-1` |
+| Schema version (v0.7.0 grand-slam ship, HEAD `12a7f29`) | **v34** (sqlite) / **v33** (postgres) — ladder v19 → v20 (v0.6.4 audit log) → v22 (v0.7.0 RC: attestation + recursive-learning inclusion) → v29 (L0.7-1 base, recursive-learning Task 1/8 reflection_depth) → v30 (L1-1) → v33 (L2 wave `memory_links.relation` CHECK constraint, commit `58877c7`) → v34 (V-4 closeout #698: `signed_events.prev_hash` + `signed_events.sequence` cross-row chain) | commit log on `feat/v0.7.0-grand-slam` |
 
 > **Doc-vs-substrate qualifier.** Schema versions can advance ahead of this document during in-flight work; the doc is updated at every layer §16 gate. Numbers in this row are "as of" the named commit on the named integration branch.
 
@@ -149,7 +149,7 @@ CI guard: `bench --baseline performance/baseline.json` fails any PR that exceeds
 
 **v0.7.0 grand-slam ship (as of `feat/v0.7.0-layer-1` HEAD, registry-confirmed):**
 
-- **52 MCP tools total** at v0.7.0 grand-slam ship: 43 baseline + `memory_reflect` (recursive-learning Task 4/8) + `memory_skill_register` / `_list` / `_get` / `_resource` / `_export` (L1-5 Agent Skills, **5 tools**, not 6 — `memory_skill_promote_from_reflection` is L2-6 and ships in v0.8.0) + `memory_load_family` (B1 always-on) + `memory_subscribe_replay` / `_dlq_list` (K7 subscription reliability)
+- **63 MCP tools total** at v0.7.0 grand-slam ship (HEAD `12a7f29`, pinned by `src/mcp/mod.rs::tool_definitions_for_profile_full_registers_51` asserting `len() == 63`): 43 baseline + `memory_reflect` (recursive-learning Task 4/8) + 7 `memory_skill_*` (L1-5 register/list/get/resource/export + L2-6 `promote_from_reflection` + L2-7 `compositional_context` — the L2-6 promote tool LANDED in v0.7.0 per `05e0cb9a` v0.7.1-fold decision, not v0.8.0 as earlier drafts implied) + `memory_load_family` (B1 always-on) + `memory_smart_load` (B2) + `memory_subscribe_replay` / `_dlq_list` (K7) + `memory_find_paths` (J7) + `memory_quota_status` (K8) + `memory_replay` (I4) + `memory_verify` (H4) + `memory_reflection_origin` (L2-2) + `memory_dependents_of_invalidated` (L2-3) + `memory_check_agent_action` + `memory_rule_list` (L1-6 / #691)
 - **25 hook events on `l1/compaction-pipeline`** at L1-7 ship: 20 baseline (Bucket 0 plan) + `pre_recall_expand` (G10 hot-path) + `pre_reflect` + `post_reflect` (recursive-learning Task 6/8, `21 → 23`) + `pre_compaction` + `on_compaction_rollback` (L1-7, `23 → 25`). v0.7.0 RC base before recursive-learning lands ships **22 events** (20 + 2 from G10 + Bucket 0 substrate); the `23` floor sits on `feat/v0.7.0-recursive-learning`; the `25` floor sits on `feat/v0.7.0-layer-1` after L1-7 lands
 
 > **Doc-vs-substrate qualifier.** The hook count and tool count in this block are "as of" the named integration branch HEAD at the time of writing. Both can advance in subsequent layer work; the doc is updated at every §16 gate.
@@ -620,12 +620,12 @@ v0.7.0 grand-slam ships **25 lifecycle events** on `feat/v0.7.0-layer-1` (20 pla
 | `post_checkpoint_resolve` | After checkpoint resolved | Notify only |
 | `pre_routine_run` | Before routine instantiation | Allow / Modify(parameters) / Deny |
 
-#### Schema migration — v30 → v3X
+#### Schema migration — v34 → v3X
 
-v0.7.0 grand-slam ships schema **v30** at L1-5 (sqlite, ladder per §4.1 schema row).
-The original §7.4 plan called for v21 (audit log + Ed25519 attestation columns) → v22 (Pillar 1); the in-flight v0.7.0 work consumed v20–v30 ahead of doc-time, so v0.8.0 Pillar 1 expansion lands at **v3X (above v30)** with the additive tables enumerated below — exact terminal version pinned at the §16 gate.
+v0.7.0 grand-slam terminal schema is **v34** (sqlite) / **v33** (postgres) at HEAD `12a7f29` (ladder per §4.1 schema row — v20 → v22 → v29 → v30 → v33 (L2 wave `memory_links.relation` CHECK constraint, commit `58877c7`) → v34 (V-4 closeout #698 `signed_events.prev_hash` + `sequence` cross-row chain)).
+The original §7.4 plan called for v21 (audit log + Ed25519 attestation columns) → v22 (Pillar 1); the in-flight v0.7.0 work consumed v20–v34 ahead of doc-time, so v0.8.0 Pillar 1 expansion lands at **v3X (above v34)** with the additive tables enumerated below — exact terminal version pinned at the §16 gate.
 
-Migration v30 → v3X (above v30):
+Migration v34 → v3X (above v34):
 - Add `actions` + `action_edges` tables
 - Add `leases` table
 - Add `signals` table
@@ -651,7 +651,7 @@ All `CREATE TABLE` operations are additive. No existing table modifications. Mig
 | §7.4.C vLLM first-class inference backend (RFC #651) | 0 | +5 | 5 |
 | §7.4.D Model signature verification chain | 0 | +2 | 2 |
 | Hook pipeline integration (10 new events) | 0 | +1.5 | 1.5 |
-| Schema migration v30 → v3X (above v30) | 0 | +0.5 | 0.5 |
+| Schema migration v34 → v3X (above v34) | 0 | +0.5 | 0.5 |
 | Test suite (~540 new tests) | 0 | +3 | 3 |
 | Documentation + reproducibility scripts | 0 | +1 | 1 |
 | **TOTAL** | **24.5** | **+22.5** | **~47 sessions** |
@@ -955,7 +955,7 @@ distinct property the operator directive named.
 
 ## 17. Net
 
-ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms. v0.7.0 grand-slam ship state (as of `feat/v0.7.0-layer-1` HEAD, L1-7 / L1-5 landed): schema **v30** (sqlite ladder per §4.1), **52 MCP tools** total (including 5 Agent Skills tools from L1-5, not 6 — the 6th `_promote_from_reflection` is L2-6 / v0.8.0), and **25 hook lifecycle events** (see §4.7 grand-slam block for the ladder).
+ai-memory v0.6.3 shipped clean: 1,809 tests, 93.08% coverage, ship-gate 4/4, A2A 48/48 mTLS, 5/5 channels, LongMemEval R@5 97.8% / R@10 99.0% / R@20 99.8%, 43 MCP tools, schema v15. v0.6.3.1 then landed (2026-04-30) with the never-lose-context release: 1,886 lib tests (+281), 93.84% line coverage, schema v19 (ladder v15→v17→v18→v19), 7 new CLI surfaces (boot/install/wrap/logs/audit/doctor/bench), and 17 documented integrations across 10 platforms. v0.7.0 grand-slam terminal ship state (HEAD `12a7f29` on `feat/v0.7.0-grand-slam`): schema **v34 sqlite / v33 postgres** (ladder per §4.1, including V-4 closeout #698 `signed_events` cross-row chain), **63 MCP tools** total (7 Agent Skills tools = L1-5 register/list/get/resource/export + L2-6 `promote_from_reflection` + L2-7 `compositional_context`, with the L2-6 promote tool landed at v0.7.0 per `05e0cb9a` v0.7.1-fold decision), **25 hook lifecycle events** (see §4.7 grand-slam block for the ladder), and Policy Engine Option B foundation (L1-6 substrate rules + PE-1/PE-2/PE-3 all merged on grand-slam).
 
 The audit found 22 distinct gaps. None block the published v0.6.3 claims. One (G1 — namespace-inheritance enforcement) is a security-shaped bug that gets a cutline-protected slot in v0.7 Bucket 3. Eight are capabilities-JSON theater that v0.6.3.1 Capabilities v2 makes honest. The remaining thirteen distribute cleanly across v0.6.3.1 / v0.7 / v0.8 / v0.9 / v1.0.
 
