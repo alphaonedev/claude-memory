@@ -6,7 +6,7 @@
 use crate::models::GovernancePolicy;
 use crate::{db, validate};
 use serde_json::{Value, json};
-pub(crate) fn handle_namespace_set_standard(
+pub fn handle_namespace_set_standard(
     conn: &rusqlite::Connection,
     params: &Value,
 ) -> Result<Value, String> {
@@ -23,26 +23,50 @@ pub(crate) fn handle_namespace_set_standard(
 
     // Task 1.8: optional governance policy merged into the standard memory's
     // metadata.governance. Policy is deserialized + validated before write.
+    //
+    // v0.7.0 G-PHASE-E-2 (#707) — DO NOT strip "extra" fields from the
+    // governance blob. The pre-#707 path round-tripped the incoming
+    // governance JSON through the typed `GovernancePolicy` struct, which
+    // only carries the whitelist (write/promote/delete/approver/inherit/
+    // max_reflection_depth). Any other key — most notably
+    // `require_approval_above_depth`, which is a free-function look-up
+    // (`storage::resolve_require_approval_above_depth`) outside the
+    // typed struct — was silently dropped on re-serialisation. Operators
+    // who set `require_approval_above_depth` on a memory and later
+    // touched `memory_namespace_set_standard` for any reason lost that
+    // gate without any error or log.
+    //
+    // The fix: take the existing standard memory's `metadata.governance`
+    // (if any) as the base, layer the incoming `g` on top key-by-key,
+    // validate the merged blob's typed shape, and write the FULL merged
+    // JSON back — so unknown-to-the-struct fields on either side survive
+    // the round-trip.
     let governance_val = params.get("governance").filter(|v| !v.is_null());
     if let Some(g) = governance_val {
-        let policy: crate::models::GovernancePolicy =
-            serde_json::from_value(g.clone()).map_err(|e| format!("invalid governance: {e}"))?;
-        validate::validate_governance_policy(&policy).map_err(|e| e.to_string())?;
-
-        // Load the standard memory, merge metadata.governance, write back.
+        // Load the standard memory first so we can read its existing
+        // governance blob and merge.
         let mut mem = db::get(conn, id)
             .map_err(|e| e.to_string())?
             .ok_or_else(|| format!("memory not found: {id}"))?;
+        // Compute the merged governance JSON: existing fields preserved,
+        // incoming overrides applied per-key.
+        let merged = merge_governance_fields(mem.metadata.get("governance"), g);
+        // Validate the typed shape of the result. Deserialising drops
+        // unknown fields but the typed sub-set must still parse + pass
+        // policy validation — this catches operator typos in known
+        // fields without rejecting extras like
+        // `require_approval_above_depth`.
+        let policy: crate::models::GovernancePolicy = serde_json::from_value(merged.clone())
+            .map_err(|e| format!("invalid governance: {e}"))?;
+        validate::validate_governance_policy(&policy).map_err(|e| e.to_string())?;
+
         let mut metadata = if mem.metadata.is_object() {
             mem.metadata.clone()
         } else {
             serde_json::json!({})
         };
         if let Some(obj) = metadata.as_object_mut() {
-            obj.insert(
-                "governance".to_string(),
-                serde_json::to_value(&policy).map_err(|e| e.to_string())?,
-            );
+            obj.insert("governance".to_string(), merged);
         }
         let (found, _) = db::update(
             conn,
@@ -212,6 +236,39 @@ pub(super) fn auto_register_path_hierarchy(conn: &rusqlite::Connection, namespac
         }
         current = dir.parent().map(std::path::Path::to_path_buf);
     }
+}
+
+/// v0.7.0 G-PHASE-E-2 (#707) — merge an incoming governance JSON blob
+/// onto an existing one, key-by-key. The incoming blob's keys override
+/// the existing ones; keys present only on the existing blob (e.g. an
+/// operator-set `require_approval_above_depth`) survive untouched.
+///
+/// Both sides are treated as JSON objects — non-object inputs (or
+/// missing `existing`) collapse to "use the incoming side wholesale".
+/// Returns a fresh `serde_json::Value::Object` so the caller can
+/// re-serialise without aliasing the input slots.
+fn merge_governance_fields(
+    existing: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = serde_json::Map::new();
+    if let Some(existing_obj) = existing.and_then(serde_json::Value::as_object) {
+        for (k, v) in existing_obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(incoming_obj) = incoming.as_object() {
+        for (k, v) in incoming_obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    } else {
+        // Incoming is not an object — fall back to the incoming value
+        // wholesale so callers can still pass primitives through (the
+        // typed deserialise on the caller side will reject anything
+        // structurally wrong).
+        return incoming.clone();
+    }
+    serde_json::Value::Object(merged)
 }
 
 // ---------------------------------------------------------------------------

@@ -371,9 +371,14 @@ pub use capabilities::{
 };
 pub use find_paths::handle_find_paths;
 pub use load_family::{handle_load_family, handle_smart_load};
-pub(crate) use namespace::{
-    handle_namespace_clear_standard, handle_namespace_get_standard, handle_namespace_set_standard,
-};
+pub(crate) use namespace::{handle_namespace_clear_standard, handle_namespace_get_standard};
+// v0.7.0 G-PHASE-E-2 (#707) — promoted to `pub` so the integration
+// regression at `tests/g_phase_e_2_namespace_set_standard_governance_passthrough.rs`
+// can exercise the merge path directly. The handler is still routed
+// through the MCP dispatch above; the `pub` re-export is purely so
+// external test harnesses can pin the substrate behaviour without
+// going through stdio JSON-RPC.
+pub use namespace::handle_namespace_set_standard;
 pub(crate) use notify::{handle_inbox, handle_notify};
 pub use pending::{handle_pending_approve, handle_pending_reject};
 pub use quota_status::handle_quota_status;

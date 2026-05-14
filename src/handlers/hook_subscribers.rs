@@ -937,6 +937,31 @@ fn namespace_standard_params(ns: &str, body: &NamespaceStandardBody) -> serde_js
     params
 }
 
+/// v0.7.0 G-PHASE-E-2 (#707) — merge an incoming governance JSON blob
+/// onto an existing one, key-by-key. Mirrors the helper in
+/// `mcp::tools::namespace`. Incoming keys override existing ones; keys
+/// present only on the existing blob (e.g. an operator-set
+/// `require_approval_above_depth`) survive untouched.
+fn merge_governance_fields_http(
+    existing: Option<&serde_json::Value>,
+    incoming: &serde_json::Value,
+) -> serde_json::Value {
+    let mut merged = serde_json::Map::new();
+    if let Some(existing_obj) = existing.and_then(serde_json::Value::as_object) {
+        for (k, v) in existing_obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    }
+    if let Some(incoming_obj) = incoming.as_object() {
+        for (k, v) in incoming_obj {
+            merged.insert(k.clone(), v.clone());
+        }
+    } else {
+        return incoming.clone();
+    }
+    serde_json::Value::Object(merged)
+}
+
 async fn set_namespace_standard_inner(
     app: &AppState,
     ns: &str,
@@ -1017,18 +1042,33 @@ async fn set_namespace_standard_inner(
         // metadata has no `governance` key, returns `None`, and the
         // intruder's write is allowed through.
         if let Some(g) = body.governance.clone() {
-            // Validate the policy before persisting (mirrors the SQLite
-            // path at mcp.rs:5183).
-            let policy: crate::models::GovernancePolicy = match serde_json::from_value(g.clone()) {
-                Ok(p) => p,
-                Err(e) => {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(json!({"error": format!("invalid governance: {e}")})),
-                    )
-                        .into_response();
-                }
+            // Load the standard memory FIRST so we can merge the
+            // incoming `g` onto the existing `metadata.governance`
+            // blob — this preserves extra fields like
+            // `require_approval_above_depth` that live outside the
+            // typed `GovernancePolicy` struct (v0.7.0 G-PHASE-E-2,
+            // #707). Mirrors the SQLite handler's merge in
+            // `mcp::tools::namespace::handle_namespace_set_standard`.
+            let standard_mem = match app.store.get(&ctx, &standard_id).await {
+                Ok(m) => m,
+                Err(e) => return store_err_to_response(e),
             };
+            let merged = merge_governance_fields_http(standard_mem.metadata.get("governance"), &g);
+            // Validate the merged blob's typed shape. Deserialising
+            // drops unknown fields but the typed sub-set must still
+            // parse + pass policy validation. Mirrors the SQLite path
+            // at `mcp::tools::namespace`.
+            let policy: crate::models::GovernancePolicy =
+                match serde_json::from_value(merged.clone()) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        return (
+                            StatusCode::BAD_REQUEST,
+                            Json(json!({"error": format!("invalid governance: {e}")})),
+                        )
+                            .into_response();
+                    }
+                };
             if let Err(e) = validate::validate_governance_policy(&policy) {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -1036,21 +1076,13 @@ async fn set_namespace_standard_inner(
                 )
                     .into_response();
             }
-            // Load the standard memory, merge metadata.governance, write back.
-            let standard_mem = match app.store.get(&ctx, &standard_id).await {
-                Ok(m) => m,
-                Err(e) => return store_err_to_response(e),
-            };
             let mut metadata = if standard_mem.metadata.is_object() {
                 standard_mem.metadata.clone()
             } else {
                 json!({})
             };
             if let Some(obj) = metadata.as_object_mut() {
-                obj.insert(
-                    "governance".to_string(),
-                    serde_json::to_value(&policy).unwrap_or(g.clone()),
-                );
+                obj.insert("governance".to_string(), merged);
             }
             let patch = crate::store::UpdatePatch {
                 metadata: Some(metadata),
