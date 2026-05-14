@@ -311,6 +311,18 @@ harness = false
 name = "reflect"
 harness = false
 
+# v0.7.0 L3-1 (issue #674) — LongMemEval-Reflection benchmark. Drives
+# the curator's reflection-pass + the substrate reflect_with_hooks
+# path against a deterministic 50-scenario synthetic dataset. CI runs
+# with the deterministic Gemma-4-stub judge (token-Jaccard); a real
+# Gemma 4 wrapper swaps in at publish time without touching the
+# runner. The bench's `--test` flag drives a 6-scenario smoke (~3s).
+# Full run reports coverage / accuracy / depth-violation / sig-verify
+# / throughput against the spec gates and exits non-zero on any miss.
+[[bench]]
+name = "longmemeval_reflection"
+harness = false
+
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/ai-memory-{ target }.tar.gz"
 bin-dir = "ai-memory"
