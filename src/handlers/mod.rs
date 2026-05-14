@@ -962,6 +962,10 @@ mod tests {
             verify_require_nonce: false,
             autonomous_hooks: false,
             recall_scope: Arc::new(None),
+            // v0.7.0 Policy-Engine Item 3 — tests don't spawn the
+            // drainer; the queue is None and the storage hook is
+            // intentionally absent in test_app_state scaffolds.
+            deferred_audit_queue: Arc::new(None),
         }
     }
 
@@ -1621,6 +1625,7 @@ mod tests {
             verify_require_nonce: false,
             autonomous_hooks: false,
             recall_scope: Arc::new(None),
+            deferred_audit_queue: Arc::new(None),
         };
         let router = Router::new()
             .route("/api/v1/memories/bulk", axum_post(bulk_create))
@@ -9833,6 +9838,7 @@ mod tests {
             verify_require_nonce: false,
             autonomous_hooks: false,
             recall_scope: Arc::new(None),
+            deferred_audit_queue: Arc::new(None),
         }
     }
 

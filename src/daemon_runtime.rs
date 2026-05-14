@@ -1911,11 +1911,30 @@ pub async fn bootstrap_serve(
     // ALLOW with a WARN: a transient FS issue must not wedge the
     // write surface, and the operator can detect the degradation
     // from the log surface.
+    //
+    // v0.7.0 Policy-Engine Item 3 (2026-05-14) — the hook now also
+    // submits every refusal to the process-wide deferred-audit
+    // queue via `check_agent_action_deferred`. The queue's
+    // background drainer task chain-logs each refusal as a
+    // `governance.refusal` row in `signed_events` AFTER the
+    // in-flight `storage::insert` transaction has released its
+    // lock. This closes the cryptographic-log gap that the prior
+    // `_no_audit` variant left open (refusals were typed but not
+    // chain-logged; the deadlock-avoidance came at the cost of
+    // breaking the bypass-impossibility audit story for storage
+    // writes).
+    let (deferred_audit_queue, deferred_audit_supervisor) =
+        crate::governance::deferred_audit::install_deferred_audit_drainer(db_path);
+    tracing::info!(
+        "policy-engine item 3: deferred-audit drainer spawned (chain-logs \
+         storage refusals as `governance.refusal` rows in signed_events)"
+    );
     {
         use crate::governance::agent_action::{
-            AgentAction, Decision as RuleDecision, check_agent_action_no_audit,
+            AgentAction, Decision as RuleDecision, check_agent_action_deferred,
         };
         let rules_db_path = db_path.to_path_buf();
+        let queue_for_hook = deferred_audit_queue.clone();
         let install_result = crate::storage::GOVERNANCE_PRE_WRITE.set(Box::new(
             move |mem: &crate::models::Memory| -> std::result::Result<(), String> {
                 let conn_for_check = match db::open(&rules_db_path) {
@@ -1939,11 +1958,29 @@ pub async fn bootstrap_serve(
                         "title": mem.title,
                     }),
                 };
-                match check_agent_action_no_audit(&conn_for_check, &action) {
+                // Resolve the agent_id from the memory's metadata
+                // (every substrate-written memory carries it under
+                // `metadata.agent_id` — see CLAUDE.md §"Agent
+                // Identity"). Fall back to a stable hook-source tag
+                // when the metadata key is missing so the audit row
+                // still attributes the refusal.
+                let agent_id = mem
+                    .metadata
+                    .get("agent_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("substrate:pre_write_hook")
+                    .to_string();
+                match check_agent_action_deferred(
+                    &conn_for_check,
+                    &agent_id,
+                    &action,
+                    &queue_for_hook,
+                ) {
                     Ok(RuleDecision::Allow | RuleDecision::Warn { .. }) => Ok(()),
                     Ok(RuleDecision::Refuse { rule_id, reason }) => {
                         tracing::info!(
-                            "L1-6 governance pre-write refused namespace={:?} rule_id={} reason={}",
+                            "L1-6 governance pre-write refused namespace={:?} rule_id={} \
+                             reason={} (chain-logged via deferred audit queue)",
                             mem.namespace,
                             rule_id,
                             reason
@@ -1973,7 +2010,7 @@ pub async fn bootstrap_serve(
         } else {
             tracing::info!(
                 "L1-6 governance pre-write hook installed (substrate-authoritative \
-                 memory_write gate active)"
+                 memory_write gate active + deferred chain-log on refusal)"
             );
         }
     }
@@ -2262,7 +2299,21 @@ pub async fn bootstrap_serve(
         // `[agents.defaults.recall_scope]`. None preserves v0.6.x
         // recall semantics (no splice on session_default=true).
         recall_scope: Arc::new(app_config.effective_recall_scope().cloned()),
+        // v0.7.0 Policy-Engine Item 3 — deferred-audit producer handle.
+        // Always Some on bootstrap_serve (the drainer was spawned
+        // above before the storage hook installed). Wrapped in
+        // Arc<Option<...>> per the AppState clone-cheap idiom.
+        deferred_audit_queue: Arc::new(Some(deferred_audit_queue)),
     };
+
+    // v0.7.0 Policy-Engine Item 3 — register the deferred-audit
+    // supervisor task with the task_handles vec so `serve()` aborts
+    // it on shutdown. The supervisor wraps the drainer with panic
+    // recovery + graceful drain of buffered events when the queue is
+    // closed. This MUST be in `task_handles` so the test assertion in
+    // `test_bootstrap_serve_keyword_tier_no_embedder` updates its
+    // expected count accordingly.
+    task_handles.push(deferred_audit_supervisor);
 
     // Automatic GC.
     task_handles.push(spawn_gc_loop(
@@ -3059,6 +3110,7 @@ mod tests {
             verify_require_nonce: false,
             autonomous_hooks: false,
             recall_scope: Arc::new(None),
+            deferred_audit_queue: Arc::new(None),
         }
     }
 
@@ -3559,17 +3611,18 @@ mod tests {
         assert!(bs.app_state.embedder.is_none());
         let vi = bs.app_state.vector_index.lock().await;
         assert!(vi.is_none());
-        // Five task handles spawned (gc + wal_checkpoint + v0.7 K2
-        // pending_actions timeout sweep + v0.7 I3 transcript
+        // Six task handles spawned (v0.7 policy-engine item 3 added
+        // the deferred-audit supervisor + gc + wal_checkpoint +
+        // v0.7 K2 pending_actions timeout sweep + v0.7 I3 transcript
         // archive→prune lifecycle sweep + v0.7 K8 agent_quotas
         // daily-counter reset sweep). v0.7 B3-fix2 gates the
         // family-descriptor embedding precompute behind
         // `AI_MEMORY_PRECOMPUTE_FAMILY_EMBEDDINGS=1` (default OFF) so
         // it does not contend with HTTP request-path embeds under
         // parallel CI load — see the gate site in `bootstrap_serve`
-        // for the rationale. The task count reverts to five when the
+        // for the rationale. The task count reverts to six when the
         // env var is unset.
-        assert_eq!(bs.task_handles.len(), 5);
+        assert_eq!(bs.task_handles.len(), 6);
         // Cleanly abort the spawned tasks so they don't leak across tests.
         for h in bs.task_handles {
             h.abort();

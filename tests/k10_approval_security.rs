@@ -94,6 +94,7 @@ fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
         verify_require_nonce: false,
         autonomous_hooks: false,
         recall_scope: std::sync::Arc::new(None),
+        deferred_audit_queue: std::sync::Arc::new(None),
     };
     let api_key_state = ai_memory::handlers::ApiKeyState { key: None };
     let router = ai_memory::build_router(api_key_state, app_state);

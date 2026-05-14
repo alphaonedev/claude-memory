@@ -64,6 +64,7 @@ fn build_test_router() -> (axum::Router, std::path::PathBuf, NamedTempFile) {
         verify_require_nonce: false,
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
+        deferred_audit_queue: Arc::new(None),
     };
     let api_key_state = ApiKeyState { key: None };
     let router = ai_memory::build_router(api_key_state, app_state);

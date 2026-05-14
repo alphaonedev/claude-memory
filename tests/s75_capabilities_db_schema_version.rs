@@ -90,6 +90,7 @@ fn build_sqlite_app_state() -> (AppState, tempfile::NamedTempFile) {
         verify_require_nonce: false,
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
+        deferred_audit_queue: Arc::new(None),
     };
     (state, tmp)
 }

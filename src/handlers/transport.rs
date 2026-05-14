@@ -227,6 +227,26 @@ pub struct AppState {
     /// cheap and the absent case (every deployment that hasn't
     /// opted in yet) is a single `Arc<None>`.
     pub recall_scope: Arc<Option<crate::config::RecallScope>>,
+
+    /// v0.7.0 Policy-Engine Item 3 (2026-05-14) — deferred-audit
+    /// queue handle. Captures every `governance.refusal` event
+    /// from the storage `GOVERNANCE_PRE_WRITE` hook and submits it
+    /// to a background drainer task that chain-logs the refusal to
+    /// `signed_events` on a FRESH `Connection` (separate from the
+    /// substrate writer's connection — closes the re-entrant-deadlock
+    /// gap the old `_no_audit` variant traded the chain-log property
+    /// for).
+    ///
+    /// The queue is `Clone` (cheap `Arc` semantics over an mpsc
+    /// sender) so each callsite (storage hook closure, future MCP
+    /// `governance_state` tool, future Prometheus scrape) can hold
+    /// its own producer handle without contention.
+    ///
+    /// Always present on `bootstrap_serve` — the drainer is spawned
+    /// unconditionally before the storage hook installs. The
+    /// `Option<...>` shape lets tests inject `None` in scaffolds
+    /// that don't need the audit chain.
+    pub deferred_audit_queue: Arc<Option<crate::governance::deferred_audit::DeferredAuditQueue>>,
 }
 
 /// v0.7.0 B3 — canonical 1-2 sentence English descriptors for each

@@ -140,6 +140,7 @@ async fn build_postgres_app_state(
         verify_require_nonce: false,
         autonomous_hooks: false,
         recall_scope: Arc::new(None),
+        deferred_audit_queue: Arc::new(None),
     }
 }
 
