@@ -319,6 +319,18 @@ pub struct GovernancePolicy {
     /// payloads byte-identical for legacy peers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_reflection_depth: Option<u32>,
+    /// v0.7.0 QW-1 — when `Some(true)`, the `post_reflect` substrate
+    /// hook deferred-spawns a filesystem write of the reflection
+    /// markdown to `~/.ai-memory/reflections/<namespace>/<id>.md` so
+    /// operators can `cat` the reflection chain without learning SQL.
+    /// Inherits via the same leaf-first ancestor walk as every other
+    /// field on this struct (G1 governance). `None` / `Some(false)`
+    /// keeps the substrate quiet — the canonical reflection is the
+    /// SQL row, never the file. `skip_serializing_if = "Option::is_none"`
+    /// keeps the absent shape on the wire for pre-QW-1 federation
+    /// peers (no payload-byte drift, no replication regressions).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_export_reflections_to_filesystem: Option<bool>,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -351,6 +363,11 @@ impl Default for GovernancePolicy {
             // and `effective_max_reflection_depth` resolves to the
             // compiled default of 3.
             max_reflection_depth: None,
+            // v0.7.0 QW-1: default to "do not write reflections to
+            // disk". The substrate stays SQL-canonical out of the
+            // box; operators opt in per-namespace by setting this to
+            // `Some(true)` on the namespace standard's governance blob.
+            auto_export_reflections_to_filesystem: None,
         }
     }
 }
@@ -387,6 +404,10 @@ impl GovernancePolicy {
             // `max_reflection_depth` unset so operators get the
             // compiled-in default (3) until they explicitly override.
             max_reflection_depth: None,
+            // v0.7.0 QW-1: file-backed export stays opt-in even for
+            // managed namespaces — operators may want governance
+            // enforcement WITHOUT plaintext reflections on disk.
+            auto_export_reflections_to_filesystem: None,
         }
     }
 
@@ -417,6 +438,20 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_max_reflection_depth(&self) -> u32 {
         self.max_reflection_depth.unwrap_or(3)
+    }
+
+    /// v0.7.0 QW-1 — resolve the file-backed-export policy. Returns
+    /// `false` (substrate stays SQL-canonical) when the namespace has
+    /// no explicit override. `Some(true)` opts the namespace into the
+    /// deferred filesystem write in the substrate `post_reflect` hook.
+    ///
+    /// Inheritance is **not** walked here — the caller resolves the
+    /// most-specific policy via `resolve_governance_policy` and then
+    /// queries this accessor on the result, mirroring how
+    /// `effective_max_reflection_depth` is consumed.
+    #[must_use]
+    pub fn effective_auto_export_reflections_to_filesystem(&self) -> bool {
+        self.auto_export_reflections_to_filesystem.unwrap_or(false)
     }
 }
 

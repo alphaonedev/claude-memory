@@ -85,6 +85,7 @@ fn approve_write_policy() -> GovernancePolicy {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: None,
+        auto_export_reflections_to_filesystem: None,
     }
 }
 

@@ -623,6 +623,7 @@ mod tests {
         let now = Utc::now().to_rfc3339();
         let policy = crate::models::GovernancePolicy {
             max_reflection_depth: Some(cap),
+            auto_export_reflections_to_filesystem: None,
             ..crate::models::GovernancePolicy::default()
         };
         let mut metadata = default_metadata();

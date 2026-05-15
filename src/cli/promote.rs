@@ -181,6 +181,7 @@ mod tests {
             approver: ApproverType::Human,
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         let conn = db::open(db_path).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

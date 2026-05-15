@@ -443,6 +443,56 @@ are the procurement-grade audit path for reflection chains: a
 single tar an external auditor can re-verify with no daemon state,
 just the public keys of the signing agents.
 
+## File-backed export
+
+v0.7.0 QW-1 ships `ai-memory export-reflections` — a CLI subcommand
+that walks every reflection memory under a namespace and writes a
+YAML-frontmatter markdown file per row to
+`~/.ai-memory/reflections/<namespace>/<id>.md`. Operators can `cat`
+or `grep` the directory to inspect the reflection chain without
+opening a `sqlite3` shell. The on-disk artefact is **derived** —
+the SQL row stays canonical; the directory is safe to delete and
+regenerate.
+
+```bash
+# Bulk export, operator-driven.
+ai-memory export-reflections \
+    --namespace team/alpha \
+    --out-dir ~/.ai-memory/reflections \
+    --format md \
+    --since 2026-05-01T00:00:00Z
+
+cat ~/.ai-memory/reflections/team/alpha/<id>.md
+grep -c reflects_on: ~/.ai-memory/reflections/team/alpha/*.md
+```
+
+Frontmatter fields (in this order): `memory_id`, `namespace`,
+`title`, `reflection_depth`, `attest_level` (highest attestation
+level across the row's outbound `reflects_on` edges), `created_at`,
+`agent_id`, then a sequence-shaped `reflects_on` block listing
+target ids + per-edge attest levels. Body is the reflection's
+`content` field, untouched.
+
+The companion MCP tool `memory_export_reflection` returns the
+rendered content + a suggested filename without touching the
+filesystem — the agent harness owns disk I/O so the substrate
+stays under the operator's capability gate. Symmetric with
+`memory_skill_export` (L1-5).
+
+Per-namespace auto-export: setting
+`governance.auto_export_reflections_to_filesystem: true` on a
+namespace standard installs a `post_reflect` substrate hook that
+deferred-spawns the disk write inside the substrate process the
+moment a reflection commits. The hook is non-blocking (worker
+thread + own connection) and notify-class (failure logs, never
+propagates to the caller). Default is `false` — the substrate is
+SQL-canonical out of the box; opt-in per-namespace via the same G1
+inheritance walk every other policy field uses.
+
+See [`cookbook/file-backed-export/01-export-and-inspect.sh`](../cookbook/file-backed-export/01-export-and-inspect.sh)
+for a runnable demo (5 reflections, export, `cat`, `grep` —
+reproducible in under 3 minutes).
+
 ## Substrate authority claim — v0.7.0 Option B foundation
 
 v0.7.0 ships **Option B** of the substrate-authority programme:

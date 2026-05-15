@@ -273,6 +273,7 @@ fn explicit_cap_one_refuses_depth_two_reflection() {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: Some(1),
+        auto_export_reflections_to_filesystem: None,
     };
     seed_policy(&conn, "task4-cap-one", &policy);
 
@@ -314,6 +315,7 @@ fn cap_zero_disables_every_reflection() {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: Some(0),
+        auto_export_reflections_to_filesystem: None,
     };
     seed_policy(&conn, "task4-cap-zero", &policy);
 

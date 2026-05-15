@@ -10074,6 +10074,7 @@ mod tests {
             approver: ApproverType::Human,
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -10200,6 +10201,7 @@ mod tests {
             approver: ApproverType::Human,
             inherit: false,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();

@@ -95,6 +95,7 @@ fn effective_max_reflection_depth_explicit_override_returns_value() {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: Some(7),
+        auto_export_reflections_to_filesystem: None,
     };
     assert_eq!(p.effective_max_reflection_depth(), 7);
 }
@@ -115,6 +116,7 @@ fn effective_max_reflection_depth_some_zero_disables_reflection() {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: Some(0),
+        auto_export_reflections_to_filesystem: None,
     };
     assert_eq!(
         p.effective_max_reflection_depth(),
@@ -131,6 +133,7 @@ fn effective_max_reflection_depth_some_one_returns_one() {
     // disable sentinel.
     let p = GovernancePolicy {
         max_reflection_depth: Some(1),
+        auto_export_reflections_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 1);
@@ -145,6 +148,7 @@ fn effective_max_reflection_depth_high_override_returns_value() {
     // is a pure resolver.
     let p = GovernancePolicy {
         max_reflection_depth: Some(255),
+        auto_export_reflections_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 255);
@@ -258,6 +262,7 @@ fn serialize_policy_with_explicit_field_writes_key_on_the_wire() {
     // `Some(0)` (which would silently drop the disable sentinel).
     let p = GovernancePolicy {
         max_reflection_depth: Some(0),
+        auto_export_reflections_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     let json = serde_json::to_value(&p).expect("serialize");
@@ -281,6 +286,7 @@ fn full_roundtrip_with_explicit_field() {
         approver: ApproverType::Agent("maintainer".to_string()),
         inherit: true,
         max_reflection_depth: Some(4),
+        auto_export_reflections_to_filesystem: None,
     };
     let json = serde_json::to_string(&p).expect("serialize");
     let back: GovernancePolicy = serde_json::from_str(&json).expect("deserialize");

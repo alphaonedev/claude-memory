@@ -59,8 +59,9 @@ fn k8_quota_status_loaded_under_full_profile() {
     );
     assert_eq!(
         Profile::full().expected_tool_count(),
-        63,
-        "tool count cascade must advance to 63 with v0.7.0 L2-3 \
+        64,
+        "tool count cascade must advance to 64 with v0.7.0 QW-1 \
+         memory_export_reflection on top of L2-3 \
          memory_dependents_of_invalidated, v0.7.0 L2-6 \
          memory_skill_promote_from_reflection, and v0.7.0 L2-7 \
          memory_skill_compositional_context on top of v0.7.0 issue #691 \

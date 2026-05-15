@@ -809,6 +809,19 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_export_reflection",
+                "description": "Render a single reflection memory as markdown or JSON (no filesystem write).",
+                "docs": "v0.7.0 QW-1 — render a reflection memory plus its `reflects_on` provenance as a YAML-frontmatter markdown document (default) or as a structured JSON envelope. Returns `{content, suggested_filename}`. The handler does NOT write to the filesystem — the agent harness owns disk I/O so the substrate stays under the operator's capability gate. Pair with the `ai-memory export-reflections` CLI when operator-driven bulk export is wanted. Errors: `memory not found`, `memory is not a reflection`, `unsupported export format`.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "string", "description": "Memory ID of a Reflection-kind memory (created via memory_reflect)."},
+                        "format": {"type": "string", "enum": ["md", "json"], "default": "md", "description": "Output format. `md` is YAML-frontmatter markdown; `json` is a structured envelope mirroring the same fields."}
+                    },
+                    "required": ["memory_id"]
+                }
+            },
+            {
                 "name": "memory_reflection_origin",
                 "description": "Inspect the cross-peer provenance of a reflection memory.",
                 "docs": "v0.7.0 L2-2 (S6-M1) — returns the structured `{memory_id, peer_origin, signing_agent, original_depth, local_depth_at_arrival, is_reflection}` envelope describing where a reflection row originated. `peer_origin` is the substrate identity of the peer that pushed the row to this host via `sync_push`; `signing_agent` is the original author (NHI agent_id) preserved across federation; `original_depth` is the `reflection_depth` column value as delivered; `local_depth_at_arrival` is the receiver's effective `max_reflection_depth` cap at the moment the row arrived. Non-reflection memories (depth == 0) return a well-formed envelope with `is_reflection = false` rather than a 404. Unknown ids → error.",

@@ -320,6 +320,9 @@ mod recall;
 mod reflect;
 #[path = "tools/reflection_origin.rs"]
 mod reflection_origin;
+// v0.7.0 QW-1 — file-backed reflection chain export.
+#[path = "tools/export_reflection.rs"]
+mod export_reflection;
 // v0.7.0 L2-3 (issue #668) — Reflection invalidation propagation.
 #[path = "tools/dependents_of_invalidated.rs"]
 mod dependents_of_invalidated;
@@ -456,6 +459,7 @@ use detect_contradiction::handle_detect_contradiction;
 use entity_get_by_alias::handle_entity_get_by_alias;
 use entity_register::handle_entity_register;
 use expand_query::handle_expand_query;
+use export_reflection::handle_export_reflection;
 use forget::{handle_forget, handle_stats};
 use get::handle_get;
 use get_taxonomy::handle_get_taxonomy;
@@ -1006,6 +1010,12 @@ fn handle_request(
                 "memory_rule_list" => handle_rule_list(conn, arguments),
                 // v0.7.0 L2-2 (S6-M1) — cross-peer reflection provenance.
                 "memory_reflection_origin" => handle_reflection_origin(conn, arguments),
+                // v0.7.0 QW-1 — render a single reflection memory's
+                // markdown / JSON envelope. Agent-side formatting
+                // only; the substrate never writes to the filesystem
+                // from this path (capability isolation — see
+                // `mcp::tools::export_reflection` module doc).
+                "memory_export_reflection" => handle_export_reflection(conn, arguments),
                 // v0.7.0 L2-3 (issue #668) — read-side surface for the
                 // dependents of an invalidated reflection. Pure
                 // read-only — the walker itself fires from the
@@ -1516,9 +1526,12 @@ mod tests {
         // reflections become skills become reusable knowledge.
         // v0.7.0 L2-7 (issue #672) adds memory_skill_compositional_context
         // (Family::Other) → 63 — reflection-skill composition declaration.
+        // v0.7.0 QW-1 adds memory_export_reflection (Family::Power) → 64 —
+        // file-backed reflection chain export companion to the
+        // `ai-memory export-reflections` CLI subcommand.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 63);
+        assert_eq!(tools.len(), 64);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1573,7 +1586,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            63,
+            64,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1585,7 +1598,8 @@ mod tests {
              v0.7.0 (issue #691) memory_check_agent_action + memory_rule_list (2) + \
              v0.7.0 L1-5 5×memory_skill_* (5) + \
              v0.7.0 L2-6 memory_skill_promote_from_reflection (1) + \
-             v0.7.0 L2-7 memory_skill_compositional_context (1) = 63"
+             v0.7.0 L2-7 memory_skill_compositional_context (1) + \
+             v0.7.0 QW-1 memory_export_reflection (1) = 64"
         );
     }
 
@@ -9772,6 +9786,7 @@ mod tests {
                         approver: ApproverType::Human,
                         inherit: false,
                         max_reflection_depth: None,
+                        auto_export_reflections_to_filesystem: None,
                     }
                 }),
                 reflection_depth: 0,
@@ -9829,6 +9844,7 @@ mod tests {
                         approver: ApproverType::Agent("not-me".to_string()),
                         inherit: false,
                         max_reflection_depth: None,
+                        auto_export_reflections_to_filesystem: None,
                     }
                 }),
                 reflection_depth: 0,

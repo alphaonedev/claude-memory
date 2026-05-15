@@ -181,7 +181,35 @@ pub(super) fn handle_reflect(
     // string shape so Task 5/8 can match on the prefix when wiring the
     // `signed_events` audit emission (and so the HTTP layer can map it
     // back to the typed `MemoryError::ReflectionDepthExceeded` variant).
-    let outcome = match db::reflect(conn, &input) {
+    //
+    // v0.7.0 QW-1 — when the resolved namespace policy opts into
+    // `auto_export_reflections_to_filesystem`, install the
+    // `post_reflect` hook that deferred-spawns the markdown disk
+    // write. The hook is a Box<dyn Fn> spawning std::thread::spawn,
+    // so the response path stays as fast as the unhooked write.
+    let hooks = {
+        let target_ns = input.namespace.clone().or_else(|| {
+            input
+                .source_ids
+                .first()
+                .and_then(|id| db::get(conn, id).ok().flatten())
+                .map(|m| m.namespace)
+        });
+        let auto_export = target_ns
+            .as_deref()
+            .and_then(|ns| db::resolve_governance_policy(conn, ns))
+            .map(|p| p.effective_auto_export_reflections_to_filesystem())
+            .unwrap_or(false);
+        if auto_export {
+            crate::hooks::post_reflect::build_post_reflect_hook(
+                db_path.to_path_buf(),
+                crate::hooks::post_reflect::AutoExportConfig::default_for_home(),
+            )
+        } else {
+            db::ReflectHooks::empty()
+        }
+    };
+    let outcome = match db::reflect_with_hooks(conn, &input, &hooks) {
         Ok(o) => o,
         Err(db::ReflectError::Validation(m)) => return Err(m),
         Err(db::ReflectError::SourceNotFound(id)) => {

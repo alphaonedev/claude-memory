@@ -117,6 +117,7 @@ fn set_governance_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
     let now = Utc::now().to_rfc3339();
     let policy = GovernancePolicy {
         max_reflection_depth: Some(cap),
+        auto_export_reflections_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     let mut metadata = default_metadata();
