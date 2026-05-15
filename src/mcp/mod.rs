@@ -274,6 +274,8 @@ mod consolidate;
 // v0.7.0 WT-1-C — curator-pass atomisation tool (memory_atomise).
 #[path = "tools/atomise.rs"]
 mod atomise;
+// v0.7.0 Form 3 (issue #756) — multi-step ingest orchestrator tool.
+// Surfaces the [`crate::multistep_ingest`] subsystem at Family::Power.
 #[path = "tools/delete.rs"]
 mod delete;
 #[path = "tools/detect_contradiction.rs"]
@@ -292,6 +294,8 @@ mod forget;
 mod get;
 #[path = "tools/get_taxonomy.rs"]
 mod get_taxonomy;
+#[path = "tools/ingest_multistep.rs"]
+mod ingest_multistep;
 #[path = "tools/kg_invalidate.rs"]
 mod kg_invalidate;
 #[path = "tools/kg_query.rs"]
@@ -463,6 +467,12 @@ pub fn tools_check_agent_action_mutation_disabled_error() -> &'static str {
 pub mod tools {
     pub use super::atomise::{AtomiseToolHandler, handle_atomise};
 
+    // v0.7.0 Form 3 (issue #756) — multi-step ingest orchestrator
+    // handler + bundle. Integration test at
+    // `tests/form_3_multistep_ingest.rs` drives the handler directly
+    // through this re-export.
+    pub use super::ingest_multistep::{IngestMultistepHandler, handle_ingest_multistep};
+
     /// v0.7.x Form 1/2 acceptance tests need to drive the `memory_store`
     /// MCP write path from an integration test crate. Thin pass-through
     /// to the internal `handle_store` dispatch. Not part of the supported
@@ -510,6 +520,7 @@ use check_duplicate::handle_check_duplicate;
 use consolidate::handle_consolidate;
 // v0.7.0 WT-1-C — `memory_atomise` MCP tool wiring.
 use atomise::handle_atomise;
+// v0.7.0 Form 3 (issue #756) — `memory_ingest_multistep` MCP tool wiring.
 use delete::handle_delete;
 use dependents_of_invalidated::handle_dependents_of_invalidated;
 use detect_contradiction::handle_detect_contradiction;
@@ -520,6 +531,7 @@ use export_reflection::handle_export_reflection;
 use forget::{handle_forget, handle_stats};
 use get::handle_get;
 use get_taxonomy::handle_get_taxonomy;
+use ingest_multistep::handle_ingest_multistep;
 use kg_invalidate::handle_kg_invalidate;
 use kg_query::handle_kg_query;
 use kg_timeline::handle_kg_timeline;
@@ -719,6 +731,10 @@ fn handle_request(
     // when an LLM is wired (smart/autonomous tier); `None` collapses
     // the dispatch path to a tier-locked advisory envelope.
     atomise_handler: Option<&atomise::AtomiseToolHandler>,
+    // v0.7.0 Form 3 (issue #756) — `memory_ingest_multistep` handler
+    // bundle. `Some` when an LLM is wired; `None` collapses to the
+    // tier-locked advisory.
+    ingest_multistep_handler: Option<&ingest_multistep::IngestMultistepHandler>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -879,6 +895,12 @@ fn handle_request(
                     tier_config.tier,
                     mcp_client,
                 ),
+                // v0.7.0 Form 3 (issue #756) — multi-step ingest
+                // orchestrator. Tier-gated to smart+; the keyword tier
+                // short-circuits with the standard advisory envelope.
+                "memory_ingest_multistep" => {
+                    handle_ingest_multistep(arguments, ingest_multistep_handler, tier_config.tier)
+                }
                 // v0.7.0 Task 4/8 (recursive learning, issue #655) —
                 // substrate-native reflection primitive. See
                 // `handle_reflect` for the contract.
@@ -1543,6 +1565,25 @@ pub fn run_mcp_server(
             None
         };
 
+    // v0.7.0 Form 3 (issue #756) — `memory_ingest_multistep` MCP tool
+    // wiring. The handler is built only when an LLM is available
+    // (Form 3 LLM stages require the smart/autonomous tier). On
+    // keyword/semantic tiers the handler is wired as `None` and the
+    // dispatch returns the tier-locked advisory envelope.
+    let ingest_multistep_handler: Option<std::sync::Arc<ingest_multistep::IngestMultistepHandler>> =
+        if let Some(ref llm_client) = llm {
+            let dispatch: std::sync::Arc<dyn crate::multistep_ingest::LlmDispatch> =
+                std::sync::Arc::new(crate::multistep_ingest::executor::OllamaDispatch::new(
+                    llm_client.clone(),
+                ));
+            eprintln!("ai-memory: multi-step ingest orchestrator ready (Form 3)");
+            Some(std::sync::Arc::new(
+                ingest_multistep::IngestMultistepHandler::new(dispatch, tier_config.tier),
+            ))
+        } else {
+            None
+        };
+
     // Captured from the MCP `initialize` handshake's `clientInfo.name`.
     // Used by `crate::identity` to synthesize an `ai:<client>@<host>:pid-<pid>`
     // agent_id when the caller doesn't supply one explicitly.
@@ -1615,6 +1656,7 @@ pub fn run_mcp_server(
             app_config.mcp_federation_forward_url.as_deref(),
             resolved_recall_scope,
             atomise_handler.as_deref(),
+            ingest_multistep_handler.as_deref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -1675,7 +1717,7 @@ mod tests {
         // (Family::Power) → 69 — Persona-as-artifact substrate.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 69);
+        assert_eq!(tools.len(), 70);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1730,7 +1772,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            69,
+            70,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1746,7 +1788,8 @@ mod tests {
              v0.7.0 QW-1 memory_export_reflection (1) + \
              v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) + \
              v0.7.0 WT-1-C memory_atomise (1) + \
-             v0.7.0 QW-2 memory_persona + memory_persona_generate (2) = 69"
+             v0.7.0 QW-2 memory_persona + memory_persona_generate (2) + \
+             v0.7.0 Form 3 memory_ingest_multistep (1) = 70"
         );
     }
 
@@ -2340,6 +2383,7 @@ mod tests {
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
                 None, // atomise_handler (WT-1-C)
+                None, // ingest_multistep_handler (Form 3 / #756)
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -2397,6 +2441,7 @@ mod tests {
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
                 None, // atomise_handler (WT-1-C)
+                None, // ingest_multistep_handler (Form 3 / #756)
             );
             // Handler errs are returned as ok_response with isError=true,
             // not RpcError, by design (the JSON-RPC layer is reserved for
@@ -2775,6 +2820,7 @@ mod tests {
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
                 None, // atomise_handler (WT-1-C)
+                None, // ingest_multistep_handler (Form 3 / #756)
             );
             assert!(
                 resp.error.is_none(),
@@ -2818,6 +2864,7 @@ mod tests {
                     None, // federation_forward_url (#318)
                     None, // recall_scope (#518)
                     None, // atomise_handler (WT-1-C)
+                    None, // ingest_multistep_handler (Form 3 / #756)
                 );
 
                 // Missing required args should produce an error response (handler returns Err)
@@ -2878,6 +2925,7 @@ mod tests {
             None, // federation_forward_url (#318)
             None, // recall_scope (#518)
             None, // atomise_handler (WT-1-C)
+            None, // ingest_multistep_handler (Form 3 / #756)
         )
     }
 
@@ -3253,6 +3301,7 @@ mod tests {
             None, // federation_forward_url (#318)
             None, // recall_scope (#518)
             None, // atomise_handler (WT-1-C)
+            None, // ingest_multistep_handler (Form 3 / #756)
         );
         assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
         let text = resp.result.unwrap()["content"][0]["text"]

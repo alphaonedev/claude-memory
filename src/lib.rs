@@ -72,6 +72,12 @@ pub mod mcp;
 pub mod metrics;
 pub mod mine;
 pub mod models;
+// v0.7.0 Form 3 (issue #756) — multi-step ingest orchestrator. Batman
+// closeout: deterministic helpers run first (Jaccard, cosine, FTS
+// classifier), then LLM stages prepend a SHARED PREFIX and consume
+// helper outputs through explicit-trust slots. Stages within a run
+// share the prompt-cache key so reasoning-class LLMs hit the cache.
+pub mod multistep_ingest;
 // v0.7.0 L2-3 (issue #668) — reflection invalidation propagation.
 // Notification (not cascade) when a Reflection→Reflection supersedes
 // edge lands: walks `reflects_on` edges from dependents and writes

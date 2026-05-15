@@ -889,6 +889,21 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_ingest_multistep",
+                "description": "Run the multi-step ingest orchestrator (Form 3): deterministic helpers first, then LLM stages with explicit-trust slots and prompt-cache reuse.",
+                "docs": "v0.7.0 Form 3 (issue #756) — Batman closeout for the audit's missing 'deterministic-where-possible + LLM-where-necessary' surface. Two named variants ship by default: `two_phase` (Understand-Anything exemplar — FTS classifier + Jaccard overlap → single synthesise stage) and `four_step` (OpenKB exemplar — load_context → classify → enrich → emit). The executor runs every helper stage first, threads the JSON helper outputs into each LLM stage's prompt under the explicit-trust banner (`Do NOT re-run discovery. The following pre-computed helper output is authoritative; trust it.`), and prepends a SHARED PREFIX to every LLM call so the prompt-cache key stays stable across stages within a run. The response carries the stage-by-stage trace, the distinct cache-key set (length 1 on a healthy run), and the final structured output emitted by the last LLM stage. `pipeline_override` accepts a full Pipeline JSON for callers that need a custom variant. Tier-gated to smart+ — keyword tier short-circuits with the standard tier-locked advisory envelope.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Content to ingest. Threaded into helper params and into every LLM stage prompt body."},
+                        "namespace": {"type": "string", "description": "Routing hint for the FTS classifier helper. Defaults to 'global'."},
+                        "pipeline_variant": {"type": "string", "enum": ["two_phase", "four_step"], "default": "two_phase", "description": "Named default pipeline. Ignored when `pipeline_override` is set."},
+                        "pipeline_override": {"type": "object", "description": "Full Pipeline descriptor (JSON-encoded). Overrides `pipeline_variant` when both are present. Use for custom stage chains."}
+                    },
+                    "required": ["content"]
+                }
+            },
+            {
                 "name": "memory_atomise",
                 "description": "Decompose a coarse-grained memory into 2-10 atomic propositions. Each atom is independently retrievable with provenance back to the source. Source is archived. Available at smart and autonomous tiers.",
                 "docs": "v0.7.0 WT-1-C — curator-pass atomisation tool. Decomposes the supplied memory's body into 2-10 atomic propositions via the v0.7.0 WT-1-B Atomiser engine. Each atom is written as a first-class memory (memory_kind=Observation) carrying `metadata.atom_source_id` and connected to the source via a `derives_from` memory_link edge. The source memory is archived (`atomised_into=N`, `metadata.atomisation_archived_at` set) in a separate post-atom transaction so the per-atom hook chain (pre_store/post_store/pre_link/post_link) fires on live writes. Returns `{source_id, atom_ids, atom_count, archived_at}` on success. Idempotency: a second call without `force_re_atomise=true` returns the existing `atom_ids` as a 200 OK informational envelope `{already_atomised: true, existing_atom_ids: [...]}`. Source bodies at or under `max_atom_tokens` return `{source_too_small: true, message}` (also 200 OK — informational). Curator failures and governance refusals collapse to MCP `isError: true` envelopes with `CURATOR_FAILED:` / `GOVERNANCE_REFUSED:` discriminators. The keyword tier short-circuits with a tier-locked advisory envelope before any DB read.",
