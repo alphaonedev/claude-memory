@@ -333,6 +333,18 @@ impl LlmGenerate for crate::llm::OllamaClient {
     }
 }
 
+/// Pass-through impl for `Arc<OllamaClient>` — lets the MCP wiring at
+/// `mcp::run_mcp_server` share the daemon's existing `Arc<OllamaClient>`
+/// across the auto-tag / expand-query / detect-contradiction surface
+/// and the WT-1-C atomiser without cloning the underlying connection
+/// pool.
+impl LlmGenerate for std::sync::Arc<crate::llm::OllamaClient> {
+    fn generate(&self, prompt: &str, system: Option<&str>) -> Result<String, CuratorError> {
+        crate::llm::OllamaClient::generate(self.as_ref(), prompt, system)
+            .map_err(|e| CuratorError::LlmUnavailable(e.to_string()))
+    }
+}
+
 impl<L: LlmGenerate + Send + Sync> LlmCurator<L> {
     /// Construct a curator with the supplied LLM and the real
     /// `std::thread::sleep` for retry backoff.

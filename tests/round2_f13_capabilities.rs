@@ -88,12 +88,12 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     // memory_offload + memory_deref to Family::Power — bumping the
     // substantive total from 52 to 65.
     assert!(
-        summary.contains("65 of 65 memory tools"),
-        "summary must report 65 of 65 memory tools; got: {summary}"
+        summary.contains("66 of 66 memory tools"),
+        "summary must report 66 of 66 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 65 memory tools"),
-        "describe_to_user must report all 65 memory tools; got: {describe}"
+        describe.contains("all 66 memory tools"),
+        "describe_to_user must report all 66 memory tools; got: {describe}"
     );
 }
 
@@ -113,8 +113,8 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     // memory_offload + memory_deref to Family::Power — bumping the
     // substantive total from 52 to 65.
     assert!(
-        summary.contains("7 of 65 memory tools"),
-        "summary must report 7 of 65 memory tools; got: {summary}"
+        summary.contains("7 of 66 memory tools"),
+        "summary must report 7 of 66 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

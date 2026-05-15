@@ -191,7 +191,12 @@ impl Family {
             // `core` surface unchanged (semantic-tier+ exposure per the
             // QW-3 brief).
             | "memory_offload"
-            | "memory_deref" => Some(Self::Power),
+            | "memory_deref"
+            // v0.7.0 WT-1-C — curator-pass atomisation tool. Lives in
+            // the same family/profile group as memory_consolidate and
+            // memory_reflect (semantic+ tier; the keyword tier short-
+            // circuits with a tier-locked advisory envelope).
+            | "memory_atomise" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -273,8 +278,10 @@ impl Family {
             // reflection chain export) +
             // 2 (v0.7.0 QW-3 follow-up — memory_offload + memory_deref,
             // context-offload substrate primitive surfaced at the
-            // semantic-tier+ Power family) = 17.
-            Self::Power => 17,
+            // semantic-tier+ Power family) +
+            // 1 (v0.7.0 WT-1-C — memory_atomise, curator-pass
+            // decomposition into 2-10 atomic propositions) = 18.
+            Self::Power => 18,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -396,6 +403,11 @@ impl Family {
                 // handlers themselves live at src/mcp/tools/offload.rs.
                 "memory_offload",
                 "memory_deref",
+                // v0.7.0 WT-1-C — curator-pass atomisation tool.
+                // Decomposes a coarse memory into 2-10 atomic
+                // propositions; archives the source. Lives in Power
+                // alongside memory_consolidate / memory_reflect.
+                "memory_atomise",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -695,7 +707,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 66,
+            total, 67,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -708,7 +720,8 @@ mod tests {
              v0.7.0 L2-6 `memory_skill_promote_from_reflection` + \
              v0.7.0 L2-7 `memory_skill_compositional_context` + \
              v0.7.0 QW-1 `memory_export_reflection` + \
-             v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` = 66. \
+             v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` + \
+             v0.7.0 WT-1-C `memory_atomise` = 67. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -795,7 +808,8 @@ mod tests {
         // v0.7.0 QW-1 — Power got memory_export_reflection (+1 → 15).
         // v0.7.0 QW-3 follow-up — Power got memory_offload + memory_deref
         // (context-offload substrate primitive, +2 → 17).
-        assert_eq!(p.expected_tool_count(), 7 + 17);
+        // v0.7.0 WT-1-C — Power got memory_atomise (+1 → 18).
+        assert_eq!(p.expected_tool_count(), 7 + 18);
     }
 
     #[test]
@@ -811,13 +825,14 @@ mod tests {
         // 5×memory_skill_* (L1-5) + memory_skill_promote_from_reflection
         // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) +
         // memory_export_reflection (QW-1) +
-        // memory_offload + memory_deref (QW-3 follow-up, Family::Power) = 66.
-        assert_eq!(p.expected_tool_count(), 66);
+        // memory_offload + memory_deref (QW-3 follow-up, Family::Power) +
+        // memory_atomise (WT-1-C, Family::Power) = 67.
+        assert_eq!(p.expected_tool_count(), 67);
 
         // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
-        // additions live in Family::Power (operator/governance), so the
-        // `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 17);
+        // + WT-1-C additions live in Family::Power (operator/governance),
+        // so the `power` profile picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 18);
     }
 
     // ---------- Profile::parse ----------
@@ -1015,10 +1030,12 @@ mod tests {
             // v0.7.0 QW-3 follow-up — context-offload substrate (Family::Power).
             "memory_offload",
             "memory_deref",
+            // v0.7.0 WT-1-C (curator-pass atomisation) — Family::Power.
+            "memory_atomise",
         ];
         assert_eq!(
             baseline.len(),
-            62,
+            63,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
@@ -1029,7 +1046,8 @@ mod tests {
              1 (v0.7.0 L2-6 memory_skill_promote_from_reflection) + \
              1 (v0.7.0 L2-7 memory_skill_compositional_context) + \
              1 (v0.7.0 QW-1 memory_export_reflection) + \
-             2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) = 62"
+             2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) + \
+             1 (v0.7.0 WT-1-C memory_atomise) = 63"
         );
         for name in baseline {
             assert!(

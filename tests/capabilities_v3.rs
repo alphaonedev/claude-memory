@@ -179,21 +179,22 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // bumped via v0.7.0 L1-5 5×memory_skill_* + v0.7.0 L2-7
     // memory_skill_compositional_context).
     assert!(
-        summary.starts_with("7 of 65 memory tools"),
-        "core profile summary should open with \"7 of 65 memory tools\" (Round-2 F13; \
+        summary.starts_with("7 of 66 memory tools"),
+        "core profile summary should open with \"7 of 66 memory tools\" (Round-2 F13; \
          v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list, \
          v0.7.0 L1-5 added 5 memory_skill_* tools to Family::Other, v0.7.0 L2-3 \
          added memory_dependents_of_invalidated to Family::Power, v0.7.0 L2-6 \
          added memory_skill_promote_from_reflection to Family::Other, v0.7.0 \
          L2-7 added memory_skill_compositional_context to Family::Other, v0.7.0 \
-         QW-1 added memory_export_reflection to Family::Power, and v0.7.0 QW-3 \
-         follow-up added memory_offload + memory_deref to Family::Power — \
-         bumping the substantive total from 52 to 65); got: {summary}"
+         QW-1 added memory_export_reflection to Family::Power, v0.7.0 QW-3 \
+         follow-up added memory_offload + memory_deref to Family::Power, and \
+         v0.7.0 WT-1-C added memory_atomise to Family::Power — \
+         bumping the substantive total from 52 to 66); got: {summary}"
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("58 are listed in this manifest"),
-        "core profile must report 58 unloaded (65 - 7); got: {summary}"
+        summary.contains("59 are listed in this manifest"),
+        "core profile must report 59 unloaded (66 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -230,15 +231,16 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
     // 5 memory_skill_* tools to Family::Other, bumping the substantive
     // total from 51 to 56.
     assert!(
-        summary.starts_with("65 of 65 memory tools"),
-        "full profile summary should open with \"65 of 65 memory tools\" (Round-2 F13; \
+        summary.starts_with("66 of 66 memory tools"),
+        "full profile summary should open with \"66 of 66 memory tools\" (Round-2 F13; \
          v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list, \
          v0.7.0 L1-5 added 5 memory_skill_* tools, v0.7.0 L2-3 added \
          memory_dependents_of_invalidated, v0.7.0 L2-6 added \
          memory_skill_promote_from_reflection, v0.7.0 L2-7 added \
          memory_skill_compositional_context, v0.7.0 QW-1 added \
-         memory_export_reflection, and v0.7.0 QW-3 follow-up added \
-         memory_offload + memory_deref); got: {summary}"
+         memory_export_reflection, v0.7.0 QW-3 follow-up added \
+         memory_offload + memory_deref, and v0.7.0 WT-1-C added \
+         memory_atomise); got: {summary}"
     );
     assert!(summary.contains("(full)"));
     assert!(
@@ -265,19 +267,20 @@ fn cap_v3_summary_graph_profile_counts() {
     // memory tools. Total = 55 (56 - bootstrap; v0.7.0 L1-5 added 5
     // memory_skill_* tools to Family::Other, bumping total from 51 to 56).
     assert!(
-        summary.starts_with("18 of 65 memory tools"),
+        summary.starts_with("18 of 66 memory tools"),
         "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18 memory tools \
          (Round-2 F13: bootstrap excluded; v0.7.0 issue #691 added two power tools, \
          v0.7.0 L1-5 added 5 memory_skill_* tools to Family::Other, v0.7.0 L2-3 \
          added memory_dependents_of_invalidated, v0.7.0 L2-6 added \
          memory_skill_promote_from_reflection, v0.7.0 L2-7 added \
          memory_skill_compositional_context, v0.7.0 QW-1 added \
-         memory_export_reflection, and v0.7.0 QW-3 follow-up added \
-         memory_offload + memory_deref to Family::Power, bumping the substantive \
-         total from 52 to 65); got: {summary}"
+         memory_export_reflection, v0.7.0 QW-3 follow-up added \
+         memory_offload + memory_deref to Family::Power, and v0.7.0 WT-1-C \
+         added memory_atomise to Family::Power, bumping the substantive \
+         total from 52 to 66); got: {summary}"
     );
     assert!(summary.contains("(graph)"));
-    assert!(summary.contains("47 are listed in this manifest"));
+    assert!(summary.contains("48 are listed in this manifest"));
 }
 
 // ---------------------------------------------------------------------------
@@ -377,15 +380,16 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
     // for honest user-facing counting. Total bumped to 56 in v0.7.0
     // L1-5 (Family::Other gained 5 memory_skill_* tools).
     assert!(
-        describe.contains("58 more"),
-        "core profile must report 58 unloaded (65 - 7); v0.7.0 issue #691 \
+        describe.contains("59 more"),
+        "core profile must report 59 unloaded (66 - 7); v0.7.0 issue #691 \
          added memory_check_agent_action + memory_rule_list, v0.7.0 L1-5 added \
          5 memory_skill_* tools, v0.7.0 L2-3 added \
          memory_dependents_of_invalidated, v0.7.0 L2-6 added \
          memory_skill_promote_from_reflection, v0.7.0 L2-7 added \
          memory_skill_compositional_context, v0.7.0 QW-1 added \
-         memory_export_reflection, and v0.7.0 QW-3 follow-up added \
-         memory_offload + memory_deref, bumping the substantive total to 65; \
+         memory_export_reflection, v0.7.0 QW-3 follow-up added \
+         memory_offload + memory_deref, and v0.7.0 WT-1-C added \
+         memory_atomise, bumping the substantive total to 66; \
          got: {describe}"
     );
     // Sample of unloaded tools is plain (no memory_ prefix). The first
@@ -433,7 +437,7 @@ fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     // (memory_export_reflection, Family::Power); to 65 with QW-3 follow-up
     // (memory_offload + memory_deref, Family::Power).
     assert!(
-        describe.starts_with("I can directly use all 65 memory tools right now ("),
+        describe.starts_with("I can directly use all 66 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -456,11 +460,12 @@ fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     );
     // Preview is the first 5 of the 18 loaded — the first 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
-    // 47 more = 65 substantive - 18 loaded. L2-3 + L2-6 + L2-7 each
+    // 48 more = 66 substantive - 18 loaded. L2-3 + L2-6 + L2-7 each
     // added one tool not loaded under graph (42 → 43 → 44); QW-1 added
     // memory_export_reflection to Family::Power (44 → 45); QW-3 follow-up
-    // added memory_offload + memory_deref to Family::Power (45 → 47).
-    assert!(describe.contains("47 more"));
+    // added memory_offload + memory_deref to Family::Power (45 → 47);
+    // WT-1-C added memory_atomise to Family::Power (47 → 48).
+    assert!(describe.contains("48 more"));
 }
 
 // ---------------------------------------------------------------------------
@@ -644,8 +649,8 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
         .expect("top-level tools must be present and an array under v3");
     assert_eq!(
         tools.len(),
-        66,
-        "v3 must surface all 66 tools regardless of profile (v0.7.0 I4 added \
+        67,
+        "v3 must surface all 67 tools regardless of profile (v0.7.0 I4 added \
          memory_replay; v0.7 H4 added memory_verify; v0.7 B1 added \
          memory_load_family; v0.7 B2 added memory_smart_load; v0.7 K7 added \
          memory_subscription_replay + memory_subscription_dlq_list; v0.7 J7 \
@@ -657,7 +662,7 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
          memory_skill_promote_from_reflection; v0.7.0 L2-7 added \
          memory_skill_compositional_context; v0.7.0 QW-1 added \
          memory_export_reflection; v0.7.0 QW-3 follow-up added \
-         memory_offload + memory_deref); got {}",
+         memory_offload + memory_deref; v0.7.0 WT-1-C added memory_atomise); got {}",
         tools.len()
     );
 
