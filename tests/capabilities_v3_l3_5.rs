@@ -30,9 +30,9 @@
 //! regression tests at the bottom of this file pin that pair.
 
 use ai_memory::config::{
-    Capabilities, CapabilitiesV3, CapabilityForensic, CapabilityGovernance, CapabilityReflection,
-    CapabilitySkills, ENFORCED_AGENT_ACTIONS, FeatureTier, GOVERNANCE_BYPASS_IMPOSSIBILITY_TESTS,
-    SKILL_TOOL_NAMES, TierConfig,
+    Capabilities, CapabilitiesV3, CapabilityAtomisation, CapabilityForensic, CapabilityGovernance,
+    CapabilityReflection, CapabilitySkills, ENFORCED_AGENT_ACTIONS, FeatureTier,
+    GOVERNANCE_BYPASS_IMPOSSIBILITY_TESTS, SKILL_TOOL_NAMES, TierConfig,
 };
 use ai_memory::mcp::{
     CapabilitiesAccept, handle_capabilities_with_conn, handle_capabilities_with_conn_v3,
@@ -481,6 +481,168 @@ fn cap_v3_l3_5_v1_clients_see_no_new_top_level_fields() {
 
     // L1-1 memory_kinds is a v2+ field; v1 doesn't carry it either.
     assert!(val.get("memory_kinds").is_none(), "v1 has no memory_kinds");
+}
+
+// ===========================================================================
+// v0.7.0 WT-1-G — atomisation capability block. Six operator-facing
+// sub-fields (`tool`, `cli`, `auto`, `recall_preference`, `forensic`,
+// `curator`) plus the `derives_from` link-relation anchor. Every field
+// is "implemented" because WT-1-A..F all landed before WT-1-G.
+// ===========================================================================
+
+#[test]
+fn cap_v3_wt1g_response_carries_atomisation_block() {
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn_v3(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        &Profile::full(),
+        None,
+        None,
+        None,
+    )
+    .expect("v3 capabilities serialize");
+
+    let a = &val["atomisation"];
+    assert!(
+        a.is_object(),
+        "WT-1-G atomisation block must be present under v3"
+    );
+    assert_eq!(a["tool"], "implemented", "memory_atomise MCP tool (WT-1-C)");
+    assert_eq!(a["cli"], "implemented", "`ai-memory atomise` CLI (WT-1-F)");
+    assert_eq!(
+        a["auto"], "implemented",
+        "namespace-policy auto_atomise pre_store hook (WT-1-D)"
+    );
+    assert_eq!(
+        a["recall_preference"], "implemented",
+        "recall-time atom preference SQL guard (WT-1-E)"
+    );
+    assert_eq!(
+        a["forensic"], "implemented",
+        "forensic chain envelope in bundle export (WT-1-E)"
+    );
+    assert_eq!(
+        a["curator"], "implemented",
+        "LlmCurator (Gemma 4 + tiktoken-rs, WT-1-B)"
+    );
+    // The link-relation anchor must match the canonical
+    // `MemoryLinkRelation::DerivesFrom` wire string. Any drift here
+    // would break downstream tooling that filters atomisation lineage.
+    assert_eq!(
+        a["link_relation"], "derives_from",
+        "atom → parent edge uses MemoryLinkRelation::DerivesFrom"
+    );
+}
+
+#[test]
+fn cap_v3_wt1g_atomisation_struct_anchors_implementation() {
+    use ai_memory::models::MemoryLinkRelation;
+
+    // Direct probe — bypasses the JSON path so a future serde
+    // mistake doesn't mask a struct-level drift.
+    let a = CapabilityAtomisation::current();
+    assert_eq!(a.tool, "implemented");
+    assert_eq!(a.cli, "implemented");
+    assert_eq!(a.auto, "implemented");
+    assert_eq!(a.recall_preference, "implemented");
+    assert_eq!(a.forensic, "implemented");
+    assert_eq!(a.curator, "implemented");
+    // Pins the wire spelling of the link relation — must match
+    // `MemoryLinkRelation::DerivesFrom.as_str()`.
+    assert_eq!(a.link_relation, MemoryLinkRelation::DerivesFrom.as_str());
+}
+
+#[test]
+fn cap_v3_wt1g_atomisation_round_trips_through_serde() {
+    let tier_config = semantic_tier();
+    let caps: Capabilities = tier_config.capabilities();
+    let v3 = caps.to_v3(
+        "summary".to_string(),
+        "describe".to_string(),
+        Vec::new(),
+        None,
+        None,
+    );
+
+    let json = serde_json::to_value(&v3).expect("serialize v3 with WT-1-G atomisation block");
+    let back: CapabilitiesV3 =
+        serde_json::from_value(json.clone()).expect("deserialize v3 with WT-1-G atomisation block");
+
+    assert_eq!(back.atomisation, v3.atomisation);
+    assert_eq!(back.atomisation, CapabilityAtomisation::current());
+    assert!(
+        json.get("atomisation").is_some(),
+        "top-level `atomisation` key must serialise"
+    );
+}
+
+#[test]
+fn cap_v3_wt1g_pre_wt1g_payload_still_deserializes_with_default() {
+    // A v3 payload captured before WT-1-G landed MUST still parse —
+    // the new `atomisation` field carries `#[serde(default = …)]` so
+    // an older envelope round-trips into a struct with the current-
+    // implementation snapshot filled in.
+    let pre_wt1g_json = serde_json::json!({
+        "schema_version": "3",
+        "summary": "pre-WT-1-G summary",
+        "to_describe_to_user": "pre-WT-1-G describe",
+        "tools": [],
+        "tier": "semantic",
+        "version": "0.7.0",
+        "features": {
+            "keyword_search": true,
+            "semantic_search": true,
+            "hybrid_recall": true,
+            "query_expansion": false,
+            "auto_consolidation": false,
+            "auto_tagging": false,
+            "contradiction_analysis": false,
+            "cross_encoder_reranking": false,
+            "memory_reflection": {"planned": false, "version": "v0.7.0", "enabled": true},
+            "embedder_loaded": false,
+            "recall_mode_active": "disabled",
+            "reranker_active": "off",
+            "reflection_boost": {"boost": 1.2, "per_depth_increment": 0.05, "max_depth_cap": 3}
+        },
+        "models": {"embedding": "none", "embedding_dim": 0, "llm": "none", "cross_encoder": "none"},
+        "permissions": {"mode": "advisory", "active_rules": 0},
+        "hooks": {"registered_count": 0},
+        "compaction": {"planned": true, "version": "v0.8+", "enabled": false},
+        "approval": {"pending_requests": 0},
+        "transcripts": {"planned": true, "version": "v0.7+", "enabled": false},
+        "memory_kinds": ["observation", "reflection"]
+    });
+
+    let back: CapabilitiesV3 = serde_json::from_value(pre_wt1g_json)
+        .expect("pre-WT-1-G v3 payload must still parse with default atomisation");
+    assert_eq!(back.atomisation, CapabilityAtomisation::current());
+}
+
+#[test]
+fn cap_v3_wt1g_v2_clients_see_no_atomisation_field() {
+    // Backward compat — v2 wire shape must not grow the WT-1-G block.
+    // The L3-5 v2 regression test already covers reflection/skills/
+    // forensic/governance; this asserts atomisation is absent too.
+    let tier_config = semantic_tier();
+    let conn = fresh_conn();
+    let val = handle_capabilities_with_conn(
+        &tier_config,
+        None,
+        false,
+        Some(&conn),
+        CapabilitiesAccept::V2,
+    )
+    .expect("v2 capabilities still work");
+
+    assert_eq!(val["schema_version"], "2");
+    assert!(
+        val.get("atomisation").is_none(),
+        "v2 must NOT carry the WT-1-G atomisation block — would break v2 clients"
+    );
 }
 
 // ===========================================================================

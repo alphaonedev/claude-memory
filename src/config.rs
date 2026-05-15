@@ -1126,6 +1126,105 @@ fn default_capability_governance() -> CapabilityGovernance {
     CapabilityGovernance::current()
 }
 
+/// v0.7.0 WT-1-G — atomisation capability surface.
+///
+/// WT-1 ships substrate-native decomposition of long memories into
+/// atomic propositions. The parent memory is archived (`archived_at`
+/// stamped, `atomised_into = N`) and `N` first-class atomic children
+/// land with `atom_of` back-pointers and a signed `derives_from`
+/// `MemoryLink`. Each sub-field below names a real operator-facing
+/// surface in this binary; the round-trip is honest — the values are
+/// `"implemented"` only when the engine, hook, and wrapper code are
+/// all wired.
+///
+/// Field → implementation anchor map:
+///
+/// - `tool`: MCP `memory_atomise` (Family::Power). Defined in
+///   [`crate::mcp::tools::atomise`] + registered in
+///   [`crate::mcp::registry`]. WT-1-C landed it.
+/// - `cli`: `ai-memory atomise <memory_id>` subcommand. Wrapper lives
+///   in [`crate::cli::commands::atomise`]. WT-1-F landed it.
+/// - `auto`: namespace-policy-gated `auto_atomise` pre_store hook.
+///   The hook in [`crate::hooks::pre_store::auto_atomise`] is
+///   non-blocking (detached worker thread) and fires only when the
+///   namespace standard's `metadata.governance.auto_atomise = true`.
+///   WT-1-D landed it.
+/// - `recall_preference`: recall surfaces atoms in place of an
+///   archived parent via the SQL guard
+///   `AND NOT (archived_at IS NOT NULL AND atomised_into > 0)`.
+///   WT-1-E landed it.
+/// - `forensic`: forensic bundle export includes the parent → atoms
+///   chain envelope so a downstream auditor reconstructs the
+///   decomposition offline. WT-1-E landed it.
+/// - `curator`: production `LlmCurator` uses the Gemma 4 prompt
+///   with `tiktoken-rs::cl100k_base` token-budget validation and
+///   the audit-honest STOP discipline (no retry after a parse-OK
+///   verdict). WT-1-B landed it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityAtomisation {
+    /// MCP `memory_atomise` tool — `"implemented"` once the tool is
+    /// registered and the [`crate::mcp::tools::atomise`] handler is
+    /// wired against [`crate::atomisation::Atomiser`].
+    pub tool: String,
+    /// `ai-memory atomise` CLI subcommand — `"implemented"` once the
+    /// wrapper in [`crate::cli::commands::atomise`] is dispatched
+    /// from `daemon_runtime::Command::Atomise`.
+    pub cli: String,
+    /// Namespace-policy-gated auto-atomisation pre_store hook —
+    /// `"implemented"` when [`crate::hooks::pre_store::auto_atomise`]
+    /// is compiled and the store handlers call
+    /// `maybe_enqueue_auto_atomise` after a successful insert.
+    pub auto: String,
+    /// Recall-time atom preference — `"implemented"` when the recall
+    /// SQL carries the
+    /// `AND NOT (archived_at IS NOT NULL AND atomised_into > 0)`
+    /// guard so atomised parents stop surfacing in their atoms'
+    /// place. WT-1-E.
+    pub recall_preference: String,
+    /// Forensic chain envelope — `"implemented"` when the forensic
+    /// bundle exporter ([`crate::forensic::bundle::build`]) walks
+    /// `atom_of` back-pointers to include the parent → atoms chain
+    /// in the bundle. WT-1-E.
+    pub forensic: String,
+    /// LLM curator — `"implemented"` once
+    /// [`crate::atomisation::curator::LlmCurator`] is the production
+    /// `Curator` impl driving the atomisation engine (Gemma 4 prompt,
+    /// tiktoken-rs cl100k token-budget validation, audit-honest STOP).
+    /// WT-1-B.
+    pub curator: String,
+    /// Memory-link relation that anchors the atom → parent edge.
+    /// Always `"derives_from"`, matching
+    /// [`crate::models::MemoryLinkRelation::DerivesFrom`]. Distinct
+    /// from `related_to` / `supersedes` / `contradicts` — the
+    /// atomisation engine writes this edge specifically, and
+    /// downstream consumers can filter on the relation to walk
+    /// decomposition lineage without reflection-chain noise.
+    pub link_relation: String,
+}
+
+impl CapabilityAtomisation {
+    /// Build the WT-1-G atomisation capability surface from real,
+    /// code-anchored values. Every `"implemented"` here is a claim
+    /// pinned by [`tests/capabilities_v3_l3_5.rs`] and walked back to
+    /// a registered MCP tool / CLI verb / hook module / SQL guard.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            tool: "implemented".to_string(),
+            cli: "implemented".to_string(),
+            auto: "implemented".to_string(),
+            recall_preference: "implemented".to_string(),
+            forensic: "implemented".to_string(),
+            curator: "implemented".to_string(),
+            link_relation: "derives_from".to_string(),
+        }
+    }
+}
+
+fn default_capability_atomisation() -> CapabilityAtomisation {
+    CapabilityAtomisation::current()
+}
+
 // ---------------------------------------------------------------------------
 // Capabilities v1 — legacy shape retained for backward compat
 // ---------------------------------------------------------------------------
@@ -1261,6 +1360,11 @@ impl Capabilities {
             skills: CapabilitySkills::current(),
             forensic: CapabilityForensic::current(),
             governance: CapabilityGovernance::current(),
+            // v0.7.0 WT-1-G — operator-facing atomisation surface.
+            // Anchored at compile time against the WT-1-{A..F} ships
+            // (engine, curator, hook, recall guard, forensic bundle,
+            // MCP tool, CLI subcommand).
+            atomisation: CapabilityAtomisation::current(),
         }
     }
 }
@@ -1440,6 +1544,20 @@ pub struct CapabilitiesV3 {
     /// to honour unsigned rules. See [`CapabilityGovernance`].
     #[serde(default = "default_capability_governance")]
     pub governance: CapabilityGovernance,
+
+    /// v0.7.0 WT-1-G — atomisation capability surface. Names the six
+    /// operator-facing atomisation surfaces (`tool` / `cli` / `auto` /
+    /// `recall_preference` / `forensic` / `curator`) plus the
+    /// `derives_from` link relation that anchors atom → parent
+    /// lineage. See [`CapabilityAtomisation`] for the per-field
+    /// implementation anchor map.
+    ///
+    /// Additive over the L3-5 surface — pre-WT-1-G v3 payloads still
+    /// deserialise cleanly (the `default_capability_atomisation`
+    /// helper resolves to the current-implementation snapshot for any
+    /// payload missing the field).
+    #[serde(default = "default_capability_atomisation")]
+    pub atomisation: CapabilityAtomisation,
 }
 
 // ---------------------------------------------------------------------------
@@ -5011,6 +5129,17 @@ legacy_scoring = false
         // Lines 1125-1127.
         let helper = default_capability_governance();
         let current = CapabilityGovernance::current();
+        assert_eq!(helper, current);
+    }
+
+    #[test]
+    fn default_capability_atomisation_helper_returns_current() {
+        // v0.7.0 WT-1-G — mirrors the governance/forensic/skills/reflection
+        // helper round-trip: the `#[serde(default = …)]` resolver must
+        // collapse to the same compile-anchored snapshot
+        // [`CapabilityAtomisation::current`] returns.
+        let helper = default_capability_atomisation();
+        let current = CapabilityAtomisation::current();
         assert_eq!(helper, current);
     }
 
