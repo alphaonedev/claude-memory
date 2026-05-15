@@ -863,6 +863,20 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_atomise",
+                "description": "Decompose a coarse-grained memory into 2-10 atomic propositions. Each atom is independently retrievable with provenance back to the source. Source is archived. Available at smart and autonomous tiers.",
+                "docs": "v0.7.0 WT-1-C — curator-pass atomisation tool. Decomposes the supplied memory's body into 2-10 atomic propositions via the v0.7.0 WT-1-B Atomiser engine. Each atom is written as a first-class memory (memory_kind=Observation) carrying `metadata.atom_source_id` and connected to the source via a `derives_from` memory_link edge. The source memory is archived (`atomised_into=N`, `metadata.atomisation_archived_at` set) in a separate post-atom transaction so the per-atom hook chain (pre_store/post_store/pre_link/post_link) fires on live writes. Returns `{source_id, atom_ids, atom_count, archived_at}` on success. Idempotency: a second call without `force_re_atomise=true` returns the existing `atom_ids` as a 200 OK informational envelope `{already_atomised: true, existing_atom_ids: [...]}`. Source bodies at or under `max_atom_tokens` return `{source_too_small: true, message}` (also 200 OK — informational). Curator failures and governance refusals collapse to MCP `isError: true` envelopes with `CURATOR_FAILED:` / `GOVERNANCE_REFUSED:` discriminators. The keyword tier short-circuits with a tier-locked advisory envelope before any DB read.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memory_id": {"type": "string", "description": "UUID of the source memory to atomise."},
+                        "max_atom_tokens": {"type": "integer", "minimum": 50, "maximum": 1000, "default": 200, "description": "Per-atom token budget (cl100k_base). Out-of-range values are rejected by the input validator."},
+                        "force_re_atomise": {"type": "boolean", "default": false, "description": "When true, skip the idempotency check and mint a fresh set of atoms. Old atoms are retained (their `atom_of` pointer remains valid); `atomised_into` is bumped to the new atom_count."}
+                    },
+                    "required": ["memory_id"]
+                }
+            },
+            {
                 "name": "memory_capabilities",
                 "description": "Discover runtime capabilities; family=<name> drills in.",
                 "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget. v0.7 C4 — verbose=true also restores the FULL inputSchema (every optional param) instead of the trimmed default; the C2 docs strip and the C4 optional-params trim are both governed by the same `verbose` flag.",

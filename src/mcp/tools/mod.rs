@@ -72,6 +72,11 @@ pub(super) mod skill_compositional_context;
 // wires them into `tool_definitions_for_profile` after the
 // profile-count test fleet is rolled forward.
 pub mod offload;
+// v0.7.0 WT-1-C — `memory_atomise` MCP tool. Decomposes a coarse
+// memory into 2-10 atomic propositions via the WT-1-B Atomiser engine
+// and re-writes each atom as a first-class memory with provenance.
+// Curator-pass tool family (semantic+ tier).
+pub(super) mod atomise;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the
@@ -120,6 +125,8 @@ pub(super) use self::{
     export_reflection::handle_export_reflection,
     dependents_of_invalidated::handle_dependents_of_invalidated,
     consolidate::handle_consolidate,
+    atomise::handle_atomise,
+    atomise::AtomiseToolHandler,
     namespace::handle_namespace_set_standard,
     namespace::handle_namespace_get_standard,
     namespace::handle_namespace_clear_standard,

@@ -190,8 +190,8 @@ mod tests {
     fn table_has_51_entries_matching_tool_definitions_count() {
         let n = tool_sizes().len();
         assert_eq!(
-            n, 66,
-            "expected exactly 66 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, 67,
+            "expected exactly 67 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
              `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 \
              `memory_subscription_replay` + `memory_subscription_dlq_list` \
@@ -206,7 +206,8 @@ mod tests {
              `memory_skill_promote_from_reflection` + v0.7.0 L2-7 \
              `memory_skill_compositional_context` + v0.7.0 QW-1 \
              `memory_export_reflection` + v0.7.0 QW-3 follow-up \
-             `memory_offload` + `memory_deref`, source-anchored at \
+             `memory_offload` + `memory_deref` + v0.7.0 WT-1-C \
+             `memory_atomise`, source-anchored at \
              src/mcp.rs::tool_definitions); got {n}. If the count changed, \
              update the family map and this assertion together."
         );
@@ -255,6 +256,8 @@ mod tests {
         // (`memory_export_reflection` + `memory_offload` + `memory_deref`),
         // pushing the verbose source-of-truth total past 13K. Upper bound
         // widened to 14K.
+        // v0.7.0 WT-1-C adds memory_atomise with a long docs string
+        // (curator-pass error envelope spec); 14K bound still holds.
         assert!(
             (5_000..=14_000).contains(&total),
             "full-profile total {total} tokens is outside the measured \
@@ -262,8 +265,9 @@ mod tests {
              `docs` fields + v0.7.0 L2-2 memory_reflection_origin + \
              v0.7.0 issue #691 2 rule tools + v0.7.0 L1-5 5 skill tools + \
              v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up \
-             memory_offload + memory_deref). If the schema grew, update \
-             the public claim in RFC/README/roadmap and adjust this bound."
+             memory_offload + memory_deref + v0.7.0 WT-1-C memory_atomise). \
+             If the schema grew, update the public claim in RFC/README/\
+             roadmap and adjust this bound."
         );
     }
 

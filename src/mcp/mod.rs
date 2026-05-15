@@ -271,6 +271,9 @@ mod capabilities;
 mod check_duplicate;
 #[path = "tools/consolidate.rs"]
 mod consolidate;
+// v0.7.0 WT-1-C — curator-pass atomisation tool (memory_atomise).
+#[path = "tools/atomise.rs"]
+mod atomise;
 #[path = "tools/delete.rs"]
 mod delete;
 #[path = "tools/detect_contradiction.rs"]
@@ -446,6 +449,18 @@ pub fn tools_check_agent_action_mutation_disabled_error() -> &'static str {
     check_agent_action::MCP_MUTATION_DISABLED_ERROR
 }
 
+/// v0.7.0 WT-1-C — test-only re-export bundle for the
+/// `memory_atomise` MCP handler. Mirrors
+/// [`dispatch_handle_link_for_test`]'s rationale: the integration
+/// suite at `tests/wt1c_mcp_atomise.rs` drives the handler directly
+/// without spinning up the stdio loop, so the handler symbol and
+/// the handler bundle struct need a stable `ai_memory::mcp::tools::`
+/// path. The production wire path remains the JSON-RPC dispatch in
+/// `handle_request`.
+pub mod tools {
+    pub use super::atomise::{AtomiseToolHandler, handle_atomise};
+}
+
 // ---------------------------------------------------------------------------
 // Internal use — functions called from handle_request below.
 // Not part of the external public surface.
@@ -458,6 +473,8 @@ use archive::{
 use auto_tag::handle_auto_tag;
 use check_duplicate::handle_check_duplicate;
 use consolidate::handle_consolidate;
+// v0.7.0 WT-1-C — `memory_atomise` MCP tool wiring.
+use atomise::handle_atomise;
 use delete::handle_delete;
 use dependents_of_invalidated::handle_dependents_of_invalidated;
 use detect_contradiction::handle_detect_contradiction;
@@ -662,6 +679,10 @@ fn handle_request(
     // their `memory_recall` request before the storage call. `None`
     // (single-tenant default) preserves v0.6.x recall semantics.
     recall_scope: Option<&crate::config::RecallScope>,
+    // v0.7.0 WT-1-C — `memory_atomise` MCP tool handler bundle. `Some`
+    // when an LLM is wired (smart/autonomous tier); `None` collapses
+    // the dispatch path to a tier-locked advisory envelope.
+    atomise_handler: Option<&atomise::AtomiseToolHandler>,
 ) -> RpcResponse {
     let id = req.id.clone().unwrap_or(Value::Null);
 
@@ -809,6 +830,17 @@ fn handle_request(
                     llm,
                     embedder,
                     vector_index,
+                    mcp_client,
+                ),
+                // v0.7.0 WT-1-C — curator-pass atomisation tool. Wraps
+                // the WT-1-B Atomiser engine; tier-gates to smart+ via
+                // the handler's `tier` field. See
+                // `crate::mcp::tools::atomise` for the error mapping.
+                "memory_atomise" => handle_atomise(
+                    conn,
+                    arguments,
+                    atomise_handler,
+                    tier_config.tier,
                     mcp_client,
                 ),
                 // v0.7.0 Task 4/8 (recursive learning, issue #655) —
@@ -1436,6 +1468,34 @@ pub fn run_mcp_server(
         eprintln!("ai-memory: link signing enabled (Ed25519)");
     }
 
+    // v0.7.0 WT-1-C — `memory_atomise` MCP tool wiring. The atomiser
+    // is built ONLY when an LLM is available (curator-pass tools
+    // require the smart/autonomous tier). On the keyword and semantic
+    // tiers (no LLM), the handler is wired as `None` and the dispatch
+    // path returns the tier-locked advisory envelope.
+    let atomise_handler: Option<std::sync::Arc<atomise::AtomiseToolHandler>> =
+        if let Some(ref llm_client) = llm {
+            let curator: Box<dyn crate::atomisation::curator::Curator> = Box::new(
+                crate::atomisation::curator::LlmCurator::new(llm_client.clone()),
+            );
+            let keypair_arc = active_keypair
+                .as_ref()
+                .map(|kp| std::sync::Arc::new(kp.clone()));
+            let atomiser = std::sync::Arc::new(crate::atomisation::Atomiser::new(
+                curator,
+                keypair_arc,
+                crate::atomisation::AtomiserConfig::default(),
+                tier_config.tier,
+            ));
+            eprintln!("ai-memory: atomisation engine ready (curator=LlmCurator)");
+            Some(std::sync::Arc::new(atomise::AtomiseToolHandler::new(
+                atomiser,
+                tier_config.tier,
+            )))
+        } else {
+            None
+        };
+
     // Captured from the MCP `initialize` handshake's `clientInfo.name`.
     // Used by `crate::identity` to synthesize an `ai:<client>@<host>:pid-<pid>`
     // agent_id when the caller doesn't supply one explicitly.
@@ -1507,6 +1567,7 @@ pub fn run_mcp_server(
             detected_harness.as_ref(),
             app_config.mcp_federation_forward_url.as_deref(),
             resolved_recall_scope,
+            atomise_handler.as_deref(),
         );
         let out = serde_json::to_string(&resp)?;
         writeln!(stdout, "{out}")?;
@@ -1560,9 +1621,12 @@ mod tests {
         // v0.7.0 QW-3 follow-up adds memory_offload + memory_deref
         // (Family::Power) → 66 — context-offload substrate primitive
         // surfaced at the semantic-tier+ Power profile.
+        // v0.7.0 WT-1-C adds memory_atomise (Family::Power) → 67 —
+        // curator-pass decomposition of a memory into 2-10 atomic
+        // propositions; archives the source.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 66);
+        assert_eq!(tools.len(), 67);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1617,7 +1681,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            66,
+            67,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1631,7 +1695,8 @@ mod tests {
              v0.7.0 L2-6 memory_skill_promote_from_reflection (1) + \
              v0.7.0 L2-7 memory_skill_compositional_context (1) + \
              v0.7.0 QW-1 memory_export_reflection (1) + \
-             v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) = 66"
+             v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) + \
+             v0.7.0 WT-1-C memory_atomise (1) = 67"
         );
     }
 
@@ -2224,6 +2289,7 @@ mod tests {
                 None,
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
+                None, // atomise_handler (WT-1-C)
             );
             assert!(resp.error.is_none(), "expected ok rpc response");
         });
@@ -2280,6 +2346,7 @@ mod tests {
                 None,
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
+                None, // atomise_handler (WT-1-C)
             );
             // Handler errs are returned as ok_response with isError=true,
             // not RpcError, by design (the JSON-RPC layer is reserved for
@@ -2657,6 +2724,7 @@ mod tests {
                 None,
                 None, // federation_forward_url (#318)
                 None, // recall_scope (#518)
+                None, // atomise_handler (WT-1-C)
             );
             assert!(
                 resp.error.is_none(),
@@ -2699,6 +2767,7 @@ mod tests {
                     None,
                     None, // federation_forward_url (#318)
                     None, // recall_scope (#518)
+                    None, // atomise_handler (WT-1-C)
                 );
 
                 // Missing required args should produce an error response (handler returns Err)
@@ -2758,6 +2827,7 @@ mod tests {
             None,
             None, // federation_forward_url (#318)
             None, // recall_scope (#518)
+            None, // atomise_handler (WT-1-C)
         )
     }
 
@@ -3124,6 +3194,7 @@ mod tests {
             None,
             None, // federation_forward_url (#318)
             None, // recall_scope (#518)
+            None, // atomise_handler (WT-1-C)
         );
         assert!(resp.error.is_none(), "MCP error: {:?}", resp.error);
         let text = resp.result.unwrap()["content"][0]["text"]
