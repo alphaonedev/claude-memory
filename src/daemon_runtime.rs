@@ -392,14 +392,21 @@ pub struct GovernanceCliArgs {
     pub action: GovernanceAction,
 }
 
-/// `ai-memory governance` sub-subcommands. Today only the K11 migrator
-/// lives here; future K-track work may add more verbs (`lint`,
-/// `explain`, …) so the surface is shaped as an enum from day one.
+/// `ai-memory governance` sub-subcommands. K11 migrator + 7th-form
+/// `install-defaults` (issue #760) bulk-activator for seed rules
+/// R001-R004 live here; future K-track work may add more verbs
+/// (`lint`, `explain`, …) so the surface is shaped as an enum from
+/// day one.
 #[derive(clap::Subcommand)]
 pub enum GovernanceAction {
     /// Translate legacy [governance] policies to v0.7
     /// [[permissions.rules]] (K9 format).
     MigrateToPermissions(crate::cli::governance_migrate::MigrateToPermissionsArgs),
+    /// v0.7.0 7th-form closeout (issue #760) — flip the seeded
+    /// operator hard rules R001-R004 (migration
+    /// `0024_v07_governance_rules.sql`) to `enabled = 1`. Interactive
+    /// confirmation by default; `--yes` overrides for CI/scripts.
+    InstallDefaults(crate::cli::governance_install_defaults::InstallDefaultsArgs),
 }
 
 /// Arguments for the `doctor` subcommand. Lives next to `Cli` so clap
@@ -1174,6 +1181,9 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             match a.action {
                 GovernanceAction::MigrateToPermissions(args) => {
                     cli::governance_migrate::run(args, &mut out)
+                }
+                GovernanceAction::InstallDefaults(args) => {
+                    cli::governance_install_defaults::run(&db_path, args, &mut out)
                 }
             }
         }

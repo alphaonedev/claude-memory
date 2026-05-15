@@ -35,11 +35,35 @@
 //!   (operator-configured), not at the **agent attention** boundary
 //!   (probabilistic).
 //!
-//! This module ships **callable but un-wired** in the substrate
-//! write path. Storage::insert and `create_link_signed` do NOT
-//! consult [`check_agent_action`] in this commit — a follow-up PR
-//! wires the calls in after the operator runs the test-fleet audit
-//! and activates seed rules R001-R004.
+//! # Wired-state (v0.7.0 7th-form closeout — issue #760)
+//!
+//! This module is now **wired at the harness boundary** across four
+//! daemon-side wire-points enumerated in issue #691:
+//!
+//! | Wire-point                          | AgentAction variant   | File:line                                   |
+//! |-------------------------------------|-----------------------|---------------------------------------------|
+//! | Skill manifest emission             | `FilesystemWrite`     | `src/mcp/tools/skill_export.rs:162,209`     |
+//! | Federation peer POST                | `NetworkRequest`      | `src/federation/sync.rs:66`                 |
+//! | Hooks subprocess spawn              | `ProcessSpawn`        | `src/hooks/executor.rs:399,783`             |
+//! | LLM (Ollama / OpenAI) HTTP          | `NetworkRequest`      | `src/llm.rs:421`                            |
+//!
+//! Every wire-point calls [`crate::governance::wire_check::check`]
+//! BEFORE the external action proceeds. The daemon `bootstrap_serve`
+//! installs ONE [`crate::governance::wire_check::GOVERNANCE_PRE_ACTION`]
+//! closure that consults [`check_agent_action_no_audit`] against the
+//! operator-signed `governance_rules` table. CLI one-shot binaries
+//! never install the hook so direct operator ops stay unimpeded.
+//!
+//! The substrate-INTERNAL `Custom("memory_write")` gate runs through
+//! the parallel [`crate::storage::GOVERNANCE_PRE_WRITE`] hook.
+//!
+//! Seed rules R001-R004 land at `enabled = 0` per migration
+//! `0024_v07_governance_rules.sql`. The operator activates them via
+//! `ai-memory governance install-defaults` (or per-rule via
+//! `ai-memory rules enable <id> --sign` after running `rules keygen`).
+//! Until activation the wire is mechanically inert — the audit-honest
+//! property is that the wire EXISTS and is consulted on every external
+//! action, not that any specific rule fires by default.
 
 use std::path::PathBuf;
 

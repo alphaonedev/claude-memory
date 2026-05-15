@@ -42,10 +42,16 @@ use crate::hooks::events::MemoryDelta;
 // memory_link, ...). `agent_action` adds the parallel engine for
 // agent-EXTERNAL actions (Bash, FilesystemWrite, NetworkRequest,
 // ProcessSpawn, Custom). `rules_store` is the typed CRUD over the
-// `governance_rules` table. Both ship callable but un-wired: storage
-// write paths do NOT consult `check_agent_action` in this commit;
-// the seed rules R001-R004 land at `enabled=0` awaiting operator
-// activation via `ai-memory rules enable <id> --sign`.
+// `governance_rules` table.
+//
+// 7th-form closeout (issue #760): wired at the harness boundary
+// across the four enumerated wire-points (skill_export,
+// federation::sync, hooks::executor, llm) — see
+// `agent_action::module-docs` for the full table. Seed rules
+// R001-R004 land at `enabled=0` per migration
+// `0024_v07_governance_rules.sql`; the operator activates them via
+// `ai-memory governance install-defaults` (one-shot bulk enable)
+// or `ai-memory rules enable <id> --sign` (per-rule).
 pub mod agent_action;
 // v0.7.0 Policy-Engine Item 3 — deferred audit-log queue for
 // storage-hook refusals. Closes the cryptographic-log gap on the

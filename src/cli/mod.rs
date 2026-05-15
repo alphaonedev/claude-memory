@@ -33,6 +33,10 @@ pub mod export;
 pub mod forget;
 pub mod gc;
 pub mod governance;
+/// v0.7.0 7th-form (issue #760) — `ai-memory governance install-defaults`
+/// subcommand. Bulk-flip seed rules R001-R004 to `enabled = 1` after
+/// operator confirmation (interactive prompt; `--yes` overrides).
+pub mod governance_install_defaults;
 pub mod governance_migrate;
 pub mod helpers;
 pub mod identity;
