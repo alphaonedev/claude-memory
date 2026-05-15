@@ -330,6 +330,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();

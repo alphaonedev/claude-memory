@@ -2892,6 +2892,7 @@ pub async fn recall_memories_get(
         p.since.clone(),
         p.limit,
     );
+    let kinds = p.resolved_kinds();
     recall_response(
         &app,
         &ctx,
@@ -2905,6 +2906,7 @@ pub async fn recall_memories_get(
         tier_resolved.as_deref(),
         p.has_citations.unwrap_or(false),
         p.source_uri_prefix.as_deref(),
+        kinds.as_deref(),
     )
     .await
 }
@@ -2942,6 +2944,7 @@ pub async fn recall_memories_post(
         body.since.clone(),
         body.limit,
     );
+    let kinds = body.resolved_kinds();
     recall_response(
         &app,
         &ctx_val,
@@ -2955,6 +2958,7 @@ pub async fn recall_memories_post(
         tier_resolved.as_deref(),
         body.has_citations.unwrap_or(false),
         body.source_uri_prefix.as_deref(),
+        kinds.as_deref(),
     )
     .await
 }
@@ -3000,6 +3004,11 @@ async fn recall_response(
     // stay stable. Composes with every other filter.
     has_citations: bool,
     source_uri_prefix: Option<&str>,
+    // v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    // filter. Applied post-fetch on both the sqlite and postgres
+    // branches. `None` preserves the pre-Form-6 "no kind filter"
+    // semantics.
+    kinds_filter: Option<&[crate::models::MemoryKind]>,
 ) -> axum::response::Response {
     // `recall_scope_tier` is consumed only on the postgres SAL branch
     // (line 3026). Suppress the unused-variable lint when the sal
@@ -3089,6 +3098,15 @@ async fn recall_response(
                     has_citations,
                     source_uri_prefix,
                 );
+                // v0.7.x Form 6 — apply post-fetch kinds filter on the
+                // postgres SAL branch. OR-of-kinds within the param.
+                let scored_pairs: Vec<_> = match kinds_filter {
+                    None => scored_pairs,
+                    Some(allowed) => scored_pairs
+                        .into_iter()
+                        .filter(|(m, _)| allowed.contains(&m.memory_kind))
+                        .collect(),
+                };
                 let touch_ids: Vec<String> =
                     scored_pairs.iter().map(|(m, _)| m.id.clone()).collect();
                 let scored: Vec<serde_json::Value> = scored_pairs
@@ -3187,6 +3205,16 @@ async fn recall_response(
             // v0.7.0 Form 4 (issue #757) — fact-provenance post-filter.
             let r =
                 crate::cli::recall::apply_form4_recall_filters(r, has_citations, source_uri_prefix);
+            // v0.7.x Form 6 — apply post-fetch kinds filter on the
+            // sqlite branch. Cheap because recall already capped
+            // r.len() at limit.min(50).
+            let r: Vec<_> = match kinds_filter {
+                None => r,
+                Some(allowed) => r
+                    .into_iter()
+                    .filter(|(m, _)| allowed.contains(&m.memory_kind))
+                    .collect(),
+            };
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {

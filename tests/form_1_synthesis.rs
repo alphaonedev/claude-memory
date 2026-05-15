@@ -92,6 +92,9 @@ fn seed_existing(conn: &Connection, title: &str, content: &str, namespace: &str)
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &mem).expect("seed insert")
 }
@@ -397,6 +400,9 @@ fn synthesis_parse_response_round_trips() {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }];
     let raw = r#"{"verdicts":[{"candidate_id":"c1","verb":"delete","reason":"stale"}]}"#;
     let parsed: SynthesisResponse = parse_response(raw, &cands).unwrap();

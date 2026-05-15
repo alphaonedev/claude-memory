@@ -5,10 +5,59 @@
 
 use crate::embeddings::Embed;
 use crate::hnsw::VectorIndex;
-use crate::models::{CandidateCounts, Memory, RecallMeta, RecallTelemetry};
+use crate::models::{CandidateCounts, Memory, MemoryKind, RecallMeta, RecallTelemetry};
 use crate::reranker::BatchedReranker;
 use crate::{db, validate};
 use serde_json::{Value, json};
+
+/// v0.7.x Form 6 — parse the `kinds` recall-filter parameter from the
+/// MCP params bag. Accepts:
+///   * an array of strings: `["concept", "claim"]`
+///   * a single comma-separated string: `"concept,claim"`
+///   * the literal string `"all"` (any-of-all, equivalent to omission)
+/// Returns `None` when the field is absent or syntactically empty so
+/// callers treat that as "no kind filter". Unknown tokens are dropped
+/// silently — a future variant emitted by a newer client should not
+/// break recall on an older binary.
+fn parse_kinds_filter(params: &Value) -> Option<Vec<MemoryKind>> {
+    let raw = params.get("kinds")?;
+    if let Some(s) = raw.as_str() {
+        if s.trim().eq_ignore_ascii_case("all") {
+            return None;
+        }
+        return MemoryKind::parse_csv(s);
+    }
+    if let Some(arr) = raw.as_array() {
+        let mut out: Vec<MemoryKind> = Vec::new();
+        for v in arr {
+            if let Some(name) = v.as_str()
+                && let Some(k) = MemoryKind::from_str(name.trim())
+                && !out.contains(&k)
+            {
+                out.push(k);
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
+    } else {
+        None
+    }
+}
+
+/// v0.7.x Form 6 — apply the parsed kinds filter to a recall result
+/// set in-place. No-op when `kinds == None`. OR-of-kinds semantics:
+/// a memory passes when `kinds.contains(&memory.memory_kind)`.
+fn apply_kinds_filter(
+    results: Vec<(Memory, f64)>,
+    kinds: Option<&[MemoryKind]>,
+) -> Vec<(Memory, f64)> {
+    match kinds {
+        None => results,
+        Some(allowed) => results
+            .into_iter()
+            .filter(|(m, _)| allowed.contains(&m.memory_kind))
+            .collect(),
+    }
+}
 
 /// Build the standards-inheritance chain for a namespace, most-general
 /// first. Task 1.6 extends this from the historical 3-level scheme
@@ -203,6 +252,12 @@ pub fn handle_recall(
         .as_u64()
         .and_then(|n| usize::try_from(n).ok());
 
+    // v0.7.x Form 6 — Batman-taxonomy `kinds` filter. Parsed once
+    // and applied to every result vector below (keyword, hybrid,
+    // hybrid+rerank). OR-of-kinds within the param, AND with the
+    // other filters (namespace, tags, time window, visibility).
+    let kinds_filter = parse_kinds_filter(params);
+
     // v0.7.0 WT-1-E — atom-preference recall semantics.
     //
     // By default recall surfaces atoms in place of archived sources
@@ -371,6 +426,7 @@ pub fn handle_recall(
                 // Apply cross-encoder reranking if available
                 if let Some(ce) = reranker {
                     let ce_reranked = ce.rerank(context, results);
+                    let ce_reranked = apply_kinds_filter(ce_reranked, kinds_filter.as_deref());
                     let memories = scored_memories(ce_reranked);
                     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "hybrid+rerank"});
                     decorate_budget(&mut resp, &outcome);
@@ -379,6 +435,7 @@ pub fn handle_recall(
                     return Ok(resp);
                 }
 
+                let results = apply_kinds_filter(results, kinds_filter.as_deref());
                 let memories = scored_memories(results);
                 let mut resp =
                     json!({"memories": memories, "count": memories.len(), "mode": "hybrid"});
@@ -420,6 +477,7 @@ pub fn handle_recall(
         has_citations_filter,
         source_uri_prefix.as_deref(),
     );
+    let results = apply_kinds_filter(results, kinds_filter.as_deref());
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
     decorate_budget(&mut resp, &outcome);

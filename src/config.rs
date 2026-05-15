@@ -1226,6 +1226,80 @@ fn default_capability_atomisation() -> CapabilityAtomisation {
 }
 
 // ---------------------------------------------------------------------------
+// v0.7.x Form 6 — MemoryKind Batman-vocabulary capability surface (#759)
+// ---------------------------------------------------------------------------
+
+/// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+/// capability surface. Names the recall-filter / auto-classify
+/// surfaces shipped under Form 6.
+///
+/// Field → implementation anchor map:
+///
+/// - `vocabulary`: the complete enumerated vocabulary the substrate
+///   accepts on the `memory_kind` column. Always
+///   `["observation", "reflection", "persona", "concept", "entity",
+///   "claim", "relation", "event", "conversation", "decision"]` in
+///   v0.7.x — anchored at compile time by
+///   [`crate::models::MemoryKind::all`].
+/// - `recall_filter`: MCP `memory_recall` and HTTP recall accept a
+///   `kinds` parameter (CSV string or JSON array). `"implemented"`
+///   once the param is plumbed into [`crate::mcp::tools::recall`]
+///   and [`crate::handlers::http::recall_response`].
+/// - `cli_filter`: `ai-memory recall --kind concept,entity` CLI
+///   flag. `"implemented"` once the flag is wired in
+///   [`crate::cli::recall::RecallArgs`].
+/// - `auto_classify`: the namespace-policy-gated
+///   `pre_store::auto_classify_kind` hook. `"implemented"` once
+///   the hook module is compiled and `memory_store` calls
+///   [`crate::hooks::pre_store::maybe_auto_classify`] after policy
+///   resolution.
+/// - `auto_classify_modes`: enumerated policy modes the operator
+///   may set. Always `["off", "regex_only", "regex_then_llm"]` —
+///   anchored against [`crate::models::MemoryKindAutoClassify`].
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CapabilityMemoryKindVocab {
+    /// Complete enumerated vocabulary the substrate accepts on the
+    /// `memory_kind` column. Compile-anchored.
+    pub vocabulary: Vec<String>,
+    /// MCP `memory_recall` + HTTP recall `kinds` param wiring.
+    pub recall_filter: String,
+    /// CLI `--kind` flag wiring.
+    pub cli_filter: String,
+    /// Namespace-policy-gated auto-classify pre_store hook wiring.
+    pub auto_classify: String,
+    /// Enumerated auto-classify policy modes (`off` / `regex_only` /
+    /// `regex_then_llm`). Compile-anchored.
+    pub auto_classify_modes: Vec<String>,
+}
+
+impl CapabilityMemoryKindVocab {
+    /// Build the Form 6 memory-kind-vocab capability surface from
+    /// real, code-anchored values. Every `"implemented"` here is a
+    /// claim pinned by [`tests/form_6_memorykind_vocab.rs`].
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            vocabulary: crate::models::MemoryKind::all()
+                .iter()
+                .map(|k| k.as_str().to_string())
+                .collect(),
+            recall_filter: "implemented".to_string(),
+            cli_filter: "implemented".to_string(),
+            auto_classify: "implemented".to_string(),
+            auto_classify_modes: vec![
+                "off".to_string(),
+                "regex_only".to_string(),
+                "regex_then_llm".to_string(),
+            ],
+        }
+    }
+}
+
+fn default_capability_memory_kind_vocab() -> CapabilityMemoryKindVocab {
+    CapabilityMemoryKindVocab::current()
+}
+
+// ---------------------------------------------------------------------------
 // Capabilities v1 — legacy shape retained for backward compat
 // ---------------------------------------------------------------------------
 
@@ -1365,6 +1439,11 @@ impl Capabilities {
             // (engine, curator, hook, recall guard, forensic bundle,
             // MCP tool, CLI subcommand).
             atomisation: CapabilityAtomisation::current(),
+            // v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+            // vocabulary surface. Anchored at compile time against the
+            // [`crate::models::MemoryKind`] enum + the recall-filter /
+            // CLI / auto-classify wiring shipped under Form 6.
+            memory_kind_vocab: CapabilityMemoryKindVocab::current(),
         }
     }
 }
@@ -1558,6 +1637,18 @@ pub struct CapabilitiesV3 {
     /// payload missing the field).
     #[serde(default = "default_capability_atomisation")]
     pub atomisation: CapabilityAtomisation,
+
+    /// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    /// vocabulary capability surface. Names the recall-filter +
+    /// auto-classify surfaces shipped under Form 6 and enumerates
+    /// the substrate's full set of recognised `memory_kind` values.
+    /// See [`CapabilityMemoryKindVocab`].
+    ///
+    /// Additive over the WT-1-G surface — pre-Form-6 v3 payloads
+    /// deserialise cleanly via the
+    /// `default_capability_memory_kind_vocab` helper.
+    #[serde(default = "default_capability_memory_kind_vocab")]
+    pub memory_kind_vocab: CapabilityMemoryKindVocab,
 }
 
 // ---------------------------------------------------------------------------

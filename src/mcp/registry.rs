@@ -447,7 +447,8 @@ pub fn tool_definitions() -> Value {
                         "metadata": {"type": "object", "description": "Arbitrary JSON metadata", "default": {}},
                         "agent_id": {"type": "string", "description": "Agent identifier. If omitted, the server synthesizes an NHI-hardened default (ai:<client>@<host>:pid-<pid>, host:<host>:pid-<pid>-<uuid8>, or anonymous:pid-<pid>-<uuid8>)."},
                         "scope": {"type": "string", "enum": ["private", "team", "unit", "org", "collective"], "description": "Task 1.5 visibility scope. Defaults to private when unset. Stored as metadata.scope."},
-                        "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already exists. 'error' returns CONFLICT (default for v2-capable clients). 'merge' updates the existing row in place (legacy v0.6.3 behaviour, default for v1 clients). 'version' appends a monotonic suffix to the title — 'My Memory (2)', '(3)', ..."}
+                        "on_conflict": {"type": "string", "enum": ["error", "merge", "version"], "description": "v0.6.3.1 P2 (G6) — collision policy when (title, namespace) already exists. 'error' returns CONFLICT (default for v2-capable clients). 'merge' updates the existing row in place (legacy v0.6.3 behaviour, default for v1 clients). 'version' appends a monotonic suffix to the title — 'My Memory (2)', '(3)', ..."},
+                        "kind": {"type": "string", "enum": ["observation", "reflection", "persona", "concept", "entity", "claim", "relation", "event", "conversation", "decision"], "description": "v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind for the stored row. When omitted, defaults to 'observation' (or to the verdict of the namespace-policy-gated auto-classify hook). Reflection and Persona are normally written by the substrate's `memory_reflect` and `memory_persona_generate` paths; setting them here is allowed but unusual."}
                     },
                     "required": ["title", "content"]
                 }
@@ -472,6 +473,13 @@ pub fn tool_definitions() -> Value {
                         "include_archived": {"type": "boolean", "default": false, "description": "v0.7.0 WT-1-E — by default, atomised sources are excluded (atoms surface in their place). Use include_archived=true to retrieve archived sources alongside atoms (forensic / auditor recall)."},
                         "has_citations": {"type": "boolean", "default": false, "description": "v0.7.0 Form 4 (issue #757) — when true, restrict results to memories whose `citations` array is non-empty (fact-provenance filter)."},
                         "source_uri_prefix": {"type": "string", "description": "v0.7.0 Form 4 (issue #757) — when set, restrict results to memories whose `source_uri` column begins with this exact prefix. Typical use: `doc:` to surface atoms or memories pointing at substrate docs; `uri:https://` to surface memories citing an HTTP source."},
+                        "kinds": {
+                            "oneOf": [
+                                {"type": "array", "items": {"type": "string", "enum": ["observation", "reflection", "persona", "concept", "entity", "claim", "relation", "event", "conversation", "decision"]}},
+                                {"type": "string"}
+                            ],
+                            "description": "v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind filter. Accepts either a JSON array (['concept', 'claim']) or a comma-separated string ('concept,claim'). OR-of-kinds within the param; AND with namespace/tags/time-window/visibility. Pass 'all' or omit for no filter. Unknown kind tokens are silently dropped (forward-compat with future variants)."
+                        },
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]

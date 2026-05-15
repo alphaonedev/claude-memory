@@ -274,6 +274,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -320,6 +321,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -371,6 +373,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -421,6 +424,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();
@@ -468,6 +472,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         seed_governance_policy(&db_path, "gov-ns", policy, "alice");
         let conn = db::open(&db_path).unwrap();

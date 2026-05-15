@@ -207,6 +207,7 @@ fn make_policy(mode: Option<AutoAtomiseMode>, enable_legacy_flag: bool) -> Gover
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: mode,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     }
 }
 

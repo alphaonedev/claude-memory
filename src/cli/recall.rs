@@ -79,6 +79,16 @@ pub struct RecallArgs {
     /// to surface every memory citing an HTTP source.
     #[arg(long)]
     pub source_uri_prefix: Option<String>,
+    /// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    /// filter. Comma-separated. Examples:
+    ///   --kind concept
+    ///   --kind concept,entity,claim
+    /// Recognised values: observation, reflection, persona, concept,
+    /// entity, claim, relation, event, conversation, decision.
+    /// OR-of-kinds within the flag; AND with the other filters.
+    /// Pass 'all' or omit for no filter.
+    #[arg(long = "kind", value_name = "KIND[,KIND...]")]
+    pub kind: Option<String>,
 }
 
 /// v0.7.0 Form 4 (issue #757) — post-filter a recall result set by
@@ -227,6 +237,17 @@ pub(crate) fn run_with_embedder(
     };
     let _effective_recall_tier: Option<String> = scope.and_then(|s| s.tier.clone());
 
+    // v0.7.x Form 6 — parse the optional --kind filter. Treat the
+    // literal "all" as "no filter" to match the MCP `kinds: "all"`
+    // shorthand, and accept comma-separated tokens otherwise.
+    let kinds_filter: Option<Vec<crate::models::MemoryKind>> = args.kind.as_deref().and_then(|s| {
+        if s.trim().eq_ignore_ascii_case("all") {
+            None
+        } else {
+            crate::models::MemoryKind::parse_csv(s)
+        }
+    });
+
     if let Some(desc) = embedder_model_description {
         writeln!(out.stderr, "ai-memory: embedder loaded ({desc})")?;
     } else if tier_config.embedding_model.is_some() {
@@ -374,6 +395,18 @@ pub(crate) fn run_with_embedder(
         args.source_uri_prefix.as_deref(),
     );
 
+    // v0.7.x Form 6 — apply the parsed kinds filter to the result set
+    // in-place. No-op when `kinds_filter == None`. Cheap (results are
+    // already capped at limit.min(50)), and avoids touching the recall
+    // SQL on the existing storage path.
+    let results: Vec<(crate::models::Memory, f64)> = match kinds_filter.as_deref() {
+        None => results,
+        Some(allowed) => results
+            .into_iter()
+            .filter(|(m, _)| allowed.contains(&m.memory_kind))
+            .collect(),
+    };
+
     if json_out {
         let scored: Vec<serde_json::Value> = results
             .iter()
@@ -467,6 +500,7 @@ mod tests {
             include_archived: false,
             has_citations: false,
             source_uri_prefix: None,
+            kind: None,
         }
     }
 

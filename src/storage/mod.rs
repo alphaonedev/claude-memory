@@ -1560,11 +1560,12 @@ pub fn recall(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            // v0.7.0 Form 4 — name-based read for the trailing score
-            // column. Switched from positional `row.get(16)` after
-            // schema v38 (citations, source_uri, source_span) shifted
-            // the trailing column's index; name-based reads survive
-            // future column additions without further churn.
+            // v0.7.0 Form 4 / v0.7.x Form 6 — name-based read for the
+            // trailing score column. Switched from positional `row.get`
+            // after schema v38 (citations, source_uri, source_span) and
+            // Form 6's `memory_kind`/`entity_id`/`persona_version`
+            // shifted the trailing column's index; name-based reads
+            // survive future column additions without further churn.
             let score: f64 = row.get("score")?;
             Ok((mem, score))
         },
@@ -4952,7 +4953,7 @@ pub fn recall_hybrid_with_telemetry(
     let sem_sql = format!(
         "SELECT id, tier, namespace, title, content, tags, priority,
                 confidence, source, access_count, created_at, updated_at,
-                last_accessed_at, expires_at, metadata, reflection_depth, embedding
+                last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, embedding
          FROM memories
          WHERE embedding IS NOT NULL
            AND (?1 IS NULL OR namespace = ?1)
@@ -4986,9 +4987,9 @@ pub fn recall_hybrid_with_telemetry(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            // v0.7.0 Form 4 — name-based read for the trailing
-            // fts_score column. Same rationale as the other recall
-            // SELECT — schema v38 columns shifted the trailing
+            // v0.7.0 Form 4 / v0.7.x Form 6 — name-based read for the
+            // trailing fts_score column. Same rationale as the other
+            // recall SELECT — schema v38 columns shifted the trailing
             // computed column's index. Named reads survive future
             // additive column drops.
             let fts_score: f64 = row.get("fts_score")?;
@@ -5111,7 +5112,10 @@ pub fn recall_hybrid_with_telemetry(
             ],
             |row| {
                 let mem = row_to_memory(row)?;
-                let emb_bytes: Option<Vec<u8>> = row.get(15)?;
+                // v0.7.x Form 6: bumped from 15 to 16 when `memory_kind`
+                // was inserted between `reflection_depth` and `embedding`
+                // in the SELECT list above.
+                let emb_bytes: Option<Vec<u8>> = row.get(16)?;
                 Ok((mem, emb_bytes))
             },
         )?;
@@ -10343,6 +10347,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -10482,6 +10487,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();

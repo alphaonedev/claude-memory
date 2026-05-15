@@ -265,7 +265,19 @@ pub(crate) fn handle_store(
         OnConflict::Merge => title.to_string(),
     };
 
-    let mem = Memory {
+    // v0.7.x Form 6 (issue #759) — caller-supplied `kind` parameter.
+    // Recognised values match the [`crate::models::MemoryKind`] enum:
+    // observation / reflection / persona / concept / entity / claim /
+    // relation / event / conversation / decision. Unknown values are
+    // ignored (treated as omission) for forward-compat with future
+    // variants. `None` means the auto-classify hook (if enabled by the
+    // namespace policy) decides; otherwise the row lands as
+    // `Observation`.
+    let caller_kind = params["kind"]
+        .as_str()
+        .and_then(crate::models::MemoryKind::from_str);
+
+    let mut mem = Memory {
         id: uuid::Uuid::new_v4().to_string(),
         tier,
         namespace,
@@ -282,13 +294,24 @@ pub(crate) fn handle_store(
         expires_at,
         metadata,
         reflection_depth: 0,
-        memory_kind: crate::models::MemoryKind::Observation,
+        memory_kind: caller_kind.unwrap_or(crate::models::MemoryKind::Observation),
         entity_id: None,
         persona_version: None,
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
     };
+
+    // v0.7.x Form 6 — substrate-side auto-classify pre_store hook.
+    // Consults the namespace `auto_classify_kind` policy (None ⇒ Off).
+    // Caller-supplied non-default kind always wins (preserved inside
+    // the hook), so this is a no-op when the caller passed an explicit
+    // `kind`. The regex pass is allocation-light and runs in tens of
+    // microseconds; the optional LLM round-trip is opt-in via the
+    // `RegexThenLlm` policy.
+    let auto_classify_policy =
+        db::resolve_governance_policy(conn, &mem.namespace).and_then(|p| p.auto_classify_kind);
+    crate::hooks::pre_store::maybe_auto_classify(&mut mem, auto_classify_policy);
 
     // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
     // composes declarative `[permissions.rules]` matchers + the K3
@@ -1792,6 +1815,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -1854,6 +1878,7 @@ mod tests {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: Some(true),
+            auto_classify_kind: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -1887,6 +1912,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let sid = db::insert(conn, &standard).expect("insert standard");
         db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");

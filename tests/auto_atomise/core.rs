@@ -211,6 +211,7 @@ fn opt_in_policy(threshold: u32, max_atom_tokens: u32) -> GovernancePolicy {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     }
 }
 
@@ -230,6 +231,7 @@ fn opt_out_policy() -> GovernancePolicy {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     }
 }
 

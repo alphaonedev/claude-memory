@@ -401,6 +401,25 @@ pub struct GovernancePolicy {
     /// `Some(true)` per-namespace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub legacy_per_pair_classifier: Option<bool>,
+    /// v0.7.x Form 6 (issue #759) — auto-classify a stored memory's
+    /// `MemoryKind` from its content via the substrate-side
+    /// `pre_store::auto_classify_kind` hook. One of:
+    ///   * `Off` (default) — keeps the substrate quiet; the
+    ///     caller-supplied kind (or the SQL `DEFAULT 'observation'`)
+    ///     stands.
+    ///   * `RegexOnly` — deterministic regex heuristics (e.g.
+    ///     "is_a" → Concept; "happened on" → Event;
+    ///     "X says:" → Conversation). No LLM round-trip; tens of
+    ///     microseconds per call.
+    ///   * `RegexThenLlm` — regex first; if low-confidence (no
+    ///     heuristic fired or multiple fired with conflict), fall
+    ///     through to a single-shot LLM classifier. Opt-in only;
+    ///     the substrate never spawns an LLM round-trip on a
+    ///     namespace whose policy is `Off`.
+    /// Caller-supplied `memory_kind` always wins — the hook only
+    /// fills in `Observation` (the default) when no kind was set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_classify_kind: Option<MemoryKindAutoClassify>,
 }
 
 /// v0.7.x Form 2 — atomisation execution mode. Stored inside
@@ -441,6 +460,24 @@ impl AutoAtomiseMode {
             Self::Synchronous => "synchronous",
         }
     }
+}
+
+/// v0.7.x Form 6 — namespace-policy enum for the
+/// `pre_store::auto_classify_kind` substrate hook. See
+/// [`GovernancePolicy::auto_classify_kind`].
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryKindAutoClassify {
+    /// Substrate quiet — caller-supplied (or default `Observation`)
+    /// kind stands. The hook is a zero-cost no-op.
+    #[default]
+    Off,
+    /// Deterministic regex-based heuristics only. No LLM round-trip.
+    RegexOnly,
+    /// Regex first; if no heuristic fires (or multiple fire with
+    /// conflicting verdicts), fall through to a single-shot LLM
+    /// classifier. Opt-in only.
+    RegexThenLlm,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -488,6 +525,10 @@ impl Default for GovernancePolicy {
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            // v0.7.x Form 6: substrate defaults to Off — caller-supplied
+            // (or `Observation` default) kind stands. Operators opt in
+            // per-namespace via the namespace standard's governance blob.
+            auto_classify_kind: None,
         }
     }
 }
@@ -543,6 +584,9 @@ impl GovernancePolicy {
             // mode (inherited from the legacy auto_atomise flag).
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            // v0.7.x Form 6: managed-namespace bootstrap leaves
+            // auto-classify Off — operators opt in explicitly.
+            auto_classify_kind: None,
         }
     }
 

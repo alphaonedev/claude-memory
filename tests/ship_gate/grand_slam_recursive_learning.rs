@@ -385,6 +385,7 @@ fn sg_rl_3_federation_reflection_replication_with_cross_peer_refusal() {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     };
     seed_policy(&conn_b, ns, &tight);
 

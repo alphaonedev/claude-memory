@@ -340,6 +340,7 @@ mod tests {
             auto_export_personas_to_filesystem: if export { Some(true) } else { None },
             auto_atomise_mode: None,
             legacy_per_pair_classifier: None,
+            auto_classify_kind: None,
         };
         let now = Utc::now().to_rfc3339();
         let gov_meta = serde_json::json!({

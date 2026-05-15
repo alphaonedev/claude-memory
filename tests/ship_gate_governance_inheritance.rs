@@ -106,6 +106,7 @@ fn approve_write_policy() -> GovernancePolicy {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn any_policy_no_inherit() -> GovernancePolicy {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     }
 }
 

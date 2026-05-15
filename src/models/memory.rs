@@ -11,8 +11,20 @@ use super::default_metadata;
 ///
 /// `Observation` and `Reflection` exist since v0.7.0. `Persona`
 /// landed in v0.7.0 QW-2 (schema v36) as the substrate-native
-/// Tencent-pattern L3 persona artefact. Goal/Plan/Step/Decision are
-/// scoped to L1-6/v0.8.0 and MUST NOT be added here yet.
+/// Tencent-pattern L3 persona artefact.
+///
+/// v0.7.x Form 6 (issue #759) — Batman taxonomy extension. The
+/// `Concept | Entity | Claim | Relation | Event | Conversation |
+/// Decision` variants give downstream readers a richer atom-type
+/// vocabulary aligned with the Batman framework's exemplar
+/// (Tolaria's frontmatter-as-type schema). All seven variants
+/// serialize as snake_case strings via the existing
+/// `memory_kind TEXT` column — no schema migration is required
+/// because the column has no CHECK constraint. Old rows with no
+/// kind read as `Observation` (the SQL `DEFAULT 'observation'`).
+/// A future-schema variant a binary doesn't recognise reads as
+/// `Observation` via the `unwrap_or_default()` chain in
+/// `row_to_memory` (forward-compat).
 ///
 /// `Observation` is the default for every memory created before v30 (the
 /// `DEFAULT 'observation'` SQL column handles the backfill contract for
@@ -21,10 +33,11 @@ use super::default_metadata;
 /// write path in addition to the existing `metadata.type='reflection'`
 /// back-compat marker. `Persona` is set by the QW-2
 /// `PersonaGenerator` and the `memory_persona_generate` MCP tool.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
     /// Default — a direct observation or note from the caller.
+    #[default]
     Observation,
     /// A memory synthesised by the reflection pass over lower-depth
     /// peers (set by `memory_reflect` and the curator reflection pass).
@@ -35,6 +48,40 @@ pub enum MemoryKind {
     /// `entity_id` + `persona_version` columns on `memories` are
     /// populated only for this variant.
     Persona,
+    /// v0.7.x Form 6 — abstract definition / vocabulary term
+    /// ("ownership is a Rust borrow-checker rule").
+    Concept,
+    /// v0.7.x Form 6 — named real-world thing (person, org, product,
+    /// system component). Pairs with `entity_id` on the row when the
+    /// caller has registered the entity in the KG.
+    Entity,
+    /// v0.7.x Form 6 — factual assertion the caller is recording
+    /// ("the build broke at 14:32 UTC"). Distinct from
+    /// `Observation` in that a `Claim` is a propositional commitment;
+    /// a `Reflection` chain may agree or contradict it.
+    Claim,
+    /// v0.7.x Form 6 — typed pair / triple. Anchors a KG relation
+    /// inside the memory substrate so an operator can query the
+    /// relation set with the same recall pipeline used for free-text.
+    Relation,
+    /// v0.7.x Form 6 — temporally-bounded happening
+    /// ("deploy at 09:00", "incident at 14:32"). Distinct from
+    /// `Observation` only when the caller wants the
+    /// downstream-filtering surface to separate "what I saw" from
+    /// "what happened".
+    Event,
+    /// v0.7.x Form 6 — captured dialogue turn (the substrate also
+    /// stores conversations as `Observation`-kind today; this kind
+    /// makes the type explicit for callers that want to filter to
+    /// just conversational atoms).
+    Conversation,
+    /// v0.7.x Form 6 (L1-6 reservation) — choice point with
+    /// rationale. Distinct from `Reflection` in that a `Decision`
+    /// commits to a course of action; reflections summarise. The
+    /// L1-6 work (v0.8.0) will likely add columns for
+    /// rationale / alternatives, but the variant lands now so
+    /// callers can start typing decisions.
+    Decision,
 }
 
 impl MemoryKind {
@@ -45,26 +92,76 @@ impl MemoryKind {
             Self::Observation => "observation",
             Self::Reflection => "reflection",
             Self::Persona => "persona",
+            Self::Concept => "concept",
+            Self::Entity => "entity",
+            Self::Claim => "claim",
+            Self::Relation => "relation",
+            Self::Event => "event",
+            Self::Conversation => "conversation",
+            Self::Decision => "decision",
         }
     }
 
     /// Parse the column-wire string. Returns `None` on unrecognised values
     /// so callers can fall back to `Observation` (forward-compat with
-    /// L1-6 variants that land in a newer DB on an older binary).
+    /// future variants that land in a newer DB on an older binary).
     #[must_use]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "observation" => Some(Self::Observation),
             "reflection" => Some(Self::Reflection),
             "persona" => Some(Self::Persona),
+            "concept" => Some(Self::Concept),
+            "entity" => Some(Self::Entity),
+            "claim" => Some(Self::Claim),
+            "relation" => Some(Self::Relation),
+            "event" => Some(Self::Event),
+            "conversation" => Some(Self::Conversation),
+            "decision" => Some(Self::Decision),
             _ => None,
         }
     }
-}
 
-impl Default for MemoryKind {
-    fn default() -> Self {
-        Self::Observation
+    /// Enumerate every variant in declaration order. Used by the
+    /// capabilities surface (Form 6 `CapabilityMemoryKindVocab`) and
+    /// by the recall filter parser when the caller passes `"all"`.
+    #[must_use]
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::Observation,
+            Self::Reflection,
+            Self::Persona,
+            Self::Concept,
+            Self::Entity,
+            Self::Claim,
+            Self::Relation,
+            Self::Event,
+            Self::Conversation,
+            Self::Decision,
+        ]
+    }
+
+    /// v0.7.x Form 6 — parse a comma-separated list of kind names
+    /// into a deduplicated `Vec<MemoryKind>`. Returns `None` when the
+    /// input is empty (after trim) so callers can treat "no filter"
+    /// distinctly from "empty filter list ⇒ nothing matches". Unknown
+    /// tokens are skipped silently so a future variant emitted by a
+    /// newer client doesn't break recall on an older binary.
+    #[must_use]
+    pub fn parse_csv(s: &str) -> Option<Vec<Self>> {
+        let mut out: Vec<Self> = Vec::new();
+        for tok in s.split(',') {
+            let t = tok.trim();
+            if t.is_empty() {
+                continue;
+            }
+            if let Some(k) = Self::from_str(t)
+                && !out.contains(&k)
+            {
+                out.push(k);
+            }
+        }
+        if out.is_empty() { None } else { Some(out) }
     }
 }
 
@@ -480,6 +577,14 @@ pub struct RecallQuery {
     /// `source_uri` column begins with this exact prefix.
     #[serde(default)]
     pub source_uri_prefix: Option<String>,
+    /// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    /// filter. Comma-separated string (`kinds=concept,claim`).
+    /// OR-of-kinds within the param; AND with namespace / tags /
+    /// time-window / visibility. `None` (default) preserves the
+    /// pre-Form-6 "no kind filter" semantics. Unknown tokens are
+    /// silently dropped (forward-compat with future variants).
+    #[serde(default)]
+    pub kinds: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -531,6 +636,13 @@ pub struct RecallBody {
     /// `source_uri` column begins with this exact prefix.
     #[serde(default)]
     pub source_uri_prefix: Option<String>,
+    /// v0.7.x Form 6 (issue #759) — Batman-taxonomy memory-kind
+    /// filter. Accepts either a JSON array of strings
+    /// (`{"kinds": ["concept", "claim"]}`) or a comma-separated
+    /// string (`{"kinds": "concept,claim"}`). OR-of-kinds within
+    /// the param; AND with the other filters.
+    #[serde(default)]
+    pub kinds: Option<serde_json::Value>,
 }
 
 impl RecallBody {
@@ -546,6 +658,49 @@ impl RecallBody {
             .unwrap_or("")
             .trim()
             .to_string()
+    }
+
+    /// v0.7.x Form 6 — parse the optional `kinds` JSON field.
+    /// Accepts a JSON array of strings or a single comma-separated
+    /// string. Treats `"all"` as "no filter" (returns `None`).
+    /// Drops unknown tokens silently.
+    #[must_use]
+    pub fn resolved_kinds(&self) -> Option<Vec<MemoryKind>> {
+        let raw = self.kinds.as_ref()?;
+        if let Some(s) = raw.as_str() {
+            if s.trim().eq_ignore_ascii_case("all") {
+                return None;
+            }
+            return MemoryKind::parse_csv(s);
+        }
+        if let Some(arr) = raw.as_array() {
+            let mut out: Vec<MemoryKind> = Vec::new();
+            for v in arr {
+                if let Some(name) = v.as_str()
+                    && let Some(k) = MemoryKind::from_str(name.trim())
+                    && !out.contains(&k)
+                {
+                    out.push(k);
+                }
+            }
+            if out.is_empty() { None } else { Some(out) }
+        } else {
+            None
+        }
+    }
+}
+
+impl RecallQuery {
+    /// v0.7.x Form 6 — parse the optional `kinds` query string.
+    /// Comma-separated. `"all"` (case-insensitive) is treated as "no
+    /// filter" (returns `None`). Drops unknown tokens silently.
+    #[must_use]
+    pub fn resolved_kinds(&self) -> Option<Vec<MemoryKind>> {
+        let s = self.kinds.as_deref()?;
+        if s.trim().eq_ignore_ascii_case("all") {
+            return None;
+        }
+        MemoryKind::parse_csv(s)
     }
 }
 

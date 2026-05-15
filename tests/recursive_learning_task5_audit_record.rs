@@ -430,6 +430,7 @@ fn cap_zero_disable_path_still_emits_audit_row() {
         auto_export_personas_to_filesystem: None,
         auto_atomise_mode: None,
         legacy_per_pair_classifier: None,
+        auto_classify_kind: None,
     };
     seed_policy(&conn, "task5-cap-zero", &policy);
     let src = make_memory("task5-cap-zero", "src-d0", 0);
