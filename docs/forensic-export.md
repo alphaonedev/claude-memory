@@ -14,6 +14,9 @@ contract for reflection chains sits in
 [`RECURSIVE_LEARNING.md`](RECURSIVE_LEARNING.md); the cryptographic
 identity model sits in
 [`v0.7/rfc-attested-cortex.md`](v0.7/rfc-attested-cortex.md) §Track-H.
+The category-level positioning (why procurement-grade attestation is
+a differentiator versus other agent-memory projects) lives in
+[`positioning.md`](positioning.md).
 
 ## Three CLI verbs
 

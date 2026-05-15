@@ -23,6 +23,9 @@ runaway recursion before any write opens.
 This page is the engineering-precise primer. The procurement-level
 introduction lives in [`v0.7.0/release-notes.md`](v0.7.0/release-notes.md).
 The CHANGELOG block sits under v0.7.0 in [`../CHANGELOG.md`](../CHANGELOG.md).
+The category-level comparison against other agent-memory projects
+(mem0, Letta, Tencent TencentDB Agent Memory, etc.) lives in
+[`positioning.md`](positioning.md).
 
 ## Conceptual model
 
