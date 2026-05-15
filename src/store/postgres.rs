@@ -107,6 +107,15 @@ const MIGRATION_V34_OFFLOADED_BLOBS: &str =
 const MIGRATION_V35_ATOMISATION: &str =
     include_str!("../../migrations/postgres/0017_v07_atomisation.sql");
 
+/// v0.7.0 QW-2 — Persona-as-artifact substrate primitive. Adds
+/// `memories.entity_id TEXT NULL` + `memories.persona_version
+/// INTEGER NULL` columns plus the partial index
+/// `idx_personas_by_entity`. Mirrors SQLite schema v37. Postgres
+/// supports `ADD COLUMN IF NOT EXISTS` so the DDL is a pure
+/// idempotent batch.
+const MIGRATION_V36_PERSONA: &str =
+    include_str!("../../migrations/postgres/0018_v07_persona.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -181,7 +190,13 @@ const MIGRATION_V35_ATOMISATION: &str =
 //       pure idempotent DDL batch; the constraint drop-add is gated
 //       on a pg_constraint probe so re-running is a no-op. First
 //       hard prereq for WT-1-B through WT-1-G.
-const CURRENT_SCHEMA_VERSION: i32 = 35;
+// v36 = v0.7.0 QW-2 — Persona-as-artifact substrate primitive. Adds
+//       `memories.entity_id TEXT NULL` + `memories.persona_version
+//       INTEGER NULL` plus the partial index
+//       `idx_personas_by_entity`. Mirrors SQLite schema v37. Pure
+//       idempotent ADD COLUMN IF NOT EXISTS + CREATE INDEX IF NOT
+//       EXISTS — no backfill needed (non-Persona rows keep NULL).
+const CURRENT_SCHEMA_VERSION: i32 = 36;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -585,6 +600,9 @@ impl PostgresStore {
         if current_version < 35 {
             self.migrate_v35().await?;
         }
+        if current_version < 36 {
+            self.migrate_v36().await?;
+        }
 
         Ok(())
     }
@@ -925,6 +943,39 @@ impl PostgresStore {
             target = "store::postgres",
             "schema migration v35 applied (memories.atomised_into + atom_of columns; \
              memory_links.relation CHECK extended with derives_from)"
+        );
+        Ok(())
+    }
+
+    /// v36 — Persona-as-artifact substrate primitive (QW-2).
+    ///
+    /// Adds the `memories.entity_id` + `memories.persona_version`
+    /// columns plus the partial index `idx_personas_by_entity`
+    /// covering Persona-kind rows. Mirrors SQLite schema v37. Pure
+    /// idempotent ADD COLUMN IF NOT EXISTS + CREATE INDEX IF NOT
+    /// EXISTS — no application-side backfill (non-Persona rows
+    /// keep their NULL payloads).
+    async fn migrate_v36(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v36 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V36_PERSONA)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v36 persona", e))?;
+
+        record_schema_version(&mut tx, 36).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v36 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v36 applied (persona-as-artifact entity_id + persona_version)"
         );
         Ok(())
     }
