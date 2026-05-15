@@ -90,12 +90,12 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     // memory_persona + memory_persona_generate to Family::Power —
     // bumping the substantive total from 52 to 68.
     assert!(
-        summary.contains("68 of 68 memory tools"),
-        "summary must report 68 of 68 memory tools; got: {summary}"
+        summary.contains("69 of 69 memory tools"),
+        "summary must report 69 of 69 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 68 memory tools"),
-        "describe_to_user must report all 68 memory tools; got: {describe}"
+        describe.contains("all 69 memory tools"),
+        "describe_to_user must report all 69 memory tools; got: {describe}"
     );
 }
 
@@ -117,8 +117,8 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     // memory_persona + memory_persona_generate to Family::Power —
     // bumping the substantive total from 52 to 68.
     assert!(
-        summary.contains("7 of 68 memory tools"),
-        "summary must report 7 of 68 memory tools; got: {summary}"
+        summary.contains("7 of 69 memory tools"),
+        "summary must report 7 of 69 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

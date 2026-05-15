@@ -108,8 +108,11 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
     // `memory_persona_generate` (not loaded under core), so the
     // "more" count grows 59 → 61.
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` (not loaded under core), so the "more"
+    // count grows 61 → 62.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 61 more \
+                    (store, recall, list, get, search, ...). 62 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -173,7 +176,11 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
     // `memory_persona_generate` → 68 visible under full (the "all 68"
     // form excludes the always-on `memory_capabilities` bootstrap from
     // the 69-tool total).
-    let expected = "I can directly use all 68 memory tools right now \
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` → 69 visible under full (the "all 69"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 70-tool total).
+    let expected = "I can directly use all 69 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -235,8 +242,11 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
     // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
     // `memory_persona_generate` (not loaded under graph), so the
     // "more" count grows 48 → 50.
+    // v0.7.0 Form 3 (#756) — Family::Power gained
+    // `memory_ingest_multistep` (not loaded under graph), so the
+    // "more" count grows 50 → 51.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 50 more \
+                    (store, recall, list, get, search, ...). 51 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";

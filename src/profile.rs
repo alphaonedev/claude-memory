@@ -203,7 +203,12 @@ impl Family {
             // the same family/profile group as memory_consolidate and
             // memory_reflect (semantic+ tier; the keyword tier short-
             // circuits with a tier-locked advisory envelope).
-            | "memory_atomise" => Some(Self::Power),
+            | "memory_atomise"
+            // v0.7.0 Form 3 (issue #756) — multi-step ingest
+            // orchestrator. Lives at Family::Power alongside the other
+            // LLM-driven write-side tools; tier-gated to smart+ with
+            // the standard tier-locked advisory on keyword.
+            | "memory_ingest_multistep" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -289,8 +294,11 @@ impl Family {
             // 1 (v0.7.0 WT-1-C — memory_atomise, curator-pass
             // decomposition into 2-10 atomic propositions) +
             // 2 (v0.7.0 QW-2 — memory_persona + memory_persona_generate,
-            // Persona-as-artifact substrate primitive) = 20.
-            Self::Power => 20,
+            // Persona-as-artifact substrate primitive) +
+            // 1 (v0.7.0 Form 3 / #756 — memory_ingest_multistep,
+            // multi-step ingest orchestrator with deterministic
+            // helpers + prompt-cache reuse) = 21.
+            Self::Power => 21,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -423,6 +431,10 @@ impl Family {
                 // policy); the agent never holds the keypair.
                 "memory_persona",
                 "memory_persona_generate",
+                // v0.7.0 Form 3 (issue #756) — multi-step ingest
+                // orchestrator. Deterministic helpers + LLM stages
+                // with explicit-trust slots and prompt-cache reuse.
+                "memory_ingest_multistep",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -722,7 +734,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 69,
+            total, 70,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -737,7 +749,8 @@ mod tests {
              v0.7.0 QW-1 `memory_export_reflection` + \
              v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` + \
              v0.7.0 WT-1-C `memory_atomise` + \
-             v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` = 69. \
+             v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` + \
+             v0.7.0 Form 3 `memory_ingest_multistep` = 70. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -827,7 +840,10 @@ mod tests {
         // v0.7.0 WT-1-C — Power got memory_atomise (+1 → 18).
         // v0.7.0 QW-2 — Power got memory_persona + memory_persona_generate
         // (Persona-as-artifact substrate primitive, +2 → 20).
-        assert_eq!(p.expected_tool_count(), 7 + 20);
+        // v0.7.0 Form 3 (#756) — Power got memory_ingest_multistep
+        // (multi-step ingest orchestrator with deterministic helpers
+        // + prompt-cache reuse, +1 → 21).
+        assert_eq!(p.expected_tool_count(), 7 + 21);
     }
 
     #[test]
@@ -845,13 +861,14 @@ mod tests {
         // memory_export_reflection (QW-1) +
         // memory_offload + memory_deref (QW-3 follow-up, Family::Power) +
         // memory_atomise (WT-1-C, Family::Power) +
-        // memory_persona + memory_persona_generate (QW-2, Family::Power) = 69.
-        assert_eq!(p.expected_tool_count(), 69);
+        // memory_persona + memory_persona_generate (QW-2, Family::Power) +
+        // memory_ingest_multistep (Form 3 / #756, Family::Power) = 70.
+        assert_eq!(p.expected_tool_count(), 70);
 
         // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
         // + WT-1-C + QW-2 additions live in Family::Power
         // (operator/governance), so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 20);
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 21);
     }
 
     // ---------- Profile::parse ----------
@@ -1051,10 +1068,12 @@ mod tests {
             "memory_deref",
             // v0.7.0 WT-1-C (curator-pass atomisation) — Family::Power.
             "memory_atomise",
+            // v0.7.0 Form 3 (#756) — multi-step ingest orchestrator.
+            "memory_ingest_multistep",
         ];
         assert_eq!(
             baseline.len(),
-            63,
+            64,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
@@ -1066,7 +1085,8 @@ mod tests {
              1 (v0.7.0 L2-7 memory_skill_compositional_context) + \
              1 (v0.7.0 QW-1 memory_export_reflection) + \
              2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) + \
-             1 (v0.7.0 WT-1-C memory_atomise) = 63"
+             1 (v0.7.0 WT-1-C memory_atomise) + \
+             1 (v0.7.0 Form 3 memory_ingest_multistep) = 64"
         );
         for name in baseline {
             assert!(
