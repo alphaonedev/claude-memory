@@ -437,9 +437,31 @@ pub fn append_signed_event(conn: &Connection, event: &SignedEvent) -> Result<()>
     let tx = conn
         .unchecked_transaction()
         .context("append signed_event: begin tx")?;
-    let (max_seq, prev_hash) = read_chain_head(&tx).context("append signed_event: read head")?;
+    append_signed_event_no_tx(&tx, event)?;
+    tx.commit().context("append signed_event: commit tx")?;
+    Ok(())
+}
+
+/// Append a signed event using the caller's already-open transaction.
+///
+/// Use this when the caller is mid-transaction (e.g.
+/// `invalidate_link` after its `BEGIN IMMEDIATE` for the UPDATE +
+/// audit-INSERT atom). The public `append_signed_event` wrapper
+/// adds its own IMMEDIATE tx; calling that from inside a wrapping
+/// tx fails on SQLite (nested transactions are not supported on
+/// the same connection). This variant takes a `Connection`-like
+/// reference (works for both `Connection` and `Transaction`) and
+/// inserts directly.
+///
+/// # Errors
+///
+/// Returns the underlying `rusqlite` error if the chain-head read
+/// fails or the INSERT itself fails. Callers MUST rollback their
+/// own transaction on error.
+pub fn append_signed_event_no_tx(conn: &Connection, event: &SignedEvent) -> Result<()> {
+    let (max_seq, prev_hash) = read_chain_head(conn).context("append signed_event: read head")?;
     let next_seq = max_seq + 1;
-    tx.execute(
+    conn.execute(
         "INSERT INTO signed_events \
             (id, agent_id, event_type, payload_hash, signature, attest_level, timestamp, \
              prev_hash, sequence) \
@@ -457,7 +479,6 @@ pub fn append_signed_event(conn: &Connection, event: &SignedEvent) -> Result<()>
         ],
     )
     .context("append signed_event")?;
-    tx.commit().context("append signed_event: commit tx")?;
     Ok(())
 }
 

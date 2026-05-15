@@ -929,7 +929,7 @@ pub fn tool_definitions() -> Value {
             },
             {
                 "name": "memory_calibrate_confidence",
-                "description": "v0.7.0 Form 5 — scan `confidence_shadow_observations` since N days back and emit per-(namespace, source) baselines. Operator-callable equivalent of the `ai-memory calibrate confidence --from-shadow` CLI driver (Family::Power).",
+                "description": "Scan `confidence_shadow_observations` and emit per-source baselines (Form 5).",
                 "docs": "v0.7.0 Form 5 (issue #758) — calibration sweep. Reads the shadow-mode observation table (populated when `AI_MEMORY_CONFIDENCE_SHADOW=1`) and returns a `CalibrationReport` envelope: `{window_days, total_observations, baselines: [{namespace, source, count, median, mean, buckets}]}`. The sweep is read-only by default; operators review the report before deciding whether to persist baselines into a calibration store (operator-driven follow-up). Composes with the auto-derive engine: the per-source median is exactly the `baseline_per_source` signal `crate::confidence::derive` consumes on the next write. Default window is 30 days; tune via `days`. Family::Power surface — refuses on keyword tier.",
                 "inputSchema": {
                     "type": "object",

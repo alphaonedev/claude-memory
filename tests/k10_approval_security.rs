@@ -155,7 +155,7 @@ async fn seed_pending_delete_row(
 /// Verbatim copy of the helper in `tests/k10_approval_http.rs` — the
 /// logic is small enough to duplicate without the cost of a shared
 /// crate, and keeping it inline lets each blocker test stand alone.
-fn sign(secret: &str, timestamp: &str, body: &str) -> String {
+fn sign(secret: &str, timestamp: &str, pending_id: &str, body: &str) -> String {
     use sha2::Digest;
     use sha2::Sha256;
     fn sha256_hex(s: &str) -> String {
@@ -198,7 +198,8 @@ fn sign(secret: &str, timestamp: &str, body: &str) -> String {
             .collect()
     }
     let key_hash = sha256_hex(secret);
-    let canonical = format!("{timestamp}.{body}");
+    // P1 (#628 agent-4): canonical request now binds method + pending_id.
+    let canonical = format!("{timestamp}.POST.{pending_id}.{body}");
     let sig = hmac_sha256_hex(&key_hash, &canonical);
     format!("sha256={sig}")
 }
@@ -224,7 +225,7 @@ async fn hmac_replay_rejected() {
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     // 600s in the past — well outside the 300s allowed window.
     let stale_ts = (chrono::Utc::now().timestamp() - 600).to_string();
-    let sig = sign("k10-replay-secret", &stale_ts, &body);
+    let sig = sign("k10-replay-secret", &stale_ts, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
@@ -244,6 +245,50 @@ async fn hmac_replay_rejected() {
     set_active_hooks_hmac_secret(None);
 }
 
+/// In-window replay: even with a fresh timestamp, the same signature
+/// MUST NOT verify a second time. Pins the P2 nonce-cache fix
+/// (#628 agent-4) — without it, a captured signature could be
+/// replayed N times within the 300s window.
+#[tokio::test]
+async fn hmac_in_window_replay_rejected() {
+    let _g = K10_SECURITY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    set_active_hooks_hmac_secret(Some("k10-nonce-secret".to_string()));
+    let (router, db) = build_router_with_db();
+    let pending_id = seed_pending_delete_row(&db, "scratch", "alice").await;
+
+    let body = json!({"decision": "approve", "remember": "once"}).to_string();
+    let now_ts = chrono::Utc::now().timestamp().to_string();
+    let sig = sign("k10-nonce-secret", &now_ts, &pending_id, &body);
+
+    let make_req = || {
+        Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/approvals/{pending_id}"))
+            .header("content-type", "application/json")
+            .header("x-ai-memory-timestamp", &now_ts)
+            .header("x-ai-memory-signature", sig.clone())
+            .header("x-agent-id", "operator-1")
+            .body(Body::from(body.clone()))
+            .unwrap()
+    };
+    // First fire — accepted (or 4xx for row-already-decided, but not 401).
+    let first = router.clone().oneshot(make_req()).await.unwrap();
+    assert_ne!(
+        first.status(),
+        StatusCode::UNAUTHORIZED,
+        "first fire of fresh signature must NOT be 401 (got {})",
+        first.status()
+    );
+    // Second fire of the same signature — MUST be 401 from the nonce cache.
+    let second = router.clone().oneshot(make_req()).await.unwrap();
+    assert_eq!(
+        second.status(),
+        StatusCode::UNAUTHORIZED,
+        "in-window replay of identical signature must be 401 (P2 nonce cache)"
+    );
+    set_active_hooks_hmac_secret(None);
+}
+
 /// A correctly signed approval whose timestamp lies inside the
 /// allowed window MUST still succeed. Pins the positive control so
 /// the replay-window fix doesn't regress the happy path.
@@ -256,7 +301,7 @@ async fn hmac_fresh_timestamp_accepted() {
 
     let body = json!({"decision": "approve", "remember": "once"}).to_string();
     let now_ts = chrono::Utc::now().timestamp().to_string();
-    let sig = sign("k10-replay-secret", &now_ts, &body);
+    let sig = sign("k10-replay-secret", &now_ts, &pending_id, &body);
 
     let req = Request::builder()
         .method("POST")
@@ -370,6 +415,35 @@ async fn sse_anonymous_subscriber_sees_nothing() {
         !ai_memory::handlers::sse_event_visible_to("", &evt),
         "anonymous subscriber must never see an event"
     );
+}
+
+/// Security regression test (#628 P1, agent-4 finding): a client
+/// passing `X-Agent-Id: host:anything` MUST NOT see every tenant's
+/// events. The historical `host:` prefix bypass let any client past
+/// `api_key_auth` claim host-process privilege; `host:` is reserved
+/// for server-side fallback identifiers and must be rejected as
+/// self-asserted input.
+#[tokio::test]
+async fn sse_host_prefix_subscriber_sees_nothing() {
+    let _g = K10_SECURITY_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let evt = ai_memory::approvals::ApprovalEvent::ApprovalRequested {
+        pending_id: "pa-host-bypass".into(),
+        action_type: "store".into(),
+        namespace: "alice/scratch".into(),
+        requested_by: "alice".into(),
+        requested_at: chrono::Utc::now().to_rfc3339(),
+    };
+    for malicious in &[
+        "host:foo:pid-1-deadbeef",
+        "host:",
+        "host:legitimate-looking",
+        "host:any-tenant-anywhere",
+    ] {
+        assert!(
+            !ai_memory::handlers::sse_event_visible_to(malicious, &evt),
+            "host:-prefixed subscriber `{malicious}` must NOT see cross-tenant events"
+        );
+    }
 }
 
 /// End-to-end SSE check: stand up two HTTP subscribers, each with

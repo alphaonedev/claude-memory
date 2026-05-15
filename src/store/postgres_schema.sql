@@ -114,6 +114,14 @@ CREATE TABLE IF NOT EXISTS memories (
     -- rows it FK-points back to the parent memory.
     atomised_into     INTEGER,
     atom_of           TEXT REFERENCES memories(id),
+    -- v0.7.0 typed kind discriminator (mirrors SQLite migration v30+).
+    -- Originally added by sqlite migration as the Memory.memory_kind
+    -- enum landed; the postgres base schema was missing this column
+    -- (the persona idx at the end of this file references it). v0.7.0
+    -- Form 6 extends the vocabulary to claim/relation/event/etc. Fresh
+    -- schemas carry this inline; existing schemas pick it up via the
+    -- WT-1-A-era migration ladder arm.
+    memory_kind       TEXT NOT NULL DEFAULT 'observation',
     -- v0.7.0 QW-2 (schema v36 postgres / v37 sqlite) — Persona-as-artifact
     -- discriminator columns. Populated only for `memory_kind = 'persona'`
     -- rows; every observation/reflection keeps NULL. Fresh schemas carry

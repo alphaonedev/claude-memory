@@ -138,6 +138,12 @@ fn seed_parent(conn: &rusqlite::Connection, namespace: &str) -> Result<(String, 
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: vec![],
+        source_uri: None,
+        source_span: None,
+        confidence_source: Default::default(),
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = db::insert(conn, &parent).context("insert long parent")?;
     Ok((id, body_len))

@@ -333,7 +333,28 @@ pub(crate) const APPROVAL_HMAC_MAX_SKEW_SECS: i64 = 60;
 /// reformatted byte invalidates the signature, which is the whole
 /// point of HMAC. We compare in constant time via `constant_time_eq`
 /// to avoid timing oracles on the hex digest.
-pub(crate) fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(), StatusCode> {
+///
+/// **Canonical request (#628 P1, agent-4 finding)**: the signed
+/// payload binds **method + URL path + body**, not just `<ts>.<body>`.
+/// Without the path binding, a captured signature for pending row A
+/// could be replayed against pending row B by simply changing the URL
+/// — a row-substitution attack inside the 300s replay window. The
+/// canonical is now:
+///
+/// ```text
+/// canonical = "<unix_ts>.<METHOD>.<pending_id>.<body>"
+/// ```
+///
+/// Both signer and verifier MUST use the exact same join. Callers
+/// that previously signed `<ts>.<body>` will now hard-fail (401), so
+/// any in-tree test fixture or external client must be updated in
+/// lockstep with this change.
+pub(crate) fn verify_approval_hmac(
+    headers: &HeaderMap,
+    body: &[u8],
+    method: &str,
+    pending_id: &str,
+) -> Result<(), StatusCode> {
     let secret = match crate::config::active_hooks_hmac_secret() {
         Some(s) => s,
         None => {
@@ -383,14 +404,50 @@ pub(crate) fn verify_approval_hmac(headers: &HeaderMap, body: &[u8]) -> Result<(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let body_str = std::str::from_utf8(body).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let canonical = format!("{timestamp}.{body_str}");
+    // P1 (#628 agent-4): bind method + pending_id so a captured
+    // signature can't be redirected to a different approval row.
+    let canonical = format!("{timestamp}.{method}.{pending_id}.{body_str}");
     let key_hash = crate::subscriptions::sha256_hex(&secret);
     let expected = crate::subscriptions::hmac_sha256_hex(&key_hash, &canonical);
-    if constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
+    if !constant_time_eq(expected.as_bytes(), sig_hex.as_bytes()) {
+        return Err(StatusCode::UNAUTHORIZED);
     }
+    // P2 (#628 agent-4): nonce-cache enforces single-use within the
+    // 300s window. Without this, a captured signature could be
+    // replayed N times against the same row before the timestamp
+    // staled out — rendering the row-already-decided check the only
+    // line of defence. The cache keys on the signature hex itself
+    // (which already commits to ts + method + path + body + secret),
+    // so any change to any field produces a new key.
+    if !record_hmac_nonce(sig_hex, ts_secs) {
+        tracing::warn!(
+            "K10 approval rejected: signature replay (sig={}…)",
+            &sig_hex[..16.min(sig_hex.len())]
+        );
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(())
+}
+
+/// Process-wide replay cache for verified K10 HMAC signatures. Entries
+/// expire after `APPROVAL_HMAC_MAX_AGE_SECS * 2` (twice the legitimate
+/// window — safe upper bound including future-skew tolerance).
+fn record_hmac_nonce(sig_hex: &str, ts_secs: i64) -> bool {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<std::sync::Mutex<HashMap<String, i64>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|p| p.into_inner());
+    let now = Utc::now().timestamp();
+    let ttl = APPROVAL_HMAC_MAX_AGE_SECS.saturating_mul(2);
+    // Opportunistic eviction. The cache is bounded by traffic × ttl,
+    // typically < 10K entries even on a busy daemon — cheap to scan.
+    guard.retain(|_, t| now.saturating_sub(*t) < ttl);
+    if guard.contains_key(sig_hex) {
+        return false;
+    }
+    guard.insert(sig_hex.to_string(), ts_secs);
+    true
 }
 
 /// `POST /api/v1/approvals/{pending_id}` — K10's HMAC-gated approval
@@ -402,7 +459,7 @@ pub async fn approval_decide(
     Path(id): Path<String>,
     body_bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
-    if let Err(status) = verify_approval_hmac(&headers, &body_bytes) {
+    if let Err(status) = verify_approval_hmac(&headers, &body_bytes, "POST", &id) {
         return (
             status,
             Json(json!({"error": "invalid or missing X-AI-Memory-Signature"})),
@@ -596,8 +653,20 @@ pub fn sse_event_visible_to(
     if subscriber_agent.is_empty() {
         return false;
     }
+    // Security (#628 P1, agent-4 finding): the prior `host:` prefix
+    // bypass let any client passing `X-Agent-Id: host:anything` see
+    // every tenant's events. `host:` is meant to be the *server-side*
+    // fallback identifier from `identity::resolve_agent_id` — it is
+    // never a legitimate self-asserted subscriber agent_id. The
+    // `approvals_sse` handler now rejects `host:`-prefixed values at
+    // the handshake; this defence-in-depth check ensures the
+    // visibility predicate cannot leak cross-tenant even if a future
+    // refactor admits `host:` past the handshake gate. Operators who
+    // need a privileged "see all events" subscription must add an
+    // explicit K9 `Allow` rule for their administrative agent_id +
+    // namespace pattern.
     if subscriber_agent.starts_with("host:") {
-        return true;
+        return false;
     }
     let event_agent = event.tenant_agent_id();
     if !event_agent.is_empty() && event_agent == subscriber_agent {
@@ -652,9 +721,20 @@ pub async fn approvals_sse(
     // is impractical on a long-lived GET stream with an empty body).
     // An unidentified subscriber gets an empty agent_id and
     // `sse_event_visible_to` refuses all events (fail-closed).
+    //
+    // Security (#628 P1, agent-4 finding): reject self-asserted
+    // `host:`-prefixed agent_ids. `host:` is the server-side fallback
+    // produced by `identity::resolve_agent_id` when no agent_id is
+    // supplied; it must never be accepted from an external client
+    // (which would otherwise gain a privilege-escalation path through
+    // the historical `host:` bypass in `sse_event_visible_to`). A
+    // client passing `X-Agent-Id: host:…` is treated as anonymous
+    // (empty subscriber_agent → fail-closed).
     let subscriber_agent = headers
         .get("x-agent-id")
         .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.starts_with("host:"))
         .unwrap_or("")
         .to_string();
 
@@ -702,8 +782,14 @@ pub async fn approvals_sse(
                             .event(event_name)
                             .data(data))));
                     }
-                    Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(n)))) => {
-                        let body = serde_json::json!({"lagged": n}).to_string();
+                    Poll::Ready(Some(Err(BroadcastStreamRecvError::Lagged(_n)))) => {
+                        // P4 (#628 agent-4): the lagged-event count `n`
+                        // reflects cross-tenant traffic volume — leaking
+                        // it lets a noisy-neighbour fingerprint other
+                        // tenants' approval rates. Surface only "we
+                        // lagged"; subscribers re-sync via
+                        // GET /api/v1/pending and don't need the count.
+                        let body = serde_json::json!({"lagged": true}).to_string();
                         return Poll::Ready(Some(Ok(Event::default().event("lagged").data(body))));
                     }
                 }
@@ -772,10 +858,15 @@ mod tests {
     /// Mirrors the reference helper in `tests/k10_approval_http.rs::sign`
     /// but uses the in-crate `pub(crate)` helpers so we don't redeclare
     /// the HMAC primitive in two places.
-    pub(super) fn sign_approve_body(secret: &str, body: &[u8]) -> (String, String) {
+    pub(super) fn sign_approve_body(
+        secret: &str,
+        method: &str,
+        pending_id: &str,
+        body: &[u8],
+    ) -> (String, String) {
         let ts = chrono::Utc::now().timestamp().to_string();
         let body_str = std::str::from_utf8(body).unwrap_or("");
-        let canonical = format!("{ts}.{body_str}");
+        let canonical = format!("{ts}.{method}.{pending_id}.{body_str}");
         let key_hash = crate::subscriptions::sha256_hex(secret);
         let sig = crate::subscriptions::hmac_sha256_hex(&key_hash, &canonical);
         (ts, format!("sha256={sig}"))
@@ -4335,7 +4426,7 @@ mod tests {
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let unknown = Uuid::new_v4().to_string();
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &unknown, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -4375,7 +4466,7 @@ mod tests {
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let id = Uuid::new_v4().to_string();
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &id, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -4405,7 +4496,7 @@ mod tests {
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let unknown = Uuid::new_v4().to_string();
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &unknown, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -4436,7 +4527,7 @@ mod tests {
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let id = Uuid::new_v4().to_string();
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &id, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9084,7 +9175,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state.clone()));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pending_id, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9132,7 +9223,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", "bad\x01id", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9185,7 +9276,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pid, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9253,7 +9344,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state.clone()));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pid, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9315,7 +9406,7 @@ mod tests {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         crate::config::set_active_hooks_hmac_secret(Some("a1-test-secret".to_string()));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pid, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9378,7 +9469,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state.clone()));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pid, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9459,7 +9550,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &pid, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -9490,7 +9581,7 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", "bad\x01id", b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13227,7 +13318,7 @@ mod tests {
             .route("/api/v1/pending/{id}/approve", axum_post(approve_pending))
             .with_state(test_app_state(state));
         let id = "abcdef0123456789abcdef0123456789";
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &id, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()
@@ -13260,7 +13351,7 @@ mod tests {
             .route("/api/v1/pending/{id}/reject", axum_post(reject_pending))
             .with_state(test_app_state(state));
         let id = "abcdef0123456789abcdef0123456789";
-        let (ts, sig) = sign_approve_body("a1-test-secret", b"");
+        let (ts, sig) = sign_approve_body("a1-test-secret", "POST", &id, b"");
         let resp = app
             .oneshot(
                 axum::http::Request::builder()

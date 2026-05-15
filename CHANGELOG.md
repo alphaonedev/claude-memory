@@ -266,6 +266,27 @@ landed on `feat/v0.7.0-grand-slam`:
 - **F8 — `permissions.mode` defaults to `enforce`** (was `advisory`). Operators relying on default-permissive must opt back in via `[permissions] mode = "advisory"` in `config.toml`.
 - **F11 — `forget --pattern` / `forget --tier` without `--namespace`** require `--confirm-global`.
 
+### Security-hardening sweep (release/v0.7.0 final pass, reconciled into trunk)
+
+Eleven late-cycle security hardening commits landed on `release/v0.7.0` between the initial release-cut and the reconciled HEAD. All eleven are folded into the v0.7.0 ship via the reconciliation merge — both audiences (release auditors + feature operators) see the same surface:
+
+- **SSRF — reject IPv4-mapped IPv6 + NAT64 prefix bypasses** (commit `3ab72dc`) — `validate_url_with` now refuses `::ffff:10.0.0.1` and `64:ff9b::10.0.0.1` style addresses that would otherwise smuggle private-range traffic past the v6 path. Test pin: `tests/k10_approval_security.rs` SSRF v4-mapped cases (release-branch tightening on `6b6b3c0` updated callers to pass the explicit flag).
+- **K9 governance gate parity on `handle_kg_invalidate`** (commit `a41c08f`) — the KG invalidate path now consults the same governance pre-write gate `handle_link` already used; the prior asymmetry left a substrate-internal write path ungated.
+- **K10 SSE — close `host:` prefix privilege-escalation** (commit `7496a6e`) — SSE subscription auth no longer accepts a `host:`-prefixed agent id as a substitute for the bound agent; the prefix used to short-circuit the namespace-inheritance check.
+- **K10 HMAC — bind method + `pending_id` in canonical request** (commit `99ffacc`) — the approval API HMAC now signs `(method, pending_id, body_hash)` rather than just `body_hash`; the prior shape allowed a captured signature to be replayed against a different verb or a different pending row.
+- **`invalidate_link` BEGIN IMMEDIATE wrap** (commit `2c77537`) — the UPDATE + audit-INSERT pair is now wrapped in a single `BEGIN IMMEDIATE` so a concurrent reader cannot observe the invalidation without the audit row, or vice-versa.
+- **Hooks executor — redact secret-shaped stderr** (commit `cbe934c`) — operator-log + caller-`reason` strings now scrub anything matching `password|secret|key|token|cred` patterns before surfacing; closes the side-channel where a hook subprocess could leak credentials by panicking with them in the message body.
+- **K10 HMAC nonce cache — single-use signatures within 300s window** (commit `a69325f`) — replay protection now tracks (signature, nonce) tuples in a 300-second sliding window; a captured signature cannot be replayed even before its timestamp expires.
+- **H8 — rebound namespace `Ask` must not silently elevate** (commit `69ad41c`) — when a namespace's `Ask` policy is rebound to a stricter parent, the prior leaf-resolution short-circuit no longer surfaces the parent's permissive grant; the resolver now walks the full chain on rebind.
+- **I1 — `transcripts` decompression cap is config-driven** (commit `26fab06`) — the zstd decompression bound now reads `TranscriptsConfig.max_decompressed_bytes` (default 16 MiB) instead of a compile-time constant; operators can tighten the cap on memory-constrained hosts.
+- **K10 SSE — strip lagged-event count to close volume side-channel** (commit `d1f6c9f`) — the SSE `Retry-After` and `X-Lagged-Events` headers no longer surface the exact count of dropped events; an attacker can no longer infer the rate of other subscribers' traffic from the lag signal.
+- **SSRF v4-mapped tests use `validate_url_with` explicit flag** (commit `6b6b3c0`) — test-side tightening so the SSRF test fleet exercises the explicit-flag path that production callers now take.
+
+All eleven fixes are no-op for callers operating inside the substrate's expected envelope; each closes a specific bypass / replay / inference vector surfaced during the v0.7.0 cert sequence.
+
+## [0.7.0-release-branch-headline] — 2026-05-06 — `attested-cortex` (initial release-cut narrative, superseded by 2026-05-09 reconciled headline above)
+
+**Headline:** v0.7.0 closes the `attested-cortex` epic — **69/69 tasks across 11 tracks** (A/B/C/D/E/F/G/H/I/J/K). The substrate becomes both **more articulate** (capabilities v3 with pre-computed calibration strings, named loaders, 52% MCP-tool token reduction on the full profile) and **cryptographically trustworthy** (per-agent Ed25519 attestation with append-only `signed_events` audit chain, sidechain transcripts with `memory_replay`, programmable 20-event hook pipeline, opt-in Apache AGE acceleration, K1/G1 namespace-inheritance enforcement, real permission system with deny-first semantics, A2A maturity). Canonical scope: [`docs/v0.7/V0.7-EPIC.md`](docs/v0.7/V0.7-EPIC.md). Migration: [`docs/MIGRATION_v0.7.md`](docs/MIGRATION_v0.7.md). What's new: [`docs/whats-new-v07.html`](docs/whats-new-v07.html). RFC: [`docs/v0.7/rfc-attested-cortex.md`](docs/v0.7/rfc-attested-cortex.md).
 
 > **Backward compatibility.** v3 capabilities are additive over v2; existing v0.6.4 SDKs continue to work against a v0.7.0 server. v0.6.4's `--profile core` 5-tool default surface is unchanged. The hook pipeline is **default off** — a v0.7.0 install with no `hooks.toml` behaves identically to v0.6.4 at the lifecycle layer. Schema migrations v20 → v22 (`audit_log` → `signed_events` → `memory_transcripts`) run automatically on first start and are idempotent.
 
@@ -440,7 +461,7 @@ The following per-task entries were authored as v0.7 tracks landed and are prese
   `doctor_critical_on_pending_actions_older_than_24h`,
   `doctor_remote_queries_capabilities_endpoint`). Documented in
   `docs/operations/doctor.md`.
-=======
+
 ### Phase P6 (R1) — `budget_tokens` recall recovery
 
 Recovered the prior phased ROADMAP's "killer feature, no competitor has

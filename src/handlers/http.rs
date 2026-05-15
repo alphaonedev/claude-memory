@@ -1279,14 +1279,14 @@ pub async fn approve_pending(
     // regardless of `api_key` configuration. Without a server-wide
     // `[hooks.subscription].hmac_secret`, `verify_approval_hmac`
     // refuses every request — the safe default.
-    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes) {
+    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes, "POST", &id) {
         return (
             status,
             Json(json!({
                 "error": "invalid or missing X-AI-Memory-Signature",
                 "hint": "POST /api/v1/pending/{id}/approve requires HMAC signing per K7's pattern. \
                         Set [hooks.subscription] hmac_secret in config and send \
-                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<body>\")> \
+                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<METHOD>.<pending_id>.<body>\")> \
                         with X-AI-Memory-Timestamp: <unix-epoch-secs>."
             })),
         )
@@ -1499,14 +1499,14 @@ pub async fn reject_pending(
     // Legacy reject endpoint MUST verify HMAC for the same reason — an
     // unsigned reject is just as dangerous (denial-of-service against
     // governance state, write-amplifies pending row churn).
-    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes) {
+    if let Err(status) = super::verify_approval_hmac(&headers, &body_bytes, "POST", &id) {
         return (
             status,
             Json(json!({
                 "error": "invalid or missing X-AI-Memory-Signature",
                 "hint": "POST /api/v1/pending/{id}/reject requires HMAC signing per K7's pattern. \
                         Set [hooks.subscription] hmac_secret in config and send \
-                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<body>\")> \
+                        X-AI-Memory-Signature: sha256=<HMAC-SHA256(SHA256(secret), \"<ts>.<METHOD>.<pending_id>.<body>\")> \
                         with X-AI-Memory-Timestamp: <unix-epoch-secs>."
             })),
         )

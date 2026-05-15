@@ -376,6 +376,7 @@ mod tests {
             default_ttl_secs: Some(3600),
             archive_grace_secs: Some(3600),
             namespaces: None,
+            max_decompressed_bytes: None,
         }
     }
 
@@ -524,6 +525,7 @@ mod tests {
             default_ttl_secs: Some(3600),
             archive_grace_secs: Some(3600),
             namespaces: Some(ns_table),
+            max_decompressed_bytes: None,
         };
 
         // Two rows, two namespaces, both 2 h old.
@@ -561,6 +563,7 @@ mod tests {
             default_ttl_secs: Some(86_400 * 30), // 30 days global
             archive_grace_secs: Some(86_400 * 7),
             namespaces: Some(ns_table),
+            max_decompressed_bytes: None,
         };
 
         // 5-min-old row in ephemeral/scratch — past the 60s pattern TTL,

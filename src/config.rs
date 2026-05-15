@@ -1899,6 +1899,14 @@ pub struct TranscriptsConfig {
     /// child namespace under the prefix; the bare `"*"` is the
     /// catch-all and is consulted last.
     pub namespaces: Option<std::collections::HashMap<String, TranscriptNamespaceConfig>>,
+    /// v0.7.0 I1 cap (#628 agent-3 follow-up): the maximum number of
+    /// bytes a single transcript may decompress to before
+    /// `transcripts::fetch` rejects it as a decompression bomb. `None`
+    /// → compiled default ([`crate::transcripts::MAX_DECOMPRESSED_BYTES`]
+    /// = 16 MiB). Operators with legitimately larger transcripts
+    /// raise the cap explicitly; the cap is per-call, so concurrent
+    /// fetches consume up to N × this value of transient memory.
+    pub max_decompressed_bytes: Option<usize>,
 }
 
 /// Per-namespace overrides nested under
@@ -2634,6 +2642,40 @@ pub fn set_active_hooks_hmac_secret(secret: Option<String>) {
 #[must_use]
 pub fn active_hooks_hmac_secret() -> Option<String> {
     ACTIVE_HOOKS_HMAC_SECRET.read().ok().and_then(|g| g.clone())
+}
+
+// ---------------------------------------------------------------------------
+// I1 cap (#628 agent-3 follow-up) — process-wide transcript decompression cap
+// ---------------------------------------------------------------------------
+//
+// `transcripts::fetch` consults this getter to decide the maximum
+// number of bytes a single transcript may decompress to. Operators
+// who legitimately store >16 MiB transcripts raise the cap explicitly
+// via `[transcripts] max_decompressed_bytes = …`; default-on uses the
+// compiled `MAX_DECOMPRESSED_BYTES` constant. The cap is per-call;
+// concurrent fetches consume up to N × this value of transient memory.
+
+static ACTIVE_MAX_DECOMPRESSED_BYTES: std::sync::RwLock<Option<usize>> =
+    std::sync::RwLock::new(None);
+
+/// Set the process-wide decompression cap. Boot reads
+/// `[transcripts] max_decompressed_bytes` and calls this; tests flip
+/// mid-process to exercise both branches.
+pub fn set_active_max_decompressed_bytes(cap: Option<usize>) {
+    if let Ok(mut w) = ACTIVE_MAX_DECOMPRESSED_BYTES.write() {
+        *w = cap;
+    }
+}
+
+/// Read the process-wide decompression cap, falling back to the
+/// compiled default when unset.
+#[must_use]
+pub fn active_max_decompressed_bytes() -> usize {
+    ACTIVE_MAX_DECOMPRESSED_BYTES
+        .read()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or(crate::transcripts::MAX_DECOMPRESSED_BYTES)
 }
 
 // ---------------------------------------------------------------------------

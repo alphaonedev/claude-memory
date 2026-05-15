@@ -27,6 +27,50 @@ pub(super) fn handle_kg_invalidate(
         validate::validate_expires_at_format(ts).map_err(|e| e.to_string())?;
     }
 
+    // v0.7.0 K9 (#628 H5/H6/I1 follow-up): the unified permission
+    // pipeline must gate `kg_invalidate` symmetrically with
+    // `handle_link`. Without this gate, a cross-tenant call could
+    // NULL another tenant's signed-link signature (H5 supersession
+    // semantic clears the signature row). Scope evaluation by the
+    // *source* memory's namespace — same convention as `handle_link`
+    // — so the same `[permissions.rules] action_type = "link"` rule
+    // applies to both create-link and invalidate-link.
+    {
+        use crate::permissions::{Op, PermissionContext, Permissions};
+        let link_ns = match db::get(conn, source_id) {
+            Ok(Some(m)) => m.namespace,
+            _ => "global".to_string(),
+        };
+        let agent_id = crate::identity::resolve_agent_id(params["agent_id"].as_str(), None)
+            .map_err(|e| e.to_string())?;
+        let ctx = PermissionContext {
+            op: Op::MemoryLink,
+            namespace: link_ns,
+            agent_id,
+            payload: json!({
+                "source_id": source_id,
+                "target_id": target_id,
+                "relation": relation,
+                "operation": "invalidate",
+            }),
+        };
+        match Permissions::evaluate(&ctx, &[]) {
+            crate::permissions::Decision::Allow | crate::permissions::Decision::Modify(_) => {}
+            crate::permissions::Decision::Deny(reason) => {
+                return Err(format!("kg_invalidate denied by permission rule: {reason}"));
+            }
+            crate::permissions::Decision::Ask(prompt) => {
+                return Ok(json!({
+                    "status": "ask",
+                    "reason": prompt,
+                    "action": "kg_invalidate",
+                    "source_id": source_id,
+                    "target_id": target_id,
+                }));
+            }
+        }
+    }
+
     match db::invalidate_link(conn, source_id, target_id, relation, valid_until)
         .map_err(|e| e.to_string())?
     {
