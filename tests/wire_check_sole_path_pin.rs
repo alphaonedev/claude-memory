@@ -37,13 +37,18 @@ use std::path::PathBuf;
 fn src(file: &str) -> String {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let path: PathBuf = [manifest_dir, file].iter().collect();
-    std::fs::read_to_string(&path).unwrap_or_else(|e| {
+    let raw = std::fs::read_to_string(&path).unwrap_or_else(|e| {
         panic!(
             "wire_check_sole_path_pin: failed to read {}: {}",
             path.display(),
             e
         )
-    })
+    });
+    // Normalise CRLF -> LF: Windows git checkouts can convert .rs to
+    // CRLF; the literal-string searches below contain bare `\n` so the
+    // CRLF form misses every match. Normalising here keeps the test
+    // platform-independent without changing the production source.
+    raw.replace("\r\n", "\n")
 }
 
 #[test]
