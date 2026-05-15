@@ -13,6 +13,11 @@
 // Library interface for ai-memory. Exposes public modules for testing and external use.
 
 pub mod approvals;
+// v0.7.0 WT-1-B — substrate-level atomisation engine. Decomposes
+// long-form memories into atomic propositions with full provenance
+// (atom_of FK, derives_from edge, signed_events trail). The first
+// downstream consumer landing on the WT-1-A schema v36 foundation.
+pub mod atomisation;
 pub mod audit;
 pub mod autonomy;
 pub mod bench;
