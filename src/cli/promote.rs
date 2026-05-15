@@ -185,6 +185,8 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         };
         let conn = db::open(db_path).unwrap();
         let now = chrono::Utc::now().to_rfc3339();

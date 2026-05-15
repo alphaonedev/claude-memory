@@ -356,6 +356,25 @@ pub struct GovernancePolicy {
     /// Resolved via the same leaf-first inheritance walk.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_atomise_max_atom_tokens: Option<u32>,
+    /// v0.7.0 QW-2 — auto-regenerate the Persona artefact for an
+    /// entity every N writes to a same-entity Reflection memory.
+    /// `None` (default) disables the cadence — operators trigger
+    /// regeneration explicitly via `memory_persona_generate` or
+    /// `ai-memory persona <entity_id> --regenerate`. Inherits via
+    /// the same leaf-first ancestor walk as every other field on
+    /// this struct (G1 governance). `skip_serializing_if` keeps
+    /// the absent shape on the wire for pre-QW-2 federation peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_persona_trigger_every_n_memories: Option<u32>,
+    /// v0.7.0 QW-2 companion to
+    /// `auto_export_reflections_to_filesystem` — when `Some(true)`,
+    /// the substrate writes generated Personas to
+    /// `~/.ai-memory/personas/<namespace>/<entity_id>.md` so
+    /// operators can `cat` the persona without learning SQL. The
+    /// canonical persona is the SQL row; the file is a derived
+    /// artefact. `None` / `Some(false)` keeps the substrate quiet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_export_personas_to_filesystem: Option<bool>,
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -399,6 +418,8 @@ impl Default for GovernancePolicy {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         }
     }
 }
@@ -444,6 +465,11 @@ impl GovernancePolicy {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            // v0.7.0 QW-2: persona cadence stays opt-in for managed
+            // namespaces too. Operators flip on the cadence
+            // explicitly via the namespace standard's metadata.
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         }
     }
 
@@ -521,6 +547,25 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_auto_atomise_max_atom_tokens(&self) -> u32 {
         self.auto_atomise_max_atom_tokens.unwrap_or(200)
+    /// v0.7.0 QW-2 — resolve the auto-persona regeneration cadence.
+    /// Returns `None` (cadence disabled) when the namespace has no
+    /// explicit override; `Some(N)` opts the namespace into deferred
+    /// persona regeneration every N writes against an entity. The
+    /// `post_store` hook reads this accessor on the resolved policy
+    /// after walking the leaf-first ancestor chain.
+    #[must_use]
+    pub fn effective_auto_persona_trigger_every_n_memories(&self) -> Option<u32> {
+        self.auto_persona_trigger_every_n_memories
+    }
+
+    /// v0.7.0 QW-2 — resolve the file-backed-export policy for
+    /// Persona-kind memories. Returns `false` (substrate stays
+    /// SQL-canonical) when the namespace has no explicit override.
+    /// Symmetric with
+    /// [`Self::effective_auto_export_reflections_to_filesystem`].
+    #[must_use]
+    pub fn effective_auto_export_personas_to_filesystem(&self) -> bool {
+        self.auto_export_personas_to_filesystem.unwrap_or(false)
     }
 }
 
