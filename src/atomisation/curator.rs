@@ -140,7 +140,8 @@ pub trait Curator: Send + Sync {
 ///
 /// Lifted from the WT-1-B brief without modification so a future
 /// audit can grep this constant in source against the spec doc.
-pub const CURATOR_SYSTEM_PROMPT: &str = "You are decomposing a long memory into atomic propositions.
+pub const CURATOR_SYSTEM_PROMPT: &str =
+    "You are decomposing a long memory into atomic propositions.
 Each atom must:
 (1) Be self-contained — readable without the original context
 (2) Be at most {max_atom_tokens} tokens
@@ -327,7 +328,8 @@ pub trait LlmGenerate {
 
 impl LlmGenerate for crate::llm::OllamaClient {
     fn generate(&self, prompt: &str, system: Option<&str>) -> Result<String, CuratorError> {
-        Self::generate(self, prompt, system).map_err(|e| CuratorError::LlmUnavailable(e.to_string()))
+        Self::generate(self, prompt, system)
+            .map_err(|e| CuratorError::LlmUnavailable(e.to_string()))
     }
 }
 
@@ -476,8 +478,12 @@ mod tests {
     #[test]
     fn enforce_token_budget_keeps_in_budget() {
         let atoms = vec![
-            Atom { text: "small atom".to_string() },
-            Atom { text: "another small atom".to_string() },
+            Atom {
+                text: "small atom".to_string(),
+            },
+            Atom {
+                text: "another small atom".to_string(),
+            },
         ];
         let (kept, dropped) = enforce_token_budget(atoms, 200);
         assert_eq!(kept.len(), 2);
@@ -489,7 +495,9 @@ mod tests {
         // Build a string that is firmly over the 25% overshoot window.
         let huge: String = "word ".repeat(500);
         let atoms = vec![
-            Atom { text: "fine".to_string() },
+            Atom {
+                text: "fine".to_string(),
+            },
             Atom { text: huge },
         ];
         let (kept, dropped) = enforce_token_budget(atoms, 10);
