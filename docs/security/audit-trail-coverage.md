@@ -366,6 +366,67 @@ pins the procurement-grade scenario end-to-end.
   `/api/v1/sync/*` when this is true.
 - Threaded at boot in `src/daemon_runtime.rs::bootstrap_serve`.
 
+### 9.1 Per-author attestation on `/sync/push` (v0.7.0 #238)
+
+Pre-v0.7.0, every `POST /api/v1/sync/push` accepted whatever
+`sender_agent_id` the body claimed and charged the matching
+`agent_quotas` row, logged the matching `audit::AuditAction::Store`,
+and recorded the matching `sync_state` clock entry. Any peer with a
+valid mTLS cert could therefore mint audit-trail rows under any
+agent's name — defeating per-agent integrity in the cryptographic
+chain. Red-team #230 caught it; #238 closes it.
+
+The fix:
+
+| Inbound `x-peer-id` header | `body.sender_agent_id` | Operator config           | Result                                                                  |
+|----------------------------|------------------------|---------------------------|-------------------------------------------------------------------------|
+| `Some(p)`                  | `s == p`               | n/a                       | Accept (peer authoring as itself).                                      |
+| `Some(p)`                  | `s` empty / absent     | n/a                       | Accept (legacy unauthored push).                                        |
+| `Some(p)`                  | `s != p`               | `s ∈ allowed_sender_agent_ids[p]` | Accept (operator-pre-approved cross-author push).               |
+| `Some(p)`                  | `s != p`               | not in allowlist          | **403 `{"error":"sender_agent_id_mismatch","claimed":"s","peer_header":"p"}`** |
+| absent                     | `s` non-empty          | bypass unset              | **403 `{"error":"peer_id_header_missing"}`**                            |
+| any                        | any                    | `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1` | Accept (legacy compat; logged at WARN).                       |
+
+**Operator-bound trust caveat.** Today's mTLS substrate
+(`src/tls.rs::FingerprintAllowlistVerifier`) pins the peer's client
+certificate by SHA-256 fingerprint but **does not propagate the
+verified cert (or its SAN/CN) to handler code** — axum-server 0.8 has
+no per-request extension for that. The `x-peer-id` header is therefore
+a peer-claimed identity tied to a fingerprint **only by operator
+deployment convention** (one cert ↔ one `x-peer-id`), not by a
+cryptographic attestation surface. The cert-SAN extraction work is
+tracked as a v0.8.0 follow-up to #238.
+
+**Implementation surface**:
+
+- `src/federation/peer_attestation.rs` — `PeerAttestationConfig`,
+  `attest_sender`, `AttestError`, env-var contract.
+- `src/handlers/federation_receive.rs::sync_push` — runs
+  `attest_sender` before the postgres-dispatch branch so both
+  backends share the refusal posture.
+- `src/federation/sync.rs::post_once` + `bulk_catchup_push` —
+  attaches `x-peer-id` on every outbound POST.
+- `src/daemon_runtime.rs` (sync-daemon pull + push) — same.
+
+**Env-var contract**:
+
+- `AI_MEMORY_FED_PEER_ATTESTATION` — JSON map of
+  `{peer_id: {allowed_sender_agent_ids: [...], allowed_namespaces: [...]}}`.
+  Absent = empty allowlist; default-deny on cross-author claims.
+- `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1` — opt-out for legacy peers.
+
+**Test coverage**: `tests/g_issue_238_sender_attestation.rs` (5
+cases): header-matches-body, mismatch-no-allowlist, header-absent,
+env-bypass, allowlist-permits.
+
+### 9.2 Per-peer namespace scope on `/sync/since` (v0.7.0 #239)
+
+The per-peer namespace allowlist for `/sync/since` lands in the
+companion commit on this branch (issue #239). The `PeerScope`
+schema documented in §9.1 already reserves the
+`allowed_namespaces` field so operator-facing JSON does not churn
+between the two security commits.
+
 ---
 
 ## 10. Forward roadmap

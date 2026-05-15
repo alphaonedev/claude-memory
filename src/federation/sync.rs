@@ -85,6 +85,22 @@ pub(super) async fn post_once(
     if let Some(key) = api_key {
         req = req.header("x-api-key", key);
     }
+    // v0.7.0 #238 — attach `x-peer-id` carrying the body's
+    // `sender_agent_id` so the receiver's attestation step can
+    // cross-check the body claim against an explicit wire-level
+    // peer-id. The body's `sender_agent_id` is the canonical source
+    // (already in the payload); the header just lifts it to a
+    // request-shape position the receiver reads BEFORE deserialising
+    // the JSON envelope. Backwards-compatible: a missing field
+    // results in no header attached + the receiver enforces via the
+    // body field alone.
+    if let Some(peer_id) = body
+        .get("sender_agent_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        req = req.header(crate::federation::peer_attestation::PEER_ID_HEADER, peer_id);
+    }
     match req.send().await {
         Ok(resp) if resp.status().is_success() => {
             match resp.json::<serde_json::Value>().await {
@@ -1283,6 +1299,16 @@ pub async fn bulk_catchup_push(
             // 401 and the row gap stays open.
             if let Some(key) = api_key.as_deref() {
                 req = req.header("x-api-key", key);
+            }
+            // v0.7.0 #238 — attach `x-peer-id` so catchup batches
+            // attest against the receiver's allowlist exactly like
+            // the per-row fanout in `post_once`.
+            if let Some(peer_id) = payload
+                .get("sender_agent_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                req = req.header(crate::federation::peer_attestation::PEER_ID_HEADER, peer_id);
             }
             let outcome = match req.send().await {
                 Ok(resp) if resp.status().is_success() => Ok(()),

@@ -308,7 +308,7 @@ fn enable_rejects_mismatched_key_keypub_pair() {
 
 /// Layout 2 — `operator.key` present, but no `operator.key.pub` sidecar.
 /// The verify block is skipped and the seed-only load must still succeed.
-/// Covers the `if pub_keygen.exists()` FALSE branch (load_operator_signing_key_from_dir).
+/// Covers the `if pub_keygen.exists()` FALSE branch (`load_operator_signing_key_from_dir`).
 #[test]
 fn enable_accepts_keygen_layout_without_pub_sidecar() {
     let tdir = tempfile::tempdir().unwrap();

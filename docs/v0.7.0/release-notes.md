@@ -101,6 +101,34 @@ deny-first semantics, A2A maturity).
   to each droplet's `/etc/ai-memory-a2a/tls/` and rewrites the
   systemd `ExecStart=` line idempotently.
 
+### Security hardening — federation red-team P2 closeouts
+
+Two red-team #230 findings on `/api/v1/sync/*` are closed in v0.7.0
+proper rather than deferred to v0.8.0:
+
+- **[#238](https://github.com/alphaonedev/ai-memory-mcp/issues/238)
+  Body-claimed `sender_agent_id` is now attested against the wire-
+  level `x-peer-id` header**, with an operator-configured allowlist
+  for legitimate cross-author claims. Mismatched claims return
+  `403 sender_agent_id_mismatch`; a missing header returns
+  `403 peer_id_header_missing`. Legacy peers can opt in to pre-v0.7.0
+  behaviour via `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`. See
+  [`docs/security/audit-trail-coverage.md` §9.1](../security/audit-trail-coverage.md#91-per-author-attestation-on-syncpush-v070-238).
+- **[#239](https://github.com/alphaonedev/ai-memory-mcp/issues/239)
+  `/api/v1/sync/since` per-peer namespace allowlist** lands in the
+  companion commit on this branch. See §9.2 of the audit-trail
+  coverage doc for the full matrix.
+
+**Cert-SAN extraction follow-up.** Today's mTLS substrate
+(`FingerprintAllowlistVerifier`) pins client certificates by SHA-256
+fingerprint but does not propagate the cert's SAN/CN to handler code
+(axum-server 0.8 has no per-request extension surface for that).
+v0.7.0 closes the substantive integrity gaps using the `x-peer-id`
+header convention bound to fingerprints via operator deployment
+runbook. The cryptographic-attestation surface (cert SAN ↔ peer-id
+binding inside the verifier) lands in v0.8.0 — tracked as a follow-up
+to #238/#239.
+
 ### Track-level rollup (the original epic, unchanged)
 
 - **Track A — Capabilities v3 response shape (5 tasks).** Adds

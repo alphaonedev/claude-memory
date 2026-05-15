@@ -11,6 +11,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::db;
+use crate::federation::peer_attestation::{
+    self, AttestError, PEER_ID_HEADER, PeerAttestationConfig,
+};
 use crate::models::{Memory, MemoryLink};
 use crate::validate;
 
@@ -18,6 +21,39 @@ use super::MAX_BULK_SIZE;
 #[cfg(feature = "sal")]
 use super::store_err_to_response;
 use super::{AppState, StorageBackend};
+
+/// v0.7.0 federation security — extract the peer's self-claimed
+/// `x-peer-id` header. Lowercase form per HTTP/2 wire convention;
+/// axum's `HeaderMap` lookup is case-insensitive so callers can send
+/// the canonical `X-Peer-Id`.
+fn extract_peer_id(headers: &HeaderMap) -> Option<&str> {
+    headers.get(PEER_ID_HEADER).and_then(|v| v.to_str().ok())
+}
+
+/// v0.7.0 #238 — render a 403 envelope when the body-claimed
+/// `sender_agent_id` does not attest to the wire-level `x-peer-id`
+/// header. Surfaces both values so the operator can diff exactly
+/// what the peer claimed against what the substrate expected.
+fn attestation_refusal_response(err: &AttestError) -> Response {
+    let (claimed, peer_header) = match err {
+        AttestError::HeaderMissing => (String::new(), String::new()),
+        AttestError::Mismatch {
+            claimed,
+            peer_header,
+        } => (claimed.clone(), peer_header.clone()),
+    };
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({
+            "error": err.tag(),
+            "claimed": claimed,
+            "peer_header": peer_header,
+            "note": "set AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1 to opt out (legacy peers); \
+                     pre-v0.7.0 federation peers must be upgraded to send `x-peer-id`.",
+        })),
+    )
+        .into_response()
+}
 
 // ---------------------------------------------------------------------------
 // Phase 3 foundation (issue #224) — HTTP sync endpoints.
@@ -128,8 +164,15 @@ fn next_utc_midnight() -> String {
 #[derive(Deserialize)]
 pub struct SyncPushBody {
     /// Claimed `agent_id` of the peer pushing data. Recorded in
-    /// `sync_state` for vector clock advancement. Treated as identity
-    /// only (not attestation) — same NHI model as every other write.
+    /// `sync_state` for vector clock advancement.
+    ///
+    /// v0.7.0 #238 — this body field is now ATTESTED against the
+    /// wire-level `x-peer-id` HTTP header before any substrate write
+    /// fires. See `src/federation/peer_attestation.rs` for the
+    /// decision matrix, env bypass, and operator runbook. Pre-v0.7.0
+    /// federation clients that don't send `x-peer-id` are accepted
+    /// only when the operator opts in via
+    /// `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`.
     pub sender_agent_id: String,
     /// Vector clock the sender had at push time. v0.7.0 S6-LOW2: now
     /// consulted for observability-only clock-skew detection — the
@@ -587,6 +630,39 @@ pub async fn sync_push(
     Json(body): Json<SyncPushBody>,
 ) -> impl IntoResponse {
     let state = app.db.clone();
+
+    // v0.7.0 #238 — body-claimed sender_agent_id MUST attest against
+    // the wire-level `x-peer-id` header (or be the unauthored-push
+    // legacy shape). Backwards-compat via
+    // `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`. Runs BEFORE the
+    // postgres-dispatch branch so both backends share the same
+    // refusal posture. See `src/federation/peer_attestation.rs`.
+    let peer_header_owned = extract_peer_id(&headers).map(str::to_string);
+    let attest_cfg = PeerAttestationConfig::from_env();
+    if !peer_attestation::trust_body_agent_id_bypass() {
+        if let Err(e) = peer_attestation::attest_sender(
+            peer_header_owned.as_deref(),
+            Some(body.sender_agent_id.as_str()),
+            &attest_cfg,
+        ) {
+            tracing::warn!(
+                target: "federation::attestation",
+                tag = e.tag(),
+                claimed = %body.sender_agent_id,
+                peer_header = %peer_header_owned.as_deref().unwrap_or(""),
+                "sync_push: sender_agent_id failed attestation against x-peer-id header"
+            );
+            return attestation_refusal_response(&e);
+        }
+    } else {
+        // Bypass set — log once per request at WARN so the operator
+        // can see the legacy posture is in effect.
+        tracing::warn!(
+            target: "federation::attestation",
+            "sync_push: AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1 — bypassing #238 \
+             sender_agent_id attestation (legacy compat)"
+        );
+    }
 
     // v0.7.0 Wave-3 Continuation 2 — postgres-backed federation
     // dispatches through the SAL trait for memories / deletions /

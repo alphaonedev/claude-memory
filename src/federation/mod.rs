@@ -35,6 +35,7 @@
 //!   daemon is a federation node.
 
 pub mod peer;
+pub mod peer_attestation;
 pub mod quorum;
 pub mod receive;
 pub mod reflection_bookkeeping;

@@ -2935,9 +2935,15 @@ pub async fn sync_cycle_once(
             "memories": outgoing,
             "dry_run": false,
         });
+        // v0.7.0 #238 — attach `x-peer-id` so the receiver attests
+        // body.sender_agent_id against our wire-level peer identity.
         let mut req = client
             .post(format!("{peer_url}/api/v1/sync/push"))
             .header("x-agent-id", local_agent_id)
+            .header(
+                crate::federation::peer_attestation::PEER_ID_HEADER,
+                local_agent_id,
+            )
             .header("content-type", "application/json")
             .json(&body);
         if let Some(key) = api_key {
