@@ -126,6 +126,8 @@ fn seed_reflection(
         metadata: json!({"agent_id": "test-l2-7"}),
         reflection_depth: depth,
         memory_kind: MemoryKind::Reflection,
+        entity_id: None,
+        persona_version: None,
     };
     let id = db::insert(conn, &m).expect("insert reflection");
 

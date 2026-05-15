@@ -55,6 +55,8 @@ fn seed_two_memories(conn: &Connection) -> (String, String) {
         metadata: serde_json::json!({}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let tgt = Memory {
         id: uuid::Uuid::new_v4().to_string(),
@@ -74,6 +76,8 @@ fn seed_two_memories(conn: &Connection) -> (String, String) {
         metadata: serde_json::json!({}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let src_id = db::insert(conn, &src).expect("insert source");
     let tgt_id = db::insert(conn, &tgt).expect("insert target");

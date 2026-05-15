@@ -182,6 +182,8 @@ fn insert_memory(conn: &Connection, ns: &str, title: &str, depth: i32, kind: Mem
         metadata: serde_json::json!({"agent_id": "ai:l3-3"}),
         reflection_depth: depth,
         memory_kind: kind,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &m).expect("insert")
 }

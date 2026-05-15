@@ -130,6 +130,8 @@ fn make_memory(id: &str, namespace: &str, title: &str, content: &str) -> Memory 
         metadata: serde_json::json!({"agent_id": "ai:j5-equivalence"}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

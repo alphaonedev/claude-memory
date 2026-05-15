@@ -367,6 +367,12 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
             .ok()
             .and_then(|s| crate::models::MemoryKind::from_str(&s))
             .unwrap_or_default(),
+        // v0.7.0 QW-2 — Persona-as-artifact discriminator columns.
+        // Populated only for `memory_kind = 'persona'` rows. NULL on
+        // every observation/reflection row. Pre-v36 rows lack the
+        // column entirely — the `.ok()` fallthrough yields None.
+        entity_id: row.get::<_, Option<String>>("entity_id").unwrap_or(None),
+        persona_version: row.get::<_, Option<i32>>("persona_version").unwrap_or(None),
     })
 }
 
@@ -387,8 +393,8 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -419,14 +425,25 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             -- v0.7.0 L1-1 — kind is sticky: once Reflection, always Reflection.
             -- An upsert of an observation onto an existing reflection row must
             -- not downgrade the kind (reflect is not reversible by re-store).
+            -- v0.7.0 QW-2 — Persona is also sticky once set; the engine
+            -- writes new versions via fresh rows under a unique
+            -- `__persona_<entity>_v<n>` title rather than upsert.
             memory_kind = CASE WHEN memories.memory_kind = 'reflection' THEN 'reflection'
-                               ELSE excluded.memory_kind END
+                               WHEN memories.memory_kind = 'persona' THEN 'persona'
+                               ELSE excluded.memory_kind END,
+            -- v0.7.0 QW-2 — entity_id + persona_version stay attached to
+            -- the row they were minted with (Persona-kind upserts use
+            -- versioned titles so the conflict path is exercised only
+            -- on accidental same-title collisions).
+            entity_id = COALESCE(memories.entity_id, excluded.entity_id),
+            persona_version = COALESCE(memories.persona_version, excluded.persona_version)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
+            mem.entity_id, mem.persona_version,
         ],
         |r| r.get(0),
     )?;
@@ -567,14 +584,15 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
             // its `MemoryKind::Reflection` typing and the stored row
             // falls back to the column DEFAULT 'observation'.
             let actual_id: String = conn.query_row(
-                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
                  RETURNING id",
                 params![
                     mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
                     tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
                     mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
                     metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
+                    mem.entity_id, mem.persona_version,
                 ],
                 |r| r.get(0),
             ).map_err(|e| {
@@ -1576,6 +1594,8 @@ pub fn promote_to_namespace(
         metadata: source.metadata.clone(),
         reflection_depth: source.reflection_depth,
         memory_kind: source.memory_kind.clone(),
+        entity_id: None,
+        persona_version: None,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -3149,6 +3169,8 @@ pub fn entity_register(
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -3974,6 +3996,8 @@ pub fn register_agent(
         metadata,
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     insert(conn, &mem)
@@ -4411,8 +4435,8 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at
                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
@@ -4455,14 +4479,22 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             -- v0.7.0 L1-1 — kind is sticky across federation merges: a
             -- reflection row must not be downgraded to observation by a
             -- newer-wins merge from a peer that doesn't know about the kind.
+            -- v0.7.0 QW-2 — Persona is similarly sticky.
             memory_kind = CASE WHEN memories.memory_kind = 'reflection' THEN 'reflection'
-                               ELSE excluded.memory_kind END
+                               WHEN memories.memory_kind = 'persona' THEN 'persona'
+                               ELSE excluded.memory_kind END,
+            -- v0.7.0 QW-2 — entity_id + persona_version are immutable
+            -- once set so a federation merge can't drop the persona
+            -- discriminator off a `memory_kind = 'persona'` row.
+            entity_id = COALESCE(memories.entity_id, excluded.entity_id),
+            persona_version = COALESCE(memories.persona_version, excluded.persona_version)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
             tags_json, mem.priority, mem.confidence, mem.source, mem.access_count,
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
+            mem.entity_id, mem.persona_version,
         ],
         |r| r.get(0),
     )?;
@@ -7191,6 +7223,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 
@@ -10210,6 +10244,8 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         };
 
         let now = chrono::Utc::now().to_rfc3339();
@@ -10242,6 +10278,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -10340,6 +10378,8 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -10371,6 +10411,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -12061,6 +12103,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let ref_mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -12080,6 +12124,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 1,
             memory_kind: crate::models::MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         };
 
         insert(&conn, &obs).unwrap();
@@ -12140,6 +12186,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 1,
             memory_kind: crate::models::MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         };
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id)
@@ -12180,6 +12228,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 1,
             memory_kind: crate::models::MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         };
         insert(&conn, &mem_reflection).unwrap();
 
@@ -12202,6 +12252,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         insert(&conn, &mem_obs).unwrap();
 

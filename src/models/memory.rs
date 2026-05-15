@@ -9,15 +9,18 @@ use super::default_metadata;
 /// L1-1 (v0.7.0) — typed memory-kind discriminator stored in the
 /// `memories.memory_kind` column (schema v30).
 ///
-/// Only `Observation` and `Reflection` exist in v0.7.0. Goal/Plan/Step/
-/// Decision are scoped to L1-6/v0.8.0 and MUST NOT be added here yet.
+/// `Observation` and `Reflection` exist since v0.7.0. `Persona`
+/// landed in v0.7.0 QW-2 (schema v36) as the substrate-native
+/// Tencent-pattern L3 persona artefact. Goal/Plan/Step/Decision are
+/// scoped to L1-6/v0.8.0 and MUST NOT be added here yet.
 ///
 /// `Observation` is the default for every memory created before v30 (the
 /// `DEFAULT 'observation'` SQL column handles the backfill contract for
 /// rows that pre-date the migration; new inserts that omit the field also
 /// land at `Observation`). `Reflection` is set by the `memory_reflect`
 /// write path in addition to the existing `metadata.type='reflection'`
-/// back-compat marker.
+/// back-compat marker. `Persona` is set by the QW-2
+/// `PersonaGenerator` and the `memory_persona_generate` MCP tool.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryKind {
@@ -26,6 +29,12 @@ pub enum MemoryKind {
     /// A memory synthesised by the reflection pass over lower-depth
     /// peers (set by `memory_reflect` and the curator reflection pass).
     Reflection,
+    /// v0.7.0 QW-2 — Persona-as-artifact. A curator-generated
+    /// Markdown profile summarising an entity, derived from a
+    /// cluster of Reflection-kind memories about that entity. The
+    /// `entity_id` + `persona_version` columns on `memories` are
+    /// populated only for this variant.
+    Persona,
 }
 
 impl MemoryKind {
@@ -35,6 +44,7 @@ impl MemoryKind {
         match self {
             Self::Observation => "observation",
             Self::Reflection => "reflection",
+            Self::Persona => "persona",
         }
     }
 
@@ -46,6 +56,7 @@ impl MemoryKind {
         match s {
             "observation" => Some(Self::Observation),
             "reflection" => Some(Self::Reflection),
+            "persona" => Some(Self::Persona),
             _ => None,
         }
     }
@@ -157,6 +168,20 @@ pub struct Memory {
     /// that don't yet emit the field.
     #[serde(default)]
     pub memory_kind: MemoryKind,
+    /// v0.7.0 QW-2 — populated only when `memory_kind == Persona`.
+    /// Identifies the subject of the persona. Stored on the SQL
+    /// column `memories.entity_id TEXT NULL` (schema v36).
+    /// `skip_serializing_if = "Option::is_none"` keeps the absent
+    /// shape on the wire for pre-QW-2 federation peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    /// v0.7.0 QW-2 — monotonic per-(entity_id, namespace) version
+    /// counter for the Persona artefact. Populated only when
+    /// `memory_kind == Persona`. Each `PersonaGenerator::generate`
+    /// call writes a new row with `version + 1`; older rows stay
+    /// queryable for audit / rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_version: Option<i32>,
 }
 
 impl Default for Memory {
@@ -183,6 +208,8 @@ impl Default for Memory {
             metadata: default_metadata(),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 }

@@ -245,6 +245,8 @@ fn write_notification(
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     crate::storage::insert(conn, &mem)?;
@@ -322,6 +324,8 @@ mod tests {
                 0
             },
             memory_kind: kind,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

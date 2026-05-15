@@ -283,6 +283,8 @@ pub(super) fn handle_store(
         metadata,
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
@@ -1566,6 +1568,8 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -1597,6 +1601,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let sid = db::insert(conn, &standard).expect("insert standard");
         db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");

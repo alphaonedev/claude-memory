@@ -426,6 +426,8 @@ mod tests {
             metadata: serde_json::json!({"agent_id": agent_id}),
             reflection_depth: depth,
             memory_kind: MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

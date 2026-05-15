@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 36).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 37).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -47,7 +47,16 @@ CREATE TABLE IF NOT EXISTS memories (
     -- to the parent memory. Pure additive — no existing semantics
     -- changes.
     atomised_into INTEGER,
-    atom_of       TEXT REFERENCES memories(id)
+    atom_of       TEXT REFERENCES memories(id),
+    -- v0.7.0 QW-2 (schema v37) — Persona-as-artifact substrate primitive.
+    -- `entity_id` is NULL on non-Persona rows; on Persona rows it carries
+    -- the canonicalised entity descriptor the persona is about (e.g.
+    -- `user:fate`). `persona_version` is NULL on non-Persona rows; on
+    -- Persona rows it carries the monotonic per-(entity_id, namespace)
+    -- generation counter. Pure additive — non-Persona rows keep NULL
+    -- payloads with no backfill.
+    entity_id       TEXT,
+    persona_version INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -62,6 +71,14 @@ CREATE INDEX IF NOT EXISTS idx_memories_atom_of
     ON memories(atom_of) WHERE atom_of IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
     ON memories(atomised_into) WHERE atomised_into > 0;
+-- v37 (QW-2) partial index covering per-entity persona lookups lives
+-- in `migrations/sqlite/0031_v07_persona.sql` and runs from the
+-- migrate step's `if version < 37` arm — NOT in this bootstrap
+-- SCHEMA, because `db::open` applies SCHEMA before `migrate`, and
+-- the index references `entity_id` (a column only present after the
+-- v37 ALTER fires on a legacy DB). Fresh installs land the column
+-- via the CREATE TABLE above, then the migrate step's v37 arm
+-- creates the index a few statements later.
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -255,7 +272,15 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       indexes. Pure additive on legacy data: every pre-v36 row has
 //       `atomised_into IS NULL` and `atom_of IS NULL`. The first hard
 //       prereq for WT-1-B (atomisation pass) through WT-1-G.
-const CURRENT_SCHEMA_VERSION: i64 = 36;
+// v37 = v0.7.0 QW-2 — Persona-as-artifact substrate primitive. Adds
+//       `memories.entity_id TEXT NULL` + `memories.persona_version
+//       INTEGER NULL` columns plus the partial index
+//       `idx_personas_by_entity` covering Persona-kind rows. The
+//       ALTERs are emitted from Rust (SQLite has no `ADD COLUMN IF
+//       NOT EXISTS`); the SQL file holds the supporting partial
+//       index. Substrate for Tencent-pattern L3 personas; non-
+//       Persona rows keep NULL payloads with no backfill.
+const CURRENT_SCHEMA_VERSION: i64 = 37;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -479,6 +504,12 @@ BEGIN
     SELECT RAISE(ABORT, 'CHECK constraint failed: memory_links.attest_level must be one of unsigned/self_signed/peer_attested (or NULL for legacy rows)');
 END;
 ";
+// v0.7.0 QW-2 — Persona-as-artifact substrate primitive. ALTER
+// TABLEs adding `memories.entity_id` + `memories.persona_version`
+// are emitted from Rust (SQLite has no `ADD COLUMN IF NOT EXISTS`);
+// this file holds the idempotent partial index that makes the
+// per-entity persona lookup cheap.
+const MIGRATION_V37_SQLITE: &str = include_str!("../../migrations/sqlite/0031_v07_persona.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1219,7 +1250,6 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // idempotent, no Rust-emitted ALTERs needed.
             conn.execute_batch(MIGRATION_V35_SQLITE)?;
         }
-
         if version < 36 {
             // v0.7.0 WT-1-A — substrate-level atomisation foundation.
             //
@@ -1297,6 +1327,36 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             // Step 3: supporting partial indexes from the SQL file.
             // CREATE INDEX IF NOT EXISTS — idempotent.
             conn.execute_batch(MIGRATION_V36_SQLITE)?;
+        }
+
+        if version < 37 {
+            // v0.7.0 QW-2 — Persona-as-artifact substrate primitive.
+            // Probe for the `entity_id` and `persona_version` columns
+            // on `memories` and ADD them when absent. SQLite has no
+            // `ADD COLUMN IF NOT EXISTS`, so the probe lives in Rust;
+            // the partial index lives in the .sql file.
+            let mut has_entity_id = false;
+            let mut has_persona_version = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                match col?.as_str() {
+                    "entity_id" => has_entity_id = true,
+                    "persona_version" => has_persona_version = true,
+                    _ => {}
+                }
+            }
+            drop(stmt);
+            if !has_entity_id {
+                conn.execute("ALTER TABLE memories ADD COLUMN entity_id TEXT", [])?;
+            }
+            if !has_persona_version {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN persona_version INTEGER",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V37_SQLITE)?;
         }
 
         conn.execute("DELETE FROM schema_version", [])?;
@@ -1504,8 +1564,8 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 36,
-            "module docstring advertises 36; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 37,
+            "module docstring advertises 37; bump the docstring when this number changes"
         );
     }
 

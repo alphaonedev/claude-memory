@@ -125,6 +125,8 @@ fn make_observation(namespace: &str, topic: &str, idx: usize) -> Memory {
         metadata: serde_json::json!({"agent_id": "ai:l3-3"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -159,6 +161,8 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_policy insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");
@@ -188,6 +192,8 @@ fn seed_governance_json(conn: &Connection, namespace: &str, governance: &serde_j
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_governance_json insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");
@@ -366,6 +372,8 @@ fn sg_rl_3_federation_reflection_replication_with_cross_peer_refusal() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     seed_policy(&conn_b, ns, &tight);
 

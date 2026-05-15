@@ -42,6 +42,8 @@ fn mk(id: &str, title: &str, content: &str, kind: MemoryKind, reflection_depth: 
         metadata: serde_json::json!({}),
         reflection_depth,
         memory_kind: kind,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

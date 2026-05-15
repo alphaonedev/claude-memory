@@ -331,6 +331,9 @@ mod reflection_origin;
 // v0.7.0 QW-1 — file-backed reflection chain export.
 #[path = "tools/export_reflection.rs"]
 mod export_reflection;
+// v0.7.0 QW-2 — Persona-as-artifact substrate handlers.
+#[path = "tools/persona.rs"]
+mod persona;
 // v0.7.0 L2-3 (issue #668) — Reflection invalidation propagation.
 #[path = "tools/dependents_of_invalidated.rs"]
 mod dependents_of_invalidated;
@@ -492,6 +495,7 @@ use link::{handle_get_links, handle_link};
 use list::handle_list;
 use pending::handle_pending_list;
 use pending::handle_subscription_dlq_list;
+use persona::{handle_persona, handle_persona_generate};
 use promote::handle_promote;
 use reflect::handle_reflect;
 use reflection_origin::handle_reflection_origin;
@@ -1053,6 +1057,17 @@ fn handle_request(
                 // from this path (capability isolation — see
                 // `mcp::tools::export_reflection` module doc).
                 "memory_export_reflection" => handle_export_reflection(conn, arguments),
+                // v0.7.0 QW-2 — Persona-as-artifact surface. Read-only
+                // `memory_persona` does an indexed lookup; the write
+                // surface `memory_persona_generate` refuses below
+                // smart tier (curator needs the LLM trait wired).
+                "memory_persona" => handle_persona(conn, arguments),
+                "memory_persona_generate" => handle_persona_generate(
+                    conn,
+                    arguments,
+                    llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
+                    tier_config.tier,
+                ),
                 // v0.7.0 L2-3 (issue #668) — read-side surface for the
                 // dependents of an invalidated reflection. Pure
                 // read-only — the walker itself fires from the
@@ -1624,9 +1639,11 @@ mod tests {
         // v0.7.0 WT-1-C adds memory_atomise (Family::Power) → 67 —
         // curator-pass decomposition of a memory into 2-10 atomic
         // propositions; archives the source.
+        // v0.7.0 QW-2 adds memory_persona + memory_persona_generate
+        // (Family::Power) → 69 — Persona-as-artifact substrate.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 67);
+        assert_eq!(tools.len(), 69);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1681,7 +1698,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            67,
+            69,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1696,7 +1713,8 @@ mod tests {
              v0.7.0 L2-7 memory_skill_compositional_context (1) + \
              v0.7.0 QW-1 memory_export_reflection (1) + \
              v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) + \
-             v0.7.0 WT-1-C memory_atomise (1) = 67"
+             v0.7.0 WT-1-C memory_atomise (1) + \
+             v0.7.0 QW-2 memory_persona + memory_persona_generate (2) = 69"
         );
     }
 
@@ -2990,6 +3008,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -3068,6 +3088,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));
@@ -3113,6 +3135,8 @@ mod tests {
                 metadata: json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -3161,6 +3185,8 @@ mod tests {
                 metadata: json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             ids.push(db::insert(&conn, &mem).unwrap());
         }
@@ -3676,6 +3702,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
         db::set_namespace_standard(&conn, "m9-parent", &std_id, None).unwrap();
@@ -3698,6 +3726,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(&conn, "repo/team/sub", &child_id, None).unwrap();
@@ -3763,6 +3793,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let parent_id = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "m9-explicit-parent", &parent_id, None).unwrap();
@@ -3785,6 +3817,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let child_id = db::insert(&conn, &child_mem).unwrap();
         db::set_namespace_standard(
@@ -3844,6 +3878,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(conn, &mem).unwrap();
         db::set_namespace_standard(conn, namespace, &id, None).unwrap();
@@ -4128,6 +4164,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -4249,6 +4287,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -4463,6 +4503,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let std_id = db::insert(&conn, &mem).unwrap();
 
@@ -4570,6 +4612,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -4916,6 +4960,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -4950,6 +4996,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5023,6 +5071,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5061,6 +5111,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5094,6 +5146,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -5379,6 +5433,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let pid = db::insert(&conn, &parent_mem).unwrap();
         db::set_namespace_standard(&conn, "w12-explicit-grand", &pid, None).unwrap();
@@ -5478,6 +5534,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_promote", json!({"id": id}));
@@ -5611,6 +5669,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5658,6 +5718,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -5702,6 +5764,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_get", json!({"id": id}));
@@ -5739,6 +5803,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -5785,6 +5851,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -5824,6 +5892,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -5869,6 +5939,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -6287,6 +6359,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut mem_b = mem_a.clone();
         mem_b.id = uuid::Uuid::new_v4().to_string();
@@ -6340,6 +6414,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_update", json!({"id": id, "expires_at": ""}));
@@ -6373,6 +6449,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -6414,6 +6492,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_delete", json!({"id": id}));
@@ -6808,6 +6888,8 @@ mod tests {
             metadata: json!({"agent_id": "test-agent-reflect"}),
             reflection_depth: depth,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -6844,6 +6926,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let std_id = db::insert(conn, &standard).unwrap();
         db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();
@@ -7551,6 +7635,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -7700,6 +7786,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let a = db::insert(&conn, &mk("a")).unwrap();
         let b = db::insert(&conn, &mk("b")).unwrap();
@@ -7799,6 +7887,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         let req = make_tools_call(
@@ -7991,6 +8081,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8038,6 +8130,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8097,6 +8191,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8169,6 +8265,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8252,6 +8350,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8336,6 +8436,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let mut tgt = src.clone();
         tgt.id = uuid::Uuid::new_v4().to_string();
@@ -8435,6 +8537,8 @@ mod tests {
             metadata: json!({"agent_id": "test-agent-chunkc"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -8465,6 +8569,8 @@ mod tests {
             metadata: json!({"family": family, "agent_id": "test-agent-chunkc"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -9619,6 +9725,8 @@ mod tests {
             metadata: json!({"family": "core"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &stale).unwrap();
         let resp = crate::mcp::handle_load_family(
@@ -9892,11 +10000,15 @@ mod tests {
                         auto_export_reflections_to_filesystem: None,
                         auto_atomise: None,
                         auto_atomise_threshold_cl100k: None,
-                        auto_atomise_max_atom_tokens: None
+                        auto_atomise_max_atom_tokens: None,
+                        auto_persona_trigger_every_n_memories: None,
+                        auto_export_personas_to_filesystem: None,
                     }
                 }),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -9953,11 +10065,15 @@ mod tests {
                         auto_export_reflections_to_filesystem: None,
                         auto_atomise: None,
                         auto_atomise_threshold_cl100k: None,
-                        auto_atomise_max_atom_tokens: None
+                        auto_atomise_max_atom_tokens: None,
+                        auto_persona_trigger_every_n_memories: None,
+                        auto_export_personas_to_filesystem: None,
                     }
                 }),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -10567,6 +10683,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_gc", json!({"dry_run": false}));
@@ -10601,6 +10719,8 @@ mod tests {
             metadata: json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).unwrap();
         let req = make_tools_call("memory_gc", json!({"dry_run": true}));

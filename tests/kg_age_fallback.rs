@@ -102,6 +102,8 @@ fn make_memory(id: &str, namespace: &str, title: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "ai:fold-a2a1-3-fallback"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

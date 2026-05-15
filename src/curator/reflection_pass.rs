@@ -356,6 +356,8 @@ impl<'a> CompactionPass for ReflectionPass<'a> {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         })
     }
 
@@ -887,6 +889,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 
@@ -1125,6 +1129,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         crate::db::insert(conn, &mem).unwrap()
     }
@@ -1413,6 +1419,8 @@ mod tests {
             metadata,
             reflection_depth: 1,
             memory_kind: MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         };
         let id = crate::db::insert(&conn, &m).unwrap();
         let err = pass.verify(id).unwrap_err().to_string();
@@ -1531,6 +1539,8 @@ mod tests {
                 metadata,
                 reflection_depth: 2,
                 memory_kind: MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             crate::db::insert(&conn, &m).unwrap();
         }

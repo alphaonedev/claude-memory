@@ -91,6 +91,8 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         metadata: serde_json::json!({"agent_id": "test-agent-task7-chaos"}),
         reflection_depth,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -761,6 +763,8 @@ async fn federation_apply_remote_memory_round_trips_reflection_depth() {
         metadata: serde_json::json!({"agent_id": "peer-ai"}),
         reflection_depth: 2,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let id = store
         .apply_remote_memory(&ctx, &mem)

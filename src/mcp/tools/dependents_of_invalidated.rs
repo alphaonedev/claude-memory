@@ -98,6 +98,8 @@ mod tests {
                 0
             },
             memory_kind: kind,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

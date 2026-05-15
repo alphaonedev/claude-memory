@@ -155,6 +155,8 @@ mod tests {
             metadata: json!({"agent_id": "ai:owner"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

@@ -143,7 +143,15 @@ fn test_migration_v36_applies_cleanly() {
             |r| r.get(0),
         )
         .expect("read schema_version");
-    assert_eq!(v, 36, "v36: schema_version must be stamped at 36");
+    // The migration ladder reaches v37 (QW-2 persona substrate); it
+    // passes through v36 (WT-1-A atomisation foundation) on its way
+    // there, so the v36 column + index probes above still exercise
+    // WT-1-A's migration step, but the final stamped version is v37.
+    assert_eq!(
+        v, 37,
+        "v36→v37: schema_version must be stamped at 37 \
+         (migration ladder passes through v36 on its way to v37)"
+    );
 }
 
 #[test]
@@ -172,8 +180,10 @@ fn test_migration_v36_idempotent() {
         )
         .expect("read v2");
 
-    assert_eq!(v1, 36);
-    assert_eq!(v1, v2, "v36: migrate is not idempotent — version drifted");
+    // The migration ladder reaches v37 (QW-2 persona substrate);
+    // pass-through v36 still exercises WT-1-A's atomisation migration.
+    assert_eq!(v1, 37);
+    assert_eq!(v1, v2, "v37: migrate is not idempotent — version drifted");
 
     // Columns + indexes still present after replay.
     assert!(column_exists(&conn2, "memories", "atomised_into"));
@@ -437,11 +447,12 @@ async fn test_capabilities_db_schema_version_reports_36() {
         .expect("WT-1-A: db_schema_version must be a JSON integer");
 
     assert_eq!(
-        v, 36,
-        "WT-1-A: capabilities.db_schema_version must be 36 after the \
-         atomisation-foundation bump (was 35 after QW-3's offload-substrate \
-         bump). Drift here means the migrate ladder skipped the v36 step or \
-         the SAL `schema_version()` lookup is reading the wrong source."
+        v, 37,
+        "WT-1-A+QW-2: capabilities.db_schema_version must be 37 after \
+         the atomisation-foundation bump (35→36) and the persona-as-\
+         artifact bump (36→37). Drift here means the migrate ladder \
+         skipped one of those steps or the SAL `schema_version()` \
+         lookup is reading the wrong source."
     );
 
     shutdown.notify_one();

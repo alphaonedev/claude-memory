@@ -82,6 +82,11 @@ pub mod notification;
 // compression (Mermaid canvas + auto-cadence + node_id integration)
 // builds on this plumbing.
 pub mod offload;
+// v0.7.0 QW-2 — Persona-as-artifact substrate primitive. Curator-
+// generated Markdown profile of an entity, derived from a cluster
+// of Reflection-kind memories. First-class MemoryKind variant +
+// MCP tools + namespace-policy cadence + optional filesystem export.
+pub mod persona;
 // v0.7.0 L1-5 — SKILL.md parser and structured-document ingestion pipelines.
 pub mod parsing;
 // v0.7.0 K9 — unified permission system. Composes declarative

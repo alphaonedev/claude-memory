@@ -136,6 +136,8 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let standard_id = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, namespace, &standard_id, None).expect("set standard");
@@ -165,6 +167,8 @@ fn observation(namespace: &str, title: &str, depth: i32, agent_id: &str) -> Memo
         } else {
             MemoryKind::Observation
         },
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -229,6 +233,8 @@ fn three_peer_federation_depth_replication_and_cross_peer_refusal() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     seed_policy(&peer_b.conn, NAMESPACE, &tight);
 

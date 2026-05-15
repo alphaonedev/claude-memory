@@ -381,6 +381,8 @@ mod tests {
             auto_atomise: Some(true),
             auto_atomise_threshold_cl100k: Some(50),
             auto_atomise_max_atom_tokens: Some(20),
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         }
     }
 

@@ -59,6 +59,8 @@ fn make_memory(namespace: &str, title: &str, depth: i32) -> Memory {
         metadata: serde_json::json!({"agent_id": "test-agent-l1-8"}),
         reflection_depth: depth,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -110,6 +112,8 @@ fn seed_governance_json(
         metadata,
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let std_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();

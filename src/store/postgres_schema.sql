@@ -113,7 +113,13 @@ CREATE TABLE IF NOT EXISTS memories (
     -- atomisation pass. `atom_of` is NULL on non-atom rows; on atom
     -- rows it FK-points back to the parent memory.
     atomised_into     INTEGER,
-    atom_of           TEXT REFERENCES memories(id)
+    atom_of           TEXT REFERENCES memories(id),
+    -- v0.7.0 QW-2 (schema v36 postgres / v37 sqlite) — Persona-as-artifact
+    -- discriminator columns. Populated only for `memory_kind = 'persona'`
+    -- rows; every observation/reflection keeps NULL. Fresh schemas carry
+    -- these inline; existing schemas pick them up via migrate_v36().
+    entity_id         TEXT,
+    persona_version   INTEGER
 );
 
 -- v0.6.0 blocker #294 fix: upsert contract is `(title, namespace)`.
@@ -152,6 +158,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_atom_of
     ON memories(atom_of) WHERE atom_of IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
     ON memories(atomised_into) WHERE atomised_into > 0;
+-- v0.7.0 QW-2 (schema v36 postgres / v37 sqlite) — partial index covering
+-- per-entity persona lookups. Persona rows are a small minority of the
+-- table; the partial predicate keeps the index footprint minimal on
+-- observation/reflection-dominant workloads.
+CREATE INDEX IF NOT EXISTS idx_personas_by_entity
+    ON memories(entity_id, namespace) WHERE memory_kind = 'persona';
 
 -- Full-text search. English stemming; matches the SQLite FTS5 setup.
 CREATE INDEX IF NOT EXISTS memories_content_fts ON memories

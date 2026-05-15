@@ -730,6 +730,7 @@ struct DepthTwoRecord {
     depth_violations: usize,
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_depth_two<J>(
     scenario: &Scenario,
     scenario_d1: &DepthOneRecord,
@@ -800,6 +801,8 @@ where
             }),
             reflection_depth: 1,
             memory_kind: MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         }
     };
     let imported_id = db::insert(&conn, &imported_sibling)?;

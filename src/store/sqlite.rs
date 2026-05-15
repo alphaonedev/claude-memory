@@ -876,6 +876,8 @@ impl MemoryStore for SqliteStore {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let conn = self.state.lock().await;
         db::insert(&conn, &mem).map_err(box_err)
@@ -926,6 +928,8 @@ mod tests {
             metadata: serde_json::json!({"agent_id": "alice"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

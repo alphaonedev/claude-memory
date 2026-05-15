@@ -144,6 +144,8 @@ fn insert_long_source(conn: &Connection, ns: &str, title_keyword: &str) -> Strin
         metadata: json!({"agent_id": "wt1e-agent"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &mem).expect("seed long source")
 }

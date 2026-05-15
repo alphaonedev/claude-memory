@@ -128,6 +128,8 @@ fn seed_long_source(conn: &Connection, ns: &str, keyword: &str) -> String {
         metadata: json!({"agent_id": "wt1e-fb-agent"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &mem).expect("seed")
 }

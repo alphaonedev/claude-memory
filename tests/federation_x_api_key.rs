@@ -136,6 +136,8 @@ fn sample_memory() -> Memory {
         metadata: serde_json::json!({"agent_id":"ai:fanout"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

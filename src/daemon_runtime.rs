@@ -379,6 +379,10 @@ pub enum Command {
     /// substrate failure with a stable exit code (see
     /// [`crate::cli::commands::atomise::exit_code`]).
     Atomise(crate::cli::commands::atomise::AtomiseArgs),
+    /// v0.7.0 QW-2 — fetch (or regenerate) the Persona artefact for
+    /// an entity. Read-only by default; pass `--regenerate` to run
+    /// the curator and persist a fresh row.
+    Persona(crate::cli::commands::persona::PersonaArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1241,6 +1245,23 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 cli_agent_id.as_deref(),
                 &mut out,
             )? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        Command::Persona(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            // v0.7.0 QW-2 — the CLI deliberately runs WITHOUT a live
+            // LLM client. `--regenerate` requires one; we surface the
+            // documented "install Ollama" hint via exit code 2 rather
+            // than spinning up a transient OllamaClient here. Operators
+            // who want the regenerate path call `memory_persona_generate`
+            // through MCP (where the daemon already owns the LLM).
+            match cli::commands::persona::run(&db_path, &a, None, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }
@@ -3982,6 +4003,8 @@ mod tests {
             metadata: crate::models::default_metadata(),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         db::set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -4025,6 +4048,8 @@ mod tests {
             metadata: crate::models::default_metadata(),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);

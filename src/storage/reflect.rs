@@ -486,6 +486,8 @@ pub fn reflect_with_hooks(
         // back-compat path). This is the first-class typed counterpart
         // to the metadata.type = 'reflection' splice above.
         memory_kind: MemoryKind::Reflection,
+        entity_id: None,
+        persona_version: None,
     };
 
     // Atomic boundary: insert the reflection row + N `reflects_on`

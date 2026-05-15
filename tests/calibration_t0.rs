@@ -105,8 +105,11 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // from 56 to 58.
     // v0.7.0 WT-1-C — Family::Power gained `memory_atomise` (not
     // loaded under core), so the "more" count grows 58 → 59.
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` (not loaded under core), so the
+    // "more" count grows 59 → 61.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 59 more \
+                    (store, recall, list, get, search, ...). 61 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -163,11 +166,14 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
     // v0.7.0 QW-1 — Family::Power gained `memory_export_reflection`
     // → 63 visible under full.
     // v0.7.0 QW-3 follow-up — Family::Power gained `memory_offload` +
-    // `memory_deref` → 65 visible (the "all 65" form excludes the
-    // always-on `memory_capabilities` bootstrap from the 66-tool total).
+    // `memory_deref` → 65 visible (out of the 66-tool total).
     // v0.7.0 WT-1-C — Family::Power gained `memory_atomise`
-    // → 66 visible under full (out of the 67-tool total).
-    let expected = "I can directly use all 66 memory tools right now \
+    // → 66 visible (out of the 67-tool total).
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` → 68 visible under full (the "all 68"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 69-tool total).
+    let expected = "I can directly use all 68 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -226,8 +232,11 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
     // from 45 to 47.
     // v0.7.0 WT-1-C — Family::Power gained `memory_atomise`
     // (not loaded under graph), so the "more" count grows 47 → 48.
+    // v0.7.0 QW-2 — Family::Power gained `memory_persona` +
+    // `memory_persona_generate` (not loaded under graph), so the
+    // "more" count grows 48 → 50.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 48 more \
+                    (store, recall, list, get, search, ...). 50 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";

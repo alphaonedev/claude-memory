@@ -214,6 +214,8 @@ fn test_export_reflections_since_filter() {
         title: "old".into(),
         content: "old body".into(),
         memory_kind: MemoryKind::Reflection,
+        entity_id: None,
+        persona_version: None,
         reflection_depth: 1,
         created_at: old_now.clone(),
         updated_at: old_now,
@@ -323,6 +325,8 @@ fn enable_auto_export(conn: &rusqlite::Connection, ns: &str) {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     let gov_meta = json!({
         "agent_id": "ai:test",

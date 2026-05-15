@@ -53,6 +53,8 @@ fn seed_family(conn: &rusqlite::Connection, family: &str) -> String {
         metadata: json!({"family": family}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

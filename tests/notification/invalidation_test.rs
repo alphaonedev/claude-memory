@@ -59,6 +59,8 @@ fn make_mem(title: &str, namespace: &str, kind: MemoryKind) -> Memory {
         metadata: json!({"agent_id": "ai:tester"}),
         reflection_depth: i32::from(matches!(kind, MemoryKind::Reflection)),
         memory_kind: kind,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

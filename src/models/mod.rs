@@ -326,6 +326,8 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();
@@ -513,6 +515,8 @@ mod tests {
             metadata: default_metadata(),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();

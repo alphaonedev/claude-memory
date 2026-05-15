@@ -193,6 +193,8 @@ fn insert_long_source(conn: &Connection, ns: &str) -> String {
         metadata: json!({"agent_id": "test-agent"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     storage::insert(conn, &mem).expect("seed long source")
 }
@@ -217,6 +219,8 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         metadata: json!({"agent_id": "test-agent"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     storage::insert(conn, &mem).expect("seed short source")
 }

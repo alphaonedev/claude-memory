@@ -52,6 +52,8 @@ fn seed_memory(id: &str, ns: &str, title: &str) -> Memory {
         metadata: serde_json::json!({"agent_id":"ai:migrate-roundtrip"}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

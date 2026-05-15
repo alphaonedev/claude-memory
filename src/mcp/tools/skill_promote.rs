@@ -358,6 +358,8 @@ mod tests {
             metadata: sjson!({}),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(conn, &m).expect("insert observation")
     }
