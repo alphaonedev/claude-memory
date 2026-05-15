@@ -1,14 +1,14 @@
 # ai-memory v0.7.0 — SHIP-VERDICT memo (Phase I)
 
 **Status:** FINAL · ready for tag-cut.
-**HEAD:** `ea59288` (security fixes on top of 7-PR cascade on top of `41bd382` build-fix on top of `dfa4847`)
+**HEAD:** `b0e2014` (test gates + lint cleanup + security fixes on top of 7-PR cascade on top of `41bd382` build-fix on top of `dfa4847`)
 **Date:** 2026-05-14
 **Authors:** AI NHI cross-LLM campaign (Claude Opus 4.7 driving, Grok 4.20-0309-reasoning cross-verifying)
 **Tracking:** #700, #29
 
 ## Fix-all-gaps closeout (operator directive: no v0.8.0 deferral)
 
-The campaign surfaced and addressed **14 distinct gaps** end-to-end. Every
+The campaign surfaced and addressed **16 distinct gaps** end-to-end. Every
 single one landed in v0.7.0 — zero deferred to v0.8.0 except (a) the
 cert-SAN extraction substrate that requires axum-server contribution
 (#717) and (b) the A2A campaign harness modernization (#718). Both
@@ -30,12 +30,22 @@ documented and tracked.
 | 12 | a2a workflow Terraform install | a2a PR #2 | ✅ merged |
 | 13 | a2a workflow NODE_INDEX + env injection | a2a PR #3 + #4 | ✅ merged |
 | 14 | Federation security #238 + #239 (sender_agent_id attestation + per-peer scope) | PR #716 | ✅ merged |
+| 15 | Default-features lint warnings introduced in #716 (unused imports + dead code at non-sal builds) | PR #719 | ✅ merged |
+| 16 | Default-features Check matrix: 2 SAL-only endpoint tests (http_kg_find_paths_happy + http_verify_link_unsigned) needed `#[cfg(feature = "sal")]` gates | PR #720 | ✅ merged |
 
-This is what "we are not shipping gaps" looks like in practice: 14
+This is what "we are not shipping gaps" looks like in practice: 16
 substrate/CI/test/security gaps closed, with the substrate-cures for
 #238 + #239 documented as having a v0.8.0 follow-up for cert-SAN
 extraction once axum-server exposes verified-cert state to handlers
 (#717).
+
+The final two gaps (#15 + #16) were surfaced by the v0.7.0 tag CI itself:
+the original tag at `ea59288` failed the cross-platform Check matrix
+because 2 SAL-only endpoint tests didn't have feature gates, AND failed
+Lint because PR #716 introduced unused-at-default-features imports. The
+tag was deleted from origin (no release had been published — all
+publish jobs were skipped due to the Check failure) and re-cut at
+`b0e2014` after both fixes landed.
 
 Gaps surfaced from PR coverage checks, agent self-audit, DigitalOcean
 campaign build, AI NHI evaluation, chained test re-runs, and triage
