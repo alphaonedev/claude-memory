@@ -65,6 +65,7 @@ use ai_memory::db::{
 };
 use ai_memory::hooks::events::{ReflectDelta, ReflectResult};
 use ai_memory::hooks::{EventClass, HookEvent, event_class, is_pre_event};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::signed_events::list_signed_events;
 use chrono::Utc;
@@ -101,6 +102,9 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

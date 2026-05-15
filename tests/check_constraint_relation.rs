@@ -25,6 +25,7 @@
 //! pinned to make any future taxonomy drift loud.
 
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use rusqlite::Connection;
 use std::path::Path;
@@ -60,6 +61,9 @@ fn seed_two_memories(conn: &Connection) -> (String, String) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let tgt = Memory {
         id: uuid::Uuid::new_v4().to_string(),
@@ -84,6 +88,9 @@ fn seed_two_memories(conn: &Connection) -> (String, String) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let src_id = db::insert(conn, &src).expect("insert source");
     let tgt_id = db::insert(conn, &tgt).expect("insert target");

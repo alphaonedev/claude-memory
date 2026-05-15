@@ -24,6 +24,7 @@
 //! These tests don't depend on the MCP JSON-RPC envelope — they exercise
 //! the handler directly, mirroring the pattern in `tests/skill_test.rs`.
 
+use ai_memory::models::ConfidenceSource;
 use std::path::PathBuf;
 
 use ai_memory::db;
@@ -131,6 +132,9 @@ fn seed_reflection(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = db::insert(conn, &m).expect("insert reflection");
 

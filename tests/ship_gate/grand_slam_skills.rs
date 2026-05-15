@@ -48,6 +48,7 @@
 //! Hermetic: tempdir DBs, in-memory SQLite, no live network, no live
 //! LLM (the promote handler doesn't need one).
 
+use ai_memory::models::ConfidenceSource;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -94,6 +95,9 @@ fn insert_observation(conn: &rusqlite::Connection, title: &str, ns: &str, body: 
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &m).expect("insert observation")
 }

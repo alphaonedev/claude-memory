@@ -20,6 +20,7 @@
 
 use ai_memory::db;
 use ai_memory::kg::cycle_check::would_create_reflection_cycle;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::signed_events::{
     SignedEvent, append_signed_event, list_signed_events, payload_hash,
@@ -60,6 +61,9 @@ fn insert(conn: &Connection, id: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("insert memory")
 }

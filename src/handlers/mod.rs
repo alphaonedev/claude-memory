@@ -817,6 +817,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
         let got = db::get(&lock.0, &id).unwrap().unwrap();
@@ -851,6 +854,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&lock.0, &mem).unwrap();
         let (results, _outcome) = db::recall(
@@ -936,6 +942,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
 
@@ -1239,6 +1248,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1371,6 +1383,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1447,6 +1462,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1520,6 +1538,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1908,6 +1929,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -2001,6 +2025,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -2078,6 +2105,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let m1_id = db::insert(&lock.0, &m1).unwrap();
             let m2 = Memory {
@@ -2103,6 +2133,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let m2_id = db::insert(&lock.0, &m2).unwrap();
             (m1_id, m2_id)
@@ -2196,6 +2229,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let a_id = db::insert(&lock.0, &a).unwrap();
             let b = Memory {
@@ -2221,6 +2257,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let b_id = db::insert(&lock.0, &b).unwrap();
             db::create_link(&lock.0, &a_id, &b_id, "reflects_on").unwrap();
@@ -2322,6 +2361,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let s_id = db::insert(&lock.0, &s).unwrap();
             let t = Memory {
@@ -2347,6 +2389,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let t_id = db::insert(&lock.0, &t).unwrap();
             (s_id, t_id)
@@ -2421,6 +2466,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -2490,6 +2538,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -3035,6 +3086,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -3088,6 +3142,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -3715,6 +3772,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&lock.0, &mem).unwrap()
     }
@@ -5134,6 +5194,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -5357,6 +5420,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5493,6 +5559,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let a = db::insert(&lock.0, &mk("source-a")).unwrap();
             let b = db::insert(&lock.0, &mk("target-b")).unwrap();
@@ -5680,6 +5749,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5854,6 +5926,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5932,6 +6007,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -7044,6 +7122,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -7103,6 +7184,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -7169,6 +7253,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -8142,6 +8229,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let read = Memory {
                 id: Uuid::new_v4().to_string(),
@@ -8166,6 +8256,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &unread).unwrap();
             db::insert(&lock.0, &read).unwrap();
@@ -8224,6 +8317,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -8334,6 +8430,9 @@ mod tests {
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -8429,6 +8528,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -9439,6 +9541,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let a = db::insert(&lock.0, &mk("draft-a")).unwrap();
             let b = db::insert(&lock.0, &mk("draft-b")).unwrap();
@@ -9686,6 +9791,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mk("alice-says", "earth is round")).unwrap();
             db::insert(&lock.0, &mk("bob-says", "earth is flat")).unwrap();
@@ -9747,6 +9855,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mk("ns-iso-a", "first opinion")).unwrap();
             db::insert(&lock.0, &mk("ns-iso-b", "different opinion")).unwrap();
@@ -10337,6 +10448,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11562,6 +11676,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -13444,6 +13561,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let standard_id = db::insert(&lock.0, &standard).unwrap();
         db::set_namespace_standard(&lock.0, ns, &standard_id, None).unwrap();
@@ -14081,6 +14201,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let a = db::insert(&lock.0, &mk("aom101-0", "first")).unwrap();
             let b = db::insert(&lock.0, &mk("aom101-1", "second")).unwrap();
@@ -14184,6 +14307,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             let a = db::insert(
                 &lock.0,

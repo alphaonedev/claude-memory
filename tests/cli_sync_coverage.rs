@@ -14,6 +14,7 @@
 
 use ai_memory::cli::CliOutput;
 use ai_memory::cli::sync::{SyncArgs, SyncDaemonArgs, run, run_daemon};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::{db, models};
 use chrono::Utc;
 use std::path::PathBuf;
@@ -86,6 +87,9 @@ fn seed(db_path: &std::path::Path, ns: &str, title: &str, content: &str) -> Stri
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }
@@ -508,6 +512,9 @@ fn dry_run_classifies_update_when_remote_newer() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mut mem_remote = mem_local.clone();
     mem_remote.content = "new".to_string();
@@ -581,6 +588,9 @@ fn dry_run_classifies_pull_noop_and_push_update() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     // Local: newer (same id)
     let mut mem_local = mem_remote.clone();
@@ -644,6 +654,9 @@ fn restamp_agent_id_with_non_object_metadata_is_safe() {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         // db::insert may reject non-object metadata via JSON serialization;
         // if so, fall back to inserting a row whose metadata becomes

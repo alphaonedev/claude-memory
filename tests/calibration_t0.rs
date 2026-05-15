@@ -111,8 +111,11 @@ fn t0_describe_to_user_core_profile_canonical_phrasing() {
     // v0.7.0 Form 3 (#756) — Family::Power gained
     // `memory_ingest_multistep` (not loaded under core), so the "more"
     // count grows 61 → 62.
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` (not loaded under core), so the
+    // "more" count grows 62 → 63.
     let expected = "I can directly use 7 memory tools right now \
-                    (store, recall, list, get, search, ...). 62 more \
+                    (store, recall, list, get, search, ...). 63 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";
@@ -180,7 +183,11 @@ fn t0_describe_to_user_full_profile_canonical_phrasing() {
     // `memory_ingest_multistep` → 69 visible under full (the "all 69"
     // form excludes the always-on `memory_capabilities` bootstrap from
     // the 70-tool total).
-    let expected = "I can directly use all 69 memory tools right now \
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` → 70 visible under full (the "all 70"
+    // form excludes the always-on `memory_capabilities` bootstrap from
+    // the 71-tool total).
+    let expected = "I can directly use all 70 memory tools right now \
                     (store, recall, list, get, search, ...). Nothing more to load — \
                     the full memory surface is already active.";
 
@@ -245,8 +252,11 @@ fn t0_describe_to_user_graph_profile_canonical_phrasing() {
     // v0.7.0 Form 3 (#756) — Family::Power gained
     // `memory_ingest_multistep` (not loaded under graph), so the
     // "more" count grows 50 → 51.
+    // v0.7.0 Form 5 (#758) — Family::Power gained
+    // `memory_calibrate_confidence` (not loaded under graph), so the
+    // "more" count grows 51 → 52.
     let expected = "I can directly use 18 memory tools right now \
-                    (store, recall, list, get, search, ...). 51 more \
+                    (store, recall, list, get, search, ...). 52 more \
                     (update, delete, forget, gc, etc.) are available on demand — \
                     I can load them if you ask for something that needs them, \
                     or you can restart the server with a different profile.";

@@ -110,6 +110,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = db::insert(&conn, &mem).expect("insert");
         let out = handle_reflection_origin(&conn, &json!({"memory_id": id})).unwrap();

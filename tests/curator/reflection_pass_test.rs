@@ -35,6 +35,7 @@
 use ai_memory::autonomy::AutonomyLlm;
 use ai_memory::curator::reflection_pass::{self, ReflectionPassConfig, run_reflection_pass};
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, MemoryLinkRelation, Tier};
 use anyhow::Result;
 use chrono::Utc;
@@ -116,6 +117,9 @@ fn make_observation(ns: &str, topic: &str, idx: usize) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -402,6 +406,9 @@ fn set_namespace_max_reflection_depth(conn: &rusqlite::Connection, namespace: &s
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let _ = db::insert(conn, &mem); // best-effort; substrate uses
     // resolve_governance_policy which

@@ -41,6 +41,9 @@ pub(super) mod export_reflection;
 // smart+autonomous-tier regeneration. Module doc on
 // `mcp::tools::persona` covers the tier-gate rationale.
 pub(super) mod persona;
+// v0.7.0 Form 5 (issue #758) — confidence-calibration sweep over the
+// shadow-mode observation table. Family::Power operator surface.
+pub(super) mod calibrate_confidence;
 // v0.7.0 L2-3 (issue #668) — Reflection invalidation propagation
 // (notification, not cascade). Read-side surface for the dependents
 // flagged by the L2-3 walker.

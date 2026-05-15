@@ -1,6 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::models::ConfidenceSource;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -466,6 +467,9 @@ pub async fn create_memory(
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
 
@@ -761,6 +765,9 @@ pub async fn create_memory(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     // Task 1.9: governance enforcement (store-side).
@@ -4224,6 +4231,9 @@ pub async fn entity_register(
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         // F-A2A1.5 (#705) — governance enforcement on the postgres
         // entity-register path. Mirrors the F-A2A1.2 delete/promote gates
@@ -6812,6 +6822,9 @@ pub async fn bulk_create(
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
 
             // F-A2A1.5 (#705) — governance enforcement on the postgres
@@ -6920,6 +6933,9 @@ pub async fn bulk_create(
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),

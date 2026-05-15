@@ -48,6 +48,7 @@
 //! Hermetic: tempdir DBs, in-memory SQLite, deterministic test
 //! signatures, no live network.
 
+use ai_memory::models::ConfidenceSource;
 use std::path::Path;
 
 use ai_memory::db;
@@ -187,6 +188,9 @@ fn insert_memory(conn: &Connection, ns: &str, title: &str, depth: i32, kind: Mem
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &m).expect("insert")
 }

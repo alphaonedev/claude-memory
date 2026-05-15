@@ -32,6 +32,7 @@
 //! 3. Other "extra" fields (e.g. `skill_promotion_min_depth`) are
 //!    likewise preserved.
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use ai_memory::storage as db;
 use chrono::Utc;
@@ -74,6 +75,9 @@ fn insert_with_metadata(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("insert memory")
 }

@@ -95,6 +95,9 @@ fn seed_existing(conn: &Connection, title: &str, content: &str, namespace: &str)
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed insert")
 }
@@ -403,6 +406,9 @@ fn synthesis_parse_response_round_trips() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }];
     let raw = r#"{"verdicts":[{"candidate_id":"c1","verb":"delete","reason":"stale"}]}"#;
     let parsed: SynthesisResponse = parse_response(raw, &cands).unwrap();

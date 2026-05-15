@@ -34,6 +34,7 @@
 //! 3. **No allowlist + env bypass = full dump (legacy)**.
 //! 4. **No allowlist + no bypass = empty + WARN** (default-deny).
 
+use ai_memory::models::ConfidenceSource;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::Value;
@@ -121,6 +122,9 @@ async fn seed(db: &ai_memory::handlers::Db, ns: &str, title: &str) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     ai_memory::db::insert(&lock.0, &mem).expect("seed insert");
 }

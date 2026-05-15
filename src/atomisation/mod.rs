@@ -41,6 +41,7 @@
 
 pub mod curator;
 
+use crate::models::ConfidenceSource;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -519,6 +520,9 @@ fn write_atom(
         citations: source.citations.clone(),
         source_uri: Some(format!("doc:{}", source.id)),
         source_span: span,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     let actual_id = db::insert(conn, &mem)?;

@@ -222,6 +222,24 @@ pub struct MemoryEnvelope {
     /// Omitted when NULL on the underlying row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_span: Option<crate::models::SourceSpan>,
+    /// v0.7.0 Form 5 (issue #758) — typed discriminator for the
+    /// provenance of the `confidence` value on the underlying row.
+    /// Always emitted so auditors can rely on the field's presence
+    /// regardless of row vintage. Legacy rows resolve to
+    /// `caller_provided` (the SQL default on schema v39).
+    #[serde(default)]
+    pub confidence_source: crate::models::ConfidenceSource,
+    /// v0.7.0 Form 5 — JSON snapshot of the signals that produced an
+    /// auto-derived or calibrated confidence value. Omitted when NULL
+    /// on the underlying row (i.e., the row's
+    /// `confidence_source == CallerProvided`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_signals: Option<crate::models::ConfidenceSignals>,
+    /// v0.7.0 Form 5 — RFC3339 stamp of the last decay computation.
+    /// Omitted when NULL on the underlying row (i.e., the row has
+    /// never been touched by the decay updater).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_decayed_at: Option<String>,
 }
 
 /// v0.7.0 WT-1-E — per-memory atomisation enrichment block. Carries
@@ -444,6 +462,13 @@ pub fn build_files(
                 citations: mem.citations.clone(),
                 source_uri: mem.source_uri.clone(),
                 source_span: mem.source_span,
+                // v0.7.0 Form 5 (issue #758) — confidence-provenance
+                // fields round-trip into the bundle so an auditor can
+                // verify whether the `confidence` value was caller-
+                // provided, auto-derived, calibrated, or decayed.
+                confidence_source: mem.confidence_source,
+                confidence_signals: mem.confidence_signals.clone(),
+                confidence_decayed_at: mem.confidence_decayed_at.clone(),
             };
             let bytes = serde_json::to_vec_pretty(&env).context("serialise MemoryEnvelope")?;
             files.insert(format!("memories/{}.json", mem.id), bytes);

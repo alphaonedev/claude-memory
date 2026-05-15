@@ -54,6 +54,7 @@
 //! tracks moving idempotency into the walker itself if the
 //! cross-peer federation case demands it.
 
+use crate::models::ConfidenceSource;
 use crate::models::{Memory, MemoryKind, Tier};
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -250,6 +251,9 @@ fn write_notification(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     crate::storage::insert(conn, &mem)?;
@@ -332,6 +336,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 

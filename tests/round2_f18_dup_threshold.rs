@@ -17,6 +17,7 @@
 
 use ai_memory::db;
 use ai_memory::models;
+use ai_memory::models::ConfidenceSource;
 use chrono::Utc;
 use tempfile::TempDir;
 
@@ -64,6 +65,9 @@ fn seed_with_embedding(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let stored_id = db::insert(conn, &mem).expect("db::insert");
     db::set_embedding(conn, &stored_id, embedding).expect("db::set_embedding");

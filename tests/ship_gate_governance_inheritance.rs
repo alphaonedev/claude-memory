@@ -25,6 +25,7 @@ use ai_memory::config::{
     PermissionsMode, lock_permissions_mode_for_test, override_active_permissions_mode_for_test,
 };
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction, Memory,
     Tier, default_metadata,
@@ -85,6 +86,9 @@ fn seed_policy(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();

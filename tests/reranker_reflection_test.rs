@@ -17,6 +17,7 @@
 //! because the boost is applied AFTER the cross-encoder rerank — the
 //! recall pipeline shape is incidental to the contract.
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use ai_memory::reranker::{CrossEncoder, ReflectionBoostConfig};
 
@@ -47,6 +48,9 @@ fn mk(id: &str, title: &str, content: &str, kind: MemoryKind, reflection_depth: 
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

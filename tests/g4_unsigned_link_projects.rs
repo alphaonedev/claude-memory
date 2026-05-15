@@ -50,6 +50,7 @@
 
 #![cfg(feature = "sal-postgres")]
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::Arc;
 
 use ai_memory::config::{FeatureTier, ResolvedScoring, ResolvedTtl};
@@ -173,6 +174,9 @@ fn fresh_memory(namespace: &str, title: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

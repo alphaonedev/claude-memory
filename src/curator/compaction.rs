@@ -33,6 +33,7 @@
 //!
 //! All items are at most `pub(crate)`.  No bare `pub` items.
 
+use crate::models::ConfidenceSource;
 use anyhow::Result;
 use rusqlite::Connection;
 
@@ -182,6 +183,9 @@ impl CompactionPass for ConsolidationPass<'_> {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         })
     }
 
@@ -292,6 +296,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -449,6 +456,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 

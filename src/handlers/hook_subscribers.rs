@@ -1,6 +1,7 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::models::ConfidenceSource;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -481,6 +482,9 @@ pub async fn subscribe(
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let ctx = crate::store::CallerContext::for_agent(&caller);
         let stored_id = match app.store.store(&ctx, &mem).await {
@@ -1047,6 +1051,9 @@ async fn set_namespace_standard_inner(
                     citations: Vec::new(),
                     source_uri: None,
                     source_span: None,
+                    confidence_source: ConfidenceSource::CallerProvided,
+                    confidence_signals: None,
+                    confidence_decayed_at: None,
                 };
                 match app.store.store(&ctx, &placeholder).await {
                     Ok(id) => id,
@@ -1184,6 +1191,9 @@ async fn set_namespace_standard_inner(
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             match db::insert(&lock.0, &placeholder) {
                 Ok(id) => id,

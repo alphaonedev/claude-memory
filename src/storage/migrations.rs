@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 38).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 39).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -71,7 +71,19 @@ CREATE TABLE IF NOT EXISTS memories (
     -- `0032_v07_form4_provenance.sql` for the supporting index.
     citations       TEXT NOT NULL DEFAULT '[]',
     source_uri      TEXT,
-    source_span     TEXT
+    source_span     TEXT,
+    -- v0.7.0 Form 5 (schema v39, issue #758) — auto-confidence + shadow-mode +
+    -- calibration tooling closeout. `confidence_source` is a typed
+    -- discriminator naming the provenance of the `confidence` column value
+    -- (caller_provided | auto_derived | calibrated | decayed); legacy rows
+    -- default to 'caller_provided' via the SQL DEFAULT clause.
+    -- `confidence_signals` is a JSON snapshot of the ConfidenceSignals
+    -- struct emitted when the value was computed (NULL on legacy rows).
+    -- `confidence_decayed_at` is an RFC3339 timestamp of the last decay
+    -- computation (NULL on legacy rows and rows never touched by decay).
+    confidence_source     TEXT NOT NULL DEFAULT 'caller_provided',
+    confidence_signals    TEXT,
+    confidence_decayed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -100,6 +112,34 @@ CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
 -- zero until callers start writing URIs.
 CREATE INDEX IF NOT EXISTS idx_memories_source_uri
     ON memories(source_uri) WHERE source_uri IS NOT NULL;
+-- v39 (Form 5) partial index covering rows whose `confidence_source`
+-- is NOT the (overwhelming-majority) `caller_provided` bucket. The
+-- calibration CLI scans this slice to enumerate derived / calibrated /
+-- decayed rows; the partial predicate keeps the index footprint on
+-- legacy DBs at zero until the auto-confidence engine starts writing.
+CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
+    ON memories(confidence_source) WHERE confidence_source != 'caller_provided';
+-- v39 (Form 5) — per-recall shadow-mode telemetry. Populated when
+-- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
+-- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
+-- this table to compute per-(namespace, source) baselines.
+CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    memory_id TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    caller_confidence REAL NOT NULL,
+    derived_confidence REAL NOT NULL,
+    signals TEXT NOT NULL,
+    recall_outcome TEXT,
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(memory_id) REFERENCES memories(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace
+    ON confidence_shadow_observations(namespace);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
+    ON confidence_shadow_observations(observed_at);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
+    ON confidence_shadow_observations(memory_id);
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -312,7 +352,18 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       The ALTERs are emitted from Rust (SQLite has no `ADD COLUMN IF
 //       NOT EXISTS`); the SQL file holds the supporting partial index
 //       `idx_memories_source_uri`. Pure additive on legacy rows.
-const CURRENT_SCHEMA_VERSION: i64 = 38;
+// v39 = v0.7.0 Form 5 — auto-confidence + shadow-mode + calibration
+//       tooling closeout (issue #758). Adds three columns on `memories`
+//       (`confidence_source TEXT NOT NULL DEFAULT 'caller_provided'`,
+//       `confidence_signals TEXT NULL`, `confidence_decayed_at TEXT NULL`)
+//       plus the `confidence_shadow_observations` table backing the
+//       shadow-mode telemetry pipeline. The ALTERs on `memories` are
+//       emitted from Rust (SQLite has no `ADD COLUMN IF NOT EXISTS`);
+//       the SQL file holds the supporting table + partial index. Pure
+//       additive on legacy rows; the auto-derive engine is opt-in via
+//       `AI_MEMORY_AUTO_CONFIDENCE=1` so the column stays at
+//       'caller_provided' until operators flip the switch.
+const CURRENT_SCHEMA_VERSION: i64 = 39;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -549,6 +600,14 @@ const MIGRATION_V37_SQLITE: &str = include_str!("../../migrations/sqlite/0031_v0
 // `--source-uri-prefix` filter.
 const MIGRATION_V38_SQLITE: &str =
     include_str!("../../migrations/sqlite/0032_v07_form4_provenance.sql");
+// v0.7.0 Form 5 — auto-confidence + shadow-mode + calibration tooling.
+// ALTER TABLEs adding `confidence_source`, `confidence_signals`,
+// `confidence_decayed_at` columns are emitted from Rust (SQLite has no
+// `ADD COLUMN IF NOT EXISTS`); this file holds the
+// `confidence_shadow_observations` table, its indexes, and the partial
+// index on `confidence_source` covering the calibration scan.
+const MIGRATION_V39_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0033_v07_form5_confidence_calibration.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1434,6 +1493,50 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V38_SQLITE)?;
         }
 
+        if version < 39 {
+            // v0.7.0 Form 5 — auto-confidence + shadow-mode + calibration
+            // tooling closeout (issue #758). Probe for the three new
+            // `confidence_*` columns on `memories` and ADD them when
+            // absent. SQLite has no `ADD COLUMN IF NOT EXISTS`, so the
+            // probe lives in Rust; the supporting
+            // `confidence_shadow_observations` table and partial index
+            // on `confidence_source` live in the .sql file.
+            let mut has_source = false;
+            let mut has_signals = false;
+            let mut has_decayed_at = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                match col?.as_str() {
+                    "confidence_source" => has_source = true,
+                    "confidence_signals" => has_signals = true,
+                    "confidence_decayed_at" => has_decayed_at = true,
+                    _ => {}
+                }
+            }
+            drop(stmt);
+            if !has_source {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN confidence_source TEXT NOT NULL \
+                     DEFAULT 'caller_provided'",
+                    [],
+                )?;
+            }
+            if !has_signals {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN confidence_signals TEXT",
+                    [],
+                )?;
+            }
+            if !has_decayed_at {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN confidence_decayed_at TEXT",
+                    [],
+                )?;
+            }
+            conn.execute_batch(MIGRATION_V39_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1639,7 +1742,7 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 38,
+            CURRENT_SCHEMA_VERSION, 39,
             "module docstring advertises 37; bump the docstring when this number changes"
         );
     }

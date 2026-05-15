@@ -97,11 +97,16 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// and v38 from Form 4's fact-provenance closeout (issue #757) which
 /// adds `memories.citations TEXT NOT NULL DEFAULT '[]'`,
 /// `memories.source_uri TEXT NULL`, and `memories.source_span TEXT
-/// NULL` plus the `idx_memories_source_uri` partial index.
+/// NULL` plus the `idx_memories_source_uri` partial index, and v39
+/// from Form 5's auto-confidence + shadow-mode + calibration closeout
+/// (issue #758) which adds `memories.confidence_source TEXT NOT NULL
+/// DEFAULT 'caller_provided'`, `memories.confidence_signals TEXT NULL`,
+/// `memories.confidence_decayed_at TEXT NULL` plus the
+/// `confidence_shadow_observations` table backing per-recall telemetry.
 /// When a DB's `schema_version` exceeds this, the binary is too old
 /// for a newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue
 /// #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 38;
+pub const MAX_SUPPORTED_SCHEMA: u32 = 39;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

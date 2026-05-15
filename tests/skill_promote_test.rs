@@ -22,6 +22,7 @@
 //! noise without buying coverage — every handler is feature-checked via
 //! its own typed signature.
 
+use ai_memory::models::ConfidenceSource;
 use std::path::PathBuf;
 
 use ai_memory::db;
@@ -65,6 +66,9 @@ fn insert_observation(conn: &rusqlite::Connection, title: &str, ns: &str, body: 
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &m).expect("insert observation")
 }
@@ -183,6 +187,9 @@ fn refuses_depth_zero_reflection() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = db::insert(&conn, &m).expect("insert");
 
@@ -256,6 +263,9 @@ fn threshold_configurable_via_namespace_governance() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let std_id = db::insert(&conn, &std_mem).expect("insert standard");
     db::set_namespace_standard(&conn, "ns-strict", &std_id, None).expect("set standard");

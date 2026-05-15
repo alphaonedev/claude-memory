@@ -383,6 +383,11 @@ pub enum Command {
     /// an entity. Read-only by default; pass `--regenerate` to run
     /// the curator and persist a fresh row.
     Persona(crate::cli::commands::persona::PersonaArgs),
+    /// v0.7.0 Form 5 (issue #758) — calibration driver verbs.
+    /// `ai-memory calibrate confidence --from-shadow` reads
+    /// `confidence_shadow_observations` and emits per-(namespace,
+    /// source) baselines computed over the window.
+    Calibrate(crate::cli::commands::calibrate_confidence::CalibrateArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1274,6 +1279,24 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             match cli::commands::persona::run(&db_path, &a, None, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
+            }
+        }
+        Command::Calibrate(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            // v0.7.0 Form 5 (issue #758) — calibration driver.
+            // Currently dispatches `calibrate confidence`; future
+            // subcommands (e.g. `calibrate recall`) layer on alongside.
+            match a.subcommand {
+                cli::commands::calibrate_confidence::CalibrateSubcommand::Confidence(ref conf) => {
+                    match cli::commands::calibrate_confidence::run(&db_path, conf, &mut out)? {
+                        0 => Ok(()),
+                        code => std::process::exit(code),
+                    }
+                }
             }
         }
     };
@@ -4018,6 +4041,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         db::set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -4066,6 +4092,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);

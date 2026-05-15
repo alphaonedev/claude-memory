@@ -15,6 +15,7 @@
 
 #![cfg(all(feature = "sal", feature = "sal-postgres"))]
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::store::postgres::PostgresStore;
 use ai_memory::store::sqlite::SqliteStore;
@@ -79,6 +80,9 @@ fn make_corpus(namespace: &str) -> Vec<Memory> {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             }
         })
         .collect()

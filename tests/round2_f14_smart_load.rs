@@ -25,6 +25,7 @@
 
 use ai_memory::db;
 use ai_memory::mcp::handle_smart_load;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use chrono::Utc;
 use serde_json::{Value, json};
@@ -58,6 +59,9 @@ fn seed_family(conn: &rusqlite::Connection, family: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

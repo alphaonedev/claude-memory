@@ -66,6 +66,7 @@
 //! var so the suite runs serially even when `cargo test` parallelises
 //! across test fns.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::Mutex;
 
 use ai_memory::db;
@@ -168,6 +169,9 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

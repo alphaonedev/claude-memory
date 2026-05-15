@@ -27,6 +27,7 @@
 //! `db::get` results. The fixture shape mirrors the WT-1-B
 //! acceptance suite at `tests/atomisation/core.rs`.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
@@ -149,6 +150,9 @@ fn insert_long_source(conn: &Connection, ns: &str, title_keyword: &str) -> Strin
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed long source")
 }

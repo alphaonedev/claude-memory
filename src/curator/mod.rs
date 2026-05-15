@@ -415,6 +415,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -444,6 +447,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -473,6 +479,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -502,6 +511,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let mut cfg = CuratorConfig {
             include_namespaces: vec!["other".to_string()],
@@ -537,6 +549,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let cfg = CuratorConfig {
             exclude_namespaces: vec!["noisy".to_string()],
@@ -593,6 +608,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -812,6 +830,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: crate::models::ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             db::insert(&conn, &mem).unwrap();
         }
@@ -1096,6 +1117,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -1459,6 +1483,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let m_b = Memory {
             id: "smart-b".to_string(),
@@ -1511,6 +1538,9 @@ fn apply_rollback_handles_storage_error() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: crate::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     // Insert the memory so it exists
@@ -1567,6 +1597,9 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: crate::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     let mem2 = Memory {
@@ -1592,6 +1625,9 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: crate::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     db::insert(&conn, &mem1).unwrap();

@@ -133,7 +133,18 @@ CREATE TABLE IF NOT EXISTS memories (
     -- via migrate_v37().
     citations         TEXT NOT NULL DEFAULT '[]',
     source_uri        TEXT,
-    source_span       TEXT
+    source_span       TEXT,
+    -- v0.7.0 Form 5 (schema v38 postgres / v39 sqlite, issue #758) —
+    -- auto-confidence + shadow-mode + calibration tooling closeout.
+    -- `confidence_source` is a typed discriminator for the provenance
+    -- of the `confidence` column value (caller_provided | auto_derived
+    -- | calibrated | decayed). `confidence_signals` is a JSON snapshot
+    -- of the signals that produced the derivation. `confidence_decayed_at`
+    -- is an RFC3339 stamp of the last decay computation. Fresh schemas
+    -- carry these inline; existing schemas pick them up via migrate_v38().
+    confidence_source     TEXT NOT NULL DEFAULT 'caller_provided',
+    confidence_signals    TEXT,
+    confidence_decayed_at TEXT
 );
 
 -- v0.6.0 blocker #294 fix: upsert contract is `(title, namespace)`.
@@ -184,6 +195,37 @@ CREATE INDEX IF NOT EXISTS idx_personas_by_entity
 -- footprint at zero on every pre-v37 database.
 CREATE INDEX IF NOT EXISTS idx_memories_source_uri
     ON memories(source_uri) WHERE source_uri IS NOT NULL;
+-- v0.7.0 Form 5 (schema v38 postgres / v39 sqlite) — partial index
+-- covering rows whose `confidence_source` is NOT the (overwhelming-
+-- majority) `caller_provided` bucket. The calibration CLI scans this
+-- slice to enumerate derived / calibrated / decayed rows; the partial
+-- predicate keeps the index footprint on legacy DBs at zero until the
+-- auto-confidence engine starts writing.
+CREATE INDEX IF NOT EXISTS idx_memories_confidence_source
+    ON memories(confidence_source)
+    WHERE confidence_source != 'caller_provided';
+
+-- v0.7.0 Form 5 — per-recall shadow-mode telemetry. Populated when
+-- AI_MEMORY_CONFIDENCE_SHADOW=1 and sampled at
+-- AI_MEMORY_CONFIDENCE_SHADOW_SAMPLE_RATE. The calibration CLI reads
+-- this table to compute per-(namespace, source) baselines.
+CREATE TABLE IF NOT EXISTS confidence_shadow_observations (
+    id BIGSERIAL PRIMARY KEY,
+    memory_id TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    namespace TEXT NOT NULL,
+    caller_confidence DOUBLE PRECISION NOT NULL,
+    derived_confidence DOUBLE PRECISION NOT NULL,
+    signals TEXT NOT NULL,
+    recall_outcome TEXT,
+    observed_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_namespace
+    ON confidence_shadow_observations(namespace);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_observed_at
+    ON confidence_shadow_observations(observed_at);
+CREATE INDEX IF NOT EXISTS idx_shadow_obs_memory
+    ON confidence_shadow_observations(memory_id);
 
 -- Full-text search. English stemming; matches the SQLite FTS5 setup.
 CREATE INDEX IF NOT EXISTS memories_content_fts ON memories

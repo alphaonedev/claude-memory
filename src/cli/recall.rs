@@ -1061,6 +1061,9 @@ limit = 25
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: crate::models::ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         if let Some(obj) = mem.metadata.as_object_mut() {
             obj.insert("agent_id".to_string(), serde_json::json!("t"));

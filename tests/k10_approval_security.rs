@@ -36,6 +36,7 @@ use ai_memory::approvals::{
     record_synthetic_rule,
 };
 use ai_memory::config::set_active_hooks_hmac_secret;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::permissions::{Decision, Op, PermissionContext, Permissions};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
@@ -133,6 +134,9 @@ async fn seed_pending_delete_row(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mem_id = ai_memory::db::insert(&lock.0, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-security"});

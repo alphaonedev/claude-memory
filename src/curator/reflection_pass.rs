@@ -46,6 +46,7 @@
 //! flag wiring (see `src/cli/curator.rs`) consumes, plus
 //! [`run_reflection_pass`] which the CLI's `--reflect` mode invokes.
 
+use crate::models::ConfidenceSource;
 use std::collections::HashSet;
 
 use anyhow::{Context, Result};
@@ -361,6 +362,9 @@ impl<'a> CompactionPass for ReflectionPass<'a> {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         })
     }
 
@@ -897,6 +901,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -1140,6 +1147,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         crate::db::insert(conn, &mem).unwrap()
     }
@@ -1433,6 +1443,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = crate::db::insert(&conn, &m).unwrap();
         let err = pass.verify(id).unwrap_err().to_string();
@@ -1556,6 +1569,9 @@ mod tests {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             };
             crate::db::insert(&conn, &m).unwrap();
         }

@@ -23,6 +23,7 @@
 //! round-trip; the one live test (`live_gemma_e2b_smoke`) is
 //! `#[ignore]` so `cargo test` skips it unless explicitly opted in.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
@@ -217,6 +218,9 @@ fn insert_long_source(conn: &Connection, ns: &str, n_paras: usize) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed long source")
 }
@@ -247,6 +251,9 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed short source")
 }

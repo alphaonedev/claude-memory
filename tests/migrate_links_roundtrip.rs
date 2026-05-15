@@ -20,6 +20,7 @@
 #![cfg(feature = "sal")]
 
 use ai_memory::migrate;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryLink, Tier};
 use ai_memory::store::sqlite::SqliteStore;
 use ai_memory::store::{CallerContext, MemoryStore};
@@ -57,6 +58,9 @@ fn seed_memory(id: &str, ns: &str, title: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

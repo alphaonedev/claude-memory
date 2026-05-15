@@ -11,6 +11,7 @@
 
 #![allow(clippy::doc_markdown, clippy::too_many_lines)]
 
+use ai_memory::models::ConfidenceSource;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -118,6 +119,9 @@ fn insert_long_source(conn: &rusqlite::Connection, ns: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed source")
 }
@@ -421,6 +425,9 @@ fn test_cli_atomise_source_too_small_returns_informational() {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&conn, &mem).expect("seed tiny")
     };

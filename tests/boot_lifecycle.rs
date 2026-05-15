@@ -20,6 +20,7 @@
 //! Cross-platform: every path uses `tempfile`, every assertion is over
 //! text. Windows-runner-safe.
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::{db, models};
 use assert_cmd::Command;
 use chrono::Utc;
@@ -67,6 +68,9 @@ fn seed_one(db: &Path, namespace: &str, title: &str, content: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }

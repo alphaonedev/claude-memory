@@ -20,6 +20,7 @@
 //! the other direction: a peer that authenticates via mTLS shouldn't
 //! also need to know the shared api-key secret.
 
+use ai_memory::models::ConfidenceSource;
 use axum::Router;
 use axum::extract::{Json as AxumJson, State};
 use axum::http::StatusCode;
@@ -141,6 +142,9 @@ fn sample_memory() -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
