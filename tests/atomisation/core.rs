@@ -26,7 +26,7 @@
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
-use ai_memory::atomisation::{Atomiser, AtomiserConfig, AtomiseError};
+use ai_memory::atomisation::{AtomiseError, Atomiser, AtomiserConfig};
 use ai_memory::config::FeatureTier;
 use ai_memory::db;
 use ai_memory::models::{Memory, MemoryKind, MemoryLinkRelation, Tier};
@@ -114,7 +114,10 @@ enum HookMode {
     /// Refuse only on the Nth atom write (zero-based), counting only
     /// writes whose `source` field is `"atomiser"` so unrelated
     /// inserts in the same test don't perturb the count.
-    RefuseAtomAtIndex { idx: usize, reason: String },
+    RefuseAtomAtIndex {
+        idx: usize,
+        reason: String,
+    },
 }
 
 fn hook_mode_slot() -> &'static Mutex<HookMode> {
@@ -143,8 +146,8 @@ fn ensure_hook_installed() {
             HookMode::Allow => Ok(()),
             HookMode::RefuseAtomAtIndex { idx, reason } => {
                 if mem.source == "atomiser" {
-                    let current = atomiser_atom_counter()
-                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let current =
+                        atomiser_atom_counter().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                     if current == *idx {
                         return Err(reason.clone());
                     }
@@ -375,9 +378,7 @@ fn test_atomiser_writes_derives_from_edges() {
     let parent_links = db::get_links(&conn, &source_id).expect("get_links parent");
     let inbound: Vec<_> = parent_links
         .iter()
-        .filter(|l| {
-            l.target_id == source_id && l.relation == MemoryLinkRelation::DerivesFrom
-        })
+        .filter(|l| l.target_id == source_id && l.relation == MemoryLinkRelation::DerivesFrom)
         .collect();
     assert_eq!(inbound.len(), result.atom_count);
 }
@@ -397,9 +398,7 @@ fn test_atomiser_archives_source() {
     let (_tmp, conn) = fresh_db();
     let source_id = insert_long_source(&conn, "ns/wt1b/archive", 30);
 
-    let curator = Box::new(MockCurator::new(vec![Ok(atoms(&[
-        "A.", "B.", "C.",
-    ]))]));
+    let curator = Box::new(MockCurator::new(vec![Ok(atoms(&["A.", "B.", "C."]))]));
     let atomiser = make_atomiser(curator, FeatureTier::Smart);
 
     let result = atomiser
@@ -424,8 +423,7 @@ fn test_atomiser_archives_source() {
         Some(result.atom_count as i64),
         "atomised_into must equal atom_count"
     );
-    let meta: serde_json::Value =
-        serde_json::from_str(&metadata_str).expect("metadata parses");
+    let meta: serde_json::Value = serde_json::from_str(&metadata_str).expect("metadata parses");
     let archived_at = meta
         .get("atomisation_archived_at")
         .and_then(|v| v.as_str())
@@ -456,9 +454,7 @@ fn test_atomiser_idempotent_without_force() {
     let (_tmp, conn) = fresh_db();
     let source_id = insert_long_source(&conn, "ns/wt1b/idemp", 30);
 
-    let curator = Box::new(MockCurator::new(vec![Ok(atoms(&[
-        "A.", "B.", "C.",
-    ]))]));
+    let curator = Box::new(MockCurator::new(vec![Ok(atoms(&["A.", "B.", "C."]))]));
     let atomiser = make_atomiser(curator, FeatureTier::Smart);
 
     let first = atomiser
@@ -592,9 +588,7 @@ fn test_atomiser_records_signed_events() {
     let source_id = insert_long_source(&conn, "ns/wt1b/events", 30);
 
     let curator = Box::new(MockCurator::new(vec![Ok(atoms(&[
-        "Atom α.",
-        "Atom β.",
-        "Atom γ.",
+        "Atom α.", "Atom β.", "Atom γ.",
     ]))]));
     let atomiser = make_atomiser(curator, FeatureTier::Smart);
 
@@ -714,9 +708,9 @@ fn test_atomiser_curator_failure_propagates() {
     let (_tmp, conn) = fresh_db();
     let source_id = insert_long_source(&conn, "ns/wt1b/fail", 30);
 
-    let curator = Box::new(MockCurator::new(vec![Err(CuratorError::MalformedResponse(
-        "could not parse: unexpected token at line 1".into(),
-    ))]));
+    let curator = Box::new(MockCurator::new(vec![Err(
+        CuratorError::MalformedResponse("could not parse: unexpected token at line 1".into()),
+    )]));
     let atomiser = make_atomiser(curator, FeatureTier::Smart);
 
     let err = atomiser
@@ -724,7 +718,10 @@ fn test_atomiser_curator_failure_propagates() {
         .expect_err("curator failure must propagate");
     match err {
         AtomiseError::CuratorFailed(diag) => {
-            assert!(diag.contains("unexpected token"), "diagnostic preserved: {diag}");
+            assert!(
+                diag.contains("unexpected token"),
+                "diagnostic preserved: {diag}"
+            );
         }
         other => panic!("expected CuratorFailed, got {other:?}"),
     }
@@ -752,10 +749,7 @@ fn test_atomiser_governance_refusal_does_not_rollback_prior_atoms() {
     let source_id = insert_long_source(&conn, "ns/wt1b/gov", 30);
 
     let curator = Box::new(MockCurator::new(vec![Ok(atoms(&[
-        "Atom 1.",
-        "Atom 2.",
-        "Atom 3.",
-        "Atom 4.",
+        "Atom 1.", "Atom 2.", "Atom 3.", "Atom 4.",
     ]))]));
     let atomiser = make_atomiser(curator, FeatureTier::Smart);
 
@@ -764,7 +758,10 @@ fn test_atomiser_governance_refusal_does_not_rollback_prior_atoms() {
         .expect_err("governance must refuse mid-batch");
     match &err {
         AtomiseError::GovernanceRefused(d) => {
-            assert!(d.contains("atom[2]"), "diagnostic must name failing index: {d}");
+            assert!(
+                d.contains("atom[2]"),
+                "diagnostic must name failing index: {d}"
+            );
             assert!(
                 d.contains("too many atoms per minute"),
                 "diagnostic must carry refusal reason: {d}"

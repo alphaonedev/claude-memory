@@ -289,9 +289,8 @@ impl Atomiser {
                 .map_err(|e| AtomiseError::DbError(e.to_string()))?
             {
                 if atomised_into > 0 {
-                    let existing =
-                        list_atoms_of(conn, source_id)
-                            .map_err(|e| AtomiseError::DbError(e.to_string()))?;
+                    let existing = list_atoms_of(conn, source_id)
+                        .map_err(|e| AtomiseError::DbError(e.to_string()))?;
                     return Err(AtomiseError::AlreadyAtomised {
                         source_id: source_id.to_string(),
                         existing_atom_ids: existing,
@@ -346,10 +345,7 @@ impl Atomiser {
             )
             .map_err(|e| {
                 if let Some(refusal) = e.downcast_ref::<crate::storage::GovernanceRefusal>() {
-                    AtomiseError::GovernanceRefused(format!(
-                        "atom[{idx}]: {}",
-                        refusal.reason
-                    ))
+                    AtomiseError::GovernanceRefused(format!("atom[{idx}]: {}", refusal.reason))
                 } else {
                     AtomiseError::DbError(format!("atom[{idx}]: {e}"))
                 }
@@ -363,13 +359,8 @@ impl Atomiser {
         // resolver can switch over only after this commit lands).
         let archived_at = Utc::now().to_rfc3339();
         let atom_count_i64 = i64::try_from(atom_count).unwrap_or(i64::MAX);
-        archive_source(
-            conn,
-            source_id,
-            atom_count_i64,
-            &archived_at,
-        )
-        .map_err(|e| AtomiseError::DbError(e.to_string()))?;
+        archive_source(conn, source_id, atom_count_i64, &archived_at)
+            .map_err(|e| AtomiseError::DbError(e.to_string()))?;
 
         // Step 10 — emit the atomisation_complete signed_event.
         emit_atomisation_complete_event(
@@ -415,9 +406,8 @@ fn read_atomised_into(conn: &Connection, id: &str) -> anyhow::Result<Option<i64>
 /// at the supplied source id. Ordered by `created_at` then `id` so
 /// the response is deterministic across calls.
 fn list_atoms_of(conn: &Connection, source_id: &str) -> anyhow::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM memories WHERE atom_of = ?1 ORDER BY created_at ASC, id ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id FROM memories WHERE atom_of = ?1 ORDER BY created_at ASC, id ASC")?;
     let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(Into::into)
@@ -557,7 +547,10 @@ fn archive_source(
             .query_row(
                 "SELECT metadata FROM memories WHERE id = ?1",
                 params![source_id],
-                |r| r.get::<_, Option<String>>(0).map(|o| o.unwrap_or_else(|| "{}".to_string())),
+                |r| {
+                    r.get::<_, Option<String>>(0)
+                        .map(|o| o.unwrap_or_else(|| "{}".to_string()))
+                },
             )
             .unwrap_or_else(|_| "{}".to_string());
         let mut meta: serde_json::Map<String, serde_json::Value> =
