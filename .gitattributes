@@ -1,0 +1,31 @@
+# Cross-platform line-ending policy.
+#
+# Default: auto-detect text, leave binary as-is.
+* text=auto
+
+# JSON/JSONL snapshots used by the test suite must use LF on every
+# checkout — Windows otherwise rewrites them as CRLF and the byte-for-byte
+# snapshot tests (e.g. tests/longmemeval_reflection_bench.rs::snapshot_matches_generator)
+# fail with a phantom drift.
+*.jsonl text eol=lf
+*.json  text eol=lf
+
+# Shell scripts always LF (POSIX-only consumers).
+*.sh    text eol=lf
+
+# Rust + TOML + Markdown — let git auto-detect but never normalise binaries.
+*.rs    text
+*.toml  text
+*.md    text
+
+# Migrations are SQL — LF always (deterministic hashing inputs).
+*.sql   text eol=lf
+
+# Test fixture binaries + model weights — never touch.
+*.bin   binary
+*.gz    binary
+*.zst   binary
+*.tar   binary
+*.png   binary
+*.jpg   binary
+*.parquet binary
