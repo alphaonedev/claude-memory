@@ -20,7 +20,9 @@ use crate::validate;
 use super::MAX_BULK_SIZE;
 #[cfg(feature = "sal")]
 use super::store_err_to_response;
-use super::{AppState, StorageBackend};
+use super::AppState;
+#[cfg(feature = "sal")]
+use super::StorageBackend;
 
 /// v0.7.0 federation security — extract the peer's self-claimed
 /// `x-peer-id` header. Lowercase form per HTTP/2 wire convention;

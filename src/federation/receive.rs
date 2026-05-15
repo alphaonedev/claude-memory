@@ -4,6 +4,7 @@
 //! Post-partition catchup poller: spawn_catchup_loop, catchup_once,
 //! urlencoding_encode.
 
+#[cfg(feature = "sal")]
 use std::sync::Arc;
 use std::time::Duration;
 

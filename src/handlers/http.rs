@@ -25,7 +25,9 @@ use crate::validate;
 use super::fanout_or_503;
 #[cfg(feature = "sal")]
 use super::store_err_to_response;
-use super::{AppState, JsonOrBadRequest, StorageBackend};
+use super::{AppState, JsonOrBadRequest};
+#[cfg(feature = "sal")]
+use super::StorageBackend;
 use super::{BULK_FANOUT_CONCURRENCY, MAX_BULK_SIZE};
 
 /// v0.7.0 L5 — minimum content length (chars) below which the HTTP
@@ -2978,6 +2980,12 @@ async fn recall_response(
     // tier filter parameter.
     recall_scope_tier: Option<&str>,
 ) -> axum::response::Response {
+    // `recall_scope_tier` is consumed only on the postgres SAL branch
+    // (line 3026). Suppress the unused-variable lint when the sal
+    // feature is off — same idiom as `url_was_synthesized` in
+    // hook_subscribers.rs.
+    #[cfg(not(feature = "sal"))]
+    let _ = recall_scope_tier;
     // v0.7.0 Wave-3 Continuation 2 (Phase 10) — postgres-backed
     // hybrid recall via the SAL trait. Embeds the query AND dispatches
     // through `app.store.recall_hybrid` so the postgres adapter applies

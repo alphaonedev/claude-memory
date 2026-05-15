@@ -18,7 +18,9 @@ use crate::validate;
 
 #[cfg(feature = "sal")]
 use super::store_err_to_response;
-use super::{AppState, Db, StorageBackend};
+use super::{AppState, Db};
+#[cfg(feature = "sal")]
+use super::StorageBackend;
 use super::{fanout_or_503, list_namespaces, resolve_caller_agent_id};
 
 // --- /api/v1/notify (POST) + /api/v1/inbox (GET) ---------------------------
@@ -398,7 +400,13 @@ pub async fn subscribe(
         // wire shape. We mark it so the SSRF guard can skip the
         // loopback rejection — H11's allow_loopback_webhooks knob
         // gates real callers, not internally-synthesized stubs.
-        url_was_synthesized = true;
+        // The assignment is unused under default features (the reader
+        // is `#[cfg(feature = "sal")]`-gated); allow the unused-assignment
+        // warning specifically.
+        #[allow(unused_assignments)]
+        {
+            url_was_synthesized = true;
+        }
         let synthetic = format!("http://localhost/_ns/{caller}/{ns}");
         (
             synthetic,
@@ -942,6 +950,11 @@ fn namespace_standard_params(ns: &str, body: &NamespaceStandardBody) -> serde_js
 /// `mcp::tools::namespace`. Incoming keys override existing ones; keys
 /// present only on the existing blob (e.g. an operator-set
 /// `require_approval_above_depth`) survive untouched.
+///
+/// Only consumed on the SAL/postgres branch at line ~1064; gate the
+/// definition to match so default-features builds don't emit a
+/// dead-code warning.
+#[cfg(feature = "sal")]
 fn merge_governance_fields_http(
     existing: Option<&serde_json::Value>,
     incoming: &serde_json::Value,
