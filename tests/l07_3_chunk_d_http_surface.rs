@@ -1536,6 +1536,10 @@ async fn http_kg_query_invalid_valid_at_400() {
 // POST /api/v1/kg/find_paths
 // ---------------------------------------------------------------------------
 
+// Endpoint requires `--features sal` (returns 501 NOT_IMPLEMENTED under
+// the default sqlite-only feature set). Gate the test to match so the
+// default-features Check matrix doesn't fail.
+#[cfg(feature = "sal")]
 #[tokio::test]
 async fn http_kg_find_paths_happy() {
     let (router, _f) = build_router_fixture();
@@ -1550,6 +1554,8 @@ async fn http_kg_find_paths_happy() {
 // POST /api/v1/links/verify
 // ---------------------------------------------------------------------------
 
+// Same shape as kg/find_paths — endpoint requires `--features sal`.
+#[cfg(feature = "sal")]
 #[tokio::test]
 async fn http_verify_link_unsigned_returns_envelope() {
     let (router, _f) = build_router_fixture();
