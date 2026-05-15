@@ -32,6 +32,7 @@
 //!      row status becomes "rejected"; no reflection memory committed.
 
 use ai_memory::db::{self, ReflectInput};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{GovernanceLevel, GovernancePolicy, GovernedAction, Memory, Tier};
 use chrono::Utc;
 
@@ -64,6 +65,9 @@ fn make_memory(namespace: &str, title: &str, depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -120,6 +124,9 @@ fn seed_governance_json(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let std_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &std_id, None).unwrap();

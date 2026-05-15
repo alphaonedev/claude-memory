@@ -11,6 +11,7 @@
 //! inbound row.
 
 use ai_memory::federation::reflection_bookkeeping;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{GovernancePolicy, Memory, Tier};
 use ai_memory::quotas;
 use ai_memory::storage as db;
@@ -48,6 +49,9 @@ fn reflection(id: &str, depth: i32, namespace: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

@@ -31,6 +31,7 @@
 //! the [`tests::StubLlm`] (in tests) implement. The autonomy passes
 //! are generic over `&dyn AutonomyLlm`.
 
+use crate::models::ConfidenceSource;
 use anyhow::Result;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -571,6 +572,9 @@ fn persist_rollback_entry(conn: &Connection, entry: &RollbackEntry) -> Result<()
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -623,6 +627,9 @@ pub fn persist_self_report(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem)?;
     Ok(())
@@ -799,6 +806,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 

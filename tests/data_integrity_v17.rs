@@ -19,6 +19,7 @@ use ai_memory::db;
 use ai_memory::embeddings::{
     EMBEDDING_HEADER_BE_F32, EMBEDDING_HEADER_LE_F32, decode_embedding_blob, encode_embedding_blob,
 };
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use rusqlite::params;
 use std::path::Path;
@@ -54,6 +55,9 @@ fn make_memory(title: &str, ns: &str, tier: Tier) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

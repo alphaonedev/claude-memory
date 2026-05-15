@@ -21,6 +21,7 @@
 use ai_memory::autonomy::AutonomyLlm;
 use ai_memory::config::FeatureTier;
 use ai_memory::hooks::post_reflect::auto_persona::{AutoPersonaConfig, run_auto_persona};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier,
 };
@@ -99,6 +100,9 @@ fn seed_reflection_for_entity(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).unwrap()
 }

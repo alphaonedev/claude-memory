@@ -27,6 +27,7 @@
 use ai_memory::db;
 use ai_memory::mcp;
 use ai_memory::models;
+use ai_memory::models::ConfidenceSource;
 use chrono::Utc;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -68,6 +69,9 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

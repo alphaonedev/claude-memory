@@ -180,6 +180,12 @@ impl Family {
             // write-side surface unless smart+autonomous is enabled.
             | "memory_persona"
             | "memory_persona_generate"
+            // v0.7.0 Form 5 (issue #758) — calibration sweep over the
+            // shadow-mode observation table. Operator-callable
+            // equivalent of `ai-memory calibrate confidence
+            // --from-shadow`. Lives in Power alongside the other
+            // operator-facing observability tools.
+            | "memory_calibrate_confidence"
             // v0.7.0 L2-3 (issue #668) — read-side surface for the
             // reflection invalidation propagation walker. Operator-
             // facing inspector for the per-reflection dependent set
@@ -297,8 +303,10 @@ impl Family {
             // Persona-as-artifact substrate primitive) +
             // 1 (v0.7.0 Form 3 / #756 — memory_ingest_multistep,
             // multi-step ingest orchestrator with deterministic
-            // helpers + prompt-cache reuse) = 21.
-            Self::Power => 21,
+            // helpers + prompt-cache reuse) +
+            // 1 (v0.7.0 Form 5 / issue #758 — memory_calibrate_confidence,
+            // shadow-mode-driven per-source baseline sweep) = 22.
+            Self::Power => 22,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -435,6 +443,11 @@ impl Family {
                 // orchestrator. Deterministic helpers + LLM stages
                 // with explicit-trust slots and prompt-cache reuse.
                 "memory_ingest_multistep",
+                // v0.7.0 Form 5 (issue #758) — calibration sweep over
+                // the shadow-mode observation table. Operator surface
+                // for tuning per-(namespace, source) confidence
+                // baselines.
+                "memory_calibrate_confidence",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -734,7 +747,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 70,
+            total, 71,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -750,7 +763,8 @@ mod tests {
              v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` + \
              v0.7.0 WT-1-C `memory_atomise` + \
              v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` + \
-             v0.7.0 Form 3 `memory_ingest_multistep` = 70. \
+             v0.7.0 Form 3 `memory_ingest_multistep` + \
+             v0.7.0 Form 5 `memory_calibrate_confidence` = 71. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -843,7 +857,9 @@ mod tests {
         // v0.7.0 Form 3 (#756) — Power got memory_ingest_multistep
         // (multi-step ingest orchestrator with deterministic helpers
         // + prompt-cache reuse, +1 → 21).
-        assert_eq!(p.expected_tool_count(), 7 + 21);
+        // v0.7.0 Form 5 — Power got memory_calibrate_confidence
+        // (shadow-mode-driven per-source baseline sweep, +1 → 22).
+        assert_eq!(p.expected_tool_count(), 7 + 22);
     }
 
     #[test]
@@ -862,13 +878,14 @@ mod tests {
         // memory_offload + memory_deref (QW-3 follow-up, Family::Power) +
         // memory_atomise (WT-1-C, Family::Power) +
         // memory_persona + memory_persona_generate (QW-2, Family::Power) +
-        // memory_ingest_multistep (Form 3 / #756, Family::Power) = 70.
-        assert_eq!(p.expected_tool_count(), 70);
+        // memory_ingest_multistep (Form 3 / #756, Family::Power) +
+        // memory_calibrate_confidence (Form 5, Family::Power) = 71.
+        assert_eq!(p.expected_tool_count(), 71);
 
         // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
-        // + WT-1-C + QW-2 additions live in Family::Power
+        // + WT-1-C + QW-2 + Form 3 + Form 5 additions live in Family::Power
         // (operator/governance), so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 21);
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 22);
     }
 
     // ---------- Profile::parse ----------
@@ -1070,10 +1087,13 @@ mod tests {
             "memory_atomise",
             // v0.7.0 Form 3 (#756) — multi-step ingest orchestrator.
             "memory_ingest_multistep",
+            // v0.7.0 Form 5 (issue #758) — calibration sweep over the
+            // shadow-mode observation table (Family::Power).
+            "memory_calibrate_confidence",
         ];
         assert_eq!(
             baseline.len(),
-            64,
+            65,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
@@ -1086,7 +1106,8 @@ mod tests {
              1 (v0.7.0 QW-1 memory_export_reflection) + \
              2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) + \
              1 (v0.7.0 WT-1-C memory_atomise) + \
-             1 (v0.7.0 Form 3 memory_ingest_multistep) = 64"
+             1 (v0.7.0 Form 3 memory_ingest_multistep) + \
+             1 (v0.7.0 Form 5 memory_calibrate_confidence) = 65"
         );
         for name in baseline {
             assert!(

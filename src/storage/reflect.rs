@@ -9,6 +9,7 @@
 //! and `emit_reflection_depth_exceeded_audit` out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged.
 
+use crate::models::ConfidenceSource;
 use anyhow::Context;
 use chrono::Utc;
 use rusqlite::Connection;
@@ -491,6 +492,9 @@ pub fn reflect_with_hooks(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     // Atomic boundary: insert the reflection row + N `reflects_on`

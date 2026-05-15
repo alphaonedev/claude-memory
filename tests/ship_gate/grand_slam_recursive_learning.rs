@@ -59,6 +59,7 @@ use ai_memory::autonomy::AutonomyLlm;
 use ai_memory::curator::reflection_pass::run_reflection_pass;
 use ai_memory::db::{self, ReflectError, ReflectInput};
 use ai_memory::federation::reflection_bookkeeping;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceLevel, GovernancePolicy, GovernedAction, Memory, MemoryKind,
     MemoryLinkRelation, Tier, default_metadata,
@@ -130,6 +131,9 @@ fn make_observation(namespace: &str, topic: &str, idx: usize) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -169,6 +173,9 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_policy insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");
@@ -203,6 +210,9 @@ fn seed_governance_json(conn: &Connection, namespace: &str, governance: &serde_j
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_governance_json insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");

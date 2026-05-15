@@ -37,6 +37,7 @@ use ai_memory::mcp::{
     build_capabilities_summary, build_capabilities_tools, handle_capabilities_with_conn,
     handle_capabilities_with_conn_v3,
 };
+use ai_memory::models::ConfidenceSource;
 use ai_memory::profile::Profile;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -179,8 +180,8 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
     // bumped via v0.7.0 L1-5 5×memory_skill_* + v0.7.0 L2-7
     // memory_skill_compositional_context).
     assert!(
-        summary.starts_with("7 of 69 memory tools"),
-        "core profile summary should open with \"7 of 68 memory tools\" (Round-2 F13; \
+        summary.starts_with("7 of 70 memory tools"),
+        "core profile summary should open with \"7 of 70 memory tools\" (Round-2 F13; \
          v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list, \
          v0.7.0 L1-5 added 5 memory_skill_* tools to Family::Other, v0.7.0 L2-3 \
          added memory_dependents_of_invalidated to Family::Power, v0.7.0 L2-6 \
@@ -188,14 +189,16 @@ fn cap_v3_summary_core_profile_counts_and_names_recovery_paths() {
          L2-7 added memory_skill_compositional_context to Family::Other, v0.7.0 \
          QW-1 added memory_export_reflection to Family::Power, v0.7.0 QW-3 \
          follow-up added memory_offload + memory_deref to Family::Power, \
-         v0.7.0 WT-1-C added memory_atomise to Family::Power, and v0.7.0 QW-2 \
-         added memory_persona + memory_persona_generate to Family::Power — \
-         bumping the substantive total from 52 to 68); got: {summary}"
+         v0.7.0 WT-1-C added memory_atomise to Family::Power, v0.7.0 QW-2 \
+         added memory_persona + memory_persona_generate to Family::Power, \
+         v0.7.0 Form 3 added memory_ingest_multistep to Family::Power, and \
+         v0.7.0 Form 5 added memory_calibrate_confidence to Family::Power — \
+         bumping the substantive total from 52 to 70); got: {summary}"
     );
     assert!(summary.contains("(core)"), "must label the profile as core");
     assert!(
-        summary.contains("62 are listed in this manifest"),
-        "core profile must report 62 unloaded (69 - 7); got: {summary}"
+        summary.contains("63 are listed in this manifest"),
+        "core profile must report 63 unloaded (70 - 7); got: {summary}"
     );
 
     // Three named recovery paths must all appear (verbatim names — these
@@ -232,8 +235,8 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
     // 5 memory_skill_* tools to Family::Other, bumping the substantive
     // total from 51 to 56.
     assert!(
-        summary.starts_with("69 of 69 memory tools"),
-        "full profile summary should open with \"68 of 68 memory tools\" (Round-2 F13; \
+        summary.starts_with("70 of 70 memory tools"),
+        "full profile summary should open with \"70 of 70 memory tools\" (Round-2 F13; \
          v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list, \
          v0.7.0 L1-5 added 5 memory_skill_* tools, v0.7.0 L2-3 added \
          memory_dependents_of_invalidated, v0.7.0 L2-6 added \
@@ -241,8 +244,10 @@ fn cap_v3_summary_full_profile_reports_all_visible() {
          memory_skill_compositional_context, v0.7.0 QW-1 added \
          memory_export_reflection, v0.7.0 QW-3 follow-up added \
          memory_offload + memory_deref, v0.7.0 WT-1-C added \
-         memory_atomise, and v0.7.0 QW-2 added memory_persona + \
-         memory_persona_generate); got: {summary}"
+         memory_atomise, v0.7.0 QW-2 added memory_persona + \
+         memory_persona_generate, v0.7.0 Form 3 added \
+         memory_ingest_multistep, and v0.7.0 Form 5 added \
+         memory_calibrate_confidence); got: {summary}"
     );
     assert!(summary.contains("(full)"));
     assert!(
@@ -269,7 +274,7 @@ fn cap_v3_summary_graph_profile_counts() {
     // memory tools. Total = 55 (56 - bootstrap; v0.7.0 L1-5 added 5
     // memory_skill_* tools to Family::Other, bumping total from 51 to 56).
     assert!(
-        summary.starts_with("18 of 69 memory tools"),
+        summary.starts_with("18 of 70 memory tools"),
         "graph profile = 7 core (v0.7 B1+B2) + 11 graph (v0.7 J7) = 18 memory tools \
          (Round-2 F13: bootstrap excluded; v0.7.0 issue #691 added two power tools, \
          v0.7.0 L1-5 added 5 memory_skill_* tools to Family::Other, v0.7.0 L2-3 \
@@ -278,12 +283,14 @@ fn cap_v3_summary_graph_profile_counts() {
          memory_skill_compositional_context, v0.7.0 QW-1 added \
          memory_export_reflection, v0.7.0 QW-3 follow-up added \
          memory_offload + memory_deref to Family::Power, v0.7.0 WT-1-C \
-         added memory_atomise to Family::Power, and v0.7.0 QW-2 added \
-         memory_persona + memory_persona_generate to Family::Power, bumping \
-         the substantive total from 52 to 68); got: {summary}"
+         added memory_atomise to Family::Power, v0.7.0 QW-2 added \
+         memory_persona + memory_persona_generate to Family::Power, \
+         v0.7.0 Form 3 added memory_ingest_multistep, and v0.7.0 Form 5 \
+         added memory_calibrate_confidence to Family::Power, bumping \
+         the substantive total from 52 to 70); got: {summary}"
     );
     assert!(summary.contains("(graph)"));
-    assert!(summary.contains("51 are listed in this manifest"));
+    assert!(summary.contains("52 are listed in this manifest"));
 }
 
 // ---------------------------------------------------------------------------
@@ -383,8 +390,8 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
     // for honest user-facing counting. Total bumped to 56 in v0.7.0
     // L1-5 (Family::Other gained 5 memory_skill_* tools).
     assert!(
-        describe.contains("62 more"),
-        "core profile must report 62 unloaded (69 - 7); v0.7.0 issue #691 \
+        describe.contains("63 more"),
+        "core profile must report 63 unloaded (70 - 7); v0.7.0 issue #691 \
          added memory_check_agent_action + memory_rule_list, v0.7.0 L1-5 added \
          5 memory_skill_* tools, v0.7.0 L2-3 added \
          memory_dependents_of_invalidated, v0.7.0 L2-6 added \
@@ -392,8 +399,10 @@ fn cap_v3_describe_core_profile_is_plain_english_with_loaded_names() {
          memory_skill_compositional_context, v0.7.0 QW-1 added \
          memory_export_reflection, v0.7.0 QW-3 follow-up added \
          memory_offload + memory_deref, v0.7.0 WT-1-C added \
-         memory_atomise, and v0.7.0 QW-2 added memory_persona + \
-         memory_persona_generate, bumping the substantive total to 68; \
+         memory_atomise, v0.7.0 QW-2 added memory_persona + \
+         memory_persona_generate, v0.7.0 Form 3 added \
+         memory_ingest_multistep, and v0.7.0 Form 5 added \
+         memory_calibrate_confidence, bumping the substantive total to 70; \
          got: {describe}"
     );
     // Sample of unloaded tools is plain (no memory_ prefix). The first
@@ -443,7 +452,7 @@ fn cap_v3_describe_full_profile_uses_nothing_more_form() {
     // (memory_atomise, Family::Power); to 68 with QW-2 (memory_persona +
     // memory_persona_generate, Family::Power).
     assert!(
-        describe.starts_with("I can directly use all 69 memory tools right now ("),
+        describe.starts_with("I can directly use all 70 memory tools right now ("),
         "full profile describe must open with all-loaded form; got: {describe}"
     );
     assert!(describe.contains("Nothing more to load"));
@@ -466,13 +475,15 @@ fn cap_v3_describe_graph_profile_uses_preview_ellipsis() {
     );
     // Preview is the first 5 of the 18 loaded — the first 5 core tools.
     assert!(describe.contains("(store, recall, list, get, search, ...)"));
-    // 50 more = 68 substantive - 18 loaded. L2-3 + L2-6 + L2-7 each
+    // 52 more = 70 substantive - 18 loaded. L2-3 + L2-6 + L2-7 each
     // added one tool not loaded under graph (42 → 43 → 44); QW-1 added
     // memory_export_reflection to Family::Power (44 → 45); QW-3 follow-up
     // added memory_offload + memory_deref to Family::Power (45 → 47);
     // WT-1-C added memory_atomise to Family::Power (47 → 48); QW-2 added
-    // memory_persona + memory_persona_generate to Family::Power (48 → 50).
-    assert!(describe.contains("51 more"));
+    // memory_persona + memory_persona_generate to Family::Power (48 → 50);
+    // Form 3 added memory_ingest_multistep (50 → 51); Form 5 added
+    // memory_calibrate_confidence (51 → 52).
+    assert!(describe.contains("52 more"));
 }
 
 // ---------------------------------------------------------------------------
@@ -656,8 +667,8 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
         .expect("top-level tools must be present and an array under v3");
     assert_eq!(
         tools.len(),
-        70,
-        "v3 must surface all 70 tools regardless of profile (v0.7.0 I4 added \
+        71,
+        "v3 must surface all 71 tools regardless of profile (v0.7.0 I4 added \
          memory_replay; v0.7 H4 added memory_verify; v0.7 B1 added \
          memory_load_family; v0.7 B2 added memory_smart_load; v0.7 K7 added \
          memory_subscription_replay + memory_subscription_dlq_list; v0.7 J7 \
@@ -671,7 +682,8 @@ fn cap_v3_response_carries_tools_array_with_51_entries() {
          memory_export_reflection; v0.7.0 QW-3 follow-up added \
          memory_offload + memory_deref; v0.7.0 WT-1-C added memory_atomise; \
          v0.7.0 QW-2 added memory_persona + memory_persona_generate; \
-         v0.7.0 Form 3 added memory_ingest_multistep); got {}",
+         v0.7.0 Form 3 added memory_ingest_multistep; \
+         v0.7.0 Form 5 added memory_calibrate_confidence); got {}",
         tools.len()
     );
 
@@ -1012,6 +1024,9 @@ fn seed_governance_policy(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = ai_memory::db::insert(conn, &standard).unwrap();
     ai_memory::db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();

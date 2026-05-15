@@ -24,6 +24,7 @@ use ai_memory::db;
 use ai_memory::identity::keypair as kp_mod;
 use ai_memory::identity::sign;
 use ai_memory::identity::verify;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{self, MemoryLink};
 use chrono::Utc;
 use tempfile::TempDir;
@@ -97,6 +98,9 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

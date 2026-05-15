@@ -26,10 +26,10 @@ pub fn truncate_to_microseconds(t: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 use crate::models::{
-    AGENTS_NAMESPACE, AgentRegistration, Approval, ApproverType, DuplicateCheck, DuplicateMatch,
-    GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction, MAX_NAMESPACE_DEPTH,
-    Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD, PendingAction, Stats, Taxonomy,
-    TaxonomyNode, Tier, TierCount, namespace_ancestors,
+    AGENTS_NAMESPACE, AgentRegistration, Approval, ApproverType, ConfidenceSource, DuplicateCheck,
+    DuplicateMatch, GovernanceDecision, GovernanceLevel, GovernancePolicy, GovernedAction,
+    MAX_NAMESPACE_DEPTH, Memory, MemoryLink, NamespaceCount, PROMOTION_THRESHOLD, PendingAction,
+    Stats, Taxonomy, TaxonomyNode, Tier, TierCount, namespace_ancestors,
 };
 
 // ---------------------------------------------------------------------------
@@ -389,6 +389,23 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
             .get::<_, Option<String>>("source_span")
             .unwrap_or(None)
             .and_then(|s| serde_json::from_str(&s).ok()),
+        // v0.7.0 Form 5 — schema v39 columns. Legacy rows resolve
+        // to `CallerProvided` (SQL DEFAULT), NULL signals, NULL
+        // decayed_at. `.ok()` fallthrough keeps the reader tolerant
+        // of pre-v39 row reads (no panic when migrate hasn't fired
+        // yet).
+        confidence_source: row
+            .get::<_, String>("confidence_source")
+            .ok()
+            .and_then(|s| crate::models::ConfidenceSource::from_str(&s))
+            .unwrap_or_default(),
+        confidence_signals: row
+            .get::<_, Option<String>>("confidence_signals")
+            .unwrap_or(None)
+            .and_then(|s| serde_json::from_str(&s).ok()),
+        confidence_decayed_at: row
+            .get::<_, Option<String>>("confidence_decayed_at")
+            .unwrap_or(None),
     })
 }
 
@@ -417,9 +434,18 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
         Some(span) => Some(serde_json::to_string(&span)?),
         None => None,
     };
+    // v0.7.0 Form 5 — encode confidence-provenance fields for the
+    // schema v39 TEXT columns. The `confidence_source` column has a
+    // SQL DEFAULT of 'caller_provided' so legacy/default rows land
+    // there; `confidence_signals` is a JSON envelope (or NULL); and
+    // `confidence_decayed_at` is RFC3339 (or NULL).
+    let confidence_signals_json = match &mem.confidence_signals {
+        Some(s) => Some(serde_json::to_string(s)?),
+        None => None,
+    };
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -473,7 +499,17 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
                              THEN memories.citations
                              ELSE excluded.citations END,
             source_uri = COALESCE(excluded.source_uri, memories.source_uri),
-            source_span = COALESCE(excluded.source_span, memories.source_span)
+            source_span = COALESCE(excluded.source_span, memories.source_span),
+            -- v0.7.0 Form 5 — confidence-provenance follows the same
+            -- shape as Form 4 columns: explicit non-default replaces;
+            -- caller_provided + NULL signals keep the existing
+            -- provenance signal so a re-store doesn't blank out an
+            -- auto-derived or calibrated value.
+            confidence_source = CASE WHEN excluded.confidence_source != 'caller_provided'
+                                     THEN excluded.confidence_source
+                                     ELSE memories.confidence_source END,
+            confidence_signals = COALESCE(excluded.confidence_signals, memories.confidence_signals),
+            confidence_decayed_at = COALESCE(excluded.confidence_decayed_at, memories.confidence_decayed_at)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -482,6 +518,7 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
             mem.entity_id, mem.persona_version,
             citations_json, mem.source_uri, source_span_json,
+            mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
         ],
         |r| r.get(0),
     )?;
@@ -622,6 +659,13 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
                 Some(span) => Some(serde_json::to_string(&span)?),
                 None => None,
             };
+            // v0.7.0 Form 5 — encode confidence-provenance fields for
+            // the schema v39 TEXT columns. Mirrors the encode in
+            // `insert(...)` above.
+            let confidence_signals_json = match &mem.confidence_signals {
+                Some(s) => Some(serde_json::to_string(s)?),
+                None => None,
+            };
             // v0.7.0 L1-1 wave merge — include the `memory_kind` column.
             // This INSERT path was added by the fix-campaign R1-M3
             // (ConflictMode::Error refuses duplicates) and originally
@@ -632,8 +676,8 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
             // its `MemoryKind::Reflection` typing and the stored row
             // falls back to the column DEFAULT 'observation'.
             let actual_id: String = conn.query_row(
-                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
                  RETURNING id",
                 params![
                     mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -642,6 +686,7 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
                     metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
                     mem.entity_id, mem.persona_version,
                     citations_json, mem.source_uri, source_span_json,
+                    mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
                 ],
                 |r| r.get(0),
             ).map_err(|e| {
@@ -1154,7 +1199,8 @@ pub fn search(
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
                 m.memory_kind, m.entity_id, m.persona_version,
-                m.citations, m.source_uri, m.source_span
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1
@@ -1521,6 +1567,7 @@ pub fn recall(
                 m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
                 m.memory_kind, m.entity_id, m.persona_version,
                 m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at,
                 (fts.rank * -1)
                 + (m.priority * 0.5)
                 + (MIN(m.access_count, 50) * 0.1)
@@ -1655,6 +1702,9 @@ pub fn promote_to_namespace(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -1726,7 +1776,8 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
                 m.memory_kind, m.entity_id, m.persona_version,
-                m.citations, m.source_uri, m.source_span
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1 AND m.namespace = ?2
@@ -3235,6 +3286,9 @@ pub fn entity_register(
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -4065,6 +4119,9 @@ pub fn register_agent(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     insert(conn, &mem)
@@ -4511,9 +4568,18 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
         Some(span) => Some(serde_json::to_string(&span)?),
         None => None,
     };
+    // v0.7.0 Form 5 — encode confidence-provenance fields for the
+    // schema v39 TEXT columns on the federation merge path. The
+    // newer-wins CASE clauses pick `excluded.confidence_source` only
+    // when the incoming row wins the tiebreak; otherwise the local
+    // row's confidence provenance is preserved.
+    let confidence_signals_json = match &mem.confidence_signals {
+        Some(s) => Some(serde_json::to_string(s)?),
+        None => None,
+    };
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span, confidence_source, confidence_signals, confidence_decayed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at
                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
@@ -4575,7 +4641,22 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
                                   OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
                              THEN excluded.citations ELSE memories.citations END,
             source_uri = COALESCE(excluded.source_uri, memories.source_uri),
-            source_span = COALESCE(excluded.source_span, memories.source_span)
+            source_span = COALESCE(excluded.source_span, memories.source_span),
+            -- v0.7.0 Form 5 — confidence-provenance follows the newer-
+            -- wins shape established for the other Form 4 columns.
+            -- A peer pushing an auto-derived/calibrated value wins on
+            -- the timestamp tiebreak; otherwise the local row's
+            -- provenance is preserved so a stale peer cannot blank out
+            -- a fresher local calibration.
+            confidence_source = CASE WHEN excluded.updated_at > memories.updated_at
+                                          OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                                     THEN excluded.confidence_source ELSE memories.confidence_source END,
+            confidence_signals = CASE WHEN excluded.updated_at > memories.updated_at
+                                           OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                                      THEN excluded.confidence_signals ELSE memories.confidence_signals END,
+            confidence_decayed_at = CASE WHEN excluded.updated_at > memories.updated_at
+                                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                                         THEN excluded.confidence_decayed_at ELSE memories.confidence_decayed_at END
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -4584,6 +4665,7 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
             mem.entity_id, mem.persona_version,
             citations_json, mem.source_uri, source_span_json,
+            mem.confidence_source.as_str(), confidence_signals_json, mem.confidence_decayed_at,
         ],
         |r| r.get(0),
     )?;
@@ -4926,7 +5008,8 @@ pub fn recall_hybrid_with_telemetry(
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
                 m.memory_kind, m.entity_id, m.persona_version,
-                m.citations, m.source_uri, m.source_span, m.embedding,
+                m.citations, m.source_uri, m.source_span,
+                m.confidence_source, m.confidence_signals, m.confidence_decayed_at, m.embedding,
                 (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
                 + (m.confidence * 2.0)
                 + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
@@ -7324,6 +7407,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -10385,6 +10471,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -10524,6 +10613,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -12219,6 +12311,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let ref_mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -12243,6 +12338,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
 
         insert(&conn, &obs).unwrap();
@@ -12308,6 +12406,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id)
@@ -12353,6 +12454,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         insert(&conn, &mem_reflection).unwrap();
 
@@ -12380,6 +12484,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         insert(&conn, &mem_obs).unwrap();
 

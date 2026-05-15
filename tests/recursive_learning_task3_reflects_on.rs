@@ -42,6 +42,7 @@
 //! `CURRENT_SCHEMA_VERSION` / `MAX_SUPPORTED_SCHEMA`.
 
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryLink, Tier};
 use chrono::Utc;
 
@@ -74,6 +75,9 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

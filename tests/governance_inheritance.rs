@@ -14,6 +14,7 @@
 // test file ships green. Treat regressions here as release blockers.
 
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     self, ApproverType, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
 };
@@ -63,6 +64,9 @@ fn seed_policy(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();

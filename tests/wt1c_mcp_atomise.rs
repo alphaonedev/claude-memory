@@ -35,6 +35,7 @@
     clippy::missing_panics_doc
 )]
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
@@ -198,6 +199,9 @@ fn insert_long_source(conn: &Connection, ns: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     storage::insert(conn, &mem).expect("seed long source")
 }
@@ -227,6 +231,9 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     storage::insert(conn, &mem).expect("seed short source")
 }

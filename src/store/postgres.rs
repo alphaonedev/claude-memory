@@ -44,6 +44,7 @@
 //! fixture). Unit tests in this module exercise only the SQL-builder
 //! helpers that don't need a running Postgres.
 
+use crate::models::ConfidenceSource;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -125,6 +126,17 @@ const MIGRATION_V36_PERSONA: &str = include_str!("../../migrations/postgres/0018
 /// idempotent batch.
 const MIGRATION_V37_FORM4_PROVENANCE: &str =
     include_str!("../../migrations/postgres/0019_v07_form4_provenance.sql");
+
+/// v0.7.0 Form 5 — auto-confidence + shadow-mode + calibration tooling
+/// (issue #758). Adds `memories.confidence_source TEXT NOT NULL
+/// DEFAULT 'caller_provided'`, `memories.confidence_signals TEXT NULL`,
+/// `memories.confidence_decayed_at TEXT NULL` plus the
+/// `confidence_shadow_observations` table backing per-recall telemetry.
+/// Mirrors SQLite schema v39. Pure additive ADD COLUMN IF NOT EXISTS +
+/// CREATE TABLE IF NOT EXISTS — no backfill needed (the auto-derive
+/// engine is opt-in via `AI_MEMORY_AUTO_CONFIDENCE=1`).
+const MIGRATION_V38_FORM5_CONFIDENCE: &str =
+    include_str!("../../migrations/postgres/0020_v07_form5_confidence_calibration.sql");
 
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
@@ -215,7 +227,18 @@ const MIGRATION_V37_FORM4_PROVENANCE: &str =
 //       v38. Pure additive ADD COLUMN IF NOT EXISTS + CREATE INDEX
 //       IF NOT EXISTS — no backfill required (legacy rows default to
 //       empty citations array and NULL URI/span).
-const CURRENT_SCHEMA_VERSION: i32 = 37;
+// v38 = v0.7.0 Form 5 — auto-confidence + shadow-mode + calibration
+//       tooling closeout (issue #758). Adds three columns on
+//       `memories` (`confidence_source TEXT NOT NULL DEFAULT
+//       'caller_provided'`, `confidence_signals TEXT NULL`,
+//       `confidence_decayed_at TEXT NULL`) plus the
+//       `confidence_shadow_observations` table backing the shadow-mode
+//       telemetry pipeline. Mirrors SQLite schema v39. Pure additive
+//       ADD COLUMN IF NOT EXISTS + CREATE TABLE IF NOT EXISTS — no
+//       backfill required (every pre-Form-5 row stays at the
+//       `caller_provided` baseline; the auto-derive engine is opt-in
+//       via `AI_MEMORY_AUTO_CONFIDENCE=1`).
+const CURRENT_SCHEMA_VERSION: i32 = 38;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -624,6 +647,9 @@ impl PostgresStore {
         }
         if current_version < 37 {
             self.migrate_v37().await?;
+        }
+        if current_version < 38 {
+            self.migrate_v38().await?;
         }
 
         Ok(())
@@ -1034,6 +1060,42 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v37 applied (form4 fact-provenance citations + source_uri + source_span)"
+        );
+        Ok(())
+    }
+
+    /// v38 — Form 5 auto-confidence + shadow-mode + calibration tooling
+    /// closeout (issue #758).
+    ///
+    /// Adds three columns on `memories` (`confidence_source TEXT NOT NULL
+    /// DEFAULT 'caller_provided'`, `confidence_signals TEXT NULL`,
+    /// `confidence_decayed_at TEXT NULL`) plus the
+    /// `confidence_shadow_observations` table backing per-recall shadow-
+    /// mode telemetry. Mirrors SQLite schema v39. Pure additive ADD
+    /// COLUMN IF NOT EXISTS + CREATE TABLE IF NOT EXISTS — no
+    /// application-side backfill (legacy rows take the SQL DEFAULT for
+    /// `confidence_source` and NULL for the signals/decay columns).
+    async fn migrate_v38(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v38 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V38_FORM5_CONFIDENCE)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v38 form5 confidence", e))?;
+
+        record_schema_version(&mut tx, 38).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v38 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v38 applied (form5 auto-confidence + shadow-mode + calibration)"
         );
         Ok(())
     }
@@ -3686,6 +3748,22 @@ impl PostgresStore {
                 .try_get::<Option<String>, _>("source_span")
                 .unwrap_or(None)
                 .and_then(|s| serde_json::from_str(&s).ok()),
+            // v0.7.0 Form 5 — Postgres v38 confidence-provenance columns.
+            // Pre-v38 backups missing the column hit the `.ok()`
+            // fallthrough; legacy rows resolve to `CallerProvided`
+            // (the SQL DEFAULT on the v38 column).
+            confidence_source: row
+                .try_get::<String, _>("confidence_source")
+                .ok()
+                .and_then(|s| crate::models::ConfidenceSource::from_str(&s))
+                .unwrap_or_default(),
+            confidence_signals: row
+                .try_get::<Option<String>, _>("confidence_signals")
+                .unwrap_or(None)
+                .and_then(|s| serde_json::from_str(&s).ok()),
+            confidence_decayed_at: row
+                .try_get::<Option<String>, _>("confidence_decayed_at")
+                .unwrap_or(None),
         })
     }
 
@@ -6323,6 +6401,9 @@ impl MemoryStore for PostgresStore {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
 
         self.store(ctx, &mem).await.map(|_| ())
@@ -6843,6 +6924,9 @@ impl MemoryStore for PostgresStore {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         self.store(ctx, &mem).await
     }
@@ -8861,6 +8945,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 
@@ -9156,7 +9243,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 37);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 38);
     }
 
     #[tokio::test]

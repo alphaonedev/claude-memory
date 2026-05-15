@@ -25,6 +25,7 @@
 //! `migrate_v31` body in `src/store/postgres.rs` for the Postgres side.
 
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use chrono::Utc;
 
@@ -56,6 +57,9 @@ fn make_memory(title: &str, reflection_depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

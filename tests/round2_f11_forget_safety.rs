@@ -21,6 +21,7 @@ use ai_memory::cli::CliOutput;
 use ai_memory::cli::forget::{
     ForgetArgs, cmd_forget, global_scope_forget_error_message, requires_global_confirmation,
 };
+use ai_memory::models::ConfidenceSource;
 
 fn args_blank() -> ForgetArgs {
     ForgetArgs {
@@ -155,6 +156,9 @@ fn cmd_forget_proceeds_with_confirm_global() {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&conn, &m).unwrap();
     }

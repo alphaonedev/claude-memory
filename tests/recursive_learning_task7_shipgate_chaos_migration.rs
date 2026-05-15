@@ -61,6 +61,7 @@
 use ai_memory::db::{
     self, ReflectError, ReflectHookDecision, ReflectHooks, ReflectInput, ReflectOutcome,
 };
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{GovernancePolicy, Memory, MemoryLink, Tier};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -96,6 +97,9 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -771,6 +775,9 @@ async fn federation_apply_remote_memory_round_trips_reflection_depth() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = store
         .apply_remote_memory(&ctx, &mem)

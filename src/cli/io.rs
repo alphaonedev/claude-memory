@@ -4,6 +4,7 @@
 //! `cmd_export`, `cmd_import`, `cmd_mine` migrations.
 
 use crate::cli::CliOutput;
+use crate::models::ConfidenceSource;
 use crate::{config, db, identity, mine, models, validate};
 use anyhow::Result;
 use chrono::{Duration, Utc};
@@ -320,6 +321,9 @@ pub fn mine(
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
 
         match db::insert(&conn, &mem) {

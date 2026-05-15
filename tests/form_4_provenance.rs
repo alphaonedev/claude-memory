@@ -31,6 +31,7 @@
 //! 5. Forensic bundle exports include all three new fields.
 //! 6. Migration: v37 → v38 sqlite is idempotent.
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
@@ -88,6 +89,9 @@ fn mem_with_citations(ns: &str, title: &str, content: &str, citations: Vec<Citat
         citations,
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -430,6 +434,9 @@ fn forensic_bundle_envelope_carries_form4_fields() {
         citations: vec![citation.clone()],
         source_uri: Some("doc:parent-001".into()),
         source_span: Some(SourceSpan { start: 0, end: 7 }),
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let v: Value = serde_json::to_value(&env).expect("serialise envelope");
     assert!(v["citations"].is_array(), "citations always present");
@@ -448,11 +455,17 @@ fn forensic_bundle_envelope_carries_form4_fields() {
 fn schema_v38_columns_present_and_migration_is_idempotent() {
     let (_tmp, conn) = fresh_db();
 
-    // The fresh open already lands v38; re-opening must be a no-op.
+    // The fresh open already lands at or above v38; re-opening must
+    // be a no-op. v0.7.0 Form 5 (issue #758) bumped the schema floor
+    // to v39 (sqlite); the migration ladder is strictly additive so
+    // every v38 surface stays reachable.
     let version: i64 = conn
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .expect("schema_version row");
-    assert_eq!(version, 38, "fresh DB lands at schema v38");
+    assert!(
+        version >= 38,
+        "fresh DB lands at >= schema v38; got {version}"
+    );
 
     // Confirm the new columns exist on `memories`.
     let mut has_citations = false;

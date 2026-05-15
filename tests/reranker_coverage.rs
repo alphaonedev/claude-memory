@@ -22,6 +22,7 @@
 //! - Behavioural smoke tests on the **lexical** path through the
 //!   public `CrossEncoder::score` / `CrossEncoder::rerank` API.
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, Tier};
 use ai_memory::reranker::CrossEncoder;
 
@@ -49,6 +50,9 @@ fn make_memory(title: &str, content: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

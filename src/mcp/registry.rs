@@ -928,6 +928,18 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_calibrate_confidence",
+                "description": "v0.7.0 Form 5 — scan `confidence_shadow_observations` since N days back and emit per-(namespace, source) baselines. Operator-callable equivalent of the `ai-memory calibrate confidence --from-shadow` CLI driver (Family::Power).",
+                "docs": "v0.7.0 Form 5 (issue #758) — calibration sweep. Reads the shadow-mode observation table (populated when `AI_MEMORY_CONFIDENCE_SHADOW=1`) and returns a `CalibrationReport` envelope: `{window_days, total_observations, baselines: [{namespace, source, count, median, mean, buckets}]}`. The sweep is read-only by default; operators review the report before deciding whether to persist baselines into a calibration store (operator-driven follow-up). Composes with the auto-derive engine: the per-source median is exactly the `baseline_per_source` signal `crate::confidence::derive` consumes on the next write. Default window is 30 days; tune via `days`. Family::Power surface — refuses on keyword tier.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "days": {"type": "integer", "minimum": 1, "maximum": 3650, "default": 30, "description": "Window size in days (default 30)."},
+                        "output_format": {"type": "string", "enum": ["json", "table"], "default": "json", "description": "Output format. `json` returns the structured envelope; `table` renders an ASCII-table summary."}
+                    }
+                }
+            },
+            {
                 "name": "memory_capabilities",
                 "description": "Discover runtime capabilities; family=<name> drills in.",
                 "docs": "Capabilities-v3 (v0.7 default, always-on): tier, profile, summary, to_describe_to_user, callable_now per tool, agent_permitted_families, harness detection. family=<name> (+include_schema) enumerates one family; accept=v2/v1 for legacy clients. v0.7 C2 — pass verbose=true (with family=<name>+include_schema=true) to receive the long-form `docs` field on each tool entry, which the bare `tools/list` payload omits to stay inside the C5 token budget. v0.7 C4 — verbose=true also restores the FULL inputSchema (every optional param) instead of the trimmed default; the C2 docs strip and the C4 optional-params trim are both governed by the same `verbose` flag.",

@@ -22,6 +22,7 @@
 //! points.
 
 use ai_memory::db;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use rusqlite::Connection;
 use serde_json::json;
@@ -64,6 +65,9 @@ fn make_mem(title: &str, namespace: &str, kind: MemoryKind) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

@@ -53,6 +53,7 @@
 //! SQLite connection per test for isolation).
 
 use ai_memory::db::{self, ReflectError, ReflectInput};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceLevel, GovernancePolicy, Memory, Tier, default_metadata,
 };
@@ -89,6 +90,9 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -151,6 +155,9 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = db::insert(conn, &standard).unwrap();
     db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();

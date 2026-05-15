@@ -22,6 +22,7 @@
 #![allow(clippy::await_holding_lock)]
 
 use ai_memory::config::set_active_hooks_hmac_secret;
+use ai_memory::models::ConfidenceSource;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::json;
@@ -120,6 +121,9 @@ async fn seed_pending_row_via_db(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mem_id = ai_memory::db::insert(&lock.0, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-test"});

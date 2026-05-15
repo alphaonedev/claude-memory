@@ -49,6 +49,7 @@
 
 #![cfg(feature = "sal-postgres")]
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use ai_memory::store::postgres::PostgresStore;
 use ai_memory::store::{CallerContext, KgBackend, KgQueryRow, KgTimelineRow, MemoryStore};
@@ -107,6 +108,9 @@ fn make_memory(id: &str, namespace: &str, title: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

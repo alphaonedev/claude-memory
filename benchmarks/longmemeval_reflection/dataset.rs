@@ -59,6 +59,7 @@
 //! L3-1 generalises that fixture to fifty independent scenarios so the
 //! coverage / accuracy metrics have meaningful spread.
 
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
@@ -227,6 +228,9 @@ pub fn generate_scenarios() -> Vec<Scenario> {
                 citations: Vec::new(),
                 source_uri: None,
                 source_span: None,
+                confidence_source: ConfidenceSource::CallerProvided,
+                confidence_signals: None,
+                confidence_decayed_at: None,
             });
         }
 

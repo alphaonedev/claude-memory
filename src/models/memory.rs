@@ -171,6 +171,133 @@ impl std::fmt::Display for MemoryKind {
     }
 }
 
+/// v0.7.0 Form 5 (issue #758) — typed discriminator for the provenance
+/// of a memory's `confidence` value.
+///
+/// Stored on `memories.confidence_source TEXT NOT NULL DEFAULT
+/// 'caller_provided'` (schema v39 sqlite / v38 postgres). The auto-
+/// derive engine in [`crate::confidence::derive`] writes
+/// `AutoDerived` when [`crate::confidence::derive`] computes a fresh
+/// value; the calibration sweep writes `Calibrated` when it replaces
+/// the live value with a per-source baseline; the decay updater writes
+/// `Decayed` after applying [`crate::confidence::decay::decayed`] on
+/// recall touch. The (overwhelming-majority) legacy + default bucket
+/// is `CallerProvided`, matching the SQL `DEFAULT` clause.
+///
+/// The discriminator lets recall ranking and the forensic bundle
+/// reason about the trust path of a confidence score without re-running
+/// the derivation. The calibration CLI scans the partial index
+/// `idx_memories_confidence_source` (which excludes `caller_provided`)
+/// to enumerate derived / calibrated / decayed rows cheaply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfidenceSource {
+    /// The legacy and default bucket — the caller's value was accepted
+    /// verbatim. Matches the SQL `DEFAULT 'caller_provided'` clause on
+    /// the `confidence_source` column added in schema v39 (sqlite) /
+    /// v38 (postgres).
+    #[default]
+    CallerProvided,
+    /// The Form 5 auto-derive engine (`crate::confidence::derive`)
+    /// computed the value at write time from row signals (atom
+    /// derivation, prior-corroboration count, source age, namespace
+    /// baseline). Opt-in via `AI_MEMORY_AUTO_CONFIDENCE=1`.
+    AutoDerived,
+    /// The calibration sweep (`ai-memory calibrate confidence
+    /// --from-shadow`) replaced the live value with a per-source
+    /// baseline computed from observed shadow-mode samples.
+    Calibrated,
+    /// The freshness-decay updater (`crate::confidence::decay`) wrote
+    /// a decayed copy of the previous value, bumping
+    /// `confidence_decayed_at`. Fires when
+    /// `AI_MEMORY_CONFIDENCE_DECAY=1` or the namespace policy
+    /// `confidence_decay_half_life_days` is set.
+    Decayed,
+}
+
+impl ConfidenceSource {
+    /// Column-wire string (matches the SQL `DEFAULT 'caller_provided'`
+    /// value and the four documented discriminator values).
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::CallerProvided => "caller_provided",
+            Self::AutoDerived => "auto_derived",
+            Self::Calibrated => "calibrated",
+            Self::Decayed => "decayed",
+        }
+    }
+
+    /// Parse the column-wire string. Returns `None` on unrecognised
+    /// values so callers can fall back to `CallerProvided` (forward-
+    /// compat with future variants that land in a newer DB on an
+    /// older binary).
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "caller_provided" => Some(Self::CallerProvided),
+            "auto_derived" => Some(Self::AutoDerived),
+            "calibrated" => Some(Self::Calibrated),
+            "decayed" => Some(Self::Decayed),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ConfidenceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// v0.7.0 Form 5 (issue #758) — JSON snapshot of the signals that
+/// produced an auto-derived or calibrated confidence value.
+///
+/// Stored on `memories.confidence_signals TEXT NULL` (schema v39
+/// sqlite / v38 postgres) as a JSON-encoded envelope. NULL on legacy
+/// rows and on rows whose `confidence_source = 'caller_provided'`.
+/// Also written verbatim into the `confidence_shadow_observations.signals`
+/// column per recall when shadow mode is enabled.
+///
+/// An auditor can reconstruct the derivation after the fact by
+/// inspecting this snapshot — the recall ranker and the forensic
+/// bundle preserve it across reads, so a downstream review never
+/// needs to re-query the substrate at the then-current state.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ConfidenceSignals {
+    /// Age (in days) of the source memory at the moment of derivation.
+    /// Drives the `freshness_factor` exponent.
+    pub source_age_days: f64,
+    /// Whether the row is an atom of an existing memory (`atom_of IS
+    /// NOT NULL`). Atom rows inherit higher base confidence because
+    /// their provenance is anchored to a curator-validated parent.
+    pub atom_derivation: bool,
+    /// Count of related memories (via `memory_links`) at the moment of
+    /// derivation. More corroboration → higher confidence; the
+    /// formula uses `log10(1 + count)` to keep the bump sub-linear.
+    pub prior_corroboration_count: i64,
+    /// Pre-computed freshness factor `exp(-age / half_life)` clamped
+    /// to `[0, 1]`. Stored alongside `source_age_days` so a future
+    /// review can verify the half-life used at write time.
+    pub freshness_factor: f64,
+    /// Per-source baseline from the calibration table (median derived
+    /// confidence for the row's `(namespace, source)` pair). `0.5`
+    /// when no calibrated baseline exists yet.
+    pub baseline_per_source: f64,
+}
+
+impl Default for ConfidenceSignals {
+    fn default() -> Self {
+        Self {
+            source_age_days: 0.0,
+            atom_derivation: false,
+            prior_corroboration_count: 0,
+            freshness_factor: 1.0,
+            baseline_per_source: 0.5,
+        }
+    }
+}
+
 /// Memory tier — mirrors human memory systems.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -306,6 +433,27 @@ pub struct Memory {
     /// surface lives at `crate::validate::validate_source_span`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_span: Option<SourceSpan>,
+    /// v0.7.0 Form 5 (issue #758) — typed discriminator naming the
+    /// provenance of the `confidence` value. Stored on
+    /// `memories.confidence_source TEXT NOT NULL DEFAULT
+    /// 'caller_provided'` (schema v39 sqlite / v38 postgres). Defaults
+    /// to `CallerProvided` for every legacy row and every write that
+    /// arrives with the auto-derive engine disabled.
+    #[serde(default)]
+    pub confidence_source: ConfidenceSource,
+    /// v0.7.0 Form 5 — JSON snapshot of the signals that produced an
+    /// auto-derived or calibrated confidence value. Mapped onto
+    /// `memories.confidence_signals TEXT NULL` (schema v39 sqlite /
+    /// v38 postgres). NULL on legacy rows and on rows whose
+    /// `confidence_source = CallerProvided`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_signals: Option<ConfidenceSignals>,
+    /// v0.7.0 Form 5 — RFC3339 stamp of the last decay computation.
+    /// Mapped onto `memories.confidence_decayed_at TEXT NULL` (schema
+    /// v39 sqlite / v38 postgres). NULL on legacy rows and on rows
+    /// never touched by the decay updater.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence_decayed_at: Option<String>,
 }
 
 /// v0.7.0 Form 4 (issue #757) — fact-provenance citation envelope.
@@ -378,6 +526,9 @@ impl Default for Memory {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 }

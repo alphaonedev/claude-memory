@@ -523,6 +523,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();

@@ -20,6 +20,7 @@
 //!    back to sources via DerivesFrom (chain reconstructible from
 //!    the bundle alone).
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::atomisation::curator::{Atom, Curator, CuratorError};
@@ -133,6 +134,9 @@ fn seed_long_source(conn: &Connection, ns: &str, keyword: &str) -> String {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("seed")
 }

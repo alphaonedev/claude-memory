@@ -7,6 +7,7 @@
 //! this is a thin shim whose only job is to prove the trait surface
 //! fits the shape of the shipped code.
 
+use crate::models::ConfidenceSource;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -881,6 +882,9 @@ impl MemoryStore for SqliteStore {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         let conn = self.state.lock().await;
         db::insert(&conn, &mem).map_err(box_err)
@@ -936,6 +940,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     }
 

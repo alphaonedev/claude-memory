@@ -1300,6 +1300,82 @@ fn default_capability_memory_kind_vocab() -> CapabilityMemoryKindVocab {
 }
 
 // ---------------------------------------------------------------------------
+// v0.7.0 Form 5 (issue #758) — auto-confidence + shadow-mode +
+// calibration tooling capability surface.
+// ---------------------------------------------------------------------------
+
+/// v0.7.0 Form 5 — operator-facing confidence-calibration capability
+/// surface. Names every Form-5 substrate the binary actually ships:
+///
+/// - `auto_derive`: the [`crate::confidence::derive`] engine
+///   (deterministic auto-confidence formula). Opt-in via
+///   `AI_MEMORY_AUTO_CONFIDENCE=1` — the field reports `"implemented"`
+///   because the engine compiles in unconditionally; the env-var gate
+///   is the operator control plane.
+/// - `shadow_mode`: the [`crate::confidence::shadow`] pipeline backed
+///   by the `confidence_shadow_observations` table (schema v39 sqlite /
+///   v38 postgres). Opt-in via `AI_MEMORY_CONFIDENCE_SHADOW=1`.
+/// - `freshness_decay`: the [`crate::confidence::decay::decayed`]
+///   exponential decay model. Opt-in via `AI_MEMORY_CONFIDENCE_DECAY=1`
+///   or per-namespace `confidence_decay_half_life_days` policy.
+/// - `calibration_cli`: the `ai-memory calibrate confidence
+///   --from-shadow` driver verb that scans the observation table and
+///   emits per-(namespace, source) baselines.
+/// - `calibration_tool`: the `memory_calibrate_confidence` MCP tool
+///   (Family::Power) — operator-callable equivalent of the CLI driver.
+/// - `signals_schema`: the wire-shape discriminator for the JSON
+///   envelope stored on `memories.confidence_signals`. Always
+///   `"v1"` in v0.7.0 — bumped when the [`crate::models::ConfidenceSignals`]
+///   struct gains a new field.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CapabilityConfidenceCalibration {
+    /// `"implemented"` once [`crate::confidence::derive`] is wired into
+    /// the substrate (it compiles in regardless of feature flag).
+    pub auto_derive: String,
+    /// `"implemented"` once [`crate::confidence::shadow`] is wired
+    /// (Form 5).
+    pub shadow_mode: String,
+    /// `"implemented"` once [`crate::confidence::decay`] is wired
+    /// (Form 5).
+    pub freshness_decay: String,
+    /// `"implemented"` once the `ai-memory calibrate confidence` CLI
+    /// driver registers under [`crate::cli`].
+    pub calibration_cli: String,
+    /// `"implemented"` once the `memory_calibrate_confidence` MCP
+    /// tool registers under Family::Power.
+    pub calibration_tool: String,
+    /// Wire-shape discriminator for `memories.confidence_signals`.
+    /// Always `"v1"` in v0.7.0.
+    pub signals_schema: String,
+    /// Default freshness-decay half-life (days). 30 in v0.7.0; tunable
+    /// per namespace via the `confidence_decay_half_life_days` policy.
+    pub default_half_life_days: f64,
+}
+
+impl CapabilityConfidenceCalibration {
+    /// Build the Form 5 capability surface from real, code-anchored
+    /// values. Every `"implemented"` here is a claim pinned by
+    /// `tests/form_5_confidence_calibration.rs` and walked back to a
+    /// registered MCP tool / CLI verb / module file.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            auto_derive: "implemented".to_string(),
+            shadow_mode: "implemented".to_string(),
+            freshness_decay: "implemented".to_string(),
+            calibration_cli: "implemented".to_string(),
+            calibration_tool: "implemented".to_string(),
+            signals_schema: "v1".to_string(),
+            default_half_life_days: crate::confidence::DEFAULT_HALF_LIFE_DAYS,
+        }
+    }
+}
+
+fn default_capability_confidence_calibration() -> CapabilityConfidenceCalibration {
+    CapabilityConfidenceCalibration::current()
+}
+
+// ---------------------------------------------------------------------------
 // Capabilities v1 — legacy shape retained for backward compat
 // ---------------------------------------------------------------------------
 
@@ -1444,6 +1520,13 @@ impl Capabilities {
             // [`crate::models::MemoryKind`] enum + the recall-filter /
             // CLI / auto-classify wiring shipped under Form 6.
             memory_kind_vocab: CapabilityMemoryKindVocab::current(),
+            // v0.7.0 Form 5 (issue #758) — confidence-calibration
+            // surface. Anchored at compile time against the
+            // `crate::confidence` module (derive, shadow, decay,
+            // calibrate), the `ai-memory calibrate confidence` CLI
+            // subcommand, and the `memory_calibrate_confidence` MCP
+            // tool.
+            confidence_calibration: CapabilityConfidenceCalibration::current(),
         }
     }
 }
@@ -1649,6 +1732,20 @@ pub struct CapabilitiesV3 {
     /// `default_capability_memory_kind_vocab` helper.
     #[serde(default = "default_capability_memory_kind_vocab")]
     pub memory_kind_vocab: CapabilityMemoryKindVocab,
+
+    /// v0.7.0 Form 5 (issue #758) — confidence-calibration capability
+    /// surface. Names the five operator-facing Form-5 substrates
+    /// (`auto_derive` / `shadow_mode` / `freshness_decay` /
+    /// `calibration_cli` / `calibration_tool`) plus the
+    /// `signals_schema` wire-shape discriminator. See
+    /// [`CapabilityConfidenceCalibration`] for the per-field anchor
+    /// map.
+    ///
+    /// Additive over the WT-1-G surface — pre-Form-5 v3 payloads still
+    /// deserialise cleanly because of the
+    /// `default_capability_confidence_calibration` helper.
+    #[serde(default = "default_capability_confidence_calibration")]
+    pub confidence_calibration: CapabilityConfidenceCalibration,
 }
 
 // ---------------------------------------------------------------------------

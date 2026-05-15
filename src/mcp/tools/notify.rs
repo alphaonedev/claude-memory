@@ -3,6 +3,7 @@
 
 //! MCP `memory_notify` and `memory_inbox` handlers.
 
+use crate::models::ConfidenceSource;
 use crate::models::{Memory, Tier};
 use crate::{db, validate};
 use serde_json::{Value, json};
@@ -68,6 +69,9 @@ pub(crate) fn handle_notify(
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
 

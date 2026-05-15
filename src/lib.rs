@@ -27,6 +27,13 @@ pub mod bench;
 pub mod background;
 pub mod cli;
 pub mod color;
+/// v0.7.0 Form 5 (issue #758) — auto-confidence + shadow-mode +
+/// freshness-decay + calibration tooling. Closes the FORM 5 PARTIAL
+/// audit finding by adding deterministic auto-derivation, opt-in
+/// shadow-mode telemetry, half-life-driven freshness decay, and a
+/// per-source baseline calibration sweep on top of the legacy
+/// caller-provided `confidence` field.
+pub mod confidence;
 pub mod config;
 pub mod curator;
 pub mod daemon_runtime;

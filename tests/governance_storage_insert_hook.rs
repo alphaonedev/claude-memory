@@ -40,6 +40,7 @@
 //!    write succeeds (CLI direct ops are intentionally outside the
 //!    hook's scope).
 
+use ai_memory::models::ConfidenceSource;
 use std::sync::{Mutex, OnceLock};
 
 use ai_memory::db;
@@ -129,6 +130,9 @@ fn fresh_memory(title: &str, ns: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

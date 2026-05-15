@@ -36,6 +36,7 @@ use ai_memory::db;
 use ai_memory::forensic::bundle as fb;
 use ai_memory::identity::keypair as kp_mod;
 use ai_memory::identity::sign;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use chrono::Utc;
 use rusqlite::params;
@@ -78,6 +79,9 @@ fn insert_mem(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: MemoryKin
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     db::insert(conn, &mem).expect("insert");
     id
@@ -162,6 +166,9 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = db::insert(conn, &std_mem).expect("insert std");
     db::set_namespace_standard(conn, ns, &id, None).expect("set std");

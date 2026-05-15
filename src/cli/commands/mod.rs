@@ -15,3 +15,8 @@ pub mod export_reflections;
 // v0.7.0 QW-2 — Persona-as-artifact CLI surface. `ai-memory persona
 // <entity_id> [--namespace NS] [--regenerate] [--json]`.
 pub mod persona;
+// v0.7.0 Form 5 (issue #758) — `ai-memory calibrate confidence
+// --from-shadow [--days N] [--output-format json|table]`. Reads
+// `confidence_shadow_observations` and emits per-(namespace, source)
+// baselines.
+pub mod calibrate_confidence;

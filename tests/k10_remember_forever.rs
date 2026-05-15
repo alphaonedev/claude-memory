@@ -26,6 +26,7 @@ use ai_memory::approvals::{
     Decision, Remember, SyntheticPermissionRule, clear_synthetic_rules_for_test,
     list_synthetic_rules, record_synthetic_rule,
 };
+use ai_memory::models::ConfidenceSource;
 use serde_json::json;
 use std::sync::Mutex;
 
@@ -79,6 +80,9 @@ async fn mcp_pending_approve_with_forever_records_rule() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let mem_id = ai_memory::db::insert(&conn, &mem).expect("insert memory");
     let payload = json!({"reason": "k10-forever"});

@@ -67,6 +67,7 @@
 use ai_memory::autonomy::AutonomyLlm;
 use ai_memory::curator::reflection_pass::run_reflection_pass;
 use ai_memory::db::{self, ReflectHooks, ReflectInput, reflect_with_hooks};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, MemoryLinkRelation, Tier};
 use anyhow::Result;
 use chrono::Utc;
@@ -806,6 +807,9 @@ where
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         }
     };
     let imported_id = db::insert(&conn, &imported_sibling)?;

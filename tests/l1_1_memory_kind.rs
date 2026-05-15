@@ -21,6 +21,7 @@
 
 use ai_memory::config::{FeatureTier, TierConfig};
 use ai_memory::db::{self, ReflectInput};
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{Memory, MemoryKind, Tier};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -58,6 +59,9 @@ fn make_obs(namespace: &str, title: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
@@ -155,6 +159,9 @@ fn memory_kind_serde_roundtrip_reflection() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     let json = serde_json::to_string(&mem).expect("serialize");

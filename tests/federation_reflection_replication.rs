@@ -68,6 +68,7 @@
 
 use ai_memory::db::{ReflectError, ReflectInput};
 use ai_memory::federation::reflection_bookkeeping;
+use ai_memory::models::ConfidenceSource;
 use ai_memory::models::{
     ApproverType, GovernanceLevel, GovernancePolicy, Memory, MemoryKind, Tier, default_metadata,
 };
@@ -141,6 +142,9 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let standard_id = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, namespace, &standard_id, None).expect("set standard");
@@ -175,6 +179,9 @@ fn observation(namespace: &str, title: &str, depth: i32, agent_id: &str) -> Memo
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 

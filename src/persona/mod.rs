@@ -46,6 +46,7 @@
 //! sources hash; the H5 audit chain captures every regeneration as a
 //! distinct, signed event.
 
+use crate::models::ConfidenceSource;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -308,6 +309,9 @@ impl<'a> PersonaGenerator<'a> {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
 
         let persona_id = db::insert(self.conn, &persona_mem)
@@ -683,6 +687,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -769,6 +776,9 @@ mod tests {
             citations: Vec::new(),
             source_uri: None,
             source_span: None,
+            confidence_source: ConfidenceSource::CallerProvided,
+            confidence_signals: None,
+            confidence_decayed_at: None,
         };
         db::insert(&conn, &mem).unwrap();
         assert_eq!(next_version(&conn, "alice", "team/alpha").unwrap(), 2);

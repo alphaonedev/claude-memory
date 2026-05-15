@@ -26,6 +26,7 @@
 //! serialises via a shared `Mutex<()>` and re-uses the `Atomiser`
 //! across tests by swapping the curator response queue per-test.
 
+use ai_memory::models::ConfidenceSource;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -297,6 +298,9 @@ fn insert_memory(conn: &Connection, ns: &str, content: &str) -> Memory {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
     let id = db::insert(conn, &mem).expect("insert");
     Memory { id, ..mem }
@@ -717,6 +721,9 @@ fn test_auto_atomise_refused_memory_not_atomised() {
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     };
 
     let insert_result = db::insert(&conn, &mem);

@@ -67,6 +67,9 @@ fn make_mem(namespace: &str, title: &str, content: &str, kind: MemoryKind) -> Me
         citations: Vec::new(),
         source_uri: None,
         source_span: None,
+        confidence_source: ai_memory::models::ConfidenceSource::CallerProvided,
+        confidence_signals: None,
+        confidence_decayed_at: None,
     }
 }
 
