@@ -28,8 +28,8 @@
 //!   duplicate detection; per-agent quota counters.
 //! - **F — Link signing** (`bucket_f_*`): signed-link wire envelope
 //!   carries `attest_level=self_signed` and populates `observed_by`.
-//! - **G — pg schema_version test-side fix** (`bucket_g_*`): read the
-//!   live schema_version via the daemon and assert it matches
+//! - **G — pg `schema_version` test-side fix** (`bucket_g_*`): read the
+//!   live `schema_version` via the daemon and assert it matches
 //!   `current_schema_version()` (same constant the cert oracle should
 //!   pin against).
 //! - **State flake** (`state_flake_*`): `memory_promote` round-trip

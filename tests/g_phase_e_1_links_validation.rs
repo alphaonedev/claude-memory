@@ -28,7 +28,7 @@ use serde_json::json;
 use tower::ServiceExt as _;
 
 /// Build the router from a fresh in-memory DB so each test starts
-/// clean and there's no inter-test leakage on the memory_links table.
+/// clean and there's no inter-test leakage on the `memory_links` table.
 fn build_router_with_db() -> (axum::Router, ai_memory::handlers::Db) {
     let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
     let path = std::path::PathBuf::from(":memory:");

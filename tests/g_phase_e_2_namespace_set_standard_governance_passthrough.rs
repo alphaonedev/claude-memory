@@ -7,7 +7,7 @@
 //! Pre-#707 regression: when the caller passed a `governance` payload
 //! to `memory_namespace_set_standard`, the handler round-tripped it
 //! through the typed `GovernancePolicy` struct (write / promote /
-//! delete / approver / inherit / max_reflection_depth). Any other key
+//! delete / approver / inherit / `max_reflection_depth`). Any other key
 //! — most notably `require_approval_above_depth`, which is read by the
 //! free function `storage::resolve_require_approval_above_depth` and
 //! never lives on the typed struct — was silently dropped during the
@@ -79,9 +79,9 @@ fn insert_with_metadata(
 /// stdio JSON-RPC.
 fn call_set_standard(
     conn: &Connection,
-    params: serde_json::Value,
+    params: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    ai_memory::mcp::handle_namespace_set_standard(conn, &params)
+    ai_memory::mcp::handle_namespace_set_standard(conn, params)
 }
 
 /// Re-read a memory's metadata.governance blob.
@@ -117,7 +117,7 @@ fn existing_require_approval_above_depth_survives_set_standard() {
     // the pre-#707 caller shape that triggered the silent drop.
     let resp = call_set_standard(
         &conn,
-        json!({
+        &json!({
             "namespace": "phase-e-2",
             "id": id,
             "governance": {
@@ -156,7 +156,7 @@ fn incoming_require_approval_above_depth_lands_on_standard() {
     let id = insert_with_metadata(&conn, "phase-e-2-incoming", "standard", json!({}));
     let resp = call_set_standard(
         &conn,
-        json!({
+        &json!({
             "namespace": "phase-e-2-incoming",
             "id": id,
             "governance": {
@@ -199,7 +199,7 @@ fn extra_fields_on_existing_blob_survive_set_standard() {
     );
     let resp = call_set_standard(
         &conn,
-        json!({
+        &json!({
             "namespace": "phase-e-2-extras",
             "id": id,
             "governance": {
@@ -241,7 +241,7 @@ fn incoming_overrides_existing_for_overlapping_keys() {
     );
     let resp = call_set_standard(
         &conn,
-        json!({
+        &json!({
             "namespace": "phase-e-2-override",
             "id": id,
             "governance": {
