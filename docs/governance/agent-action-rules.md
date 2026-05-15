@@ -1,6 +1,6 @@
 # Substrate-level agent-action rules engine
 
-**Status:** v0.7.0 (issue [#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691)) — ships callable but **un-wired**; seed rules R001-R004 land at `enabled=0` awaiting operator activation.
+**Status:** v0.7.0 7th-form closeout (issues [#691](https://github.com/alphaonedev/ai-memory-mcp/issues/691), [#760](https://github.com/alphaonedev/ai-memory-mcp/issues/760)) — **wired at the harness boundary** across four daemon-side wire-points (`skill_export`, `federation::sync`, `hooks::executor`, `llm`). Seed rules R001-R004 land at `enabled=0` per migration `0024_v07_governance_rules.sql`; the operator activates them via `ai-memory governance install-defaults` or per-rule `ai-memory rules enable <id> --sign`.
 
 ## Why this exists — RCA
 
@@ -38,6 +38,37 @@ Capabilities v3 stamps:
   }
 }
 ```
+
+## Agent-EXTERNAL Layer-4 wiring (7th-form closeout)
+
+The four enumerated wire-points (`src/governance/agent_action.rs`
+module docs):
+
+| Wire-point                          | AgentAction variant   | File:line                                   |
+|-------------------------------------|-----------------------|---------------------------------------------|
+| Skill manifest emission             | `FilesystemWrite`     | `src/mcp/tools/skill_export.rs:162,209`     |
+| Federation peer POST                | `NetworkRequest`      | `src/federation/sync.rs:66`                 |
+| Hooks subprocess spawn              | `ProcessSpawn`        | `src/hooks/executor.rs:399,783`             |
+| LLM (Ollama / OpenAI) HTTP          | `NetworkRequest`      | `src/llm.rs:421`                            |
+
+Each wire-point calls `crate::governance::wire_check::check(&action)`
+before issuing the syscall. The daemon `bootstrap_serve` installs ONE
+shared closure into the process-wide `GOVERNANCE_PRE_ACTION` OnceLock
+that consults `check_agent_action_no_audit` against the live
+`governance_rules` table.
+
+### Decision verbs honored at the wire boundary
+
+The substrate rules engine returns one of three primary verdicts; the
+wire boundary honors each as follows:
+
+| Verdict     | Wire-boundary behavior                                                                                  |
+|-------------|---------------------------------------------------------------------------------------------------------|
+| **Allow**   | `wire_check::check` returns `Ok(())`; the action proceeds.                                              |
+| **Refuse**  | Returns `Err(GovernanceRefusal { reason })`; caller short-circuits with HTTP `403 / GOVERNANCE_REFUSED`. |
+| **Warn**    | Logged via the audit chain; returns `Ok(())`. The action proceeds; the warning is operator-observable.  |
+| **Modify**  | Rules engine pre-rewrites the action's args; the wire boundary sees the modified payload and Allows it. |
+| **Ask**     | Future K10 surface — operator-approval queueing. Today reduces to Refuse (action does not proceed).      |
 
 ## Schema
 
@@ -89,7 +120,21 @@ grep -rn "/tmp/" tests/ scripts/ benches/
 grep -rn "/private/tmp/" tests/
 ```
 
-…and resolving every match, activate each rule:
+…and resolving every match, the operator has two activation paths.
+
+**One-shot bulk activator (v0.7.0 7th-form, issue #760):**
+
+```bash
+ai-memory governance install-defaults           # interactive y/N prompt
+ai-memory governance install-defaults --yes     # for CI / scripts
+ai-memory governance install-defaults --yes --json
+```
+
+Flips `enabled = 1` on every present seed row; does NOT touch the
+`signature` column. Outputs `activated`, `already_enabled`, and
+`missing` lists so the operator can verify migration 0024 landed.
+
+**Per-rule activation (re-signs the row with the operator key):**
 
 ```bash
 ai-memory rules enable R001 --sign
@@ -97,6 +142,33 @@ ai-memory rules enable R002 --sign
 ai-memory rules enable R003 --sign
 ai-memory rules enable R004 --sign
 ```
+
+`rules enable --sign` is the per-rule path that recomputes the
+canonical row encoding (including `enabled = 1`) and lands an Ed25519
+signature so a direct `UPDATE governance_rules SET enabled = 1` after
+the fact fails verification at load time (`canonical_bytes_for_signing`
+commits to `enabled`).
+
+### Audit-honest framing
+
+This is **mechanical at the harness hook boundary**, NOT at the agent
+attention boundary. The wire-up upgrade from the "callable but
+un-wired" v0.7.0 fold-1 state to the wired-at-the-boundary 7th-form
+state means:
+
+1. Every daemon-side external action consults `governance_rules`
+   before issuing the syscall.
+2. A `refuse` rule short-circuits the action with a typed
+   `GovernanceRefusal { reason }` that the upstream HTTP / MCP layer
+   maps to `403 / GOVERNANCE_REFUSED`.
+3. Activation is by operator decision — the seed rows ship inert so
+   migrations don't regress existing scripts that assume `/tmp` works.
+
+The wiring guarantee does NOT extend to harness-side Bash invocations
+unless the operator has installed the Claude Code PreToolUse hook
+documented in `docs/integrations/claude-code.md`. That hook is a
+SEPARATE operator-installable surface; it consults the same substrate
+rules table via the MCP `memory_check_agent_action` tool.
 
 `--sign` requires the operator's Ed25519 keypair at `${AI_MEMORY_KEY_DIR:-~/.config/ai-memory/keys}/operator.priv` (mode 0600). Without it the CLI refuses with `governance.no_operator_key`.
 
