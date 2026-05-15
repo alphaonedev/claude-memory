@@ -173,6 +173,13 @@ impl Family {
             // Operator-facing; substrate returns rendered content,
             // agent harness owns the disk write.
             | "memory_export_reflection"
+            // v0.7.0 QW-2 — Persona-as-artifact. The read-only
+            // `memory_persona` lookup and the write-side
+            // `memory_persona_generate` regeneration both sit under
+            // Power. Tier-gating in the MCP dispatcher refuses the
+            // write-side surface unless smart+autonomous is enabled.
+            | "memory_persona"
+            | "memory_persona_generate"
             // v0.7.0 L2-3 (issue #668) — read-side surface for the
             // reflection invalidation propagation walker. Operator-
             // facing inspector for the per-reflection dependent set
@@ -280,8 +287,10 @@ impl Family {
             // context-offload substrate primitive surfaced at the
             // semantic-tier+ Power family) +
             // 1 (v0.7.0 WT-1-C — memory_atomise, curator-pass
-            // decomposition into 2-10 atomic propositions) = 18.
-            Self::Power => 18,
+            // decomposition into 2-10 atomic propositions) +
+            // 2 (v0.7.0 QW-2 — memory_persona + memory_persona_generate,
+            // Persona-as-artifact substrate primitive) = 20.
+            Self::Power => 20,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -408,6 +417,12 @@ impl Family {
                 // propositions; archives the source. Lives in Power
                 // alongside memory_consolidate / memory_reflect.
                 "memory_atomise",
+                // v0.7.0 QW-2 — Persona-as-artifact. Read-only lookup
+                // + smart+ regeneration. Substrate writes the SQL row
+                // (and optionally the filesystem export via namespace
+                // policy); the agent never holds the keypair.
+                "memory_persona",
+                "memory_persona_generate",
             ],
             Self::Meta => &[
                 "memory_capabilities",

@@ -331,6 +331,9 @@ mod reflection_origin;
 // v0.7.0 QW-1 — file-backed reflection chain export.
 #[path = "tools/export_reflection.rs"]
 mod export_reflection;
+// v0.7.0 QW-2 — Persona-as-artifact substrate handlers.
+#[path = "tools/persona.rs"]
+mod persona;
 // v0.7.0 L2-3 (issue #668) — Reflection invalidation propagation.
 #[path = "tools/dependents_of_invalidated.rs"]
 mod dependents_of_invalidated;
@@ -482,6 +485,7 @@ use entity_get_by_alias::handle_entity_get_by_alias;
 use entity_register::handle_entity_register;
 use expand_query::handle_expand_query;
 use export_reflection::handle_export_reflection;
+use persona::{handle_persona, handle_persona_generate};
 use forget::{handle_forget, handle_stats};
 use get::handle_get;
 use get_taxonomy::handle_get_taxonomy;
@@ -1053,6 +1057,17 @@ fn handle_request(
                 // from this path (capability isolation — see
                 // `mcp::tools::export_reflection` module doc).
                 "memory_export_reflection" => handle_export_reflection(conn, arguments),
+                // v0.7.0 QW-2 — Persona-as-artifact surface. Read-only
+                // `memory_persona` does an indexed lookup; the write
+                // surface `memory_persona_generate` refuses below
+                // smart tier (curator needs the LLM trait wired).
+                "memory_persona" => handle_persona(conn, arguments),
+                "memory_persona_generate" => handle_persona_generate(
+                    conn,
+                    arguments,
+                    llm.map(|c| c as &dyn crate::autonomy::AutonomyLlm),
+                    tier_config.tier,
+                ),
                 // v0.7.0 L2-3 (issue #668) — read-side surface for the
                 // dependents of an invalidated reflection. Pure
                 // read-only — the walker itself fires from the
@@ -1624,9 +1639,11 @@ mod tests {
         // v0.7.0 WT-1-C adds memory_atomise (Family::Power) → 67 —
         // curator-pass decomposition of a memory into 2-10 atomic
         // propositions; archives the source.
+        // v0.7.0 QW-2 adds memory_persona + memory_persona_generate
+        // (Family::Power) → 69 — Persona-as-artifact substrate.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 67);
+        assert_eq!(tools.len(), 69);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1681,7 +1698,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            67,
+            69,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1696,7 +1713,8 @@ mod tests {
              v0.7.0 L2-7 memory_skill_compositional_context (1) + \
              v0.7.0 QW-1 memory_export_reflection (1) + \
              v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) + \
-             v0.7.0 WT-1-C memory_atomise (1) = 67"
+             v0.7.0 WT-1-C memory_atomise (1) + \
+             v0.7.0 QW-2 memory_persona + memory_persona_generate (2) = 69"
         );
     }
 

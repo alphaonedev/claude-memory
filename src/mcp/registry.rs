@@ -824,6 +824,32 @@ pub fn tool_definitions() -> Value {
                 }
             },
             {
+                "name": "memory_persona",
+                "description": "Fetch the latest Persona artefact for an entity (read-only).",
+                "docs": "v0.7.0 QW-2 — read the most recent `MemoryKind::Persona` row for `(entity_id, namespace)`. Returns the structured envelope `{id, entity_id, namespace, body_md, sources, generated_at, version, attest_level}` rendered from the SQL row and its `metadata.persona` envelope. The body_md is a 300–500 word Markdown distillation produced by the reflection-pass curator from a cluster of `MemoryKind::Reflection` memories; every claim is footnoted with a `[^N]: <reflection-id>` citation. Returns `null` when no persona has ever been generated for the entity. Indexed lookup via `idx_personas_by_entity` (schema v36). Pair with `memory_persona_generate` to mint or refresh the artefact.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": {"type": "string", "description": "Subject of the persona — the entity identifier passed to memory_persona_generate."},
+                        "namespace": {"type": "string", "description": "Namespace the persona was minted under. Defaults to `global`."}
+                    },
+                    "required": ["entity_id"]
+                }
+            },
+            {
+                "name": "memory_persona_generate",
+                "description": "Generate (or regenerate) a Persona artefact for an entity via the reflection-pass curator.",
+                "docs": "v0.7.0 QW-2 — synthesise a `MemoryKind::Persona` memory by loading the top-K Reflection-kind memories about `entity_id` in `namespace`, running them through the substrate's reflection-pass curator (Gemma 4 via Ollama in production; mock LLM in tests), and persisting a 300–500 word Markdown profile with `[^ref]` footnotes citing the source reflections. Writes a new row per call — the substrate never overwrites a persona in place; each generation bumps `persona_version`. One `derived_from` `memory_link` edge lands per source reflection so the KG walker (`memory_find_paths`, `memory_kg_query`) can follow the Persona → Reflection → Observation chain end-to-end. Append-only `persona_generated` row written to `signed_events` for the H5 audit chain. Smart+autonomous tier only — refuses on semantic-tier and below.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "entity_id": {"type": "string", "description": "Subject of the persona. Must be 1–128 characters."},
+                        "namespace": {"type": "string", "description": "Namespace to mint the persona under. Defaults to `global`."}
+                    },
+                    "required": ["entity_id"]
+                }
+            },
+            {
                 "name": "memory_reflection_origin",
                 "description": "Inspect the cross-peer provenance of a reflection memory.",
                 "docs": "v0.7.0 L2-2 (S6-M1) — returns the structured `{memory_id, peer_origin, signing_agent, original_depth, local_depth_at_arrival, is_reflection}` envelope describing where a reflection row originated. `peer_origin` is the substrate identity of the peer that pushed the row to this host via `sync_push`; `signing_agent` is the original author (NHI agent_id) preserved across federation; `original_depth` is the `reflection_depth` column value as delivered; `local_depth_at_arrival` is the receiver's effective `max_reflection_depth` cap at the moment the row arrived. Non-reflection memories (depth == 0) return a well-formed envelope with `is_reflection = false` rather than a 404. Unknown ids → error.",

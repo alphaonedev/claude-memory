@@ -312,7 +312,7 @@ impl<'a> PersonaGenerator<'a> {
         // apply uniformly — there's no separate persona graph; the
         // KG walker traverses these edges with the rest.
         for source in &sources {
-            db::create_link(self.conn, &persona_id, &source.id, "derives_from")
+            db::create_link(self.conn, &persona_id, &source.id, "derived_from")
                 .with_context(|| {
                     format!("linking persona {persona_id} -> source {}", source.id)
                 })?;
