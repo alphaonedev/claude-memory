@@ -808,6 +808,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
@@ -828,6 +830,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         assert!(validate_governance_policy(&bad).is_err());
 
@@ -844,6 +848,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         assert!(validate_governance_policy(&good).is_ok());
     }
@@ -1241,6 +1247,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }

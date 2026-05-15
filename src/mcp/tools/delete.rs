@@ -436,6 +436,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();

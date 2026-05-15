@@ -462,6 +462,38 @@ pub fn tools_check_agent_action_mutation_disabled_error() -> &'static str {
 /// `handle_request`.
 pub mod tools {
     pub use super::atomise::{AtomiseToolHandler, handle_atomise};
+
+    /// v0.7.x Form 1/2 acceptance tests need to drive the `memory_store`
+    /// MCP write path from an integration test crate. Thin pass-through
+    /// to the internal `handle_store` dispatch. Not part of the supported
+    /// public wire API — operators keep using MCP / HTTP / CLI.
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn handle_store_for_tests(
+        conn: &rusqlite::Connection,
+        db_path: &std::path::Path,
+        params: &serde_json::Value,
+        embedder: Option<&dyn crate::embeddings::Embed>,
+        llm: Option<&crate::llm::OllamaClient>,
+        vector_index: Option<&crate::hnsw::VectorIndex>,
+        resolved_ttl: &crate::config::ResolvedTtl,
+        autonomous_hooks: bool,
+        mcp_client: Option<&str>,
+        federation_forward_url: Option<&str>,
+    ) -> Result<serde_json::Value, String> {
+        super::store::handle_store(
+            conn,
+            db_path,
+            params,
+            embedder,
+            llm,
+            vector_index,
+            resolved_ttl,
+            autonomous_hooks,
+            mcp_client,
+            federation_forward_url,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9990,21 +10022,23 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: json!({
-                    "governance": GovernancePolicy {
-                        write: GovernanceLevel::Any,
-                        promote: GovernanceLevel::Approve,
-                        delete: GovernanceLevel::Any,
-                        approver: ApproverType::Human,
-                        inherit: false,
-                        max_reflection_depth: None,
-                        auto_export_reflections_to_filesystem: None,
-                        auto_atomise: None,
-                        auto_atomise_threshold_cl100k: None,
-                        auto_atomise_max_atom_tokens: None,
-                        auto_persona_trigger_every_n_memories: None,
-                        auto_export_personas_to_filesystem: None,
-                    }
-                }),
+                        "governance": GovernancePolicy {
+                            write: GovernanceLevel::Any,
+                            promote: GovernanceLevel::Approve,
+                            delete: GovernanceLevel::Any,
+                            approver: ApproverType::Human,
+                            inherit: false,
+                            max_reflection_depth: None,
+                            auto_export_reflections_to_filesystem: None,
+                            auto_atomise: None,
+                            auto_atomise_threshold_cl100k: None,
+                            auto_atomise_max_atom_tokens: None,
+                            auto_persona_trigger_every_n_memories: None,
+                            auto_export_personas_to_filesystem: None,
+                auto_atomise_mode: None,
+                legacy_per_pair_classifier: None,
+                        }
+                    }),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
                 entity_id: None,
@@ -10055,21 +10089,23 @@ mod tests {
                 last_accessed_at: None,
                 expires_at: None,
                 metadata: json!({
-                    "governance": GovernancePolicy {
-                        write: GovernanceLevel::Any,
-                        promote: GovernanceLevel::Owner,
-                        delete: GovernanceLevel::Any,
-                        approver: ApproverType::Agent("not-me".to_string()),
-                        inherit: false,
-                        max_reflection_depth: None,
-                        auto_export_reflections_to_filesystem: None,
-                        auto_atomise: None,
-                        auto_atomise_threshold_cl100k: None,
-                        auto_atomise_max_atom_tokens: None,
-                        auto_persona_trigger_every_n_memories: None,
-                        auto_export_personas_to_filesystem: None,
-                    }
-                }),
+                        "governance": GovernancePolicy {
+                            write: GovernanceLevel::Any,
+                            promote: GovernanceLevel::Owner,
+                            delete: GovernanceLevel::Any,
+                            approver: ApproverType::Agent("not-me".to_string()),
+                            inherit: false,
+                            max_reflection_depth: None,
+                            auto_export_reflections_to_filesystem: None,
+                            auto_atomise: None,
+                            auto_atomise_threshold_cl100k: None,
+                            auto_atomise_max_atom_tokens: None,
+                            auto_persona_trigger_every_n_memories: None,
+                            auto_export_personas_to_filesystem: None,
+                auto_atomise_mode: None,
+                legacy_per_pair_classifier: None,
+                        }
+                    }),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
                 entity_id: None,

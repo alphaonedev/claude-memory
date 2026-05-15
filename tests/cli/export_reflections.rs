@@ -327,6 +327,8 @@ fn enable_auto_export(conn: &rusqlite::Connection, ns: &str) {
         auto_atomise_max_atom_tokens: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
     };
     let gov_meta = json!({
         "agent_id": "ai:test",

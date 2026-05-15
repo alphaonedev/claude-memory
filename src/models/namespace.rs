@@ -375,6 +375,72 @@ pub struct GovernancePolicy {
     /// artefact. `None` / `Some(false)` keeps the substrate quiet.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_export_personas_to_filesystem: Option<bool>,
+    /// v0.7.x Form 2 (Batman framework) — atomisation execution mode.
+    ///
+    /// - `None` / `Some(Off)` → no atomisation occurs (overrides any
+    ///   `auto_atomise` flag).
+    /// - `Some(Deferred)` → legacy WT-1-D behaviour: curator runs on a
+    ///   detached worker thread AFTER `memory_store` returns. Source
+    ///   is embedded as one blob before the curator round-trip lands.
+    /// - `Some(Synchronous)` → Form 2 alignment: SKIP source embedding,
+    ///   run the curator synchronously inside `memory_store`, atoms get
+    ///   their normal embed-on-insert path, source is archived with
+    ///   `atomised_into > 0` BEFORE the response returns.
+    ///
+    /// Backward compatibility: when this field is absent and
+    /// `auto_atomise = Some(true)` is set, the resolver implicitly maps
+    /// to `Some(Deferred)` so v0.7.0 pre-Form-2 deployments keep their
+    /// existing behaviour. See [`Self::effective_auto_atomise_mode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_atomise_mode: Option<AutoAtomiseMode>,
+    /// v0.7.x Form 1 (Batman framework) — opt-IN to the legacy per-pair
+    /// yes/no contradiction classifier on the store path. Default
+    /// (`None` / `Some(false)`) routes through the new single-batch
+    /// action-emitting synthesiser. Operators who depend on the old
+    /// metadata-only `confirmed_contradictions` behaviour set this to
+    /// `Some(true)` per-namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_per_pair_classifier: Option<bool>,
+}
+
+/// v0.7.x Form 2 — atomisation execution mode. Stored inside
+/// [`GovernancePolicy::auto_atomise_mode`].
+///
+/// The mode interacts with `auto_atomise` (the boolean enable flag)
+/// during resolution:
+///
+/// | `auto_atomise` | `auto_atomise_mode` | Effective behaviour |
+/// |----------------|---------------------|---------------------|
+/// | `None` / `false` | any              | Off (no atomisation) |
+/// | `Some(true)`     | `None`           | Deferred (legacy WT-1-D) |
+/// | `Some(true)`     | `Some(Off)`      | Off (explicit disable wins) |
+/// | `Some(true)`     | `Some(Deferred)` | Deferred (explicit) |
+/// | `Some(true)`     | `Some(Synchronous)` | Synchronous (Form 2 path) |
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AutoAtomiseMode {
+    /// No atomisation. Equivalent to `auto_atomise = false`.
+    Off,
+    /// Legacy WT-1-D behaviour: source embedded first, atomiser runs
+    /// on a detached worker thread.
+    Deferred,
+    /// Form 2 alignment: source embed is skipped, atomiser runs
+    /// synchronously inside `memory_store`, source is archived with
+    /// `atomised_into > 0` before the response returns. Atoms get
+    /// their normal embed-on-insert path.
+    Synchronous,
+}
+
+impl AutoAtomiseMode {
+    /// Telemetry label.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Deferred => "deferred",
+            Self::Synchronous => "synchronous",
+        }
+    }
 }
 
 fn default_promote_level() -> GovernanceLevel {
@@ -420,6 +486,8 @@ impl Default for GovernancePolicy {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         }
     }
 }
@@ -470,6 +538,11 @@ impl GovernancePolicy {
             // explicitly via the namespace standard's metadata.
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            // v0.7.x Form 1/2: opt-in. Default leaves the substrate
+            // on the new synthesis path and the deferred atomisation
+            // mode (inherited from the legacy auto_atomise flag).
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         }
     }
 
@@ -568,6 +641,41 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_auto_export_personas_to_filesystem(&self) -> bool {
         self.auto_export_personas_to_filesystem.unwrap_or(false)
+    }
+
+    /// v0.7.x Form 2 — resolve the atomisation execution mode.
+    ///
+    /// Resolution rules (matches the table on
+    /// [`AutoAtomiseMode`]):
+    ///
+    /// 1. `auto_atomise_mode = Some(mode)` wins — operator explicit.
+    /// 2. Otherwise `auto_atomise = Some(true)` → [`AutoAtomiseMode::Deferred`]
+    ///    (preserves pre-Form-2 deployments verbatim).
+    /// 3. Otherwise [`AutoAtomiseMode::Off`].
+    ///
+    /// Both `Off` returns and an `Off` explicit override short-circuit
+    /// the `pre_store` hook chain entirely.
+    #[must_use]
+    pub fn effective_auto_atomise_mode(&self) -> AutoAtomiseMode {
+        if let Some(m) = self.auto_atomise_mode {
+            return m;
+        }
+        if self.auto_atomise.unwrap_or(false) {
+            AutoAtomiseMode::Deferred
+        } else {
+            AutoAtomiseMode::Off
+        }
+    }
+
+    /// v0.7.x Form 1 — resolve the legacy per-pair classifier opt-in.
+    /// Returns `false` (default) when absent or `Some(false)`, routing
+    /// the substrate through the new single-batch action-emitting
+    /// synthesiser. `Some(true)` keeps the legacy per-pair binary
+    /// contradiction call (metadata-only outcome) for operators who
+    /// depend on the v0.6.x behaviour.
+    #[must_use]
+    pub fn effective_legacy_per_pair_classifier(&self) -> bool {
+        self.legacy_per_pair_classifier.unwrap_or(false)
     }
 }
 

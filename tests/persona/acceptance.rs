@@ -119,6 +119,8 @@ fn install_namespace_policy(
         auto_atomise_max_atom_tokens: None,
         auto_persona_trigger_every_n_memories: cadence,
         auto_export_personas_to_filesystem: if file_export { Some(true) } else { None },
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
     };
     let now = Utc::now().to_rfc3339();
     let metadata = serde_json::json!({

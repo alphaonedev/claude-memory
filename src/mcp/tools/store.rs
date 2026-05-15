@@ -146,7 +146,7 @@ fn forward_store_to_http(
 
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::too_many_arguments)]
-pub(super) fn handle_store(
+pub(crate) fn handle_store(
     conn: &rusqlite::Connection,
     db_path: &Path,
     params: &Value,
@@ -365,6 +365,174 @@ pub(super) fn handle_store(
     // exist. Both still call `find_contradictions` so the response can
     // surface `potential_contradictions` (similar-title fuzzy matches).
     let existing = db::find_contradictions(conn, &mem.title, &mem.namespace).unwrap_or_default();
+
+    // v0.7.x Form 1 (#754) — Resolve namespace policy ONCE up-front so
+    // both the synthesis path (Form 1) and the synchronous-atomise mode
+    // (Form 2) share a single resolution. Falls back to defaults when
+    // no namespace standard is configured.
+    let ns_policy = db::resolve_governance_policy(conn, &mem.namespace).unwrap_or_default();
+
+    // v0.7.x Form 1 — single batch action-emitting synthesis call
+    // BEFORE the SQL write. Gated on: autonomous_hooks + LLM wired +
+    // content meets threshold + namespace not internal + the namespace
+    // policy has NOT opted in to the legacy per-pair classifier.
+    //
+    // On success the synthesis verdict drives the per-candidate
+    // {add, update, delete, no_op} branch. `update` SKIPs the new-row
+    // insert (the merge subsumed the incoming fact). `delete` removes
+    // the candidate then proceeds with the standard insert. `add` /
+    // `no_op` are pass-throughs to the existing path.
+    //
+    // Errors from the synthesis call (LLM down, malformed JSON,
+    // validation failure) gracefully fall through to the existing
+    // dedup-merge / insert path — the substrate prefers a successful
+    // write to a typed error when the synthesiser is unavailable.
+    let mut synthesis_counts: Option<crate::synthesis::SynthesisCounts> = None;
+    let mut synthesis_update_id: Option<String> = None;
+    let mut synthesis_update_content: Option<String> = None;
+    let mut synthesis_deletes: Vec<String> = Vec::new();
+    let synthesis_eligible = autonomous_hooks
+        && llm.is_some()
+        && mem.content.len() >= AUTONOMY_MIN_CONTENT_LEN
+        && !mem.namespace.starts_with('_')
+        && !ns_policy.effective_legacy_per_pair_classifier();
+    if synthesis_eligible {
+        // Filter out self/exact-dup matches so the synthesiser sees
+        // only genuinely-other candidates.
+        let cands: Vec<crate::models::Memory> = existing
+            .iter()
+            .filter(|c| c.id != mem.id && c.title != mem.title)
+            .cloned()
+            .collect();
+        if !cands.is_empty()
+            && let Some(llm_client) = llm
+        {
+            match crate::synthesis::synthesise(llm_client, &mem.title, &mem.content, &cands) {
+                Ok(resp) => {
+                    let counts = crate::synthesis::SynthesisCounts::from_response(&resp);
+                    tracing::info!(
+                        target: "synthesis",
+                        namespace = %mem.namespace,
+                        add = counts.add,
+                        update = counts.update,
+                        delete = counts.delete,
+                        no_op = counts.no_op,
+                        "synthesis batch decision",
+                    );
+                    // Apply verdicts. At most one `update` wins (the
+                    // first one); subsequent `update`s degrade because
+                    // the incoming fact has already been merged into
+                    // the chosen candidate. `delete`s are collected
+                    // and applied below.
+                    for v in &resp.verdicts {
+                        match v.verb {
+                            crate::synthesis::SynthesisVerb::Update => {
+                                if synthesis_update_id.is_none() {
+                                    synthesis_update_id = Some(v.candidate_id.clone());
+                                    synthesis_update_content.clone_from(&v.merged_content);
+                                }
+                            }
+                            crate::synthesis::SynthesisVerb::Delete => {
+                                synthesis_deletes.push(v.candidate_id.clone());
+                            }
+                            crate::synthesis::SynthesisVerb::Add
+                            | crate::synthesis::SynthesisVerb::NoOp => {}
+                        }
+                    }
+                    synthesis_counts = Some(counts);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "synthesis",
+                        "synthesis call failed, falling back to legacy path: {e}",
+                    );
+                }
+            }
+        }
+    }
+
+    // v0.7.x Form 1 — verdict honouring: when the synthesiser elected
+    // to UPDATE an existing candidate, apply that merge in place and
+    // SKIP the new-row insert. We return early; the forensic chain
+    // marker is the candidate's id, not a fresh row.
+    if let Some(target_id) = synthesis_update_id.as_deref() {
+        let merged_content = synthesis_update_content
+            .as_deref()
+            .unwrap_or_else(|| mem.content.as_str());
+        if let Some(target) = existing.iter().find(|c| c.id == target_id).cloned() {
+            let preserved_metadata =
+                crate::identity::preserve_agent_id(&target.metadata, &mem.metadata);
+            let (_found, content_changed) = db::update(
+                conn,
+                target_id,
+                None,
+                Some(merged_content),
+                Some(&mem.tier),
+                None,
+                Some(&mem.tags),
+                Some(mem.priority),
+                Some(mem.confidence),
+                None,
+                Some(&preserved_metadata),
+            )
+            .map_err(|e| e.to_string())?;
+            if content_changed && let Some(emb) = embedder {
+                let text = format!("{} {}", target.title, merged_content);
+                if let Ok(embedding) = emb.embed(&text) {
+                    let _ = db::set_embedding(conn, target_id, &embedding);
+                    if let Some(idx) = vector_index {
+                        idx.remove(target_id);
+                        idx.insert(target_id.to_string(), embedding);
+                    }
+                }
+            }
+            // Apply pending deletes that came in the same batch.
+            for del_id in &synthesis_deletes {
+                if del_id == target_id {
+                    continue;
+                }
+                if let Err(e) = db::delete(conn, del_id) {
+                    tracing::warn!(
+                        target: "synthesis",
+                        "synthesis delete failed for {del_id}: {e}",
+                    );
+                }
+            }
+            let echoed_agent_id = preserved_metadata
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let mut resp = json!({
+                "id": target.id,
+                "tier": mem.tier,
+                "title": target.title,
+                "namespace": mem.namespace,
+                "agent_id": echoed_agent_id,
+                "duplicate": true,
+                "action": "synthesised: update existing memory",
+            });
+            if let Some(c) = &synthesis_counts {
+                resp["synthesis_decisions"] = c.to_json();
+            }
+            return Ok(resp);
+        }
+    }
+
+    // v0.7.x Form 1 — verdict honouring: when the synthesiser elected
+    // to DELETE candidates (without an update), apply those deletes
+    // BEFORE the new-row insert so the substrate honours the verdict
+    // on the standard insert path.
+    if synthesis_update_id.is_none() {
+        for del_id in &synthesis_deletes {
+            if let Err(e) = db::delete(conn, del_id) {
+                tracing::warn!(
+                    target: "synthesis",
+                    "synthesis delete failed for {del_id}: {e}",
+                );
+            }
+        }
+    }
+
     let exact_dup = if matches!(on_conflict, OnConflict::Merge) {
         existing
             .iter()
@@ -502,8 +670,23 @@ pub(super) fn handle_store(
         .map(|c| c.id.clone())
         .collect();
 
-    // Generate and store embedding if embedder is available
-    if let Some(emb) = embedder {
+    // v0.7.x Form 2 (#755) — resolve atomisation execution mode. When
+    // policy is `Synchronous`, SKIP source embedding (atoms get their
+    // own embed-on-insert path); the synchronous atomise pass runs
+    // BELOW after the post-store autonomy hooks. `Deferred` (legacy
+    // WT-1-D) and `Off` modes keep the source-embed step.
+    let atomise_mode = ns_policy.effective_auto_atomise_mode();
+    let skip_source_embed_for_synchronous_atomise = atomise_mode
+        == crate::models::AutoAtomiseMode::Synchronous
+        && mem.content.len() >= AUTONOMY_MIN_CONTENT_LEN;
+
+    // Generate and store embedding if embedder is available (unless
+    // synchronous atomisation will run below — in that case the
+    // source is decomposed before it gets indexed, mirroring
+    // Batman's Form 2 "decompose THEN embed" criterion).
+    if let Some(emb) = embedder
+        && !skip_source_embed_for_synchronous_atomise
+    {
         let text = format!("{} {}", mem.title, mem.content);
         match emb.embed(&text) {
             Ok(embedding) => {
@@ -552,18 +735,27 @@ pub(super) fn handle_store(
                 tracing::warn!("auto_tag hook failed for {}: {}", &actual_id, e);
             }
         }
-        for cand in &existing {
-            if cand.id == actual_id || cand.id == mem.id {
-                continue;
-            }
-            match llm_client.detect_contradiction(&mem.content, &cand.content) {
-                Ok(true) => confirmed_contradictions.push(cand.id.clone()),
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::warn!(
-                        "detect_contradiction hook failed ({actual_id} vs {}): {e}",
-                        cand.id
-                    );
+        // v0.7.x Form 1 — the legacy per-pair binary contradiction
+        // classifier ONLY runs when the namespace policy explicitly
+        // opts in via `legacy_per_pair_classifier = true`. Default
+        // behaviour routes through the synthesis batch call above and
+        // skips this loop entirely. Operators who need the old
+        // metadata-only `confirmed_contradictions` field set the
+        // policy flag to keep the previous semantics.
+        if ns_policy.effective_legacy_per_pair_classifier() {
+            for cand in &existing {
+                if cand.id == actual_id || cand.id == mem.id {
+                    continue;
+                }
+                match llm_client.detect_contradiction(&mem.content, &cand.content) {
+                    Ok(true) => confirmed_contradictions.push(cand.id.clone()),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(
+                            "detect_contradiction hook failed ({actual_id} vs {}): {e}",
+                            cand.id
+                        );
+                    }
                 }
             }
         }
@@ -619,26 +811,44 @@ pub(super) fn handle_store(
     // v0.7.0 WT-1-D — auto-atomisation pre_store substrate hook. The
     // call resolves the namespace policy, token-counts the body, and
     // spawns a detached worker thread when the threshold is exceeded.
-    // NEVER blocks the response: the hook returns synchronously and
-    // the curator round-trip lands on the worker thread post-commit
-    // (100ms wait for the WAL visibility window).
+    // NEVER blocks the response on the `Deferred` path.
+    //
+    // v0.7.x Form 2 (#755) — the `Synchronous` mode runs the atomiser
+    // INSIDE this handler so atoms surface in recall before the
+    // response returns. Source embedding was skipped above; the
+    // atomiser archives the parent with `atomised_into > 0` BEFORE
+    // the response returns.
     //
     // Refused-store path: this hook is unreachable on a Deny because
     // the governance gate above already short-circuited via Err(...)
     // before we reached `db::insert`. The store-side governance refusal
     // ensures a denied write never feeds the curator.
+    let mut atomise_outcome: Option<&'static str> = None;
     {
         // Build a fresh in-flight Memory carrying the actual_id (which
-        // may differ from mem.id under merge-mode upserts). The hook
-        // re-resolves the namespace policy from the DB so it sees any
-        // ancestor inheritance, not just the local literal struct.
+        // may differ from mem.id under merge-mode upserts).
         let post_mem = crate::models::Memory {
             id: actual_id.clone(),
             ..mem.clone()
         };
-        let _outcome = crate::hooks::pre_store::maybe_enqueue_auto_atomise(&post_mem, &agent_id);
-        // Outcome is for telemetry only; the response shape does NOT
-        // surface it (the curator pass is fire-and-forget by design).
+        match atomise_mode {
+            crate::models::AutoAtomiseMode::Synchronous => {
+                // Form 2 — synchronous atomise-before-the-response.
+                atomise_outcome = Some(crate::hooks::pre_store::run_synchronous_auto_atomise(
+                    conn, &post_mem, &agent_id,
+                ));
+            }
+            crate::models::AutoAtomiseMode::Deferred => {
+                let _outcome =
+                    crate::hooks::pre_store::maybe_enqueue_auto_atomise(&post_mem, &agent_id);
+                // Outcome is for telemetry only; the response shape
+                // does NOT surface it (the curator pass is
+                // fire-and-forget by design).
+            }
+            crate::models::AutoAtomiseMode::Off => {
+                // Substrate stays quiet for this namespace.
+            }
+        }
     }
 
     // #196: echo the resolved agent_id
@@ -662,6 +872,13 @@ pub(super) fn handle_store(
         && autonomous_hooks
     {
         response["autonomy_hook_skipped"] = json!(reason);
+    }
+    if let Some(counts) = &synthesis_counts {
+        response["synthesis_decisions"] = counts.to_json();
+    }
+    if let Some(outcome) = atomise_outcome {
+        response["atomise_mode"] = json!("synchronous");
+        response["atomise_outcome"] = json!(outcome);
     }
     Ok(response)
 }
@@ -1570,6 +1787,8 @@ mod tests {
             auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();
@@ -1588,6 +1807,65 @@ mod tests {
             tier: crate::models::Tier::Long,
             namespace: format!("_standards-{ns}"),
             title: format!("std-{ns}"),
+            content: "policy".to_string(),
+            tags: vec![],
+            priority: 9,
+            confidence: 1.0,
+            source: "test".to_string(),
+            access_count: 0,
+            created_at: now.clone(),
+            updated_at: now,
+            last_accessed_at: None,
+            expires_at: None,
+            metadata,
+            reflection_depth: 0,
+            memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
+        };
+        let sid = db::insert(conn, &standard).expect("insert standard");
+        db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");
+    }
+
+    /// v0.7.x Form 1 — opt the supplied namespace in to the legacy
+    /// per-pair classifier so a regression test can exercise the old
+    /// `confirmed_contradictions` metadata path. The new default
+    /// routes through the synthesis batch call instead.
+    fn install_legacy_classifier_policy(conn: &rusqlite::Connection, ns: &str) {
+        use crate::models::{ApproverType, GovernanceLevel, GovernancePolicy, default_metadata};
+        let policy = GovernancePolicy {
+            write: GovernanceLevel::Any,
+            promote: GovernanceLevel::Any,
+            delete: GovernanceLevel::Owner,
+            approver: ApproverType::Human,
+            inherit: true,
+            max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
+            auto_persona_trigger_every_n_memories: None,
+            auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: Some(true),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut metadata = default_metadata();
+        if let Some(obj) = metadata.as_object_mut() {
+            obj.insert(
+                "agent_id".to_string(),
+                serde_json::Value::String("ai:test".to_string()),
+            );
+            obj.insert(
+                "governance".to_string(),
+                serde_json::to_value(&policy).unwrap(),
+            );
+        }
+        let standard = crate::models::Memory {
+            id: uuid::Uuid::new_v4().to_string(),
+            tier: crate::models::Tier::Long,
+            namespace: format!("_standards-{ns}"),
+            title: format!("legacy-std-{ns}"),
             content: "policy".to_string(),
             tags: vec![],
             priority: 9,
@@ -1714,6 +1992,12 @@ mod tests {
             let conn = fresh_conn();
             let db_path = db_path();
             let ttl = ResolvedTtl::default();
+            // v0.7.x Form 1 — opt in to the legacy per-pair classifier
+            // for this namespace so the test exercises the historical
+            // `confirmed_contradictions` metadata path. Without this
+            // opt-in the new synthesis batch call would run instead
+            // and the response would carry `synthesis_decisions`.
+            install_legacy_classifier_policy(&conn, "ctr-ns");
             // Seed a memory with the same title so find_contradictions
             // returns it as a candidate. We use 'merge' on_conflict to
             // avoid the Error-mode dedup short-circuit.

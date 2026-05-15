@@ -419,6 +419,8 @@ fn cap_zero_disables_every_reflection_with_audit_row() {
         auto_atomise_max_atom_tokens: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
     };
     seed_policy(&conn, "task7-disabled", &policy);
     let src = make_memory("task7-disabled", "depth0-src", 0);

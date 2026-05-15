@@ -120,6 +120,7 @@ pub mod reranker;
 pub mod signed_events;
 pub mod sizes;
 pub mod subscriptions;
+pub mod synthesis;
 pub mod tls;
 pub mod toon;
 pub mod transcripts;

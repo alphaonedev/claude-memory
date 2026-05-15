@@ -198,6 +198,90 @@ pub fn maybe_enqueue_auto_atomise(
     }
 }
 
+/// v0.7.x Form 2 (#755) — Synchronous-mode entry point.
+///
+/// Runs the curator pass INSIDE the caller's MCP handler so atoms
+/// surface in recall BEFORE the `memory_store` response returns. The
+/// caller is responsible for SKIPPING the source-embed step before
+/// invoking this function (it checks the namespace policy mode before
+/// deciding to embed), so the substrate honours Batman's Form 2
+/// "decompose THEN embed" criterion.
+///
+/// Returns a short telemetry string describing the outcome:
+///   - `"atomised"` on success
+///   - `"skipped_dispatch_unset"`     dispatch slot empty (CLI / test)
+///   - `"skipped_under_threshold"`   token count <= threshold
+///   - `"skipped_source_too_small"`  curator returned no productive split
+///   - `"skipped_already_atomised"`  source already atomised
+///   - `"failed"`                    curator error (logged)
+///
+/// Errors are logged + swallowed per the same notify-class contract
+/// the deferred path uses — a curator outage must not block the
+/// memory_store write that has already committed.
+#[must_use]
+pub fn run_synchronous_auto_atomise(
+    conn: &rusqlite::Connection,
+    memory: &Memory,
+    calling_agent_id: &str,
+) -> &'static str {
+    let Some(dispatch) = AUTO_ATOMISE_DISPATCH.get() else {
+        tracing::info!(
+            target: "pre_store.auto_atomise.sync",
+            "synchronous-mode dispatch unset for memory={}; substrate stays quiet",
+            memory.id,
+        );
+        return "skipped_dispatch_unset";
+    };
+
+    let policy = db::resolve_governance_policy(conn, &memory.namespace).unwrap_or_default();
+    let threshold = policy.effective_auto_atomise_threshold_cl100k();
+    let tokens = db::count_tokens_cl100k(&memory.content);
+    if tokens <= threshold as usize {
+        return "skipped_under_threshold";
+    }
+    let max_atom_tokens = policy.effective_auto_atomise_max_atom_tokens();
+
+    match dispatch
+        .atomiser
+        .atomise_sync(conn, &memory.id, max_atom_tokens, false, calling_agent_id)
+    {
+        Ok(result) => {
+            tracing::info!(
+                target: "pre_store.auto_atomise.sync",
+                "synchronous-atomise succeeded: source={} atoms={}",
+                result.source_id,
+                result.atom_count,
+            );
+            "atomised"
+        }
+        Err(AtomiseError::SourceTooSmall) => {
+            tracing::info!(
+                target: "pre_store.auto_atomise.sync",
+                "synchronous-atomise skipped: source={} body too small",
+                memory.id,
+            );
+            "skipped_source_too_small"
+        }
+        Err(AtomiseError::AlreadyAtomised { .. }) => {
+            tracing::info!(
+                target: "pre_store.auto_atomise.sync",
+                "synchronous-atomise skipped: source={} already atomised",
+                memory.id,
+            );
+            "skipped_already_atomised"
+        }
+        Err(e) => {
+            tracing::error!(
+                target: "pre_store.auto_atomise.sync",
+                "synchronous-atomise failed for source={}: {:?}",
+                memory.id,
+                e,
+            );
+            "failed"
+        }
+    }
+}
+
 /// Worker-thread entry-point.
 ///
 /// Sleeps 100ms for the transaction-commit visibility window (matches
@@ -383,6 +467,8 @@ mod tests {
             auto_atomise_max_atom_tokens: Some(20),
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
+            auto_atomise_mode: None,
+            legacy_per_pair_classifier: None,
         }
     }
 

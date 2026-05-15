@@ -235,6 +235,8 @@ fn three_peer_federation_depth_replication_and_cross_peer_refusal() {
         auto_atomise_max_atom_tokens: None,
         auto_persona_trigger_every_n_memories: None,
         auto_export_personas_to_filesystem: None,
+        auto_atomise_mode: None,
+        legacy_per_pair_classifier: None,
     };
     seed_policy(&peer_b.conn, NAMESPACE, &tight);
 
