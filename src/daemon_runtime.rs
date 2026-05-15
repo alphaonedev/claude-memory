@@ -2892,7 +2892,15 @@ pub async fn sync_cycle_once(
         pull_url.push_str(&urlencoding_minimal(s));
     }
 
-    let mut req = client.get(&pull_url).header("x-agent-id", local_agent_id);
+    // v0.7.0 #238/#239 — attach `x-peer-id` so the peer's
+    // attestation + scope-allowlist substrate sees our self-claim.
+    let mut req = client
+        .get(&pull_url)
+        .header("x-agent-id", local_agent_id)
+        .header(
+            crate::federation::peer_attestation::PEER_ID_HEADER,
+            local_agent_id,
+        );
     if let Some(key) = api_key {
         req = req.header("x-api-key", key);
     }

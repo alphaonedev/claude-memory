@@ -62,7 +62,22 @@ fn lock_hmac() -> std::sync::MutexGuard<'static, ()> {
 // Fixture builder
 // ---------------------------------------------------------------------------
 
+/// v0.7.0 #238/#239 — this test file drives /sync/push through the
+/// in-process axum router without the new wire-level `x-peer-id`
+/// header. Set the legacy bypass env vars once per process so the
+/// pre-v0.7.0 posture holds for these tests; new regression tests
+/// at `tests/g_issue_238_*` and `tests/g_issue_239_*` exercise the
+/// default-enforce posture in their own test binaries.
+static FED_LEGACY_BYPASS_INIT: std::sync::Once = std::sync::Once::new();
+fn install_federation_legacy_bypass() {
+    FED_LEGACY_BYPASS_INIT.call_once(|| unsafe {
+        std::env::set_var("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+        std::env::set_var("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
+    });
+}
+
 fn build_router_fixture() -> (axum::Router, NamedTempFile) {
+    install_federation_legacy_bypass();
     let f = NamedTempFile::new().expect("tempfile");
     let db_path = f.path().to_path_buf();
     let _ = ai_memory::db::open(&db_path).expect("db::open");

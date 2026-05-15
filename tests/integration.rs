@@ -25,6 +25,15 @@ fn cmd(binary: &str) -> std::process::Command {
     // exercises the production happy path without permanently
     // relaxing the production default.
     c.env("AI_MEMORY_ALLOW_LOOPBACK_WEBHOOKS", "1");
+    // v0.7.0 #238/#239 — the integration suite drives /sync/push
+    // and /sync/since directly via curl_post / curl_get without the
+    // new wire-level `x-peer-id` header. Opt these subprocess
+    // daemons into the legacy posture so the existing assertions
+    // hold; per-issue regression tests at `tests/g_issue_238_*` and
+    // `tests/g_issue_239_*` exercise the default-enforce posture in
+    // their own test binaries.
+    c.env("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+    c.env("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
     c
 }
 /// Spawn a command and collect its output, panicking with a descriptive
@@ -8769,6 +8778,24 @@ struct OneshotDaemon {
     router: axum::Router,
 }
 
+/// v0.7.0 #238/#239 — set the federation legacy-bypass env vars
+/// once per test process so the integration suite's in-process and
+/// subprocess daemon spawns see the pre-v0.7.0 posture. The
+/// per-issue regression tests at `tests/g_issue_238_*` and
+/// `tests/g_issue_239_*` run in their own test binaries (no env
+/// contamination there) and exercise the default-enforce posture.
+static FED_LEGACY_BYPASS_INIT: std::sync::Once = std::sync::Once::new();
+fn install_federation_legacy_bypass() {
+    FED_LEGACY_BYPASS_INIT.call_once(|| {
+        // SAFETY: serial-by-Once init; the env vars are read by
+        // handler code only (no concurrent writer).
+        unsafe {
+            std::env::set_var("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+            std::env::set_var("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
+        }
+    });
+}
+
 impl OneshotDaemon {
     fn new() -> Self {
         Self::with_federation(None)
@@ -8788,6 +8815,7 @@ impl OneshotDaemon {
         // tests in `cmd()`) so the production happy path is exercised
         // without permanently relaxing the production default.
         ai_memory::config::set_allow_loopback_webhooks(true);
+        install_federation_legacy_bypass();
         let conn = ai_memory::db::open(std::path::Path::new(":memory:")).unwrap();
         let path = std::path::PathBuf::from(":memory:");
         let db: ai_memory::handlers::Db = std::sync::Arc::new(tokio::sync::Mutex::new((
@@ -8978,6 +9006,10 @@ impl DaemonGuard {
         let dir = std::env::temp_dir();
         let db = dir.join(format!("ai-memory-http-parity-{}.db", uuid::Uuid::new_v4()));
         let port = free_port();
+        // `cmd()` already injects `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`
+        // and `AI_MEMORY_FED_SYNC_TRUST_PEER=1` so the legacy posture
+        // applies to /sync/push and /sync/since here too. See `cmd()`
+        // for the per-test rationale.
         let child = cmd(bin)
             .args([
                 "--db",

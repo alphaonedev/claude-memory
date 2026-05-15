@@ -421,11 +421,43 @@ env-bypass, allowlist-permits.
 
 ### 9.2 Per-peer namespace scope on `/sync/since` (v0.7.0 #239)
 
-The per-peer namespace allowlist for `/sync/since` lands in the
-companion commit on this branch (issue #239). The `PeerScope`
-schema documented in §9.1 already reserves the
-`allowed_namespaces` field so operator-facing JSON does not churn
-between the two security commits.
+Pre-v0.7.0, every `GET /api/v1/sync/since?since=…` returned every
+memory newer than the watermark with no per-peer namespace scope.
+Compromise of any single mTLS peer key thus exfiltrated the entire
+database. Red-team #230 caught it; #239 closes it.
+
+The fix:
+
+| Inbound `x-peer-id` header | Operator config            | Bypass env | Result                                                         |
+|----------------------------|----------------------------|------------|----------------------------------------------------------------|
+| `Some(p)`                  | `allowed_namespaces[p] = [...]` | n/a        | Filter projection to namespaces matching the glob list.      |
+| `Some(p)`                  | no row for `p`             | unset      | Empty page + `excluded_for_scope: 0` + `scope_status: "no_allowlist_default_deny"`. |
+| `Some(p)`                  | no row for `p`             | `AI_MEMORY_FED_SYNC_TRUST_PEER=1` | Full dump + `scope_status: "legacy_bypass"`.        |
+| absent                     | any                        | unset      | Empty page + WARN (default-deny).                              |
+| absent                     | any                        | `AI_MEMORY_FED_SYNC_TRUST_PEER=1` | Full dump (legacy posture).                          |
+
+Response envelope additions (back-compat — additive fields only):
+
+- `excluded_for_scope: <count>` — number of rows filtered out by
+  the per-peer namespace allowlist (honest about the partial view).
+- `scope_status: "scoped" | "no_allowlist_default_deny" | "legacy_bypass"`.
+
+**Implementation surface**:
+
+- `src/federation/peer_attestation.rs::namespace_allowed_test_glob`
+  + `PeerScope::allowed_namespaces` (`*` / `**` glob, no new
+  regex dep).
+- `src/handlers/federation_receive.rs::sync_since` — applies the
+  filter to the projection from `db::memories_updated_since` /
+  `Store::list_memories_updated_since` (sqlite + postgres parity).
+- `src/federation/receive.rs::catchup_once[_with_store]` — attaches
+  `x-peer-id` on the outbound pull so a v0.7.0 peer mesh keeps
+  converging.
+
+**Test coverage**: `tests/g_issue_239_sync_scope.rs` (5 cases):
+allowlist match, allowlist mismatch (empty page), no-allowlist +
+bypass (legacy), no-allowlist + no-bypass (default-deny),
+no-peer-header default-deny.
 
 ---
 
