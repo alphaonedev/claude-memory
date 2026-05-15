@@ -1,5 +1,40 @@
 # ai-memory v0.7.0 — `attested-cortex` (release notes)
 
+## Release procedure (operator-gated, post v0.7.0)
+
+v0.7.0 separates CI verification from publish. `ci.yml` runs on every
+push + PR + tag (lint, check matrix, feature gates, dockerfile-validate,
+coverage). `release.yml` runs ONLY on explicit `workflow_dispatch` and
+handles the actual 5-channel fanout (binary builds + GitHub Release +
+crates.io + Homebrew tap + GHCR Docker + Fedora COPR).
+
+To publish a tag:
+
+```bash
+# 1. Create the signed tag locally
+git tag -s v<X.Y.Z> -m "..."
+
+# 2. Push the tag — fires ci.yml verification only
+git push origin v<X.Y.Z>
+
+# 3. Wait for ci.yml to land GREEN (Check matrix is the release gate)
+
+# 4. Manually trigger publish — operator-gated, intentional
+gh workflow run release.yml \
+  --repo alphaonedev/ai-memory-mcp \
+  -f tag=v<X.Y.Z>
+```
+
+Pre-release tags (SemVer `-` suffix, e.g. `v0.7.0-rc.1`) auto-skip the
+downstream stable channels (crates.io, Homebrew, Docker, COPR) so
+operator dry-runs are safe.
+
+This separation closes the historical gap where CI passing on a tag-push
+auto-fired the entire publish pipeline. The act of releasing is now a
+deliberate, named action — not a side effect of green tests.
+
+---
+
 > **Status (2026-05-09):** v0.7.0 is **release-pending Wave 1-4 cert**.
 > The original `attested-cortex` epic shipped at commit `fcdd2a5` on
 > 2026-05-06; the Round-2 multi-agent NHI sweep (PR #643 against
