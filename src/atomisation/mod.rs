@@ -529,9 +529,20 @@ fn write_atom(
     Ok(actual_id)
 }
 
-/// Archive the source memory by setting `archived_at` and
-/// `atomised_into`. Runs in its own transaction so the per-atom hooks
-/// (step 8) have already fired before the source flips read-only.
+/// Archive the source memory.
+///
+/// Sets `atomised_into = N` (the substrate-visible signal that the row
+/// has been atomised) and writes an `atomisation_archived_at` RFC3339
+/// stamp into `metadata` (logical "this row is read-only because its
+/// atoms are now the canonical surface"). We do NOT call
+/// `db::archive_memory` here — that physically moves the row to
+/// `archived_memories`, which would invalidate every atom's `atom_of`
+/// FK pointing at it. The atom-of relationship survives as long as
+/// the parent row remains in `memories`; flipping `atomised_into`
+/// from NULL to N is the downstream signal WT-1-C consumes.
+///
+/// Runs in its own transaction so the per-atom hooks (step 8) have
+/// already fired before the source flips into the "atomised" state.
 fn archive_source(
     conn: &Connection,
     source_id: &str,
@@ -540,10 +551,26 @@ fn archive_source(
 ) -> anyhow::Result<()> {
     conn.execute_batch("BEGIN IMMEDIATE")?;
     let result = (|| -> anyhow::Result<()> {
+        // Merge the existing metadata with the new
+        // `atomisation_archived_at` key — never clobber other keys.
+        let existing_metadata_str: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE id = ?1",
+                params![source_id],
+                |r| r.get::<_, Option<String>>(0).map(|o| o.unwrap_or_else(|| "{}".to_string())),
+            )
+            .unwrap_or_else(|_| "{}".to_string());
+        let mut meta: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&existing_metadata_str).unwrap_or_default();
+        meta.insert(
+            "atomisation_archived_at".to_string(),
+            serde_json::Value::String(archived_at.to_string()),
+        );
+        let merged = serde_json::Value::Object(meta).to_string();
         conn.execute(
-            "UPDATE memories SET atomised_into = ?1, archived_at = ?2, updated_at = ?2 \
-             WHERE id = ?3",
-            params![atom_count, archived_at, source_id],
+            "UPDATE memories SET atomised_into = ?1, metadata = ?2, updated_at = ?3 \
+             WHERE id = ?4",
+            params![atom_count, merged, archived_at, source_id],
         )?;
         Ok(())
     })();
