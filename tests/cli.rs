@@ -12,3 +12,7 @@
 // v0.7.0 QW-1 — file-backed reflection chain export tests.
 #[path = "cli/export_reflections.rs"]
 mod export_reflections;
+
+// v0.7.0 WT-1-F — `ai-memory atomise` CLI tests.
+#[path = "cli/atomise.rs"]
+mod atomise;

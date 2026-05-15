@@ -9,4 +9,6 @@
 //! matches `src/cli/export.rs` (forensic bundle) so the dispatch arm
 //! in `daemon_runtime::run` stays a one-liner.
 
+/// v0.7.0 WT-1-F — `ai-memory atomise` CLI subcommand.
+pub mod atomise;
 pub mod export_reflections;

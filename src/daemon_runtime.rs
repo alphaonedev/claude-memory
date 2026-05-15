@@ -373,6 +373,12 @@ pub enum Command {
     /// synthesised without learning SQL. The on-disk artefact is
     /// derived; the SQL row stays canonical.
     ExportReflections(crate::cli::commands::export_reflections::ExportReflectionsArgs),
+    /// v0.7.0 WT-1-F — operator-side wrapper over the atomisation
+    /// engine ([`crate::atomisation::Atomiser`]). Decomposes one
+    /// long-form memory into atomic propositions; surfaces every
+    /// substrate failure with a stable exit code (see
+    /// [`crate::cli::commands::atomise::exit_code`]).
+    Atomise(crate::cli::commands::atomise::AtomiseArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1222,6 +1228,23 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
                 code => std::process::exit(code),
             }
         }
+        Command::Atomise(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::commands::atomise::run(
+                &db_path,
+                &a,
+                app_config,
+                cli_agent_id.as_deref(),
+                &mut out,
+            )? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
     };
 
     // WAL checkpoint after write commands to prevent unbounded WAL growth
@@ -1258,6 +1281,7 @@ pub fn is_write_command(cmd: &Command) -> bool {
             | Command::Import(_)
             | Command::AutoConsolidate(_)
             | Command::Gc
+            | Command::Atomise(_)
     )
 }
 
