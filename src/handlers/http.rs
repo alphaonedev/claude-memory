@@ -22,12 +22,12 @@ use crate::models::{
 use crate::profile::Family;
 use crate::validate;
 
+#[cfg(feature = "sal")]
+use super::StorageBackend;
 use super::fanout_or_503;
 #[cfg(feature = "sal")]
 use super::store_err_to_response;
 use super::{AppState, JsonOrBadRequest};
-#[cfg(feature = "sal")]
-use super::StorageBackend;
 use super::{BULK_FANOUT_CONCURRENCY, MAX_BULK_SIZE};
 
 /// v0.7.0 L5 — minimum content length (chars) below which the HTTP

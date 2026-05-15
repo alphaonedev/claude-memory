@@ -17,10 +17,10 @@ use crate::models::{Memory, Tier};
 use crate::validate;
 
 #[cfg(feature = "sal")]
+use super::StorageBackend;
+#[cfg(feature = "sal")]
 use super::store_err_to_response;
 use super::{AppState, Db};
-#[cfg(feature = "sal")]
-use super::StorageBackend;
 use super::{fanout_or_503, list_namespaces, resolve_caller_agent_id};
 
 // --- /api/v1/notify (POST) + /api/v1/inbox (GET) ---------------------------
