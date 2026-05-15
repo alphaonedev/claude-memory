@@ -629,6 +629,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).expect("db::insert")
     }
@@ -669,6 +671,8 @@ mod tests {
                 metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&conn, &mem).unwrap()
         };
@@ -736,6 +740,8 @@ mod tests {
                 metadata: metadata.clone(),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let m2 = crate::models::Memory {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -755,6 +761,8 @@ mod tests {
                 metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             t1 = db::insert(&conn, &m1).unwrap();
             t2 = db::insert(&conn, &m2).unwrap();
@@ -820,6 +828,8 @@ mod tests {
                 metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             target = db::insert(&conn, &mem).unwrap();
         }
@@ -855,6 +865,8 @@ mod tests {
                 metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             entry_id = db::insert(&conn, &mem).unwrap();
         }

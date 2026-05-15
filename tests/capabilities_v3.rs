@@ -998,6 +998,8 @@ fn seed_governance_policy(
         metadata,
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let standard_id = ai_memory::db::insert(conn, &standard).unwrap();
     ai_memory::db::set_namespace_standard(conn, namespace, &standard_id, None).unwrap();
@@ -1053,6 +1055,8 @@ fn cap_v3_k5_rule_summary_single_policy_carries_one_entry() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     seed_governance_policy(&conn, "team", &policy);
 
@@ -1128,6 +1132,8 @@ fn cap_v3_k5_rule_summary_multiple_policies_lex_ordered() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     let alpha = GovernancePolicy {
         write: GovernanceLevel::Any,
@@ -1140,6 +1146,8 @@ fn cap_v3_k5_rule_summary_multiple_policies_lex_ordered() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     let middle = GovernancePolicy::default();
     seed_governance_policy(&conn, "zeta", &zeta);

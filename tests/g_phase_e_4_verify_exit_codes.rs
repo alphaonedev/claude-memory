@@ -73,6 +73,8 @@ fn insert_mem(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: MemoryKin
         metadata: serde_json::json!({}),
         reflection_depth: depth,
         memory_kind: kind,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &mem).expect("insert");
     id
@@ -124,6 +126,8 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
         ..ai_memory::models::GovernancePolicy::default()
     };
     let metadata = serde_json::json!({
@@ -147,6 +151,8 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let id = db::insert(conn, &std_mem).expect("insert std");
     db::set_namespace_standard(conn, ns, &id, None).expect("set std");

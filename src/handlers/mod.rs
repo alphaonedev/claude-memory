@@ -812,6 +812,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
         let got = db::get(&lock.0, &id).unwrap().unwrap();
@@ -841,6 +843,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&lock.0, &mem).unwrap();
         let (results, _outcome) = db::recall(
@@ -921,6 +925,8 @@ mod tests {
             metadata: serde_json::json!({"http_test": true, "version": 1}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&lock.0, &mem).unwrap();
 
@@ -1219,6 +1225,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1346,6 +1354,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1417,6 +1427,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1485,6 +1497,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -1868,6 +1882,8 @@ mod tests {
                     }),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -1956,6 +1972,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -2028,6 +2046,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let m1_id = db::insert(&lock.0, &m1).unwrap();
             let m2 = Memory {
@@ -2048,6 +2068,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "ai:seeder"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let m2_id = db::insert(&lock.0, &m2).unwrap();
             (m1_id, m2_id)
@@ -2136,6 +2158,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let a_id = db::insert(&lock.0, &a).unwrap();
             let b = Memory {
@@ -2156,6 +2180,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let b_id = db::insert(&lock.0, &b).unwrap();
             db::create_link(&lock.0, &a_id, &b_id, "reflects_on").unwrap();
@@ -2252,6 +2278,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let s_id = db::insert(&lock.0, &s).unwrap();
             let t = Memory {
@@ -2272,6 +2300,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let t_id = db::insert(&lock.0, &t).unwrap();
             (s_id, t_id)
@@ -2341,6 +2371,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -2405,6 +2437,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -2945,6 +2979,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -2993,6 +3029,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -3615,6 +3653,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&lock.0, &mem).unwrap()
     }
@@ -5029,6 +5069,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -5247,6 +5289,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5378,6 +5422,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let a = db::insert(&lock.0, &mk("source-a")).unwrap();
             let b = db::insert(&lock.0, &mk("target-b")).unwrap();
@@ -5560,6 +5606,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5729,6 +5777,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -5802,6 +5852,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -6909,6 +6961,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -6963,6 +7017,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -7024,6 +7080,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -7992,6 +8050,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "bob"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let read = Memory {
                 id: Uuid::new_v4().to_string(),
@@ -8011,6 +8071,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "bob"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &unread).unwrap();
             db::insert(&lock.0, &read).unwrap();
@@ -8064,6 +8126,8 @@ mod tests {
                     metadata: serde_json::json!({"agent_id": "carol"}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -8169,6 +8233,8 @@ mod tests {
                     metadata: serde_json::json!({"agent_id": "alice"}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 };
                 db::insert(&lock.0, &mem).unwrap();
             }
@@ -8259,6 +8325,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "alice"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap();
         }
@@ -9264,6 +9332,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "alice"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let a = db::insert(&lock.0, &mk("draft-a")).unwrap();
             let b = db::insert(&lock.0, &mk("draft-b")).unwrap();
@@ -9506,6 +9576,8 @@ mod tests {
                 metadata: serde_json::json!({"topic": "earth-shape"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mk("alice-says", "earth is round")).unwrap();
             db::insert(&lock.0, &mk("bob-says", "earth is flat")).unwrap();
@@ -9562,6 +9634,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mk("ns-iso-a", "first opinion")).unwrap();
             db::insert(&lock.0, &mk("ns-iso-b", "different opinion")).unwrap();
@@ -10147,6 +10221,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -11367,6 +11443,8 @@ mod tests {
                 metadata: serde_json::json!({}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             db::insert(&lock.0, &mem).unwrap()
         };
@@ -13244,6 +13322,8 @@ mod tests {
             }),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let standard_id = db::insert(&lock.0, &standard).unwrap();
         db::set_namespace_standard(&lock.0, ns, &standard_id, None).unwrap();
@@ -13876,6 +13956,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "alice"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let a = db::insert(&lock.0, &mk("aom101-0", "first")).unwrap();
             let b = db::insert(&lock.0, &mk("aom101-1", "second")).unwrap();
@@ -13974,6 +14056,8 @@ mod tests {
                 metadata: serde_json::json!({"agent_id": "alice"}),
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             let a = db::insert(
                 &lock.0,

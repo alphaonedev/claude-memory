@@ -63,6 +63,8 @@ pub(crate) fn handle_notify(
         metadata,
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let actual_id = db::insert(conn, &mem).map_err(|e| e.to_string())?;
 

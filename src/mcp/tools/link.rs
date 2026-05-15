@@ -373,6 +373,8 @@ mod tests {
             metadata: json!({"agent_id": "ai:alice"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 
@@ -671,6 +673,8 @@ mod tests {
             metadata: json!({"agent_id": "ai:reflective"}),
             reflection_depth: 1,
             memory_kind: crate::models::MemoryKind::Reflection,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

@@ -515,6 +515,8 @@ mod tests {
             metadata: default_metadata(),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let json = serde_json::to_string(&m).unwrap();
         let back: Memory = serde_json::from_str(&json).unwrap();

@@ -461,6 +461,8 @@ pub async fn create_memory(
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
 
@@ -751,6 +753,8 @@ pub async fn create_memory(
         metadata,
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     // Task 1.9: governance enforcement (store-side).
@@ -4158,6 +4162,8 @@ pub async fn entity_register(
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         // F-A2A1.5 (#705) — governance enforcement on the postgres
         // entity-register path. Mirrors the F-A2A1.2 delete/promote gates
@@ -6741,6 +6747,8 @@ pub async fn bulk_create(
                 metadata: body.metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
 
             // F-A2A1.5 (#705) — governance enforcement on the postgres
@@ -6844,6 +6852,8 @@ pub async fn bulk_create(
                 metadata: body.metadata,
                 reflection_depth: 0,
                 memory_kind: crate::models::MemoryKind::Observation,
+                entity_id: None,
+                persona_version: None,
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),

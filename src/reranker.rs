@@ -1117,6 +1117,8 @@ mod tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 
@@ -1664,6 +1666,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 },
                 0.6,
             ),
@@ -1686,6 +1690,8 @@ mod tests {
                     metadata: serde_json::json!({}),
                     reflection_depth: 0,
                     memory_kind: crate::models::MemoryKind::Observation,
+                    entity_id: None,
+                    persona_version: None,
                 },
                 0.4,
             ),
@@ -1808,6 +1814,8 @@ mod mock_tests {
             metadata: serde_json::json!({}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

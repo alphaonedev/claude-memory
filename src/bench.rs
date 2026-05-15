@@ -450,6 +450,8 @@ fn synth_memory(namespace: &str, i: usize, prefix: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "bench"}),
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

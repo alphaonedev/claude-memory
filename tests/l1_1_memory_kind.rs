@@ -53,6 +53,8 @@ fn make_obs(namespace: &str, title: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "test-l1-1"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -145,6 +147,8 @@ fn memory_kind_serde_roundtrip_reflection() {
         metadata: serde_json::json!({}),
         reflection_depth: 1,
         memory_kind: MemoryKind::Reflection,
+        entity_id: None,
+        persona_version: None,
     };
 
     let json = serde_json::to_string(&mem).expect("serialize");

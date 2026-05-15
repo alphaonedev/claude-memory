@@ -82,6 +82,8 @@ fn mem_with_content(id: &str, content: &str) -> Memory {
         metadata: json!({}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

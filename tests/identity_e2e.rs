@@ -163,6 +163,8 @@ fn seed(conn: &rusqlite::Connection, title: &str) -> String {
         metadata: models::default_metadata(),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     db::insert(conn, &mem).expect("db::insert")
 }

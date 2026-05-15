@@ -168,6 +168,20 @@ pub struct Memory {
     /// that don't yet emit the field.
     #[serde(default)]
     pub memory_kind: MemoryKind,
+    /// v0.7.0 QW-2 — populated only when `memory_kind == Persona`.
+    /// Identifies the subject of the persona. Stored on the SQL
+    /// column `memories.entity_id TEXT NULL` (schema v36).
+    /// `skip_serializing_if = "Option::is_none"` keeps the absent
+    /// shape on the wire for pre-QW-2 federation peers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entity_id: Option<String>,
+    /// v0.7.0 QW-2 — monotonic per-(entity_id, namespace) version
+    /// counter for the Persona artefact. Populated only when
+    /// `memory_kind == Persona`. Each `PersonaGenerator::generate`
+    /// call writes a new row with `version + 1`; older rows stay
+    /// queryable for audit / rollback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona_version: Option<i32>,
 }
 
 impl Default for Memory {
@@ -194,6 +208,8 @@ impl Default for Memory {
             metadata: default_metadata(),
             reflection_depth: 0,
             memory_kind: MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 }

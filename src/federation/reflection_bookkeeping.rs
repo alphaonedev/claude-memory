@@ -289,6 +289,8 @@ mod tests {
             metadata: serde_json::json!({"agent_id": "ai:test"}),
             reflection_depth: depth,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

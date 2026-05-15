@@ -58,6 +58,8 @@ fn insert_memory(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: Memory
         created_at: now.clone(),
         updated_at: now,
         memory_kind: kind,
+        entity_id: None,
+        persona_version: None,
         ..Default::default()
     };
     db::insert(conn, &mem).expect("insert");

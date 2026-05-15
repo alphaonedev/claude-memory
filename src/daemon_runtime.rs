@@ -3982,6 +3982,8 @@ mod tests {
             metadata: crate::models::default_metadata(),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let id = db::insert(&conn, &mem).unwrap();
         db::set_embedding(&conn, &id, &[1.0, 0.0, 0.0]).unwrap();
@@ -4025,6 +4027,8 @@ mod tests {
             metadata: crate::models::default_metadata(),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         db::insert(&conn, &mem).unwrap();
         drop(conn);

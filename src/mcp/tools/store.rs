@@ -283,6 +283,8 @@ pub(super) fn handle_store(
         metadata,
         reflection_depth: 0,
         memory_kind: crate::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     // v0.7.0 K9 — unified permission pipeline. The K9 evaluator
@@ -1599,6 +1601,8 @@ mod tests {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         let sid = db::insert(conn, &standard).expect("insert standard");
         db::set_namespace_standard(conn, ns, &sid, None).expect("set standard");

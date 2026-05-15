@@ -6235,6 +6235,8 @@ impl MemoryStore for PostgresStore {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
 
         self.store(ctx, &mem).await.map(|_| ())
@@ -6750,6 +6752,8 @@ impl MemoryStore for PostgresStore {
             metadata,
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         };
         self.store(ctx, &mem).await
     }
@@ -8763,6 +8767,8 @@ mod tests {
             metadata: serde_json::json!({"agent_id":"ai:sal-test"}),
             reflection_depth: 0,
             memory_kind: crate::models::MemoryKind::Observation,
+            entity_id: None,
+            persona_version: None,
         }
     }
 

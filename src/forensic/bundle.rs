@@ -1474,6 +1474,8 @@ mod tests {
             created_at: now.clone(),
             updated_at: now,
             memory_kind: kind,
+            entity_id: None,
+            persona_version: None,
             ..Default::default()
         };
         db::insert(conn, &mem).expect("insert");

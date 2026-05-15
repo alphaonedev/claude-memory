@@ -53,6 +53,8 @@ fn fresh_memory(title: &str, namespace: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "ai:test"}),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

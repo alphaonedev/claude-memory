@@ -99,6 +99,8 @@ fn effective_max_reflection_depth_explicit_override_returns_value() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     assert_eq!(p.effective_max_reflection_depth(), 7);
 }
@@ -123,6 +125,8 @@ fn effective_max_reflection_depth_some_zero_disables_reflection() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     assert_eq!(
         p.effective_max_reflection_depth(),
@@ -143,6 +147,8 @@ fn effective_max_reflection_depth_some_one_returns_one() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 1);
@@ -161,6 +167,8 @@ fn effective_max_reflection_depth_high_override_returns_value() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     assert_eq!(p.effective_max_reflection_depth(), 255);
@@ -278,6 +286,8 @@ fn serialize_policy_with_explicit_field_writes_key_on_the_wire() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
         ..GovernancePolicy::default()
     };
     let json = serde_json::to_value(&p).expect("serialize");
@@ -305,6 +315,8 @@ fn full_roundtrip_with_explicit_field() {
         auto_atomise: None,
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     };
     let json = serde_json::to_string(&p).expect("serialize");
     let back: GovernancePolicy = serde_json::from_str(&json).expect("deserialize");

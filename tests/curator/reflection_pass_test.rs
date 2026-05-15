@@ -111,6 +111,8 @@ fn make_observation(ns: &str, topic: &str, idx: usize) -> Memory {
         metadata: serde_json::json!({"agent_id": "test-agent"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 
@@ -392,6 +394,8 @@ fn set_namespace_max_reflection_depth(conn: &rusqlite::Connection, namespace: &s
         metadata,
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let _ = db::insert(conn, &mem); // best-effort; substrate uses
     // resolve_governance_policy which

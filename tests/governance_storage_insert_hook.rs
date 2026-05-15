@@ -124,6 +124,8 @@ fn fresh_memory(title: &str, ns: &str) -> Memory {
         metadata: serde_json::json!({}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     }
 }
 

@@ -116,6 +116,8 @@ async fn seed(db: &ai_memory::handlers::Db, ns: &str, title: &str) {
         metadata: ai_memory::models::default_metadata(),
         reflection_depth: 0,
         memory_kind: ai_memory::models::MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     ai_memory::db::insert(&lock.0, &mem).expect("seed insert");
 }
