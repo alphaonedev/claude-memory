@@ -133,9 +133,15 @@ fn snapshot_matches_generator() {
             e
         )
     });
+    // Normalise CRLF -> LF: Windows git checkouts (no .gitattributes
+    // pinning eol=lf for this file) convert the snapshot's LF line
+    // endings to CRLF on disk. The in-memory generator always emits
+    // LF. Without normalisation the comparison fails on Windows even
+    // though the logical content is identical.
+    let on_disk_lf = on_disk.replace("\r\n", "\n");
     let in_memory = serialise_jsonl(&generate_scenarios());
     assert_eq!(
-        on_disk, in_memory,
+        on_disk_lf, in_memory,
         "scenarios.jsonl drift — regenerate via `cargo bench --bench longmemeval_reflection -- --regenerate`"
     );
 }
