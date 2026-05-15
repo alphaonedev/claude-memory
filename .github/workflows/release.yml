@@ -1,0 +1,451 @@
+name: Release (workflow_dispatch — operator-gated publish)
+
+# Operator-gated publish pipeline. Lifted out of ci.yml (which now does
+# verification only) so that the act of releasing a tag is a separate,
+# intentional action — never an auto-fire side-effect of CI going green.
+#
+# Invoke from a maintainer shell:
+#
+#   gh workflow run release.yml --repo alphaonedev/ai-memory-mcp -f tag=v0.7.0
+#
+# The 5 jobs below mirror the historical release fanout: binary builds
+# (5 targets), GitHub Release page, crates.io, Homebrew tap, GHCR Docker
+# image, Fedora COPR. Pre-release tags (SemVer `-` suffix) auto-skip the
+# downstream stable channels (crates.io / Homebrew / Docker / COPR) so
+# `v0.7.0-rc.1` style operator dry-runs are safe.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to publish (must already exist on remote, e.g. v0.7.0).'
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  # One release at a time, per tag.
+  group: release-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  # --------------------------------------------------------------------
+  # Verify the tag exists + is on a sane sha before any publish fires.
+  # Cheap belt-and-suspenders so an `gh workflow run` typo doesn't burn
+  # 20 minutes building artifacts against the wrong commit.
+  # --------------------------------------------------------------------
+  preflight:
+    name: Preflight (tag exists + is annotated)
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      sha: ${{ steps.check.outputs.sha }}
+      is_prerelease: ${{ steps.check.outputs.is_prerelease }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag }}
+
+      - name: Resolve tag + sha + prerelease flag
+        id: check
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.inputs.tag }}"
+          # Sanity check — refuse anything that doesn't start with `v`
+          # so a workflow_dispatch typo can't accidentally tag a branch.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.\-]+)?$ ]]; then
+            echo "::error::tag '$TAG' does not match SemVer v<MAJ>.<MIN>.<PATCH>(-pre)?"
+            exit 1
+          fi
+          SHA=$(git rev-parse "$TAG^{commit}")
+          echo "::notice::release tag $TAG -> $SHA"
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA"   >> "$GITHUB_OUTPUT"
+          # SemVer pre-releases (e.g. v0.6.2-rc.0 / v0.7.0-alpha.1) skip
+          # the downstream stable channels.
+          if [[ "$TAG" == *-* ]]; then
+            echo "is_prerelease=true"  >> "$GITHUB_OUTPUT"
+            echo "::notice::pre-release detected — crates.io / Homebrew / Docker / COPR will skip"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # --------------------------------------------------------------------
+  # Cross-platform binary builds + GitHub Release page.
+  # 5 targets: linux x86_64 + aarch64, macOS x86_64 + aarch64, windows x86_64.
+  # --------------------------------------------------------------------
+  release:
+    name: Release (${{ matrix.target }})
+    needs: preflight
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: ai-memory
+            nfpm_arch: amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            artifact: ai-memory
+            nfpm_arch: arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: ai-memory
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: ai-memory
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: ai-memory.exe
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary (unix)
+        if: ${{ !contains(matrix.target, 'windows') }}
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact }} dist/
+          cd dist
+          tar czf ai-memory-${{ matrix.target }}.tar.gz ${{ matrix.artifact }}
+
+      - name: Package binary (windows)
+        if: contains(matrix.target, 'windows')
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/${{ matrix.artifact }}" -Destination dist/
+          Compress-Archive -Path "dist/${{ matrix.artifact }}" -DestinationPath "dist/ai-memory-${{ matrix.target }}.zip"
+
+      - name: Build deb and rpm packages
+        if: matrix.nfpm_arch
+        run: |
+          NFPM_ARCH=$(uname -m | sed 's/aarch64/arm64/')
+          curl -sfL https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_$(uname -s)_${NFPM_ARCH}.tar.gz | tar xz -C /usr/local/bin nfpm
+
+          VERSION="${TAG#v}"
+
+          ARCH=${{ matrix.nfpm_arch }} VERSION=$VERSION nfpm package -p deb -f nfpm.yaml -t dist/
+          ARCH=${{ matrix.nfpm_arch }} VERSION=$VERSION nfpm package -p rpm -f nfpm.yaml -t dist/
+
+          ls -la dist/*.deb dist/*.rpm
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: ai-memory-${{ matrix.target }}
+          path: dist/ai-memory*
+
+      - name: Resolve release-body file (per-tag override, optional)
+        id: release_body
+        shell: bash
+        run: |
+          # v0.6.4 introduced the per-tag release-body convention. The
+          # file lives at .github/release-body-<tag>.md and carries the
+          # polished GitHub release page copy.
+          path=".github/release-body-${TAG}.md"
+          if [[ -f "$path" ]]; then
+            echo "body_path=$path" >> "$GITHUB_OUTPUT"
+            echo "::notice::release body sourced from $path"
+          else
+            echo "body_path=" >> "$GITHUB_OUTPUT"
+            echo "::notice::no release-body file at $path — falling back to auto-generated notes"
+          fi
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          files: dist/ai-memory*
+          body_path: ${{ steps.release_body.outputs.body_path }}
+          generate_release_notes: ${{ steps.release_body.outputs.body_path == '' }}
+          prerelease: ${{ needs.preflight.outputs.is_prerelease == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # --------------------------------------------------------------------
+  # crates.io publish (stable releases only).
+  # --------------------------------------------------------------------
+  crates-io:
+    name: Publish to crates.io
+    needs: [preflight, release]
+    if: needs.preflight.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io (with retry)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if output=$(cargo publish --allow-dirty 2>&1); then
+              echo "::notice::crates.io publish succeeded on attempt $attempt"
+              echo "$output" | tail -10
+              exit 0
+            fi
+            echo "$output" | tail -20
+            if echo "$output" | grep -q "already exists\|crate version .* is already uploaded"; then
+              echo "::notice::crates.io: version already published (idempotent no-op)"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "::warning::crates.io publish failed on attempt $attempt — retrying after 30s"
+              sleep 30
+            fi
+          done
+          echo "::error::crates.io publish failed on all 3 attempts"
+          exit 1
+
+  # --------------------------------------------------------------------
+  # Homebrew tap formula update (stable releases only).
+  # --------------------------------------------------------------------
+  homebrew:
+    name: Update Homebrew formula
+    needs: [preflight, release]
+    if: needs.preflight.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+
+      - name: Download release assets and compute SHA256
+        id: sha
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          BASE="https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}"
+
+          for TARGET in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin; do
+            curl -sL -o "ai-memory-${TARGET}.tar.gz" "${BASE}/ai-memory-${TARGET}.tar.gz"
+            SHA=$(sha256sum "ai-memory-${TARGET}.tar.gz" | cut -d' ' -f1)
+            SAFE=$(echo "$TARGET" | tr '-' '_')
+            echo "sha_${SAFE}=${SHA}" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@v5
+        with:
+          repository: alphaonedev/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          cat > homebrew-tap/Formula/ai-memory.rb << 'FORMULA_EOF'
+          class AiMemory < Formula
+            desc "AI-agnostic persistent memory system — MCP server, HTTP API, and CLI"
+            homepage "https://alphaonedev.github.io/ai-memory-mcp/"
+            version "VERSION_PLACEHOLDER"
+            license "Apache-2.0"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-aarch64-apple-darwin.tar.gz"
+                sha256 "SHA_AARCH64_APPLE_DARWIN"
+              else
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-x86_64-apple-darwin.tar.gz"
+                sha256 "SHA_X86_64_APPLE_DARWIN"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_AARCH64_UNKNOWN_LINUX_GNU"
+              else
+                url "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v#{version}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "SHA_X86_64_UNKNOWN_LINUX_GNU"
+              end
+            end
+
+            def install
+              bin.install "ai-memory"
+            end
+
+            def caveats
+              <<~EOS
+                To use with an MCP-compatible AI (Claude Code, Codex CLI, Gemini CLI, OpenClaw, etc.),
+                add to your AI platform's MCP config:
+
+                  {
+                    "mcpServers": {
+                      "memory": {
+                        "command": "ai-memory",
+                        "args": ["--db", "~/.local/share/ai-memory/memories.db", "mcp"]
+                      }
+                    }
+                  }
+
+                Documentation: https://alphaonedev.github.io/ai-memory-mcp/
+              EOS
+            end
+
+            test do
+              system "#{bin}/ai-memory", "stats", "--json", "--db", testpath/"test.db"
+            end
+          end
+          FORMULA_EOF
+
+          sed -i "s/VERSION_PLACEHOLDER/${VERSION}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_X86_64_UNKNOWN_LINUX_GNU/${{ steps.sha.outputs.sha_x86_64_unknown_linux_gnu }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_AARCH64_UNKNOWN_LINUX_GNU/${{ steps.sha.outputs.sha_aarch64_unknown_linux_gnu }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_X86_64_APPLE_DARWIN/${{ steps.sha.outputs.sha_x86_64_apple_darwin }}/" homebrew-tap/Formula/ai-memory.rb
+          sed -i "s/SHA_AARCH64_APPLE_DARWIN/${{ steps.sha.outputs.sha_aarch64_apple_darwin }}/" homebrew-tap/Formula/ai-memory.rb
+
+      - name: Push updated formula
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ai-memory.rb
+          git commit -m "Update ai-memory to ${{ steps.version.outputs.version }}"
+          git push
+
+  # --------------------------------------------------------------------
+  # Docker image push to GHCR (stable releases only).
+  # --------------------------------------------------------------------
+  docker:
+    name: Docker (GHCR)
+    needs: [preflight]
+    if: needs.preflight.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/ai-memory:${{ steps.version.outputs.version }}
+            ghcr.io/${{ github.repository_owner }}/ai-memory:latest
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # --------------------------------------------------------------------
+  # Fedora COPR source-RPM upload (stable releases only).
+  # --------------------------------------------------------------------
+  copr:
+    name: Fedora COPR
+    needs: [preflight, release]
+    if: needs.preflight.outputs.is_prerelease == 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.preflight.outputs.tag }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+
+      - name: Install copr-cli
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pipx
+          pipx ensurepath
+          pipx install copr-cli
+          pipx inject copr-cli rich
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure copr-cli
+        run: |
+          mkdir -p ~/.config
+          echo "${{ secrets.COPR_CONFIG }}" > ~/.config/copr
+
+      - name: Install RPM build tools
+        run: sudo apt-get update && sudo apt-get install -y rpm
+
+      - name: Build source RPM
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p ~/rpmbuild/{SOURCES,SPECS,SRPMS}
+
+          curl -sL -o ~/rpmbuild/SOURCES/ai-memory-x86_64-unknown-linux-gnu.tar.gz \
+            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sL -o ~/rpmbuild/SOURCES/ai-memory-aarch64-unknown-linux-gnu.tar.gz \
+            "https://github.com/alphaonedev/ai-memory-mcp/releases/download/v${VERSION}/ai-memory-aarch64-unknown-linux-gnu.tar.gz"
+
+          if [[ "$VERSION" == *-* ]]; then
+            RPM_VERSION="${VERSION%%-*}"
+            PRE="${VERSION#*-}"
+            PRE_TAG="${PRE//./}"
+            RPM_RELEASE="0.1.${PRE_TAG}%{?dist}"
+          else
+            RPM_VERSION="$VERSION"
+            RPM_RELEASE="1%{?dist}"
+          fi
+          echo "RPM Version: $RPM_VERSION"
+          echo "RPM Release: $RPM_RELEASE"
+
+          sed -e "s/^Version:.*/Version:        ${RPM_VERSION}/" \
+              -e "s/^Release:.*/Release:        ${RPM_RELEASE}/" \
+              ai-memory.spec > ~/rpmbuild/SPECS/ai-memory.spec
+
+          rpmbuild -bs ~/rpmbuild/SPECS/ai-memory.spec \
+            --define "_sourcedir $HOME/rpmbuild/SOURCES" \
+            --define "_srcrpmdir $HOME/rpmbuild/SRPMS"
+
+          ls -la ~/rpmbuild/SRPMS/
+
+      - name: Upload to COPR
+        run: |
+          copr-cli build alpha-one-ai/ai-memory ~/rpmbuild/SRPMS/ai-memory-*.src.rpm
