@@ -223,7 +223,8 @@ fn sg_co_1_forensic_bundle_export_and_verify_roundtrip() {
         memory_id: d2.clone(),
         include_reflections: true,
         include_transcripts: false,
-        output: None,
+        include_atomisation_chain: true,
+            output: None,
     };
 
     // Build with a fixed `generated_at` so the bundle is reproducible
@@ -629,7 +630,8 @@ fn sg_co_8_forensic_bundle_verify_reports_tampered_file_by_name() {
         memory_id: d0.clone(),
         include_reflections: true,
         include_transcripts: false,
-        output: None,
+        include_atomisation_chain: true,
+            output: None,
     };
     let mut files =
         bundle::build_files(&conn, &args, Some("2026-05-14T00:00:00Z")).expect("build_files ok");

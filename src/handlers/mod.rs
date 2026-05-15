@@ -855,6 +855,7 @@ mod tests {
             crate::models::MID_TTL_EXTEND_SECS,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(!results.is_empty());

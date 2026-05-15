@@ -286,6 +286,7 @@ fn reflection_is_recall_visible_alongside_non_reflection_memories() {
         None,
         None,
         None,
+        false,
     )
     .expect("search ok");
     assert!(
@@ -307,6 +308,7 @@ fn reflection_is_recall_visible_alongside_non_reflection_memories() {
         0,
         None,
         None,
+        false,
     )
     .expect("recall ok");
     let ids: Vec<String> = results.iter().map(|(m, _)| m.id.clone()).collect();

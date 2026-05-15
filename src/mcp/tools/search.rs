@@ -23,6 +23,9 @@ pub(super) fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Resu
     if let Some(a) = as_agent {
         validate::validate_namespace(a).map_err(|e| e.to_string())?;
     }
+    // v0.7.0 WT-1-E — atom-preference search semantics. See
+    // `mcp::tools::recall::handle_recall` for the full contract.
+    let include_archived = params["include_archived"].as_bool().unwrap_or(false);
     let results = db::search(
         conn,
         query,
@@ -35,6 +38,7 @@ pub(super) fn handle_search(conn: &rusqlite::Connection, params: &Value) -> Resu
         None,
         agent_id,
         as_agent,
+        include_archived,
     )
     .map_err(|e| e.to_string())?;
     Ok(json!({"results": results, "count": results.len()}))

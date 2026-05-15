@@ -197,6 +197,81 @@ fn matches_subtree(namespace: &str, prefix: Option<&str>) -> bool {
 /// The `=` equality side is unaffected by LIKE wildcards and binds the raw
 /// value so that legitimate namespaces containing `_` (e.g. `under_score`)
 /// continue to match exactly.
+/// v0.7.0 WT-1-E — atom-preference WHERE fragment.
+///
+/// Default recall surfaces atoms (the canonical post-atomisation
+/// unit) in place of the archived source row. An archived source is
+/// one where:
+///
+///   * `atomised_into > 0` — the substrate-visible count of atoms
+///     emitted by the WT-1-B atomiser.
+///   * `metadata.atomisation_archived_at` is set — the RFC3339 stamp
+///     WT-1-B writes alongside the column flip (see
+///     `src/atomisation/mod.rs::archive_source`). The column is the
+///     fast index target; the metadata key is the substrate-visible
+///     read signal that the row is "atomised and archived" — both
+///     are checked so a hypothetical column-only or metadata-only
+///     drift gets filtered consistently.
+///
+/// Atoms themselves (rows where `atom_of IS NOT NULL`) are unaffected
+/// — they are not "archived" by this definition. The fragment
+/// excludes archived sources only.
+///
+/// When `include_archived` is true the fragment is empty (no
+/// filter), so auditors and the forensic-export path see the full
+/// chain. The atom rows are returned in both cases.
+fn archived_source_clause(include_archived: bool, table_alias: &str) -> &'static str {
+    if include_archived {
+        ""
+    } else {
+        // Two-part predicate: a row is archived-source when BOTH
+        // (a) atomised_into > 0 and
+        // (b) metadata.atomisation_archived_at IS NOT NULL.
+        // Either one alone could be a partial-state row (e.g. a
+        // crash between the column flip and the metadata write); we
+        // only filter rows that present BOTH signals so a partial-
+        // state row still surfaces under default recall.
+        // Static fragment with the alias baked in — recall and
+        // recall_hybrid pass `"m"`, search passes `"m"` too.
+        match table_alias {
+            "m" => "AND NOT (\
+                m.atomised_into IS NOT NULL AND m.atomised_into > 0 \
+                AND json_extract(m.metadata, '$.atomisation_archived_at') IS NOT NULL\
+            )",
+            "memories" => "AND NOT (\
+                memories.atomised_into IS NOT NULL AND memories.atomised_into > 0 \
+                AND json_extract(memories.metadata, '$.atomisation_archived_at') IS NOT NULL\
+            )",
+            _ => "",
+        }
+    }
+}
+
+/// v0.7.0 WT-1-E — Rust-side mirror of [`archived_source_clause`].
+///
+/// Used by the HNSW retrieval branch of `recall_hybrid_with_telemetry`
+/// where the bypass-the-SQL-WHERE walk fetches each candidate via
+/// `get()` and then applies post-load filters in Rust. The check
+/// reads `metadata.atomisation_archived_at` (the WT-1-B substrate-
+/// visible read signal) and tolerates the absence of the metadata
+/// key — only rows that DO present the key are excluded.
+///
+/// Note: the SQL fragment also requires `atomised_into > 0` to be
+/// set. The HNSW branch deliberately only checks the metadata key
+/// because the loaded `Memory` struct does not carry the
+/// `atomised_into` column. The two signals are written in the same
+/// `archive_source` transaction (see `src/atomisation/mod.rs`), so
+/// in steady-state every row presents both signals together; the
+/// pathological partial-state row that exists only momentarily
+/// during a crash window still surfaces through HNSW until the next
+/// recall — accepted as a tolerable looseness on the cold-fallback
+/// path.
+fn is_archived_source(mem: &Memory) -> bool {
+    mem.metadata
+        .get("atomisation_archived_at")
+        .is_some_and(|v| !v.is_null())
+}
+
 fn visibility_clause(start: usize, table_alias: &str) -> String {
     let private_ph = start;
     let team_ph = start + 1;
@@ -992,11 +1067,16 @@ pub fn search(
     tags_filter: Option<&str>,
     agent_id: Option<&str>,
     as_agent: Option<&str>,
+    // v0.7.0 WT-1-E — when false (default), search excludes archived
+    // sources whose atoms surface in their place. See
+    // [`recall_with_telemetry`] for the full contract.
+    include_archived: bool,
 ) -> Result<Vec<Memory>> {
     let now = Utc::now().to_rfc3339();
     let tier_str = tier.map(|t| t.as_str().to_string());
     let fts_query = sanitize_fts_query(query, false);
     let (vis_p, vis_t, vis_u, vis_o) = compute_visibility_prefixes(as_agent);
+    let archived_fragment = archived_source_clause(include_archived, "m");
 
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -1013,6 +1093,7 @@ pub fn search(
            AND (?7 IS NULL OR m.created_at <= ?7)
            AND (?8 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?8))
            AND (?10 IS NULL OR m.agent_id_idx = ?10)
+           {archived_fragment}
            {vis}
          ORDER BY (fts.rank * -1)
            + (m.priority * 0.5)
@@ -1297,6 +1378,11 @@ pub fn recall_with_telemetry(
     mid_extend: i64,
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
+    // v0.7.0 WT-1-E — when false (default), recall excludes archived
+    // sources whose atoms now surface in their place. When true, the
+    // archive-filter WHERE clause is dropped so forensic-export and
+    // explicit auditor recall returns both atoms and sources.
+    include_archived: bool,
 ) -> Result<(
     Vec<(Memory, f64)>,
     BudgetOutcome,
@@ -1314,6 +1400,7 @@ pub fn recall_with_telemetry(
         mid_extend,
         as_agent,
         budget_tokens,
+        include_archived,
     )?;
     let telemetry = crate::models::RecallTelemetry {
         fts_candidates: results.len(),
@@ -1335,6 +1422,9 @@ pub fn recall(
     mid_extend: i64,
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
+    // v0.7.0 WT-1-E — see [`recall_with_telemetry`] for the
+    // archived-source exclusion contract.
+    include_archived: bool,
 ) -> Result<(Vec<(Memory, f64)>, BudgetOutcome)> {
     let now = Utc::now().to_rfc3339();
     let fts_query = sanitize_fts_query(context, true);
@@ -1346,6 +1436,11 @@ pub fn recall(
     let (hierarchy_in, hierarchy_active) = hierarchy_in_clause(namespace);
     let hierarchy_fragment = hierarchy_in.unwrap_or_default();
     let effective_namespace = if hierarchy_active { None } else { namespace };
+
+    // v0.7.0 WT-1-E — archived-source exclusion (default) / pass-
+    // through (include_archived=true). Composes with the existing
+    // namespace, expiry, tag, time-window, and visibility filters.
+    let archived_fragment = archived_source_clause(include_archived, "m");
 
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
@@ -1367,6 +1462,7 @@ pub fn recall(
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
            AND (?5 IS NULL OR m.created_at >= ?5)
            AND (?6 IS NULL OR m.created_at <= ?6)
+           {archived_fragment}
            {vis}
          ORDER BY score DESC
          LIMIT ?7",
@@ -4603,6 +4699,9 @@ pub fn recall_hybrid(
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
     scoring: &crate::config::ResolvedScoring,
+    // v0.7.0 WT-1-E — see [`recall_with_telemetry`] for the
+    // archived-source exclusion contract.
+    include_archived: bool,
 ) -> Result<(Vec<(Memory, f64)>, BudgetOutcome)> {
     let (results, outcome, _telemetry) = recall_hybrid_with_telemetry(
         conn,
@@ -4619,6 +4718,7 @@ pub fn recall_hybrid(
         as_agent,
         budget_tokens,
         scoring,
+        include_archived,
     )?;
     Ok((results, outcome))
 }
@@ -4652,6 +4752,9 @@ pub fn recall_hybrid_with_telemetry(
     as_agent: Option<&str>,
     budget_tokens: Option<usize>,
     scoring: &crate::config::ResolvedScoring,
+    // v0.7.0 WT-1-E — see [`recall_with_telemetry`] for the
+    // archived-source exclusion contract.
+    include_archived: bool,
 ) -> Result<(
     Vec<(Memory, f64)>,
     BudgetOutcome,
@@ -4684,6 +4787,13 @@ pub fn recall_hybrid_with_telemetry(
     };
     let effective_namespace = if hierarchy_active { None } else { namespace };
 
+    // v0.7.0 WT-1-E — archived-source exclusion (default) / pass-
+    // through. Same predicate shape used in `recall`; the FTS branch
+    // uses the `m.` alias, the semantic branch (semantic-only `SELECT
+    // FROM memories`) uses the `memories.` alias.
+    let fts_archived_fragment = archived_source_clause(include_archived, "m");
+    let sem_archived_fragment = archived_source_clause(include_archived, "memories");
+
     // Step 1: Get FTS candidates (up to 3x limit to have a good pool)
     let fts_limit = (limit * 3).max(30);
     let fts_sql = format!(
@@ -4704,6 +4814,7 @@ pub fn recall_hybrid_with_telemetry(
            AND (?4 IS NULL OR EXISTS (SELECT 1 FROM json_each(m.tags) WHERE json_each.value = ?4))
            AND (?5 IS NULL OR m.created_at >= ?5)
            AND (?6 IS NULL OR m.created_at <= ?6)
+           {fts_archived_fragment}
            {vis}
          ORDER BY fts_score DESC
          LIMIT ?7",
@@ -4724,6 +4835,7 @@ pub fn recall_hybrid_with_telemetry(
            AND (?3 IS NULL OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE json_each.value = ?3))
            AND (?4 IS NULL OR created_at >= ?4)
            AND (?5 IS NULL OR created_at <= ?5)
+           {sem_archived_fragment}
            {vis}",
         vis = visibility_clause(6, "memories"),
     );
@@ -4839,6 +4951,16 @@ pub fn recall_hybrid_with_telemetry(
                 }
                 // #151 visibility filter (HNSW branch)
                 if !is_visible(&mem, &prefixes) {
+                    continue;
+                }
+                // v0.7.0 WT-1-E — archived-source exclusion. The HNSW
+                // path bypasses the FTS/semantic SQL WHERE clause, so
+                // we re-check the same predicate in Rust to keep the
+                // include_archived=false semantics consistent across
+                // retrieval branches. Looks for BOTH atomised_into>0
+                // and metadata.atomisation_archived_at, mirroring
+                // [`archived_source_clause`].
+                if !include_archived && is_archived_source(&mem) {
                     continue;
                 }
                 scored.insert(mem.id.clone(), (mem, 0.0, cosine));
@@ -7378,6 +7500,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(results.len(), 1);
@@ -7400,6 +7523,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(results.len(), 0);
@@ -7431,6 +7555,7 @@ mod tests {
             MID_TTL_EXTEND_SECS,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(!results.is_empty());
@@ -7457,6 +7582,7 @@ mod tests {
             MID_TTL_EXTEND_SECS,
             None,
             None,
+            false,
         );
         // May return empty or error, both acceptable
         assert!(results.is_ok() || results.is_err());
@@ -8362,6 +8488,7 @@ mod tests {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
         assert_eq!(results.len(), 1);
@@ -8387,6 +8514,7 @@ mod tests {
             86400,
             None,
             None,
+            false,
         )
         .unwrap();
         assert!(!results.is_empty());

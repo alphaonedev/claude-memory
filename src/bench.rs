@@ -225,6 +225,7 @@ fn run_search_fts(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             None,
             None,
             None,
+            false,
         )?;
         let elapsed = start.elapsed();
         if i >= config.warmup {
@@ -250,6 +251,7 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             0,
             None,
             None,
+            false,
         )?;
     }
     let mut samples = Vec::with_capacity(config.iterations);
@@ -268,6 +270,7 @@ fn run_recall_hot(conn: &Connection, config: &BenchConfig) -> Result<OperationRe
             0,
             None,
             None,
+            false,
         )?;
         samples.push(start.elapsed());
     }

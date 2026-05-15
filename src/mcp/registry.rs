@@ -455,7 +455,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_recall",
                 "description": "Recall memories relevant to a context (ranked).",
-                "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). v0.7.0 (issue #518) — pass `session_default=true` to splice the operator-configured `[agents.defaults.recall_scope]` defaults (namespace / since / tier / limit) for any filter field not explicitly set; resolution is explicit args > recall_scope > compiled defaults. Default response format is `toon_compact` (~79% smaller than JSON).",
+                "docs": "Recall memories relevant to a context. Uses fuzzy OR matching, ranks by relevance + priority + access frequency + tier. Optional context-budget-aware mode (`budget_tokens`, Phase P6 R1) returns the highest-ranked memories whose cumulative cl100k_base content tokens fit in N, with an always-return-at-least-one guarantee. Optional `context_tokens` biases the query embedding 70/30 toward recent conversation (v0.6.0.0). v0.7.0 (issue #518) — pass `session_default=true` to splice the operator-configured `[agents.defaults.recall_scope]` defaults (namespace / since / tier / limit) for any filter field not explicitly set; resolution is explicit args > recall_scope > compiled defaults. v0.7.0 WT-1-E — by default, atomised sources are excluded (atoms surface in their place). Use include_archived=true to retrieve archived sources alongside atoms. Default response format is `toon_compact` (~79% smaller than JSON).",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -469,6 +469,7 @@ pub fn tool_definitions() -> Value {
                         "budget_tokens": {"type": "integer", "minimum": 0, "description": "Phase P6 (R1) — context-budget-aware recall. Return the highest-ranked memories whose cumulative content tokens (deterministic cl100k_base BPE; matches Claude/GPT context accounting) fit in N. If the top-ranked memory alone exceeds the budget, it is returned anyway with meta.budget_overflow=true (R1 always-return-at-least-one guarantee). budget_tokens=0 returns zero memories with overflow=false. Response meta block: budget_tokens_used, budget_tokens_remaining, memories_dropped, budget_overflow."},
                         "context_tokens": {"type": "array", "items": {"type": "string"}, "description": "v0.6.0.0 contextual recall — recent conversation tokens used to bias the query embedding at 70/30 (primary/context). Pulls results toward memories that match both the explicit query and nearby conversation topics."},
                         "session_default": {"type": "boolean", "default": false, "description": "When true, splice defaults from [agents.defaults.recall_scope] in config.toml for any filter field not explicitly set. Resolution: explicit args > recall_scope > compiled defaults."},
+                        "include_archived": {"type": "boolean", "default": false, "description": "v0.7.0 WT-1-E — by default, atomised sources are excluded (atoms surface in their place). Use include_archived=true to retrieve archived sources alongside atoms (forensic / auditor recall)."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens vs JSON. 'toon' includes timestamps. 'json' for structured parsing."}
                     },
                     "required": ["context"]
@@ -477,7 +478,7 @@ pub fn tool_definitions() -> Value {
             {
                 "name": "memory_search",
                 "description": "Search memories by exact keyword match (AND semantics).",
-                "docs": "Search memories by exact keyword match (AND semantics). Faster and more deterministic than memory_recall but no fuzzy/semantic match. Filterable by namespace, tier, and agent_id; supports Task 1.5 scope-aware visibility via `as_agent`. Default response format is `toon_compact`.",
+                "docs": "Search memories by exact keyword match (AND semantics). Faster and more deterministic than memory_recall but no fuzzy/semantic match. Filterable by namespace, tier, and agent_id; supports Task 1.5 scope-aware visibility via `as_agent`. v0.7.0 WT-1-E — by default, atomised sources are excluded (atoms surface in their place). Use include_archived=true to retrieve archived sources alongside atoms. Default response format is `toon_compact`.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -487,6 +488,7 @@ pub fn tool_definitions() -> Value {
                         "limit": {"type": "integer", "default": 20, "maximum": 200},
                         "agent_id": {"type": "string", "description": "Filter by metadata.agent_id (exact match)."},
                         "as_agent": {"type": "string", "description": "Querying agent's namespace position (Task 1.5) for scope-based visibility filtering."},
+                        "include_archived": {"type": "boolean", "default": false, "description": "v0.7.0 WT-1-E — by default, atomised sources are excluded (atoms surface in their place). Use include_archived=true to retrieve archived sources alongside atoms (forensic / auditor search)."},
                         "format": {"type": "string", "enum": ["json", "toon", "toon_compact"], "default": "toon_compact", "description": "Response format. Default 'toon_compact' saves 79% tokens. 'json' for structured parsing."}
                     },
                     "required": ["query"]

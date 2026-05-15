@@ -202,7 +202,8 @@ fn bundle_byte_identical_modulo_timestamp() {
         memory_id: d2.clone(),
         include_reflections: true,
         include_transcripts: false,
-        output: None,
+        include_atomisation_chain: true,
+            output: None,
     };
     let files_a = bundle::build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build a");
     let files_b = bundle::build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build b");
@@ -256,7 +257,8 @@ fn run_verify_emits_structured_report_on_clean_bundle() {
         memory_id: d1.clone(),
         include_reflections: true,
         include_transcripts: false,
-        output: Some(bundle_path.clone()),
+        include_atomisation_chain: true,
+            output: Some(bundle_path.clone()),
     };
     let mut stdout = Vec::<u8>::new();
     let mut stderr = Vec::<u8>::new();
@@ -300,7 +302,8 @@ fn transcripts_flag_includes_replay_union() {
         memory_id: d1.clone(),
         include_reflections: true,
         include_transcripts: true,
-        output: Some(bundle_path.clone()),
+        include_atomisation_chain: true,
+            output: Some(bundle_path.clone()),
     };
     let mut stdout = Vec::<u8>::new();
     let mut stderr = Vec::<u8>::new();
