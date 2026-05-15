@@ -375,6 +375,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -675,6 +678,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 

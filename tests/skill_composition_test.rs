@@ -128,6 +128,9 @@ fn seed_reflection(
         memory_kind: MemoryKind::Reflection,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let id = db::insert(conn, &m).expect("insert reflection");
 

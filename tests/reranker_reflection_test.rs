@@ -44,6 +44,9 @@ fn mk(id: &str, title: &str, content: &str, kind: MemoryKind, reflection_depth: 
         memory_kind: kind,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 

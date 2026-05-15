@@ -66,6 +66,51 @@ pub struct RecallArgs {
     /// which is the canonical post-atomisation recall unit.
     #[arg(long)]
     pub include_archived: bool,
+    /// v0.7.0 Form 4 (issue #757) — restrict results to memories
+    /// whose `citations` array is non-empty. Composes with the
+    /// other filters; default `false` (no provenance filter).
+    #[arg(long)]
+    pub has_citations: bool,
+    /// v0.7.0 Form 4 (issue #757) — restrict results to memories
+    /// whose `source_uri` starts with this prefix. Matches the
+    /// substring exactly (no glob/regex). Typical use:
+    /// `--source-uri-prefix doc:` to surface every atom or memory
+    /// pointing at a substrate doc; `--source-uri-prefix uri:https://`
+    /// to surface every memory citing an HTTP source.
+    #[arg(long)]
+    pub source_uri_prefix: Option<String>,
+}
+
+/// v0.7.0 Form 4 (issue #757) — post-filter a recall result set by
+/// the Form 4 fact-provenance criteria. Composes with the existing
+/// substrate-level WHERE clauses (those run inside SQL); these
+/// filters run in Rust because both criteria are read-only checks
+/// on already-deserialised Memory rows and the alternative would
+/// be a substrate-wide signature change on `recall` / `recall_hybrid`.
+#[must_use]
+pub fn apply_form4_recall_filters(
+    results: Vec<(crate::models::Memory, f64)>,
+    has_citations: bool,
+    source_uri_prefix: Option<&str>,
+) -> Vec<(crate::models::Memory, f64)> {
+    if !has_citations && source_uri_prefix.is_none() {
+        return results;
+    }
+    results
+        .into_iter()
+        .filter(|(m, _)| {
+            if has_citations && m.citations.is_empty() {
+                return false;
+            }
+            if let Some(prefix) = source_uri_prefix {
+                match m.source_uri.as_deref() {
+                    Some(uri) if uri.starts_with(prefix) => {}
+                    _ => return false,
+                }
+            }
+            true
+        })
+        .collect()
 }
 
 /// `recall` handler. Mirrors `cmd_recall` from the pre-W5b `main.rs`
@@ -322,6 +367,13 @@ pub(crate) fn run_with_embedder(
         (results, outcome, "keyword")
     };
 
+    // v0.7.0 Form 4 (issue #757) — fact-provenance post-filter.
+    let results = apply_form4_recall_filters(
+        results,
+        args.has_citations,
+        args.source_uri_prefix.as_deref(),
+    );
+
     if json_out {
         let scored: Vec<serde_json::Value> = results
             .iter()
@@ -413,6 +465,8 @@ mod tests {
             context_tokens: None,
             session_default: false,
             include_archived: false,
+            has_citations: false,
+            source_uri_prefix: None,
         }
     }
 
@@ -970,6 +1024,9 @@ limit = 25
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         if let Some(obj) = mem.metadata.as_object_mut() {
             obj.insert("agent_id".to_string(), serde_json::json!("t"));

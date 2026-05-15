@@ -1119,6 +1119,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -1668,6 +1671,9 @@ mod tests {
                     memory_kind: crate::models::MemoryKind::Observation,
                     entity_id: None,
                     persona_version: None,
+                    citations: Vec::new(),
+                    source_uri: None,
+                    source_span: None,
                 },
                 0.6,
             ),
@@ -1692,6 +1698,9 @@ mod tests {
                     memory_kind: crate::models::MemoryKind::Observation,
                     entity_id: None,
                     persona_version: None,
+                    citations: Vec::new(),
+                    source_uri: None,
+                    source_span: None,
                 },
                 0.4,
             ),
@@ -1816,6 +1825,9 @@ mod mock_tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 

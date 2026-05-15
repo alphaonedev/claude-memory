@@ -358,6 +358,9 @@ impl<'a> CompactionPass for ReflectionPass<'a> {
             memory_kind: MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         })
     }
 
@@ -891,6 +894,9 @@ mod tests {
             memory_kind: MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -1131,6 +1137,9 @@ mod tests {
             memory_kind: MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         crate::db::insert(conn, &mem).unwrap()
     }
@@ -1421,6 +1430,9 @@ mod tests {
             memory_kind: MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let id = crate::db::insert(&conn, &m).unwrap();
         let err = pass.verify(id).unwrap_err().to_string();
@@ -1541,6 +1553,9 @@ mod tests {
                 memory_kind: MemoryKind::Observation,
                 entity_id: None,
                 persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
             };
             crate::db::insert(&conn, &m).unwrap();
         }

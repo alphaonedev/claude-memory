@@ -373,6 +373,22 @@ pub(crate) fn row_to_memory(row: &rusqlite::Row) -> rusqlite::Result<Memory> {
         // column entirely — the `.ok()` fallthrough yields None.
         entity_id: row.get::<_, Option<String>>("entity_id").unwrap_or(None),
         persona_version: row.get::<_, Option<i32>>("persona_version").unwrap_or(None),
+        // v0.7.0 Form 4 — schema v38 fact-provenance columns. `citations`
+        // is JSON-encoded with SQL DEFAULT '[]', so legacy rows resolve
+        // to an empty vec; the `.ok()` fallthrough yields the same
+        // default on a pre-v38 row that lacks the column entirely.
+        // `source_uri` is a plain TEXT column (NULL on legacy rows);
+        // `source_span` is JSON `{start,end}` (NULL on legacy rows).
+        citations: row
+            .get::<_, String>("citations")
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default(),
+        source_uri: row.get::<_, Option<String>>("source_uri").unwrap_or(None),
+        source_span: row
+            .get::<_, Option<String>>("source_span")
+            .unwrap_or(None)
+            .and_then(|s| serde_json::from_str(&s).ok()),
     })
 }
 
@@ -392,9 +408,18 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
 
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
+    // v0.7.0 Form 4 — encode citations/source_span to JSON for the
+    // schema v38 TEXT columns. citations always lands as a JSON array
+    // (default `[]` when caller supplied nothing); source_span lands as
+    // `{start,end}` or NULL.
+    let citations_json = serde_json::to_string(&mem.citations)?;
+    let source_span_json = match mem.source_span {
+        Some(span) => Some(serde_json::to_string(&span)?),
+        None => None,
+    };
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = excluded.content,
             tags = excluded.tags,
@@ -436,7 +461,19 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             -- versioned titles so the conflict path is exercised only
             -- on accidental same-title collisions).
             entity_id = COALESCE(memories.entity_id, excluded.entity_id),
-            persona_version = COALESCE(memories.persona_version, excluded.persona_version)
+            persona_version = COALESCE(memories.persona_version, excluded.persona_version),
+            -- v0.7.0 Form 4 — fact-provenance: when the incoming row
+            -- carries a non-empty citations array, replace the stored
+            -- value (caller re-asserted provenance); otherwise keep
+            -- the existing value (silent merge would lose freshly-cited
+            -- evidence). source_uri / source_span follow COALESCE
+            -- semantics so a new write that omits them does not blank
+            -- out existing provenance pointers.
+            citations = CASE WHEN excluded.citations = '[]'
+                             THEN memories.citations
+                             ELSE excluded.citations END,
+            source_uri = COALESCE(excluded.source_uri, memories.source_uri),
+            source_span = COALESCE(excluded.source_span, memories.source_span)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -444,6 +481,7 @@ pub fn insert(conn: &Connection, mem: &Memory) -> Result<String> {
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
             mem.entity_id, mem.persona_version,
+            citations_json, mem.source_uri, source_span_json,
         ],
         |r| r.get(0),
     )?;
@@ -574,6 +612,16 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
             }
             let tags_json = serde_json::to_string(&mem.tags)?;
             let metadata_json = serde_json::to_string(&mem.metadata)?;
+            // v0.7.0 Form 4 — encode citations + source_span for the
+            // schema v38 TEXT columns. Mirrors the encode in
+            // `insert(...)` above; the ConflictMode::Error path lands
+            // here on the first-write happy path and must persist the
+            // provenance columns the caller supplied.
+            let citations_json = serde_json::to_string(&mem.citations)?;
+            let source_span_json = match mem.source_span {
+                Some(span) => Some(serde_json::to_string(&span)?),
+                None => None,
+            };
             // v0.7.0 L1-1 wave merge — include the `memory_kind` column.
             // This INSERT path was added by the fix-campaign R1-M3
             // (ConflictMode::Error refuses duplicates) and originally
@@ -584,8 +632,8 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
             // its `MemoryKind::Reflection` typing and the stored row
             // falls back to the column DEFAULT 'observation'.
             let actual_id: String = conn.query_row(
-                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+                "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
                  RETURNING id",
                 params![
                     mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -593,6 +641,7 @@ pub fn insert_with_conflict(conn: &Connection, mem: &Memory, mode: ConflictMode)
                     mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
                     metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
                     mem.entity_id, mem.persona_version,
+                    citations_json, mem.source_uri, source_span_json,
                 ],
                 |r| r.get(0),
             ).map_err(|e| {
@@ -1103,7 +1152,9 @@ pub fn search(
     let sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1
@@ -1468,6 +1519,8 @@ pub fn recall(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
                 m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span,
                 (fts.rank * -1)
                 + (m.priority * 0.5)
                 + (MIN(m.access_count, 50) * 0.1)
@@ -1507,10 +1560,12 @@ pub fn recall(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            // Index 16 = score (the trailing computed column). Bumped from
-            // 15 in v29 (Task 1/8) when `reflection_depth` was inserted
-            // between `metadata` and the score expression above.
-            let score: f64 = row.get(16)?;
+            // v0.7.0 Form 4 — name-based read for the trailing score
+            // column. Switched from positional `row.get(16)` after
+            // schema v38 (citations, source_uri, source_span) shifted
+            // the trailing column's index; name-based reads survive
+            // future column additions without further churn.
+            let score: f64 = row.get("score")?;
             Ok((mem, score))
         },
     )?;
@@ -1596,6 +1651,9 @@ pub fn promote_to_namespace(
         memory_kind: source.memory_kind.clone(),
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let actual_id = insert(conn, &clone)?;
     // Clone → source: derived_from. Safe to ignore if the link layer
@@ -1665,7 +1723,9 @@ pub fn find_contradictions(conn: &Connection, title: &str, namespace: &str) -> R
     let mut stmt = conn.prepare(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span
          FROM memories_fts fts
          JOIN memories m ON m.rowid = fts.rowid
          WHERE memories_fts MATCH ?1 AND m.namespace = ?2
@@ -3171,6 +3231,9 @@ pub fn entity_register(
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let id = insert(conn, &mem).context("insert entity memory")?;
         (id, true)
@@ -3998,6 +4061,9 @@ pub fn register_agent(
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     insert(conn, &mem)
@@ -4434,9 +4500,19 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
 
     let tags_json = serde_json::to_string(&mem.tags)?;
     let metadata_json = serde_json::to_string(&mem.metadata)?;
+    // v0.7.0 Form 4 — encode citations + source_span for the schema
+    // v38 TEXT columns on the federation merge path. The newer-wins
+    // CASE clauses below pick `excluded.citations` only when the
+    // incoming row is the winner; otherwise the existing row's
+    // citations are preserved.
+    let citations_json = serde_json::to_string(&mem.citations)?;
+    let source_span_json = match mem.source_span {
+        Some(span) => Some(serde_json::to_string(&span)?),
+        None => None,
+    };
     let actual_id: String = conn.query_row(
-        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)
+        "INSERT INTO memories (id, tier, namespace, title, content, tags, priority, confidence, source, access_count, created_at, updated_at, last_accessed_at, expires_at, metadata, reflection_depth, memory_kind, entity_id, persona_version, citations, source_uri, source_span)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22)
          ON CONFLICT(title, namespace) DO UPDATE SET
             content = CASE WHEN excluded.updated_at > memories.updated_at
                              OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
@@ -4487,7 +4563,18 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             -- once set so a federation merge can't drop the persona
             -- discriminator off a `memory_kind = 'persona'` row.
             entity_id = COALESCE(memories.entity_id, excluded.entity_id),
-            persona_version = COALESCE(memories.persona_version, excluded.persona_version)
+            persona_version = COALESCE(memories.persona_version, excluded.persona_version),
+            -- v0.7.0 Form 4 — fact-provenance: replace the stored
+            -- citations array only when the incoming row wins the
+            -- newer-wins tiebreak; source_uri / source_span follow
+            -- COALESCE semantics so a federation merge that lacks
+            -- provenance does not blank out a value the local row
+            -- already had.
+            citations = CASE WHEN excluded.updated_at > memories.updated_at
+                                  OR (excluded.updated_at = memories.updated_at AND excluded.id > memories.id)
+                             THEN excluded.citations ELSE memories.citations END,
+            source_uri = COALESCE(excluded.source_uri, memories.source_uri),
+            source_span = COALESCE(excluded.source_span, memories.source_span)
          RETURNING id",
         params![
             mem.id, mem.tier.as_str(), mem.namespace, mem.title, mem.content,
@@ -4495,6 +4582,7 @@ pub fn insert_if_newer(conn: &Connection, mem: &Memory) -> Result<String> {
             mem.created_at, mem.updated_at, mem.last_accessed_at, mem.expires_at,
             metadata_json, mem.reflection_depth, mem.memory_kind.as_str(),
             mem.entity_id, mem.persona_version,
+            citations_json, mem.source_uri, source_span_json,
         ],
         |r| r.get(0),
     )?;
@@ -4835,7 +4923,9 @@ pub fn recall_hybrid_with_telemetry(
     let fts_sql = format!(
         "SELECT m.id, m.tier, m.namespace, m.title, m.content, m.tags, m.priority,
                 m.confidence, m.source, m.access_count, m.created_at, m.updated_at,
-                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth, m.embedding,
+                m.last_accessed_at, m.expires_at, m.metadata, m.reflection_depth,
+                m.memory_kind, m.entity_id, m.persona_version,
+                m.citations, m.source_uri, m.source_span, m.embedding,
                 (fts.rank * -1) + (m.priority * 0.5) + (MIN(m.access_count, 50) * 0.1)
                 + (m.confidence * 2.0)
                 + (CASE m.tier WHEN 'long' THEN 3.0 WHEN 'mid' THEN 1.0 ELSE 0.0 END)
@@ -4896,10 +4986,12 @@ pub fn recall_hybrid_with_telemetry(
         ],
         |row| {
             let mem = row_to_memory(row)?;
-            // Index 17 = fts_score (the trailing computed column). Bumped
-            // from 16 in v29 (Task 1/8) when `reflection_depth` was inserted
-            // between `metadata` and `embedding` in the SELECT list above.
-            let fts_score: f64 = row.get(17)?;
+            // v0.7.0 Form 4 — name-based read for the trailing
+            // fts_score column. Same rationale as the other recall
+            // SELECT — schema v38 columns shifted the trailing
+            // computed column's index. Named reads survive future
+            // additive column drops.
+            let fts_score: f64 = row.get("fts_score")?;
             Ok((mem, fts_score))
         },
     )?;
@@ -7225,6 +7317,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -10282,6 +10377,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -10417,6 +10515,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let standard_id = insert(&conn, &standard).unwrap();
         set_namespace_standard(&conn, parent_ns, &standard_id, None).unwrap();
@@ -12109,6 +12210,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let ref_mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),
@@ -12130,6 +12234,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
 
         insert(&conn, &obs).unwrap();
@@ -12192,6 +12299,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let id = insert(&conn, &mem).unwrap();
         let got = get(&conn, &id)
@@ -12234,6 +12344,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         insert(&conn, &mem_reflection).unwrap();
 
@@ -12258,6 +12371,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         insert(&conn, &mem_obs).unwrap();
 

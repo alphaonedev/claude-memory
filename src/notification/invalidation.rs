@@ -247,6 +247,9 @@ fn write_notification(
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     crate::storage::insert(conn, &mem)?;
@@ -326,6 +329,9 @@ mod tests {
             memory_kind: kind,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 

@@ -723,6 +723,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let id = db::insert(&conn, &mem).expect("db::insert standard");
         db::set_namespace_standard(&conn, namespace, &id, None).expect("set_namespace_standard");

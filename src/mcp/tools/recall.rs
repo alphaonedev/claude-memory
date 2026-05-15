@@ -217,6 +217,19 @@ pub fn handle_recall(
     // time-window, tier, and the existing visibility predicate.
     let include_archived = params["include_archived"].as_bool().unwrap_or(false);
 
+    // v0.7.0 Form 4 (issue #757) — fact-provenance post-filters.
+    // `has_citations` keeps only memories with a non-empty citations
+    // array; `source_uri_prefix` keeps only memories whose
+    // `source_uri` column begins with the supplied string. Both
+    // compose with the existing SQL-side filters; we run them in
+    // Rust after the recall returns so the substrate signature
+    // doesn't grow another two positional args. Tool-count baseline
+    // preserved (no new MCP tool).
+    let has_citations_filter = params["has_citations"].as_bool().unwrap_or(false);
+    let source_uri_prefix: Option<String> = params["source_uri_prefix"]
+        .as_str()
+        .map(std::string::ToString::to_string);
+
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
         .as_array()
@@ -349,6 +362,11 @@ pub fn handle_recall(
                     include_archived,
                 )
                 .map_err(|e| e.to_string())?;
+                let results = crate::cli::recall::apply_form4_recall_filters(
+                    results,
+                    has_citations_filter,
+                    source_uri_prefix.as_deref(),
+                );
 
                 // Apply cross-encoder reranking if available
                 if let Some(ce) = reranker {
@@ -397,6 +415,11 @@ pub fn handle_recall(
         include_archived,
     )
     .map_err(|e| e.to_string())?;
+    let results = crate::cli::recall::apply_form4_recall_filters(
+        results,
+        has_citations_filter,
+        source_uri_prefix.as_deref(),
+    );
     let memories = scored_memories(results);
     let mut resp = json!({"memories": memories, "count": memories.len(), "mode": "keyword"});
     decorate_budget(&mut resp, &outcome);
@@ -450,6 +473,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 

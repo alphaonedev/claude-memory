@@ -317,6 +317,9 @@ pub fn mine(
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
 
         match db::insert(&conn, &mem) {

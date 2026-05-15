@@ -412,6 +412,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -438,6 +441,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -464,6 +470,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         assert!(!needs_curation(&mem, &CuratorConfig::default()));
     }
@@ -490,6 +499,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let mut cfg = CuratorConfig {
             include_namespaces: vec!["other".to_string()],
@@ -522,6 +534,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let cfg = CuratorConfig {
             exclude_namespaces: vec!["noisy".to_string()],
@@ -575,6 +590,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -791,6 +809,9 @@ mod tests {
                 memory_kind: crate::models::MemoryKind::Observation,
                 entity_id: None,
                 persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
             };
             db::insert(&conn, &mem).unwrap();
         }
@@ -1072,6 +1093,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -1432,6 +1456,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let m_b = Memory {
             id: "smart-b".to_string(),
@@ -1481,6 +1508,9 @@ fn apply_rollback_handles_storage_error() {
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     // Insert the memory so it exists
@@ -1534,6 +1564,9 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     let mem2 = Memory {
@@ -1556,6 +1589,9 @@ fn consolidate_pair_skips_when_namespaces_disagree() {
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     db::insert(&conn, &mem1).unwrap();

@@ -115,6 +115,9 @@ fn insert_long_source(conn: &rusqlite::Connection, ns: &str) -> String {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &mem).expect("seed source")
 }
@@ -415,6 +418,9 @@ fn test_cli_atomise_source_too_small_returns_informational() {
             memory_kind: MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         db::insert(&conn, &mem).expect("seed tiny")
     };

@@ -115,6 +115,17 @@ const MIGRATION_V35_ATOMISATION: &str =
 /// idempotent batch.
 const MIGRATION_V36_PERSONA: &str = include_str!("../../migrations/postgres/0018_v07_persona.sql");
 
+/// v0.7.0 Form 4 — fact-provenance closeout (issue #757). Adds
+/// `memories.citations TEXT NOT NULL DEFAULT '[]'` (JSON array of
+/// Citation objects), `memories.source_uri TEXT NULL` (first-class
+/// URI-form pointer to the cited source body), and
+/// `memories.source_span TEXT NULL` (JSON `{start,end}` byte-range
+/// into the parent source body). Mirrors SQLite schema v38. Postgres
+/// supports `ADD COLUMN IF NOT EXISTS` so the DDL is a pure
+/// idempotent batch.
+const MIGRATION_V37_FORM4_PROVENANCE: &str =
+    include_str!("../../migrations/postgres/0019_v07_form4_provenance.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -195,7 +206,16 @@ const MIGRATION_V36_PERSONA: &str = include_str!("../../migrations/postgres/0018
 //       `idx_personas_by_entity`. Mirrors SQLite schema v37. Pure
 //       idempotent ADD COLUMN IF NOT EXISTS + CREATE INDEX IF NOT
 //       EXISTS — no backfill needed (non-Persona rows keep NULL).
-const CURRENT_SCHEMA_VERSION: i32 = 36;
+// v37 = v0.7.0 Form 4 — fact-provenance closeout (issue #757). Adds
+//       `memories.citations TEXT NOT NULL DEFAULT '[]'`,
+//       `memories.source_uri TEXT NULL`, and
+//       `memories.source_span TEXT NULL` plus the
+//       `idx_memories_source_uri` partial index covering the
+//       `--source-uri-prefix` recall filter. Mirrors SQLite schema
+//       v38. Pure additive ADD COLUMN IF NOT EXISTS + CREATE INDEX
+//       IF NOT EXISTS — no backfill required (legacy rows default to
+//       empty citations array and NULL URI/span).
+const CURRENT_SCHEMA_VERSION: i32 = 37;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -602,6 +622,9 @@ impl PostgresStore {
         if current_version < 36 {
             self.migrate_v36().await?;
         }
+        if current_version < 37 {
+            self.migrate_v37().await?;
+        }
 
         Ok(())
     }
@@ -975,6 +998,42 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v36 applied (persona-as-artifact entity_id + persona_version)"
+        );
+        Ok(())
+    }
+
+    /// v37 — Form 4 fact-provenance closeout (issue #757).
+    ///
+    /// Adds the `memories.citations` (JSON array of Citation objects,
+    /// default `[]`), `memories.source_uri` (first-class URI-form
+    /// pointer), and `memories.source_span` (JSON byte-range into
+    /// the parent source body) columns plus the partial index
+    /// `idx_memories_source_uri` covering the `--source-uri-prefix`
+    /// recall filter. Mirrors SQLite schema v38. Pure additive
+    /// ADD COLUMN IF NOT EXISTS + CREATE INDEX IF NOT EXISTS — no
+    /// application-side backfill (legacy rows take the SQL DEFAULT
+    /// for citations and NULL for the URI/span columns).
+    async fn migrate_v37(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v37 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V37_FORM4_PROVENANCE)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v37 form4 provenance", e))?;
+
+        record_schema_version(&mut tx, 37).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v37 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v37 applied (form4 fact-provenance citations + source_uri + source_span)"
         );
         Ok(())
     }
@@ -3611,6 +3670,22 @@ impl PostgresStore {
             persona_version: row
                 .try_get::<Option<i32>, _>("persona_version")
                 .unwrap_or(None),
+            // v0.7.0 Form 4 — Postgres v37 fact-provenance columns. The
+            // SQL DEFAULT '[]' on `citations` keeps legacy rows visible
+            // as the empty vec; pre-v37 backups missing the column hit
+            // the `.unwrap_or_default()` fallthrough below.
+            citations: row
+                .try_get::<String, _>("citations")
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default(),
+            source_uri: row
+                .try_get::<Option<String>, _>("source_uri")
+                .unwrap_or(None),
+            source_span: row
+                .try_get::<Option<String>, _>("source_span")
+                .unwrap_or(None)
+                .and_then(|s| serde_json::from_str(&s).ok()),
         })
     }
 
@@ -6245,6 +6320,9 @@ impl MemoryStore for PostgresStore {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
 
         self.store(ctx, &mem).await.map(|_| ())
@@ -6762,6 +6840,9 @@ impl MemoryStore for PostgresStore {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         self.store(ctx, &mem).await
     }
@@ -8777,6 +8858,9 @@ mod tests {
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 
@@ -9072,7 +9156,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 36);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 37);
     }
 
     #[tokio::test]

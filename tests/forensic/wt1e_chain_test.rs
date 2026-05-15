@@ -130,6 +130,9 @@ fn seed_long_source(conn: &Connection, ns: &str, keyword: &str) -> String {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &mem).expect("seed")
 }

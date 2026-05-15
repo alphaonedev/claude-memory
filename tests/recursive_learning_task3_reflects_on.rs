@@ -71,6 +71,9 @@ fn make_memory(namespace: &str, title: &str, reflection_depth: i32) -> Memory {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 

@@ -47,7 +47,7 @@ use chrono::Utc;
 use rusqlite::{Connection, params};
 
 use crate::identity::keypair::AgentKeypair;
-use crate::models::{Memory, MemoryKind, MemoryLinkRelation};
+use crate::models::{Memory, MemoryKind, MemoryLinkRelation, SourceSpan};
 use crate::signed_events::{SignedEvent, append_signed_event, payload_hash};
 use crate::storage as db;
 use curator::Curator;
@@ -334,12 +334,26 @@ impl Atomiser {
         // first-class memory_store ops" contract). A governance refusal
         // mid-batch surfaces with the atom index; PRIOR atoms remain
         // committed (they were valid writes by themselves).
+        //
+        // v0.7.0 Form 4 (issue #757) — atom-grain span fact-provenance.
+        // We compute a `SourceSpan` byte-range for each atom into the
+        // parent source body. The substring search advances a running
+        // cursor so duplicate prefixes across atoms (e.g. two atoms
+        // that both quote the same phrase) get assigned non-overlapping
+        // spans in the order the curator emitted them. Atoms whose
+        // text cannot be located fall back to `None` for the span
+        // (curator may have paraphrased) — the substrate still records
+        // `source_uri = doc:<parent>` so the lineage edge is preserved
+        // even when the byte-range is unrecoverable.
         let mut atom_ids: Vec<String> = Vec::with_capacity(atom_count);
+        let mut search_cursor: usize = 0;
         for (idx, atom) in atoms.iter().enumerate() {
+            let span = compute_atom_span(&source.content, &atom.text, &mut search_cursor);
             let atom_id = write_atom(
                 conn,
                 &source,
                 atom,
+                span,
                 calling_agent_id,
                 self.keypair.as_deref(),
             )
@@ -425,6 +439,7 @@ fn write_atom(
     conn: &Connection,
     source: &Memory,
     atom: &curator::Atom,
+    span: Option<SourceSpan>,
     calling_agent_id: &str,
     keypair: Option<&AgentKeypair>,
 ) -> anyhow::Result<String> {
@@ -493,6 +508,17 @@ fn write_atom(
         // persona_version stay NULL on the atom row.
         entity_id: None,
         persona_version: None,
+        // v0.7.0 Form 4 — atom-grain fact-provenance. Atoms inherit
+        // the parent's citations array (the same supporting evidence
+        // applies to every decomposed proposition) and stamp the
+        // parent memory id under the `doc:` scheme so the lineage is
+        // discoverable via the `--source-uri-prefix` recall filter.
+        // `source_span` carries the byte-range into the parent body
+        // when the curator's text was located verbatim; otherwise
+        // `None` (curator may have paraphrased).
+        citations: source.citations.clone(),
+        source_uri: Some(format!("doc:{}", source.id)),
+        source_span: span,
     };
 
     let actual_id = db::insert(conn, &mem)?;
@@ -625,6 +651,39 @@ fn emit_atomisation_complete_event(
     };
     append_signed_event(conn, &event)?;
     Ok(())
+}
+
+/// v0.7.0 Form 4 (issue #757) — locate an atom's text inside its
+/// parent source body and emit the byte-range as a [`SourceSpan`].
+///
+/// Strategy:
+/// 1. Search verbatim for `atom_text` in `source[cursor..]`. When
+///    found, advance the cursor to one past the start of the hit so
+///    a subsequent atom that quotes the same prefix doesn't latch
+///    onto the same offset.
+/// 2. When the verbatim search misses (curator paraphrased, or
+///    whitespace differs), fall back to a trimmed prefix-search
+///    (first 32 chars of the atom). Trimming whitespace + lowercasing
+///    is intentionally NOT performed — we want exact byte-offsets
+///    into the unmodified source.
+/// 3. Return `None` when both searches miss. The substrate still
+///    stamps `source_uri` so the lineage edge survives without the
+///    span. This is the documented fallback contract for
+///    curator-paraphrase atoms.
+fn compute_atom_span(source_body: &str, atom_text: &str, cursor: &mut usize) -> Option<SourceSpan> {
+    let needle = atom_text.trim();
+    if needle.is_empty() {
+        return None;
+    }
+    let start = if *cursor < source_body.len() {
+        source_body[*cursor..].find(needle).map(|off| *cursor + off)
+    } else {
+        None
+    };
+    let start = start.or_else(|| source_body.find(needle))?;
+    let end = start + needle.len();
+    *cursor = start.saturating_add(1);
+    Some(SourceSpan { start, end })
 }
 
 // ---------------------------------------------------------------------------

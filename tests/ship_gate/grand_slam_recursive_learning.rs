@@ -127,6 +127,9 @@ fn make_observation(namespace: &str, topic: &str, idx: usize) -> Memory {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 
@@ -163,6 +166,9 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_policy insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");
@@ -194,6 +200,9 @@ fn seed_governance_json(conn: &Connection, namespace: &str, governance: &serde_j
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let std_id = db::insert(conn, &standard).expect("seed_governance_json insert");
     db::set_namespace_standard(conn, namespace, &std_id, None).expect("set_namespace_standard");

@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 37).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 38).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -56,7 +56,22 @@ CREATE TABLE IF NOT EXISTS memories (
     -- generation counter. Pure additive — non-Persona rows keep NULL
     -- payloads with no backfill.
     entity_id       TEXT,
-    persona_version INTEGER
+    persona_version INTEGER,
+    -- v0.7.0 Form 4 (schema v38) — fact-provenance closeout. Citations
+    -- is a JSON-encoded array of `Citation` objects ({uri, accessed_at,
+    -- hash?, span?}) carrying first-class provenance pointers per
+    -- memory; legacy rows default to '[]'. `source_uri` is a first-class
+    -- URI-form pointer to the cited source body (distinct from the
+    -- existing `source` role-label column); valid schemes are `uri:`
+    -- (HTTP URL), `doc:` (substrate doc id), `file:` (filesystem path).
+    -- `source_span` is a JSON-encoded `{start, end}` byte-range into
+    -- the parent source body, populated by the WT-1-B atomisation
+    -- writer for each atom (atom-grain span fact-provenance). All
+    -- three columns are additive on legacy rows. See migration
+    -- `0032_v07_form4_provenance.sql` for the supporting index.
+    citations       TEXT NOT NULL DEFAULT '[]',
+    source_uri      TEXT,
+    source_span     TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_tier ON memories(tier);
@@ -79,6 +94,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
 -- v37 ALTER fires on a legacy DB). Fresh installs land the column
 -- via the CREATE TABLE above, then the migrate step's v37 arm
 -- creates the index a few statements later.
+-- v38 (Form 4) partial index covering the `--source-uri-prefix`
+-- recall filter. Mirrors the persona pattern: legacy rows have NULL
+-- `source_uri`, the partial predicate keeps the index footprint at
+-- zero until callers start writing URIs.
+CREATE INDEX IF NOT EXISTS idx_memories_source_uri
+    ON memories(source_uri) WHERE source_uri IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -280,7 +301,18 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       NOT EXISTS`); the SQL file holds the supporting partial
 //       index. Substrate for Tencent-pattern L3 personas; non-
 //       Persona rows keep NULL payloads with no backfill.
-const CURRENT_SCHEMA_VERSION: i64 = 37;
+// v38 = v0.7.0 Form 4 — fact-provenance closeout (issue #757). Adds
+//       `memories.citations TEXT NOT NULL DEFAULT '[]'` (JSON array of
+//       Citation objects), `memories.source_uri TEXT NULL` (first-class
+//       URI-form pointer to the cited source body, distinct from the
+//       existing `source` role-label column), and
+//       `memories.source_span TEXT NULL` (JSON-encoded `{start,end}`
+//       byte-range into the parent source body, populated by the
+//       WT-1-B atomisation writer for atom-grain span fact-provenance).
+//       The ALTERs are emitted from Rust (SQLite has no `ADD COLUMN IF
+//       NOT EXISTS`); the SQL file holds the supporting partial index
+//       `idx_memories_source_uri`. Pure additive on legacy rows.
+const CURRENT_SCHEMA_VERSION: i64 = 38;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -510,6 +542,13 @@ END;
 // this file holds the idempotent partial index that makes the
 // per-entity persona lookup cheap.
 const MIGRATION_V37_SQLITE: &str = include_str!("../../migrations/sqlite/0031_v07_persona.sql");
+// v0.7.0 Form 4 — fact-provenance closeout. ALTER TABLEs adding
+// `citations`, `source_uri`, `source_span` columns are emitted from
+// Rust (SQLite has no `ADD COLUMN IF NOT EXISTS`); this file holds
+// the supporting partial index on `source_uri` covering the recall
+// `--source-uri-prefix` filter.
+const MIGRATION_V38_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0032_v07_form4_provenance.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1359,6 +1398,42 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
             conn.execute_batch(MIGRATION_V37_SQLITE)?;
         }
 
+        if version < 38 {
+            // v0.7.0 Form 4 — fact-provenance closeout (issue #757).
+            // Probe for `citations`, `source_uri`, `source_span`
+            // columns on `memories` and ADD them when absent. SQLite
+            // has no `ADD COLUMN IF NOT EXISTS`, so the probe lives in
+            // Rust; the partial index on `source_uri` lives in the
+            // .sql file.
+            let mut has_citations = false;
+            let mut has_source_uri = false;
+            let mut has_source_span = false;
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)")?;
+            let cols = stmt.query_map([], |row| row.get::<_, String>(1))?;
+            for col in cols {
+                match col?.as_str() {
+                    "citations" => has_citations = true,
+                    "source_uri" => has_source_uri = true,
+                    "source_span" => has_source_span = true,
+                    _ => {}
+                }
+            }
+            drop(stmt);
+            if !has_citations {
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN citations TEXT NOT NULL DEFAULT '[]'",
+                    [],
+                )?;
+            }
+            if !has_source_uri {
+                conn.execute("ALTER TABLE memories ADD COLUMN source_uri TEXT", [])?;
+            }
+            if !has_source_span {
+                conn.execute("ALTER TABLE memories ADD COLUMN source_span TEXT", [])?;
+            }
+            conn.execute_batch(MIGRATION_V38_SQLITE)?;
+        }
+
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
             "INSERT INTO schema_version (version) VALUES (?1)",
@@ -1564,7 +1639,7 @@ mod tests {
         // other is a documented foot-gun. We pin the relationship
         // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 37,
+            CURRENT_SCHEMA_VERSION, 38,
             "module docstring advertises 37; bump the docstring when this number changes"
         );
     }

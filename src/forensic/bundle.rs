@@ -208,6 +208,20 @@ pub struct MemoryEnvelope {
     /// `--include-atomisation-chain=false`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub atomisation: Option<AtomisationEnvelope>,
+    /// v0.7.0 Form 4 (issue #757) — fact-provenance citations.
+    /// Always emitted (defaults to an empty array) so auditors can
+    /// rely on the field's presence regardless of row vintage.
+    /// Mirrors [`crate::models::Memory::citations`].
+    #[serde(default)]
+    pub citations: Vec<crate::models::Citation>,
+    /// v0.7.0 Form 4 — first-class URI-form pointer to the cited
+    /// source body. Omitted when NULL on the underlying row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// v0.7.0 Form 4 — byte-range into the parent source body.
+    /// Omitted when NULL on the underlying row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<crate::models::SourceSpan>,
 }
 
 /// v0.7.0 WT-1-E — per-memory atomisation enrichment block. Carries
@@ -423,6 +437,13 @@ pub fn build_files(
                 updated_at: mem.updated_at.clone(),
                 metadata: mem.metadata.clone(),
                 atomisation,
+                // v0.7.0 Form 4 (issue #757) — fact-provenance fields
+                // ride alongside the existing envelope shape. Citations
+                // always lands (defaults to empty); source_uri /
+                // source_span emit only when populated.
+                citations: mem.citations.clone(),
+                source_uri: mem.source_uri.clone(),
+                source_span: mem.source_span,
             };
             let bytes = serde_json::to_vec_pretty(&env).context("serialise MemoryEnvelope")?;
             files.insert(format!("memories/{}.json", mem.id), bytes);
@@ -1476,6 +1497,9 @@ mod tests {
             memory_kind: kind,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
             ..Default::default()
         };
         db::insert(conn, &mem).expect("insert");

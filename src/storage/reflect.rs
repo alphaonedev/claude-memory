@@ -488,6 +488,9 @@ pub fn reflect_with_hooks(
         memory_kind: MemoryKind::Reflection,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     // Atomic boundary: insert the reflection row + N `reflects_on`

@@ -182,6 +182,74 @@ pub struct Memory {
     /// queryable for audit / rollback.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub persona_version: Option<i32>,
+    /// v0.7.0 Form 4 (issue #757) — fact-provenance citations array.
+    /// Each entry carries a typed [`Citation`] envelope (uri,
+    /// accessed_at, optional hash, optional span). Stored on the
+    /// `memories.citations` TEXT column (schema v38) as a JSON-encoded
+    /// array — legacy rows default to an empty vector via the SQL
+    /// `DEFAULT '[]'` clause and the serde default below. Validator
+    /// surface lives at `crate::validate::validate_citation`.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// v0.7.0 Form 4 (issue #757) — first-class URI-form pointer to
+    /// the cited source body. Distinct from the role-label `source`
+    /// column. Accepted schemes: `uri:` (HTTP URL), `doc:` (substrate
+    /// doc id), `file:` (filesystem path). Validator surface lives at
+    /// `crate::validate::validate_source_uri`. Mapped onto the
+    /// `memories.source_uri` TEXT column (schema v38). NULL on legacy
+    /// rows and on rows that do not yet carry a URI form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uri: Option<String>,
+    /// v0.7.0 Form 4 (issue #757) — byte-range into the parent source
+    /// body. Populated by the WT-1-B atomisation writer for each atom
+    /// (atom-grain span fact-provenance) and may be set by callers
+    /// who can pin the offset of a memory inside its referenced
+    /// source. Mapped onto the `memories.source_span` TEXT column
+    /// (schema v38) as a JSON `{start, end}` envelope. Validator
+    /// surface lives at `crate::validate::validate_source_span`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_span: Option<SourceSpan>,
+}
+
+/// v0.7.0 Form 4 (issue #757) — fact-provenance citation envelope.
+///
+/// One entry inside `Memory::citations`. The shape mirrors common
+/// scholarly-citation needs while staying substrate-friendly:
+///
+/// * `uri` — URL, `doc:<id>` substrate pointer, or `file:<path>`. The
+///   validator (`crate::validate::validate_citation`) rejects bare
+///   strings; callers must use one of the typed schemes.
+/// * `accessed_at` — RFC3339 timestamp at which the cited source was
+///   read by the agent. Captures the fact-grain "when did this claim
+///   become known to me" datum.
+/// * `hash` — optional SHA-256 of the cited content. Lets a downstream
+///   verifier confirm the source has not drifted since capture.
+/// * `span` — optional byte-range pinning the specific quote inside
+///   the cited body. Composes with `Memory::source_span` for
+///   atom-grain lineage (the parent's span points into the source,
+///   the atom's `source_span` points into the parent's body).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Citation {
+    pub uri: String,
+    pub accessed_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+}
+
+/// v0.7.0 Form 4 (issue #757) — byte-range envelope used by
+/// `Memory::source_span` and `Citation::span`.
+///
+/// `start` and `end` are zero-based byte offsets into the parent
+/// body. The half-open convention `[start, end)` matches Rust's
+/// slice semantics, so the cited slice is `body[start..end]`. The
+/// validator (`crate::validate::validate_source_span`) requires
+/// `start < end` and bounds both within `usize::MAX`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SourceSpan {
+    pub start: usize,
+    pub end: usize,
 }
 
 impl Default for Memory {
@@ -210,6 +278,9 @@ impl Default for Memory {
             memory_kind: MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     }
 }
@@ -264,6 +335,19 @@ pub struct CreateMemory {
     /// caller can pass to a follow-up `memory_consolidate`.
     #[serde(default)]
     pub detect_conflicts: Option<bool>,
+    /// v0.7.0 Form 4 (issue #757) — fact-provenance citations
+    /// supplied at write time. Each entry must satisfy
+    /// `validate::validate_citation`. Empty by default.
+    #[serde(default)]
+    pub citations: Vec<Citation>,
+    /// v0.7.0 Form 4 — optional URI-form pointer to the cited source
+    /// body. Must satisfy `validate::validate_source_uri` when set.
+    #[serde(default)]
+    pub source_uri: Option<String>,
+    /// v0.7.0 Form 4 — optional byte-range into the parent source
+    /// body. Must satisfy `validate::validate_source_span` when set.
+    #[serde(default)]
+    pub source_span: Option<SourceSpan>,
 }
 
 fn default_tier() -> Tier {
@@ -387,6 +471,15 @@ pub struct RecallQuery {
     /// Default `false` preserves v0.6.x recall semantics exactly.
     #[serde(default)]
     pub session_default: Option<bool>,
+    /// v0.7.0 Form 4 (issue #757) — restrict to memories whose
+    /// `citations` array is non-empty. Composes with the other
+    /// filters; default `None` preserves v0.7.0 recall semantics.
+    #[serde(default)]
+    pub has_citations: Option<bool>,
+    /// v0.7.0 Form 4 (issue #757) — restrict to memories whose
+    /// `source_uri` column begins with this exact prefix.
+    #[serde(default)]
+    pub source_uri_prefix: Option<String>,
 }
 
 #[allow(clippy::unnecessary_wraps)]
@@ -429,6 +522,15 @@ pub struct RecallBody {
     /// defaults. Default `false` preserves v0.6.x recall semantics.
     #[serde(default)]
     pub session_default: Option<bool>,
+    /// v0.7.0 Form 4 (issue #757) — restrict to memories whose
+    /// `citations` array is non-empty. Composes with the other
+    /// filters.
+    #[serde(default)]
+    pub has_citations: Option<bool>,
+    /// v0.7.0 Form 4 (issue #757) — restrict to memories whose
+    /// `source_uri` column begins with this exact prefix.
+    #[serde(default)]
+    pub source_uri_prefix: Option<String>,
 }
 
 impl RecallBody {

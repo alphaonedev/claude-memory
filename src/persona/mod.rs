@@ -305,6 +305,9 @@ impl<'a> PersonaGenerator<'a> {
             memory_kind: MemoryKind::Persona,
             entity_id: Some(entity_id.to_string()),
             persona_version: Some(version),
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
 
         let persona_id = db::insert(self.conn, &persona_mem)
@@ -677,6 +680,9 @@ mod tests {
             memory_kind: MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         db::insert(conn, &mem).unwrap()
     }
@@ -760,6 +766,9 @@ mod tests {
             memory_kind: MemoryKind::Persona,
             entity_id: Some("alice".into()),
             persona_version: Some(1),
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         db::insert(&conn, &mem).unwrap();
         assert_eq!(next_version(&conn, "alice", "team/alpha").unwrap(), 2);

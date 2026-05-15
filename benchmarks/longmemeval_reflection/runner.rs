@@ -803,6 +803,9 @@ where
             memory_kind: MemoryKind::Reflection,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         }
     };
     let imported_id = db::insert(&conn, &imported_sibling)?;

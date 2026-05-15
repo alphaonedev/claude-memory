@@ -119,7 +119,21 @@ CREATE TABLE IF NOT EXISTS memories (
     -- rows; every observation/reflection keeps NULL. Fresh schemas carry
     -- these inline; existing schemas pick them up via migrate_v36().
     entity_id         TEXT,
-    persona_version   INTEGER
+    persona_version   INTEGER,
+    -- v0.7.0 Form 4 (schema v37 postgres / v38 sqlite, issue #757) —
+    -- fact-provenance closeout. `citations` is a JSON-encoded array
+    -- (TEXT, not JSONB, to mirror SQLite's TEXT column) of Citation
+    -- objects ({uri, accessed_at, hash?, span?}) — first-class
+    -- per-memory provenance pointers. `source_uri` is a URI-form
+    -- pointer (uri:/doc:/file:) to the cited source body, distinct
+    -- from the role-label `source` column. `source_span` is a JSON
+    -- {start, end} byte-range into the parent source body, populated
+    -- by the WT-1-B atomisation writer for atom-grain provenance.
+    -- Fresh schemas carry these inline; existing schemas pick them up
+    -- via migrate_v37().
+    citations         TEXT NOT NULL DEFAULT '[]',
+    source_uri        TEXT,
+    source_span       TEXT
 );
 
 -- v0.6.0 blocker #294 fix: upsert contract is `(title, namespace)`.
@@ -164,6 +178,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
 -- observation/reflection-dominant workloads.
 CREATE INDEX IF NOT EXISTS idx_personas_by_entity
     ON memories(entity_id, namespace) WHERE memory_kind = 'persona';
+-- v0.7.0 Form 4 (schema v37 postgres / v38 sqlite) — partial index
+-- covering the `--source-uri-prefix` recall filter. Legacy rows
+-- have NULL `source_uri` so the partial predicate keeps the index
+-- footprint at zero on every pre-v37 database.
+CREATE INDEX IF NOT EXISTS idx_memories_source_uri
+    ON memories(source_uri) WHERE source_uri IS NOT NULL;
 
 -- Full-text search. English stemming; matches the SQLite FTS5 setup.
 CREATE INDEX IF NOT EXISTS memories_content_fts ON memories

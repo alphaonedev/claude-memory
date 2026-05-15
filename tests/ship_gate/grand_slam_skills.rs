@@ -91,6 +91,9 @@ fn insert_observation(conn: &rusqlite::Connection, title: &str, ns: &str, body: 
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &m).expect("insert observation")
 }

@@ -113,6 +113,9 @@ fn make_observation(ns: &str, topic: &str, idx: usize) -> Memory {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 
@@ -396,6 +399,9 @@ fn set_namespace_max_reflection_depth(conn: &rusqlite::Connection, namespace: &s
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let _ = db::insert(conn, &mem); // best-effort; substrate uses
     // resolve_governance_policy which

@@ -60,6 +60,9 @@ fn insert_memory(conn: &rusqlite::Connection, ns: &str, depth: i32, kind: Memory
         memory_kind: kind,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
         ..Default::default()
     };
     db::insert(conn, &mem).expect("insert");

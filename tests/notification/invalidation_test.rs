@@ -61,6 +61,9 @@ fn make_mem(title: &str, namespace: &str, kind: MemoryKind) -> Memory {
         memory_kind: kind,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 

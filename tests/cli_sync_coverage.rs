@@ -83,6 +83,9 @@ fn seed(db_path: &std::path::Path, ns: &str, title: &str, content: &str) -> Stri
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }
@@ -502,6 +505,9 @@ fn dry_run_classifies_update_when_remote_newer() {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let mut mem_remote = mem_local.clone();
     mem_remote.content = "new".to_string();
@@ -572,6 +578,9 @@ fn dry_run_classifies_pull_noop_and_push_update() {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     // Local: newer (same id)
     let mut mem_local = mem_remote.clone();
@@ -632,6 +641,9 @@ fn restamp_agent_id_with_non_object_metadata_is_safe() {
             memory_kind: ai_memory::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         // db::insert may reject non-object metadata via JSON serialization;
         // if so, fall back to inserting a row whose metadata becomes

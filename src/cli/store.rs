@@ -152,6 +152,9 @@ pub fn run(
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     // W5b/C5: governance enforcement routes through `cli::governance::enforce`

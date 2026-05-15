@@ -463,6 +463,9 @@ pub async fn create_memory(
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         let ctx = crate::store::CallerContext::for_agent(agent_id.clone());
 
@@ -755,6 +758,9 @@ pub async fn create_memory(
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     // Task 1.9: governance enforcement (store-side).
@@ -2897,6 +2903,8 @@ pub async fn recall_memories_get(
         p.as_agent.as_deref(),
         p.budget_tokens,
         tier_resolved.as_deref(),
+        p.has_citations.unwrap_or(false),
+        p.source_uri_prefix.as_deref(),
     )
     .await
 }
@@ -2945,6 +2953,8 @@ pub async fn recall_memories_post(
         body.as_agent.as_deref(),
         body.budget_tokens,
         tier_resolved.as_deref(),
+        body.has_citations.unwrap_or(false),
+        body.source_uri_prefix.as_deref(),
     )
     .await
 }
@@ -2984,6 +2994,12 @@ async fn recall_response(
     // `db::recall` / `db::recall_hybrid` functions do not expose a
     // tier filter parameter.
     recall_scope_tier: Option<&str>,
+    // v0.7.0 Form 4 (issue #757) — fact-provenance post-filters.
+    // Applied in Rust after the substrate-level recall returns so
+    // the existing `db::recall` / `db::recall_hybrid` signatures
+    // stay stable. Composes with every other filter.
+    has_citations: bool,
+    source_uri_prefix: Option<&str>,
 ) -> axum::response::Response {
     // `recall_scope_tier` is consumed only on the postgres SAL branch
     // (line 3026). Suppress the unused-variable lint when the sal
@@ -3063,6 +3079,16 @@ async fn recall_response(
             .await
         {
             Ok(scored_pairs) => {
+                // v0.7.0 Form 4 (issue #757) — fact-provenance post-filter
+                // applies on the postgres SAL path too. Touch ops fire on
+                // the FILTERED set so a memory the caller filtered out by
+                // provenance does not leak through to the access_count
+                // ladder.
+                let scored_pairs = crate::cli::recall::apply_form4_recall_filters(
+                    scored_pairs,
+                    has_citations,
+                    source_uri_prefix,
+                );
                 let touch_ids: Vec<String> =
                     scored_pairs.iter().map(|(m, _)| m.id.clone()).collect();
                 let scored: Vec<serde_json::Value> = scored_pairs
@@ -3158,6 +3184,9 @@ async fn recall_response(
 
     match result {
         Ok((r, outcome)) => {
+            // v0.7.0 Form 4 (issue #757) — fact-provenance post-filter.
+            let r =
+                crate::cli::recall::apply_form4_recall_filters(r, has_citations, source_uri_prefix);
             let scored: Vec<serde_json::Value> = r
                 .iter()
                 .map(|(m, s)| {
@@ -4164,6 +4193,9 @@ pub async fn entity_register(
             memory_kind: crate::models::MemoryKind::Observation,
             entity_id: None,
             persona_version: None,
+            citations: Vec::new(),
+            source_uri: None,
+            source_span: None,
         };
         // F-A2A1.5 (#705) — governance enforcement on the postgres
         // entity-register path. Mirrors the F-A2A1.2 delete/promote gates
@@ -6749,6 +6781,9 @@ pub async fn bulk_create(
                 memory_kind: crate::models::MemoryKind::Observation,
                 entity_id: None,
                 persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
             };
 
             // F-A2A1.5 (#705) — governance enforcement on the postgres
@@ -6854,6 +6889,9 @@ pub async fn bulk_create(
                 memory_kind: crate::models::MemoryKind::Observation,
                 entity_id: None,
                 persona_version: None,
+                citations: Vec::new(),
+                source_uri: None,
+                source_span: None,
             };
             match db::insert(&lock.0, &mem) {
                 Ok(_) => created_mems.push(mem),

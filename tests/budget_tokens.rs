@@ -84,6 +84,9 @@ fn mem_with_content(id: &str, content: &str) -> Memory {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 

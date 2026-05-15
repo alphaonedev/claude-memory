@@ -138,6 +138,9 @@ fn seed_policy(conn: &Connection, namespace: &str, policy: &GovernancePolicy) {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let standard_id = db::insert(conn, &standard).expect("insert standard");
     db::set_namespace_standard(conn, namespace, &standard_id, None).expect("set standard");
@@ -169,6 +172,9 @@ fn observation(namespace: &str, title: &str, depth: i32, agent_id: &str) -> Memo
         },
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 

@@ -4,8 +4,8 @@
 use anyhow::{Result, bail};
 
 use crate::models::{
-    CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, UpdateMemory, VALID_AGENT_TYPES,
-    VALID_SCOPES,
+    Citation, CreateMemory, MAX_CONTENT_SIZE, MAX_NAMESPACE_DEPTH, Memory, SourceSpan,
+    UpdateMemory, VALID_AGENT_TYPES, VALID_SCOPES,
 };
 
 const MAX_TITLE_LEN: usize = 512;
@@ -484,6 +484,139 @@ pub fn validate_priority(priority: i32) -> Result<()> {
     Ok(())
 }
 
+/// v0.7.0 Form 4 (issue #757) — maximum citations per memory. Keeps
+/// the JSON-encoded column bounded; an operator authoring legitimate
+/// fact-grain provenance rarely needs more than a handful of citations
+/// on a single memory, and the cap protects the substrate from
+/// pathological payloads.
+const MAX_CITATIONS_PER_MEMORY: usize = 64;
+/// v0.7.0 Form 4 — maximum byte length of a URI form. HTTP URLs are
+/// commonly bounded at 2 KiB; we set a slightly larger headroom for
+/// `doc:` / `file:` payloads while still bounding the column size.
+const MAX_SOURCE_URI_LEN: usize = 4_096;
+/// v0.7.0 Form 4 — accepted URI form schemes.
+const VALID_SOURCE_URI_SCHEMES: &[&str] = &["uri:", "doc:", "file:"];
+
+/// v0.7.0 Form 4 (issue #757) — validate a [`Citation`] envelope.
+///
+/// Required invariants:
+/// * `uri` is non-empty after trim and starts with one of the typed
+///   schemes accepted by [`validate_source_uri`] (mirror semantics —
+///   citation URIs and source URIs share the same form).
+/// * `accessed_at` parses as RFC3339.
+/// * `hash` (when present) is exactly 64 lowercase hex characters
+///   (SHA-256 digest).
+/// * `span` (when present) satisfies [`validate_source_span`].
+///
+/// # Errors
+///
+/// Returns the first invariant failure encountered.
+pub fn validate_citation(c: &Citation) -> Result<()> {
+    validate_source_uri(&c.uri)?;
+    if !is_valid_rfc3339(&c.accessed_at) {
+        bail!(
+            "citation.accessed_at is not valid RFC3339: '{}'",
+            c.accessed_at
+        );
+    }
+    if let Some(ref h) = c.hash {
+        if h.len() != 64 || !h.chars().all(|ch| ch.is_ascii_hexdigit()) {
+            bail!("citation.hash must be 64 hex characters (SHA-256 digest)");
+        }
+    }
+    if let Some(ref span) = c.span {
+        validate_source_span(span)?;
+    }
+    Ok(())
+}
+
+/// v0.7.0 Form 4 — validate the full citations vector.
+///
+/// Caps the count at [`MAX_CITATIONS_PER_MEMORY`] and delegates each
+/// entry to [`validate_citation`].
+///
+/// # Errors
+///
+/// Returns the first failure encountered.
+pub fn validate_citations(citations: &[Citation]) -> Result<()> {
+    if citations.len() > MAX_CITATIONS_PER_MEMORY {
+        bail!(
+            "too many citations: {} exceeds cap of {MAX_CITATIONS_PER_MEMORY}",
+            citations.len()
+        );
+    }
+    for c in citations {
+        validate_citation(c)?;
+    }
+    Ok(())
+}
+
+/// v0.7.0 Form 4 (issue #757) — validate a URI-form source pointer.
+///
+/// Accepts three schemes:
+/// * `uri:<...>` — HTTP(S) URL or other absolute URI.
+/// * `doc:<...>` — substrate document id (caller-supplied opaque).
+/// * `file:<...>` — filesystem path.
+///
+/// In every case the payload after the scheme must be non-empty (the
+/// validator strips the scheme prefix and re-checks). Bare strings
+/// without a scheme are rejected so a caller does not accidentally
+/// stuff a role label into the URI column.
+///
+/// # Errors
+///
+/// Returns when the input is empty, exceeds [`MAX_SOURCE_URI_LEN`],
+/// uses an unrecognised scheme, or carries an empty payload.
+pub fn validate_source_uri(s: &str) -> Result<()> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        bail!("source URI cannot be empty");
+    }
+    if trimmed.len() > MAX_SOURCE_URI_LEN {
+        bail!("source URI exceeds max length of {MAX_SOURCE_URI_LEN} bytes");
+    }
+    if !is_clean_string(trimmed) {
+        bail!("source URI contains invalid control characters");
+    }
+    let matched = VALID_SOURCE_URI_SCHEMES
+        .iter()
+        .find(|prefix| trimmed.starts_with(*prefix));
+    match matched {
+        Some(prefix) => {
+            let payload = &trimmed[prefix.len()..];
+            if payload.trim().is_empty() {
+                bail!("source URI scheme '{prefix}' has empty payload");
+            }
+            Ok(())
+        }
+        None => bail!(
+            "source URI must start with one of: {}",
+            VALID_SOURCE_URI_SCHEMES.join(", ")
+        ),
+    }
+}
+
+/// v0.7.0 Form 4 (issue #757) — validate a [`SourceSpan`] byte-range.
+///
+/// Requires `start < end` and bounds both values within
+/// [`usize::MAX`]. The half-open convention `[start, end)` matches
+/// Rust slice semantics — `body[span.start..span.end]` is the cited
+/// slice.
+///
+/// # Errors
+///
+/// Returns when `start >= end`.
+pub fn validate_source_span(span: &SourceSpan) -> Result<()> {
+    if span.start >= span.end {
+        bail!(
+            "source_span requires start < end (got start={}, end={})",
+            span.start,
+            span.end
+        );
+    }
+    Ok(())
+}
+
 /// Validate a full `CreateMemory` before insert.
 pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_title(&mem.title)?;
@@ -496,6 +629,15 @@ pub fn validate_create(mem: &CreateMemory) -> Result<()> {
     validate_expires_at(mem.expires_at.as_deref())?;
     validate_ttl_secs(mem.ttl_secs)?;
     validate_metadata(&mem.metadata)?;
+    // v0.7.0 Form 4 — fact-provenance fields are optional but when
+    // supplied must satisfy the per-field invariants.
+    validate_citations(&mem.citations)?;
+    if let Some(ref uri) = mem.source_uri {
+        validate_source_uri(uri)?;
+    }
+    if let Some(ref span) = mem.source_span {
+        validate_source_span(span)?;
+    }
     Ok(())
 }
 
@@ -530,6 +672,14 @@ pub fn validate_memory(mem: &Memory) -> Result<()> {
         bail!("expires_at is not valid RFC3339");
     }
     validate_metadata(&mem.metadata)?;
+    // v0.7.0 Form 4 — fact-provenance fields on a full Memory import.
+    validate_citations(&mem.citations)?;
+    if let Some(ref uri) = mem.source_uri {
+        validate_source_uri(uri)?;
+    }
+    if let Some(ref span) = mem.source_span {
+        validate_source_span(span)?;
+    }
     Ok(())
 }
 

@@ -214,6 +214,9 @@ fn insert_long_source(conn: &Connection, ns: &str, n_paras: usize) -> String {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &mem).expect("seed long source")
 }
@@ -241,6 +244,9 @@ fn insert_short_source(conn: &Connection, ns: &str) -> String {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &mem).expect("seed short source")
 }

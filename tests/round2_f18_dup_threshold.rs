@@ -61,6 +61,9 @@ fn seed_with_embedding(
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     let stored_id = db::insert(conn, &mem).expect("db::insert");
     db::set_embedding(conn, &stored_id, embedding).expect("db::set_embedding");

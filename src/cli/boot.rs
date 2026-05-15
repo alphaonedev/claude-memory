@@ -90,14 +90,18 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// adds `memories.atomised_into INTEGER` + `memories.atom_of TEXT
 /// REFERENCES memories(id)` columns plus extends the
 /// `memory_links.relation` closed-taxonomy CHECK constraint with the
-/// `derives_from` variant (atomisation provenance edges), and v37
+/// `derives_from` variant (atomisation provenance edges), v37
 /// from QW-2's Persona-as-artifact substrate primitive (adds
 /// `memories.entity_id TEXT NULL` + `memories.persona_version
-/// INTEGER NULL` plus the `idx_personas_by_entity` partial index).
+/// INTEGER NULL` plus the `idx_personas_by_entity` partial index),
+/// and v38 from Form 4's fact-provenance closeout (issue #757) which
+/// adds `memories.citations TEXT NOT NULL DEFAULT '[]'`,
+/// `memories.source_uri TEXT NULL`, and `memories.source_span TEXT
+/// NULL` plus the `idx_memories_source_uri` partial index.
 /// When a DB's `schema_version` exceeds this, the binary is too old
 /// for a newer DB and we surface a warning. v0.6.3.1 (PR-9h / issue
 /// #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 37;
+pub const MAX_SUPPORTED_SCHEMA: u32 = 38;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

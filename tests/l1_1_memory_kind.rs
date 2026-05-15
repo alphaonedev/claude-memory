@@ -55,6 +55,9 @@ fn make_obs(namespace: &str, title: &str) -> Memory {
         memory_kind: MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 
@@ -149,6 +152,9 @@ fn memory_kind_serde_roundtrip_reflection() {
         memory_kind: MemoryKind::Reflection,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
 
     let json = serde_json::to_string(&mem).expect("serialize");

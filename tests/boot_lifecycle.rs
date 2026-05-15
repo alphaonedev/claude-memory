@@ -64,6 +64,9 @@ fn seed_one(db: &Path, namespace: &str, title: &str, content: &str) -> String {
         memory_kind: ai_memory::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(&conn, &mem).expect("db::insert")
 }

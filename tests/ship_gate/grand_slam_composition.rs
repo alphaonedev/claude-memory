@@ -184,6 +184,9 @@ fn insert_memory(conn: &Connection, ns: &str, title: &str, depth: i32, kind: Mem
         memory_kind: kind,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     };
     db::insert(conn, &m).expect("insert")
 }

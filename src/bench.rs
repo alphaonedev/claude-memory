@@ -452,6 +452,9 @@ fn synth_memory(namespace: &str, i: usize, prefix: &str) -> Memory {
         memory_kind: crate::models::MemoryKind::Observation,
         entity_id: None,
         persona_version: None,
+        citations: Vec::new(),
+        source_uri: None,
+        source_span: None,
     }
 }
 
