@@ -207,6 +207,8 @@ fn opt_in_policy(threshold: u32, max_atom_tokens: u32) -> GovernancePolicy {
         auto_atomise: Some(true),
         auto_atomise_threshold_cl100k: Some(threshold),
         auto_atomise_max_atom_tokens: Some(max_atom_tokens),
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     }
 }
 
@@ -222,6 +224,8 @@ fn opt_out_policy() -> GovernancePolicy {
         auto_atomise: Some(false),
         auto_atomise_threshold_cl100k: None,
         auto_atomise_max_atom_tokens: None,
+        auto_persona_trigger_every_n_memories: None,
+        auto_export_personas_to_filesystem: None,
     }
 }
 
@@ -282,6 +286,8 @@ fn insert_memory(conn: &Connection, ns: &str, content: &str) -> Memory {
         metadata: serde_json::json!({"agent_id": "ai:test"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let id = db::insert(conn, &mem).expect("insert");
     Memory { id, ..mem }
@@ -697,6 +703,8 @@ fn test_auto_atomise_refused_memory_not_atomised() {
         metadata: serde_json::json!({"agent_id": "ai:test"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
 
     let insert_result = db::insert(&conn, &mem);

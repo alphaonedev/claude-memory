@@ -113,8 +113,7 @@ const MIGRATION_V35_ATOMISATION: &str =
 /// `idx_personas_by_entity`. Mirrors SQLite schema v37. Postgres
 /// supports `ADD COLUMN IF NOT EXISTS` so the DDL is a pure
 /// idempotent batch.
-const MIGRATION_V36_PERSONA: &str =
-    include_str!("../../migrations/postgres/0018_v07_persona.sql");
+const MIGRATION_V36_PERSONA: &str = include_str!("../../migrations/postgres/0018_v07_persona.sql");
 
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
@@ -3603,6 +3602,15 @@ impl PostgresStore {
             metadata,
             reflection_depth,
             memory_kind,
+            // v0.7.0 QW-2 — pre-v36 rows lack these columns; tolerate the
+            // missing-column error and fall back to NULL (matches SQLite
+            // path behaviour for backups predating the persona migration).
+            entity_id: row
+                .try_get::<Option<String>, _>("entity_id")
+                .unwrap_or(None),
+            persona_version: row
+                .try_get::<Option<i32>, _>("persona_version")
+                .unwrap_or(None),
         })
     }
 
@@ -9064,7 +9072,7 @@ mod tests {
         // future bump on either side without the corresponding port
         // re-trips this assertion before the migration runner gets a
         // chance to write a partial schema to disk.
-        assert_eq!(CURRENT_SCHEMA_VERSION, 35);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 36);
     }
 
     #[tokio::test]

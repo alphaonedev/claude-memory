@@ -71,11 +71,14 @@ CREATE INDEX IF NOT EXISTS idx_memories_atom_of
     ON memories(atom_of) WHERE atom_of IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_atomised_into
     ON memories(atomised_into) WHERE atomised_into > 0;
--- v37 partial index covering per-entity persona lookups. Persona rows
--- are a small minority of the table; the partial predicate keeps the
--- index footprint minimal on observation/reflection-dominant workloads.
-CREATE INDEX IF NOT EXISTS idx_personas_by_entity
-    ON memories(entity_id, namespace) WHERE memory_kind = 'persona';
+-- v37 (QW-2) partial index covering per-entity persona lookups lives
+-- in `migrations/sqlite/0031_v07_persona.sql` and runs from the
+-- migrate step's `if version < 37` arm — NOT in this bootstrap
+-- SCHEMA, because `db::open` applies SCHEMA before `migrate`, and
+-- the index references `entity_id` (a column only present after the
+-- v37 ALTER fires on a legacy DB). Fresh installs land the column
+-- via the CREATE TABLE above, then the migrate step's v37 arm
+-- creates the index a few statements later.
 
 CREATE TABLE IF NOT EXISTS memory_links (
     source_id    TEXT NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
@@ -1348,7 +1351,10 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute("ALTER TABLE memories ADD COLUMN entity_id TEXT", [])?;
             }
             if !has_persona_version {
-                conn.execute("ALTER TABLE memories ADD COLUMN persona_version INTEGER", [])?;
+                conn.execute(
+                    "ALTER TABLE memories ADD COLUMN persona_version INTEGER",
+                    [],
+                )?;
             }
             conn.execute_batch(MIGRATION_V37_SQLITE)?;
         }

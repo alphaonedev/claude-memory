@@ -126,7 +126,10 @@ pub enum PersonaError {
     /// Input validation failure (empty entity_id, malformed namespace).
     Validation(String),
     /// The entity has no reflections in this namespace.
-    NoReflections { entity_id: String, namespace: String },
+    NoReflections {
+        entity_id: String,
+        namespace: String,
+    },
     /// The curator LLM failed during synthesis.
     Llm(String),
     /// A SQL operation failed.
@@ -313,9 +316,7 @@ impl<'a> PersonaGenerator<'a> {
         // KG walker traverses these edges with the rest.
         for source in &sources {
             db::create_link(self.conn, &persona_id, &source.id, "derived_from")
-                .with_context(|| {
-                    format!("linking persona {persona_id} -> source {}", source.id)
-                })?;
+                .with_context(|| format!("linking persona {persona_id} -> source {}", source.id))?;
         }
         // Silence unused-warning when the signer wasn't consumed
         // (production wiring stamps the agent_id into the metadata
@@ -343,9 +344,7 @@ impl<'a> PersonaGenerator<'a> {
 /// rule stays symmetric.
 fn validate_entity_id(entity_id: &str) -> std::result::Result<(), PersonaError> {
     if entity_id.trim().is_empty() {
-        return Err(PersonaError::Validation(
-            "entity_id cannot be empty".into(),
-        ));
+        return Err(PersonaError::Validation("entity_id cannot be empty".into()));
     }
     if entity_id.len() > 128 {
         return Err(PersonaError::Validation(format!(
@@ -465,7 +464,11 @@ fn load_reflections_for_entity(
          LIMIT ?3",
     )?;
     let rows = stmt.query_map(
-        rusqlite::params![namespace, like_pat, i64::try_from(limit).unwrap_or(i64::MAX)],
+        rusqlite::params![
+            namespace,
+            like_pat,
+            i64::try_from(limit).unwrap_or(i64::MAX)
+        ],
         crate::storage::row_to_memory,
     )?;
     let mut out = Vec::new();
@@ -645,22 +648,14 @@ mod tests {
         fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
-        fn summarize_memories(
-            &self,
-            memories: &[(String, String)],
-        ) -> anyhow::Result<String> {
+        fn summarize_memories(&self, memories: &[(String, String)]) -> anyhow::Result<String> {
             // Echo back the source count so tests can assert the
             // generator passed the right shape to the curator.
             Ok(format!("{} [from {} sources]", self.canned, memories.len()))
         }
     }
 
-    fn seed_reflection(
-        conn: &Connection,
-        namespace: &str,
-        title: &str,
-        body: &str,
-    ) -> String {
+    fn seed_reflection(conn: &Connection, namespace: &str, title: &str, body: &str) -> String {
         let now = Utc::now().to_rfc3339();
         let mem = Memory {
             id: uuid::Uuid::new_v4().to_string(),

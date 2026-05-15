@@ -547,6 +547,8 @@ impl GovernancePolicy {
     #[must_use]
     pub fn effective_auto_atomise_max_atom_tokens(&self) -> u32 {
         self.auto_atomise_max_atom_tokens.unwrap_or(200)
+    }
+
     /// v0.7.0 QW-2 — resolve the auto-persona regeneration cadence.
     /// Returns `None` (cadence disabled) when the namespace has no
     /// explicit override; `Some(N)` opts the namespace into deferred

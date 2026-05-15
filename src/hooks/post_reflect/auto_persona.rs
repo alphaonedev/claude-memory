@@ -273,10 +273,7 @@ mod tests {
         fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
-        fn summarize_memories(
-            &self,
-            mems: &[(String, String)],
-        ) -> anyhow::Result<String> {
+        fn summarize_memories(&self, mems: &[(String, String)]) -> anyhow::Result<String> {
             Ok(format!("Auto persona body ({} sources)", mems.len()))
         }
     }
@@ -333,6 +330,9 @@ mod tests {
             inherit: true,
             max_reflection_depth: None,
             auto_export_reflections_to_filesystem: None,
+            auto_atomise: None,
+            auto_atomise_threshold_cl100k: None,
+            auto_atomise_max_atom_tokens: None,
             auto_persona_trigger_every_n_memories: Some(n),
             auto_export_personas_to_filesystem: if export { Some(true) } else { None },
         };
@@ -409,10 +409,8 @@ mod tests {
     fn run_auto_persona_fires_when_count_hits_cadence() {
         let (conn, _dir, db_path) = fresh_db();
         enable_cadence(&conn, "team/alpha", 2, false);
-        let _a =
-            seed_reflection(&conn, "team/alpha", "obs1 alice", "alice X", Some("alice"));
-        let b =
-            seed_reflection(&conn, "team/alpha", "obs2 alice", "alice Y", Some("alice"));
+        let _a = seed_reflection(&conn, "team/alpha", "obs1 alice", "alice X", Some("alice"));
+        let b = seed_reflection(&conn, "team/alpha", "obs2 alice", "alice Y", Some("alice"));
         let cfg = AutoPersonaConfig::default();
         let llm = StubLlm;
         run_auto_persona(&db_path, &b, "team/alpha", &cfg, &llm).unwrap();
@@ -453,13 +451,7 @@ mod tests {
     #[test]
     fn resolve_entity_id_from_metadata() {
         let (conn, _dir, _db_path) = fresh_db();
-        let id = seed_reflection(
-            &conn,
-            "team/alpha",
-            "obs",
-            "body",
-            Some("entity-from-meta"),
-        );
+        let id = seed_reflection(&conn, "team/alpha", "obs", "body", Some("entity-from-meta"));
         let resolved = resolve_entity_id(&conn, &id).unwrap();
         assert_eq!(resolved.as_deref(), Some("entity-from-meta"));
     }

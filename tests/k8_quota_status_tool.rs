@@ -59,15 +59,16 @@ fn k8_quota_status_loaded_under_full_profile() {
     );
     assert_eq!(
         Profile::full().expected_tool_count(),
-        67,
-        "tool count cascade must advance to 67 with v0.7.0 L2-3 \
+        69,
+        "tool count cascade must advance to 69 with v0.7.0 L2-3 \
          memory_dependents_of_invalidated, v0.7.0 L2-6 \
          memory_skill_promote_from_reflection, v0.7.0 L2-7 \
          memory_skill_compositional_context on top of v0.7.0 issue #691 \
          memory_check_agent_action + memory_rule_list (post-L2-2), \
          v0.7.0 L1-5 5 memory_skill_* tools, v0.7.0 QW-1 \
          memory_export_reflection, v0.7.0 QW-3 follow-up \
-         memory_offload + memory_deref, and v0.7.0 WT-1-C memory_atomise"
+         memory_offload + memory_deref, v0.7.0 WT-1-C memory_atomise, \
+         and v0.7.0 QW-2 memory_persona + memory_persona_generate"
     );
 }
 

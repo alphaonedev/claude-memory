@@ -28,9 +28,7 @@ use serde_json::{Value, json};
 
 use crate::autonomy::AutonomyLlm;
 use crate::config::FeatureTier;
-use crate::persona::{
-    PersonaConfig, PersonaError, PersonaGenerator, get_latest_persona,
-};
+use crate::persona::{PersonaConfig, PersonaError, PersonaGenerator, get_latest_persona};
 
 /// Wire shape (read-only):
 ///
@@ -54,10 +52,7 @@ use crate::persona::{
 /// Errors:
 /// * `entity_id is required` — caller omitted the parameter.
 /// * `entity_id cannot be empty`.
-pub(super) fn handle_persona(
-    conn: &rusqlite::Connection,
-    params: &Value,
-) -> Result<Value, String> {
+pub(super) fn handle_persona(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let entity_id = params["entity_id"]
         .as_str()
         .ok_or("entity_id is required")?;
@@ -110,8 +105,7 @@ pub(super) fn handle_persona_generate(
     }
     let namespace = params["namespace"].as_str().unwrap_or("global");
 
-    let generator =
-        PersonaGenerator::new(conn, llm, None, PersonaConfig::default());
+    let generator = PersonaGenerator::new(conn, llm, None, PersonaConfig::default());
     let persona = generator
         .generate(entity_id, namespace)
         .map_err(persona_error_to_string)?;
@@ -144,10 +138,7 @@ mod tests {
         fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
-        fn summarize_memories(
-            &self,
-            mems: &[(String, String)],
-        ) -> anyhow::Result<String> {
+        fn summarize_memories(&self, mems: &[(String, String)]) -> anyhow::Result<String> {
             Ok(format!("Stub persona body [{} sources]", mems.len()))
         }
     }
@@ -188,9 +179,11 @@ mod tests {
     #[test]
     fn handle_persona_returns_null_when_unminted() {
         let (conn, _dir) = fresh_db();
-        let out =
-            handle_persona(&conn, &json!({"entity_id": "alice", "namespace": "team/alpha"}))
-                .unwrap();
+        let out = handle_persona(
+            &conn,
+            &json!({"entity_id": "alice", "namespace": "team/alpha"}),
+        )
+        .unwrap();
         assert!(out["persona"].is_null());
     }
 
@@ -237,9 +230,11 @@ mod tests {
         assert_eq!(p["entity_id"], "alice");
         assert_eq!(p["version"], 1);
 
-        let got =
-            handle_persona(&conn, &json!({"entity_id": "alice", "namespace": "team/alpha"}))
-                .unwrap();
+        let got = handle_persona(
+            &conn,
+            &json!({"entity_id": "alice", "namespace": "team/alpha"}),
+        )
+        .unwrap();
         assert_eq!(got["persona"]["entity_id"], "alice");
         assert_eq!(got["persona"]["version"], 1);
     }

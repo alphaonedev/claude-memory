@@ -77,23 +77,25 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     let summary = build_capabilities_summary(&Profile::full());
     let describe = build_capabilities_describe_to_user(&Profile::full());
 
-    // Both must report "65" for the full profile (substantive memory
+    // Both must report "67" for the full profile (substantive memory
     // tools, excluding the always-on `memory_capabilities` bootstrap).
     // v0.7.0 issue #691 added memory_check_agent_action + memory_rule_list,
     // v0.7.0 L1-5 added 5 memory_skill_* tools, v0.7.0 L2-3 added
     // memory_dependents_of_invalidated to Family::Power, v0.7.0 L2-6 added
     // memory_skill_promote_from_reflection, v0.7.0 L2-7 added
     // memory_skill_compositional_context, v0.7.0 QW-1 added
-    // memory_export_reflection, and v0.7.0 QW-3 follow-up added
-    // memory_offload + memory_deref to Family::Power — bumping the
-    // substantive total from 52 to 65.
+    // memory_export_reflection, v0.7.0 QW-3 follow-up added
+    // memory_offload + memory_deref to Family::Power, v0.7.0 WT-1-C
+    // added memory_atomise to Family::Power, and v0.7.0 QW-2 added
+    // memory_persona + memory_persona_generate to Family::Power —
+    // bumping the substantive total from 52 to 68.
     assert!(
-        summary.contains("66 of 66 memory tools"),
-        "summary must report 66 of 66 memory tools; got: {summary}"
+        summary.contains("68 of 68 memory tools"),
+        "summary must report 68 of 68 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 66 memory tools"),
-        "describe_to_user must report all 66 memory tools; got: {describe}"
+        describe.contains("all 68 memory tools"),
+        "describe_to_user must report all 68 memory tools; got: {describe}"
     );
 }
 
@@ -103,18 +105,20 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     let describe = build_capabilities_describe_to_user(&Profile::core());
 
     // Core profile loads `Family::Core` (7 tools). Bootstrap excluded.
-    // Total memory tools = 65 (66 - bootstrap). v0.7.0 issue #691 added
+    // Total memory tools = 68 (69 - bootstrap). v0.7.0 issue #691 added
     // memory_check_agent_action + memory_rule_list, v0.7.0 L1-5 added
     // 5 memory_skill_* tools, v0.7.0 L2-3 added
     // memory_dependents_of_invalidated, v0.7.0 L2-6 added
     // memory_skill_promote_from_reflection, v0.7.0 L2-7 added
     // memory_skill_compositional_context, v0.7.0 QW-1 added
-    // memory_export_reflection, and v0.7.0 QW-3 follow-up added
-    // memory_offload + memory_deref to Family::Power — bumping the
-    // substantive total from 52 to 65.
+    // memory_export_reflection, v0.7.0 QW-3 follow-up added
+    // memory_offload + memory_deref to Family::Power, v0.7.0 WT-1-C
+    // added memory_atomise to Family::Power, and v0.7.0 QW-2 added
+    // memory_persona + memory_persona_generate to Family::Power —
+    // bumping the substantive total from 52 to 68.
     assert!(
-        summary.contains("7 of 66 memory tools"),
-        "summary must report 7 of 66 memory tools; got: {summary}"
+        summary.contains("7 of 68 memory tools"),
+        "summary must report 7 of 68 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

@@ -722,7 +722,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 67,
+            total, 69,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -736,7 +736,8 @@ mod tests {
              v0.7.0 L2-7 `memory_skill_compositional_context` + \
              v0.7.0 QW-1 `memory_export_reflection` + \
              v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` + \
-             v0.7.0 WT-1-C `memory_atomise` = 67. \
+             v0.7.0 WT-1-C `memory_atomise` + \
+             v0.7.0 QW-2 `memory_persona` + `memory_persona_generate` = 69. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -824,7 +825,9 @@ mod tests {
         // v0.7.0 QW-3 follow-up — Power got memory_offload + memory_deref
         // (context-offload substrate primitive, +2 → 17).
         // v0.7.0 WT-1-C — Power got memory_atomise (+1 → 18).
-        assert_eq!(p.expected_tool_count(), 7 + 18);
+        // v0.7.0 QW-2 — Power got memory_persona + memory_persona_generate
+        // (Persona-as-artifact substrate primitive, +2 → 20).
+        assert_eq!(p.expected_tool_count(), 7 + 20);
     }
 
     #[test]
@@ -841,13 +844,14 @@ mod tests {
         // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) +
         // memory_export_reflection (QW-1) +
         // memory_offload + memory_deref (QW-3 follow-up, Family::Power) +
-        // memory_atomise (WT-1-C, Family::Power) = 67.
-        assert_eq!(p.expected_tool_count(), 67);
+        // memory_atomise (WT-1-C, Family::Power) +
+        // memory_persona + memory_persona_generate (QW-2, Family::Power) = 69.
+        assert_eq!(p.expected_tool_count(), 69);
 
         // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
-        // + WT-1-C additions live in Family::Power (operator/governance),
-        // so the `power` profile picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 18);
+        // + WT-1-C + QW-2 additions live in Family::Power
+        // (operator/governance), so the `power` profile picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 20);
     }
 
     // ---------- Profile::parse ----------

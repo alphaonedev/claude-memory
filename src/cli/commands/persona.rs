@@ -141,10 +141,7 @@ mod tests {
         fn detect_contradiction(&self, _a: &str, _b: &str) -> anyhow::Result<bool> {
             Ok(false)
         }
-        fn summarize_memories(
-            &self,
-            mems: &[(String, String)],
-        ) -> anyhow::Result<String> {
+        fn summarize_memories(&self, mems: &[(String, String)]) -> anyhow::Result<String> {
             Ok(format!("CLI persona body ({} sources)", mems.len()))
         }
     }

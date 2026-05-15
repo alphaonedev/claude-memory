@@ -489,6 +489,10 @@ fn write_atom(
         // by WT-1-C/D — for now atoms are typed Observation per the
         // brief.
         memory_kind: MemoryKind::Observation,
+        // v0.7.0 QW-2 — atoms are not Persona-kind; entity_id +
+        // persona_version stay NULL on the atom row.
+        entity_id: None,
+        persona_version: None,
     };
 
     let actual_id = db::insert(conn, &mem)?;

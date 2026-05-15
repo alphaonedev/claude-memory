@@ -136,6 +136,8 @@ fn seed_parent(conn: &rusqlite::Connection, namespace: &str) -> Result<(String, 
         metadata: serde_json::json!({"agent_id": "ai:cookbook"}),
         reflection_depth: 0,
         memory_kind: MemoryKind::Observation,
+        entity_id: None,
+        persona_version: None,
     };
     let id = db::insert(conn, &parent).context("insert long parent")?;
     Ok((id, body_len))

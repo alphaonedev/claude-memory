@@ -8,7 +8,7 @@
 //!   * `test_persona_derives_from_edges_recorded` — provenance check.
 //!   * `test_persona_regeneration_increments_version` — version bump.
 //!   * `test_persona_namespace_inheritance` — child resolves parent policy.
-//!   * `test_persona_auto_trigger_cadence` — post_reflect hook fires
+//!   * `test_persona_auto_trigger_cadence` — `post_reflect` hook fires
 //!     at multiples of N.
 //!   * `test_persona_keyword_tier_locked` — write tool refuses below
 //!     smart tier.
@@ -35,7 +35,7 @@ use tempfile::TempDir;
 // Test scaffolding
 // ---------------------------------------------------------------------------
 
-/// Deterministic StubLlm used by every test. Returns a canned summary
+/// Deterministic `StubLlm` used by every test. Returns a canned summary
 /// that includes the source count so assertions can pin the curator
 /// boundary without spinning up Ollama.
 struct StubLlm;
@@ -73,7 +73,11 @@ fn seed_reflection_for_entity(
         id: uuid::Uuid::new_v4().to_string(),
         tier: Tier::Mid,
         namespace: namespace.to_string(),
-        title: format!("ref-{} about {}", &uuid::Uuid::new_v4().to_string()[..8], entity_id),
+        title: format!(
+            "ref-{} about {}",
+            &uuid::Uuid::new_v4().to_string()[..8],
+            entity_id
+        ),
         content: body.to_string(),
         tags: vec!["reflection".into()],
         priority: 5,
@@ -110,6 +114,9 @@ fn install_namespace_policy(
         inherit: true,
         max_reflection_depth: None,
         auto_export_reflections_to_filesystem: None,
+        auto_atomise: None,
+        auto_atomise_threshold_cl100k: None,
+        auto_atomise_max_atom_tokens: None,
         auto_persona_trigger_every_n_memories: cadence,
         auto_export_personas_to_filesystem: if file_export { Some(true) } else { None },
     };
@@ -150,7 +157,11 @@ fn test_persona_generates_from_reflections() {
     assert_eq!(persona.namespace, "team/alpha");
     assert_eq!(persona.version, 1);
     assert_eq!(persona.sources.len(), 2);
-    assert!(persona.body_md.contains("Persona distillation derived from 2"));
+    assert!(
+        persona
+            .body_md
+            .contains("Persona distillation derived from 2")
+    );
     assert!(persona.body_md.contains("## Sources"));
 }
 
@@ -172,7 +183,7 @@ fn test_persona_derives_from_edges_recorded() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(count, persona.sources.len() as i64);
+    assert_eq!(count, i64::try_from(persona.sources.len()).unwrap());
     // Each edge's target must match a source reflection.
     for src in &persona.sources {
         let target_exists: i64 = conn
