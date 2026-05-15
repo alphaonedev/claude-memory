@@ -643,6 +643,7 @@ fn test_atomiser_records_signed_events() {
 // surface (matching the brief's "use a mock curator" guidance).
 
 #[test]
+#[allow(clippy::items_after_statements)]
 fn test_atomiser_curator_malformed_json_retries() {
     let _g = test_serial()
         .lock()

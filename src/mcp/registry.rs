@@ -1358,6 +1358,32 @@ pub fn tool_definitions() -> Value {
                     },
                     "required": ["skill_id"]
                 }
+            },
+            {
+                "name": "memory_offload",
+                "description": "Offload verbatim content into the context-offload substrate; returns a ref_id to keep in-window (Family::Power).",
+                "docs": "v0.7.0 QW-3 follow-up — context-offload substrate primitive. Stores `content` verbatim in the `offloaded_blobs` substrate table under the caller's namespace (defaults to `auto`) with an optional `ttl_seconds` retention hint, and returns a `ref_id` plus the row's `content_sha256` + `stored_at` timestamp. The caller keeps the short `ref_id` in their working window; the body is dereferenced on demand via `memory_deref`. Semantic-tier+ surface (registered under Family::Power) so the keyword-tier `core` profile stays at its 7-tool minimum. Substrate-only at v0.7.0; the v0.8.0 short-term-context-compression patch wires the pair into the auto-compaction loop.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "content": {"type": "string", "description": "Verbatim content to offload. The substrate stores it as a single row; recall is exact-byte via memory_deref."},
+                        "namespace": {"type": "string", "description": "Namespace bucket for the offloaded row. Defaults to `auto` so a tier-gated MCP caller that omits this field still produces a non-empty, audit-friendly bucket rather than a NULL violation."},
+                        "ttl_seconds": {"type": "integer", "minimum": 0, "description": "Optional retention hint in seconds. The QW-3 substrate's TTL sweep picks this up; absence means substrate-default retention."}
+                    },
+                    "required": ["content"]
+                }
+            },
+            {
+                "name": "memory_deref",
+                "description": "Dereference a memory_offload ref_id and return the verbatim content (Family::Power).",
+                "docs": "v0.7.0 QW-3 follow-up — companion to `memory_offload`. Looks up the `ref_id` in the `offloaded_blobs` substrate, verifies the row has not been tampered with (sha256 check), and returns `{ref_id, content, stored_at, sha256}`. Refuses tampered rows. Semantic-tier+ surface (registered under Family::Power).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "ref_id": {"type": "string", "description": "The opaque reference returned by a prior memory_offload call."}
+                    },
+                    "required": ["ref_id"]
+                }
             }
         ]
     })

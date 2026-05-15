@@ -10,3 +10,9 @@
 
 #[path = "offload/acceptance.rs"]
 mod acceptance;
+// v0.7.0 QW-3 follow-up — MCP-tool registration cascade. The substrate
+// behaviour lives in `acceptance.rs`; the Family-mapping +
+// per-profile loads() + pair-together invariants live here so a
+// future profile-count regression cannot mask one half of the pair.
+#[path = "offload/registration.rs"]
+mod registration;

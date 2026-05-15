@@ -51,9 +51,7 @@ pub fn handle_offload(
         .and_then(Value::as_str)
         .ok_or("content is required")?;
     let namespace = resolve_namespace(params);
-    let ttl_seconds = params
-        .get("ttl_seconds")
-        .and_then(Value::as_u64);
+    let ttl_seconds = params.get("ttl_seconds").and_then(Value::as_u64);
 
     let off = ContextOffloader::new(conn, None, OffloadConfig::default());
     let result = off
@@ -68,10 +66,7 @@ pub fn handle_offload(
 }
 
 /// `memory_deref(ref_id)`.
-pub fn handle_deref(
-    conn: &rusqlite::Connection,
-    params: &Value,
-) -> Result<Value, String> {
+pub fn handle_deref(conn: &rusqlite::Connection, params: &Value) -> Result<Value, String> {
     let ref_id = params
         .get("ref_id")
         .and_then(Value::as_str)

@@ -184,7 +184,14 @@ impl Family {
             // explicitly NOT registered over MCP per design revision
             // 2026-05-13 — operator uses CLI / HTTP with signed key.
             | "memory_check_agent_action"
-            | "memory_rule_list" => Some(Self::Power),
+            | "memory_rule_list"
+            // v0.7.0 QW-3 follow-up — context-offload substrate primitive.
+            // The pair lives in Family::Power so the `power` (and `full`)
+            // profile surfaces them while keeping the keyword-tier
+            // `core` surface unchanged (semantic-tier+ exposure per the
+            // QW-3 brief).
+            | "memory_offload"
+            | "memory_deref" => Some(Self::Power),
             // meta (5)
             "memory_capabilities"
             | "memory_agent_register"
@@ -263,8 +270,11 @@ impl Family {
             // 2 (v0.7.0 issue #691 — memory_check_agent_action +
             // memory_rule_list, substrate-level agent-action rules) +
             // 1 (v0.7.0 QW-1 — memory_export_reflection, file-backed
-            // reflection chain export) = 15.
-            Self::Power => 15,
+            // reflection chain export) +
+            // 2 (v0.7.0 QW-3 follow-up — memory_offload + memory_deref,
+            // context-offload substrate primitive surfaced at the
+            // semantic-tier+ Power family) = 17.
+            Self::Power => 17,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -380,6 +390,12 @@ impl Family {
                 // companion. Renders the markdown / JSON envelope;
                 // does NOT write to disk (agent harness owns disk I/O).
                 "memory_export_reflection",
+                // v0.7.0 QW-3 follow-up — context-offload substrate
+                // primitive (offload + deref). Power-family registration
+                // gives semantic-tier+ exposure per the QW-3 brief; the
+                // handlers themselves live at src/mcp/tools/offload.rs.
+                "memory_offload",
+                "memory_deref",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -679,7 +695,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 64,
+            total, 66,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -691,7 +707,8 @@ mod tests {
              `memory_rule_list` + v0.7.0 L1-5 5×skill tools + \
              v0.7.0 L2-6 `memory_skill_promote_from_reflection` + \
              v0.7.0 L2-7 `memory_skill_compositional_context` + \
-             v0.7.0 QW-1 `memory_export_reflection` = 64. \
+             v0.7.0 QW-1 `memory_export_reflection` + \
+             v0.7.0 QW-3 follow-up `memory_offload` + `memory_deref` = 66. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -776,7 +793,9 @@ mod tests {
         // v0.7.0 issue #691 — Power got memory_check_agent_action +
         // memory_rule_list (+2 → 14).
         // v0.7.0 QW-1 — Power got memory_export_reflection (+1 → 15).
-        assert_eq!(p.expected_tool_count(), 7 + 15);
+        // v0.7.0 QW-3 follow-up — Power got memory_offload + memory_deref
+        // (context-offload substrate primitive, +2 → 17).
+        assert_eq!(p.expected_tool_count(), 7 + 17);
     }
 
     #[test]
@@ -791,13 +810,14 @@ mod tests {
         // (L2-3) + memory_check_agent_action + memory_rule_list (#691) +
         // 5×memory_skill_* (L1-5) + memory_skill_promote_from_reflection
         // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) +
-        // memory_export_reflection (QW-1) = 64.
-        assert_eq!(p.expected_tool_count(), 64);
+        // memory_export_reflection (QW-1) +
+        // memory_offload + memory_deref (QW-3 follow-up, Family::Power) = 66.
+        assert_eq!(p.expected_tool_count(), 66);
 
-        // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 additions live
-        // in Family::Power (operator/governance), so the `power` profile
-        // picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 15);
+        // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 + QW-3 follow-up
+        // additions live in Family::Power (operator/governance), so the
+        // `power` profile picks them up too.
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 17);
     }
 
     // ---------- Profile::parse ----------
@@ -990,10 +1010,15 @@ mod tests {
             "memory_skill_promote_from_reflection",
             // v0.7.0 L2-7 (issue #672) — reflection-skill composition.
             "memory_skill_compositional_context",
+            // v0.7.0 QW-1 — file-backed reflection chain export (Family::Power).
+            "memory_export_reflection",
+            // v0.7.0 QW-3 follow-up — context-offload substrate (Family::Power).
+            "memory_offload",
+            "memory_deref",
         ];
         assert_eq!(
             baseline.len(),
-            59,
+            62,
             "baseline list = 43 (v0.6.3.1) + 1 (v0.7.0 I4 memory_replay) + \
              1 (v0.7 H4 memory_verify) + 1 (v0.7 B1 memory_load_family) + \
              1 (v0.7 B2 memory_smart_load) + \
@@ -1002,7 +1027,9 @@ mod tests {
              1 (v0.7.0 Task 4/8 memory_reflect) + \
              5 (v0.7.0 L1-5 skill tools) + \
              1 (v0.7.0 L2-6 memory_skill_promote_from_reflection) + \
-             1 (v0.7.0 L2-7 memory_skill_compositional_context) = 59"
+             1 (v0.7.0 L2-7 memory_skill_compositional_context) + \
+             1 (v0.7.0 QW-1 memory_export_reflection) + \
+             2 (v0.7.0 QW-3 follow-up memory_offload + memory_deref) = 62"
         );
         for name in baseline {
             assert!(

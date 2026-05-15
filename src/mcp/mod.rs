@@ -305,6 +305,11 @@ mod load_family;
 mod namespace;
 #[path = "tools/notify.rs"]
 mod notify;
+// v0.7.0 QW-3 follow-up — context-offload substrate primitive
+// (memory_offload + memory_deref). Family::Power registration; handlers
+// live at src/mcp/tools/offload.rs.
+#[path = "tools/offload.rs"]
+mod offload;
 #[path = "tools/pending.rs"]
 mod pending;
 #[path = "tools/promote.rs"]
@@ -1038,6 +1043,29 @@ fn handle_request(
                 "memory_skill_compositional_context" => {
                     handle_skill_compositional_context(conn, arguments)
                 }
+                // v0.7.0 QW-3 follow-up — context-offload substrate
+                // primitive. `memory_offload` accepts verbatim content
+                // and returns a ref_id; `memory_deref` round-trips the
+                // body. agent_id is resolved through the same NHI
+                // precedence chain memory_store uses
+                // (explicit > metadata > mcp_client > host fallback)
+                // so the substrate row is correctly attributed.
+                "memory_offload" => {
+                    let explicit_agent_id = arguments
+                        .get("agent_id")
+                        .and_then(Value::as_str)
+                        .or_else(|| {
+                            arguments
+                                .get("metadata")
+                                .and_then(|m| m.get("agent_id"))
+                                .and_then(Value::as_str)
+                        });
+                    match crate::identity::resolve_agent_id(explicit_agent_id, mcp_client) {
+                        Ok(agent_id) => offload::handle_offload(conn, arguments, &agent_id),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+                "memory_deref" => offload::handle_deref(conn, arguments),
                 // Ultrareview #349: unknown tool is a JSON-RPC 2.0
                 // "method not found" condition — return -32601, not
                 // an ok_response with `isError: true`. Clients that
@@ -1529,9 +1557,12 @@ mod tests {
         // v0.7.0 QW-1 adds memory_export_reflection (Family::Power) → 64 —
         // file-backed reflection chain export companion to the
         // `ai-memory export-reflections` CLI subcommand.
+        // v0.7.0 QW-3 follow-up adds memory_offload + memory_deref
+        // (Family::Power) → 66 — context-offload substrate primitive
+        // surfaced at the semantic-tier+ Power profile.
         let defs = tool_definitions();
         let tools = defs["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 64);
+        assert_eq!(tools.len(), 66);
     }
 
     /// v0.6.4-002 acceptance gate (RFC §S25/S26): `--profile core`
@@ -1586,7 +1617,7 @@ mod tests {
         let tools = defs["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            64,
+            66,
             "full profile = v0.6.3 surface (43) + v0.7.0 I4 memory_replay (1) + \
              v0.7 H4 memory_verify (1) + v0.7 B1 memory_load_family (1) + \
              v0.7 B2 memory_smart_load (1) + \
@@ -1599,7 +1630,8 @@ mod tests {
              v0.7.0 L1-5 5×memory_skill_* (5) + \
              v0.7.0 L2-6 memory_skill_promote_from_reflection (1) + \
              v0.7.0 L2-7 memory_skill_compositional_context (1) + \
-             v0.7.0 QW-1 memory_export_reflection (1) = 64"
+             v0.7.0 QW-1 memory_export_reflection (1) + \
+             v0.7.0 QW-3 follow-up memory_offload + memory_deref (2) = 66"
         );
     }
 

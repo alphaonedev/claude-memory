@@ -89,8 +89,7 @@ fn test_offload_signature_verification_on_deref() {
 
     let err = off
         .deref(&r.ref_id)
-        .err()
-        .expect("deref must refuse tampered blob");
+        .expect_err("deref must refuse tampered blob");
     let downcast = err
         .downcast_ref::<OffloadError>()
         .expect("substrate domain error");
@@ -119,8 +118,7 @@ fn test_offload_size_limit_enforced() {
     let oversize = "y".repeat(128);
     let err = off
         .offload(&oversize, "tenant-a", None, "ai:alice")
-        .err()
-        .expect("oversize must refuse");
+        .expect_err("oversize must refuse");
     let downcast = err.downcast_ref::<OffloadError>().expect("OffloadError");
     assert!(matches!(
         downcast,

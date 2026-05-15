@@ -2490,8 +2490,8 @@ mod tests {
             "default profile should be core; got: {stdout}"
         );
         assert!(
-            stdout.contains("Full   (64 tools loaded)"),
-            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection = 64)"
+            stdout.contains("Full   (66 tools loaded)"),
+            "report should include full-profile baseline (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up memory_offload + memory_deref = 66)"
         );
         assert!(
             stdout.contains("Tokenizer: cl100k_base"),
@@ -2523,7 +2523,7 @@ mod tests {
         // verbose token total past 10K. Updated upper bound to 12K.
         let total = v["full_profile_total_tokens"].as_u64().unwrap();
         assert!(
-            (5_000..=13_000).contains(&total),
+            (5_000..=14_000).contains(&total),
             "full_profile_total_tokens out of honest range: {total}"
         );
         assert!(v["active_total_tokens"].as_u64().unwrap() > 0);
@@ -2551,8 +2551,8 @@ mod tests {
         let tools = v["tools"].as_array().unwrap();
         assert_eq!(
             tools.len(),
-            64,
-            "raw_table must include all 64 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection = 64)"
+            66,
+            "raw_table must include all 66 baseline tools (43 + v0.7.0 I4 memory_replay + v0.7 H4 memory_verify + v0.7 B1 memory_load_family + v0.7 B2 memory_smart_load + v0.7 K7 memory_subscription_replay + memory_subscription_dlq_list + v0.7 J7 memory_find_paths + v0.7 K8 memory_quota_status + v0.7.0 Task 4/8 memory_reflect + v0.7.0 L2-2 memory_reflection_origin + v0.7.0 L2-3 memory_dependents_of_invalidated + v0.7.0 issue #691 memory_check_agent_action + memory_rule_list + v0.7.0 L1-5 5×skill tools + v0.7.0 L2-6 memory_skill_promote_from_reflection + v0.7.0 L2-7 memory_skill_compositional_context + v0.7.0 QW-1 memory_export_reflection + v0.7.0 QW-3 follow-up memory_offload + memory_deref = 66)"
         );
         // memory_store is in core and must be loaded under the default
         // (core) profile.
