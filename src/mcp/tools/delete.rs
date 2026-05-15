@@ -428,6 +428,7 @@ mod tests {
             approver,
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         let now = chrono::Utc::now().to_rfc3339();
         let mut metadata = default_metadata();

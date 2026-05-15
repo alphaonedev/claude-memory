@@ -797,6 +797,7 @@ mod tests {
             approver: ApproverType::Consensus(0),
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }
@@ -811,6 +812,7 @@ mod tests {
             approver: ApproverType::Agent("has space".to_string()),
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         assert!(validate_governance_policy(&bad).is_err());
 
@@ -821,6 +823,7 @@ mod tests {
             approver: ApproverType::Agent("alice".to_string()),
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         assert!(validate_governance_policy(&good).is_ok());
     }
@@ -1212,6 +1215,7 @@ mod tests {
             approver: ApproverType::Consensus(0),
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         assert!(validate_governance_policy(&p).is_err());
     }

@@ -120,6 +120,7 @@ fn set_cap(conn: &rusqlite::Connection, ns: &str, cap: u32) {
     let now = Utc::now().to_rfc3339();
     let policy = ai_memory::models::GovernancePolicy {
         max_reflection_depth: Some(cap),
+        auto_export_reflections_to_filesystem: None,
         ..ai_memory::models::GovernancePolicy::default()
     };
     let metadata = serde_json::json!({

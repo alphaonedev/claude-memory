@@ -86,12 +86,12 @@ fn f13_summary_and_describe_to_user_agree_on_count_full_profile() {
     // memory_skill_compositional_context — bumping the substantive total
     // from 52 to 62.
     assert!(
-        summary.contains("62 of 62 memory tools"),
-        "summary must report 62 of 62 memory tools; got: {summary}"
+        summary.contains("63 of 63 memory tools"),
+        "summary must report 63 of 63 memory tools; got: {summary}"
     );
     assert!(
-        describe.contains("all 62 memory tools"),
-        "describe_to_user must report all 62 memory tools; got: {describe}"
+        describe.contains("all 63 memory tools"),
+        "describe_to_user must report all 63 memory tools; got: {describe}"
     );
 }
 
@@ -109,8 +109,8 @@ fn f13_summary_and_describe_to_user_agree_on_count_core_profile() {
     // memory_skill_compositional_context — bumping the substantive
     // total from 52 to 62.
     assert!(
-        summary.contains("7 of 62 memory tools"),
-        "summary must report 7 of 62 memory tools; got: {summary}"
+        summary.contains("7 of 63 memory tools"),
+        "summary must report 7 of 63 memory tools; got: {summary}"
     );
     assert!(
         describe.contains("7 memory tools"),

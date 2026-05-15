@@ -358,6 +358,12 @@ pub enum Command {
     /// present, and re-verifies every edge signature against the
     /// bundled `observed_by` public key.
     VerifyForensicBundle(crate::forensic::bundle::VerifyForensicBundleArgs),
+    /// v0.7.0 QW-1 — write every reflection memory to a file under
+    /// `~/.ai-memory/reflections/<namespace>/<id>.md` (or `.json` with
+    /// `--format json`) so operators can `cat` what the substrate has
+    /// synthesised without learning SQL. The on-disk artefact is
+    /// derived; the SQL row stays canonical.
+    ExportReflections(crate::cli::commands::export_reflections::ExportReflectionsArgs),
 }
 
 /// `ai-memory governance` parent argument struct.
@@ -1169,6 +1175,17 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             match cli::export::verify(&a, &mut out)? {
+                0 => Ok(()),
+                code => std::process::exit(code),
+            }
+        }
+        Command::ExportReflections(a) => {
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            match cli::commands::export_reflections::run(&db_path, &a, &mut out)? {
                 0 => Ok(()),
                 code => std::process::exit(code),
             }

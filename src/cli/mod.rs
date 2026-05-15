@@ -20,6 +20,9 @@ pub mod archive;
 pub mod audit;
 pub mod backup;
 pub mod boot;
+/// v0.7.0 QW-1 — new-format CLI command modules (return exit codes
+/// rather than calling `process::exit`).
+pub mod commands;
 pub mod consolidate;
 pub mod crud;
 pub mod curator;

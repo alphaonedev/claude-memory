@@ -169,6 +169,10 @@ impl Family {
             | "memory_quota_status"
             | "memory_reflect"
             | "memory_reflection_origin"
+            // v0.7.0 QW-1 — file-backed reflection chain export.
+            // Operator-facing; substrate returns rendered content,
+            // agent harness owns the disk write.
+            | "memory_export_reflection"
             // v0.7.0 L2-3 (issue #668) — read-side surface for the
             // reflection invalidation propagation walker. Operator-
             // facing inspector for the per-reflection dependent set
@@ -257,8 +261,10 @@ impl Family {
             // 1 (v0.7.0 L2-2 / S6-M1 — memory_reflection_origin) +
             // 1 (v0.7.0 L2-3 / #668 — memory_dependents_of_invalidated) +
             // 2 (v0.7.0 issue #691 — memory_check_agent_action +
-            // memory_rule_list, substrate-level agent-action rules) = 14.
-            Self::Power => 14,
+            // memory_rule_list, substrate-level agent-action rules) +
+            // 1 (v0.7.0 QW-1 — memory_export_reflection, file-backed
+            // reflection chain export) = 15.
+            Self::Power => 15,
             Self::Archive => 4,
             // v0.7.0 L1-5 — 5 skill tools added to the Other family.
             // v0.7.0 L2-6 (issue #671) — memory_skill_promote_from_reflection
@@ -370,6 +376,10 @@ impl Family {
                 // NOT registered over MCP (operator uses CLI / HTTP).
                 "memory_check_agent_action",
                 "memory_rule_list",
+                // v0.7.0 QW-1 — file-backed reflection chain export
+                // companion. Renders the markdown / JSON envelope;
+                // does NOT write to disk (agent harness owns disk I/O).
+                "memory_export_reflection",
             ],
             Self::Meta => &[
                 "memory_capabilities",
@@ -669,7 +679,7 @@ mod tests {
     fn family_expected_tool_counts_sum_to_51() {
         let total: usize = Family::all().iter().map(|f| f.expected_tool_count()).sum();
         assert_eq!(
-            total, 63,
+            total, 64,
             "v0.6.3.1 baseline (43) + v0.7.0 I4 `memory_replay` + v0.7 H4 \
              `memory_verify` + v0.7 B1 `memory_load_family` + v0.7 B2 \
              `memory_smart_load` + v0.7 K7 `memory_subscription_replay` \
@@ -680,7 +690,8 @@ mod tests {
              v0.7.0 issue #691 `memory_check_agent_action` + \
              `memory_rule_list` + v0.7.0 L1-5 5×skill tools + \
              v0.7.0 L2-6 `memory_skill_promote_from_reflection` + \
-             v0.7.0 L2-7 `memory_skill_compositional_context` = 63. \
+             v0.7.0 L2-7 `memory_skill_compositional_context` + \
+             v0.7.0 QW-1 `memory_export_reflection` = 64. \
              If this drifts, update Family::expected_tool_count and the \
              family map docs together."
         );
@@ -764,7 +775,8 @@ mod tests {
         // v0.7.0 L2-3 — Power got memory_dependents_of_invalidated (+1 → 12).
         // v0.7.0 issue #691 — Power got memory_check_agent_action +
         // memory_rule_list (+2 → 14).
-        assert_eq!(p.expected_tool_count(), 7 + 14);
+        // v0.7.0 QW-1 — Power got memory_export_reflection (+1 → 15).
+        assert_eq!(p.expected_tool_count(), 7 + 15);
     }
 
     #[test]
@@ -778,13 +790,14 @@ mod tests {
         // memory_reflection_origin (L2-2) + memory_dependents_of_invalidated
         // (L2-3) + memory_check_agent_action + memory_rule_list (#691) +
         // 5×memory_skill_* (L1-5) + memory_skill_promote_from_reflection
-        // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) = 63.
-        assert_eq!(p.expected_tool_count(), 63);
+        // (L2-6, #671) + memory_skill_compositional_context (L2-7, #672) +
+        // memory_export_reflection (QW-1) = 64.
+        assert_eq!(p.expected_tool_count(), 64);
 
-        // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 additions live in
-        // Family::Power (operator/governance), so the `power` profile
+        // The K7+K8 + Task 4/8 + L2-2 + L2-3 + #691 + QW-1 additions live
+        // in Family::Power (operator/governance), so the `power` profile
         // picks them up too.
-        assert_eq!(Profile::power().expected_tool_count(), 7 + 14);
+        assert_eq!(Profile::power().expected_tool_count(), 7 + 15);
     }
 
     // ---------- Profile::parse ----------

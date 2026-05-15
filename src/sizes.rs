@@ -190,8 +190,8 @@ mod tests {
     fn table_has_51_entries_matching_tool_definitions_count() {
         let n = tool_sizes().len();
         assert_eq!(
-            n, 63,
-            "expected exactly 63 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
+            n, 64,
+            "expected exactly 64 tools (v0.6.3.1 baseline 43 + v0.7.0 I4 \
              `memory_replay` + v0.7 H4 `memory_verify` + v0.7 B1 \
              `memory_load_family` + v0.7 B2 `memory_smart_load` + v0.7 K7 \
              `memory_subscription_replay` + `memory_subscription_dlq_list` \
@@ -204,7 +204,8 @@ mod tests {
              `memory_skill_get` + `memory_skill_resource` + \
              `memory_skill_export` + v0.7.0 L2-6 \
              `memory_skill_promote_from_reflection` + v0.7.0 L2-7 \
-             `memory_skill_compositional_context`, source-anchored at \
+             `memory_skill_compositional_context` + v0.7.0 QW-1 \
+             `memory_export_reflection`, source-anchored at \
              src/mcp.rs::tool_definitions); got {n}. If the count changed, \
              update the family map and this assertion together."
         );

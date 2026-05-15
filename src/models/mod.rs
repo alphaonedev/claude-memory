@@ -322,6 +322,7 @@ mod tests {
             approver: ApproverType::Agent("maintainer".to_string()),
             inherit: true,
             max_reflection_depth: None,
+            auto_export_reflections_to_filesystem: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: GovernancePolicy = serde_json::from_str(&json).unwrap();

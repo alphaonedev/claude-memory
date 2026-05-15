@@ -32,6 +32,11 @@ pub(super) mod verify;
 pub(super) mod replay;
 pub(super) mod reflect;
 pub(super) mod reflection_origin;
+// v0.7.0 QW-1 — file-backed reflection chain export. Returns the
+// rendered content + suggested filename; does NOT write to disk
+// (agent-side formatting only, capability isolation rationale in
+// the module-level doc on `mcp::tools::export_reflection`).
+pub(super) mod export_reflection;
 // v0.7.0 L2-3 (issue #668) — Reflection invalidation propagation
 // (notification, not cascade). Read-side surface for the dependents
 // flagged by the L2-3 walker.
@@ -107,6 +112,7 @@ pub(super) use self::{
     replay::handle_replay,
     reflect::handle_reflect,
     reflection_origin::handle_reflection_origin,
+    export_reflection::handle_export_reflection,
     dependents_of_invalidated::handle_dependents_of_invalidated,
     consolidate::handle_consolidate,
     namespace::handle_namespace_set_standard,

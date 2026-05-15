@@ -225,6 +225,7 @@ fn three_peer_federation_depth_replication_and_cross_peer_refusal() {
         approver: ApproverType::Human,
         inherit: true,
         max_reflection_depth: Some(2),
+        auto_export_reflections_to_filesystem: None,
     };
     seed_policy(&peer_b.conn, NAMESPACE, &tight);
 
