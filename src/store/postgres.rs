@@ -89,6 +89,14 @@ const MIGRATION_V32_LINK_RELATION_CHECK: &str =
 const MIGRATION_V33_SIGNED_EVENTS_CHAIN: &str =
     include_str!("../../migrations/postgres/0015_v07_signed_events_chain.sql");
 
+/// v0.7.0 QW-3 — context-offload substrate primitive (`offloaded_blobs`
+/// table + namespace and TTL indexes). Mirrors SQLite schema v35.
+/// CREATE TABLE IF NOT EXISTS + CREATE INDEX IF NOT EXISTS — fully
+/// idempotent. v0.8.0 short-term-context-compression will build on
+/// this plumbing.
+const MIGRATION_V34_OFFLOADED_BLOBS: &str =
+    include_str!("../../migrations/postgres/0016_v07_offloaded_blobs.sql");
+
 /// Current schema version. Matches SQLite CURRENT_SCHEMA_VERSION (src/db.rs:233).
 /// Incremented on each migration step.
 ///
@@ -148,7 +156,12 @@ const MIGRATION_V33_SIGNED_EVENTS_CHAIN: &str =
 //       property. Backfill runs application-side in `migrate_v33` so
 //       both backends share the canonical-bytes encoding from
 //       `signed_events::canonical_chain_bytes`.
-const CURRENT_SCHEMA_VERSION: i32 = 33;
+// v34 = v0.7.0 QW-3 — context-offload substrate primitive. Adds the
+//       `offloaded_blobs` table backing `src/offload/mod.rs`.
+//       Mirrors SQLite schema v35. Pure idempotent CREATE TABLE IF
+//       NOT EXISTS + CREATE INDEX IF NOT EXISTS — no application-
+//       side backfill needed.
+const CURRENT_SCHEMA_VERSION: i32 = 34;
 
 /// Default embedding column dimension used when the caller doesn't pass
 /// `--embedding-dim` to `ai-memory schema-init`. Matches the v0.7.0
@@ -546,6 +559,9 @@ impl PostgresStore {
         if current_version < 33 {
             self.migrate_v33().await?;
         }
+        if current_version < 34 {
+            self.migrate_v34().await?;
+        }
 
         Ok(())
     }
@@ -809,6 +825,37 @@ impl PostgresStore {
         tracing::info!(
             target = "store::postgres",
             "schema migration v33 applied (signed_events prev_hash + sequence chain)"
+        );
+        Ok(())
+    }
+
+    /// v34 — context-offload substrate primitive (QW-3).
+    ///
+    /// Creates the `offloaded_blobs` table backing
+    /// `src/offload/mod.rs`. Mirrors SQLite schema v35. Pure
+    /// idempotent CREATE TABLE / CREATE INDEX — no application-side
+    /// backfill.
+    async fn migrate_v34(&self) -> StoreResult<()> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| to_store_err("begin v34 tx", e))?;
+
+        sqlx::raw_sql(MIGRATION_V34_OFFLOADED_BLOBS)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| to_store_err("apply v34 offloaded_blobs", e))?;
+
+        record_schema_version(&mut tx, 34).await?;
+
+        tx.commit()
+            .await
+            .map_err(|e| to_store_err("commit v34 migration", e))?;
+
+        tracing::info!(
+            target = "store::postgres",
+            "schema migration v34 applied (offloaded_blobs context-offload substrate)"
         );
         Ok(())
     }

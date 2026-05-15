@@ -243,6 +243,15 @@ pub enum Command {
     /// key storage (TPM/HSM/Secure Enclave) is out of OSS scope and
     /// lives in the AgenticMem commercial layer.
     Identity(IdentityArgs),
+    /// v0.7.0 QW-3 — context-offload substrate primitive. Persists a
+    /// file (or `-` for stdin) into the `offloaded_blobs` substrate
+    /// and prints the short `ref_id` callers keep in their working
+    /// window. Pairs with `ai-memory deref <ref_id>`.
+    Offload(crate::cli::offload::OffloadArgs),
+    /// v0.7.0 QW-3 — dereference a previously-offloaded `ref_id`.
+    /// Refuses tampered rows (SHA-256 mismatch). Pairs with
+    /// `ai-memory offload <file>`.
+    Deref(crate::cli::offload::DerefArgs),
     /// v0.7.0 (issue #691) — substrate-level agent-action rules engine.
     /// CRUD over the `governance_rules` table consulted by
     /// `check_agent_action`. Mutation verbs (add/enable/disable/remove)
@@ -915,6 +924,29 @@ pub async fn run(cli: Cli, app_config: &AppConfig) -> Result<()> {
             let mut se = stderr.lock();
             let mut out = cli::CliOutput::from_std(&mut so, &mut se);
             cli::identity::run(a, j, &mut out)
+        }
+        Command::Offload(a) => {
+            // v0.7.0 QW-3 — context-offload substrate primitive.
+            // Reads `--file` (or `-` stdin), writes a row into
+            // `offloaded_blobs`, returns the `ref_id`. The full
+            // short-term-context-compression pattern (Mermaid canvas
+            // + auto-cadence + node_id integration) targets v0.8.0.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::offload::run_offload(&db_path, &a, &mut out)
+        }
+        Command::Deref(a) => {
+            // v0.7.0 QW-3 — dereference a `ref_id` produced by
+            // `ai-memory offload`. Refuses tampered rows.
+            let stdout = std::io::stdout();
+            let stderr = std::io::stderr();
+            let mut so = stdout.lock();
+            let mut se = stderr.lock();
+            let mut out = cli::CliOutput::from_std(&mut so, &mut se);
+            cli::offload::run_deref(&db_path, &a, &mut out)
         }
         Command::Rules(a) => {
             // v0.7.0 (issue #691) — substrate-level agent-action rules

@@ -7,7 +7,7 @@
 //! constant, and the `migrate` function out of `src/db.rs` into
 //! this sub-module. Pure refactor — semantics unchanged. The
 //! `MAX_SUPPORTED_SCHEMA` constant in `cli::boot` must still bump
-//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 34).
+//! in lockstep with [`CURRENT_SCHEMA_VERSION`] (current value: 35).
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
@@ -219,7 +219,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_event_type
 //       canonical_chain_bytes`). Idempotent — re-running on an
 //       already-backfilled DB is a no-op (probes detect the columns
 //       and the existence of populated sequence rows).
-const CURRENT_SCHEMA_VERSION: i64 = 34;
+// v35 = v0.7.0 QW-3 — context-offload substrate primitive. Adds
+//       `offloaded_blobs` table backing the offload+deref engine
+//       in `src/offload/`. v0.8.0 short-term-context-compression
+//       (Mermaid canvas + auto-cadence + node_id integration) will
+//       build on this plumbing. CREATE TABLE IF NOT EXISTS +
+//       CREATE INDEX IF NOT EXISTS — fully idempotent.
+const CURRENT_SCHEMA_VERSION: i64 = 35;
 
 const MIGRATION_V15_SQLITE: &str =
     include_str!("../../migrations/sqlite/0010_v063_hierarchy_kg.sql");
@@ -343,6 +349,14 @@ const MIGRATION_V33_SQLITE: &str =
 // encoding.
 const MIGRATION_V34_SQLITE: &str =
     include_str!("../../migrations/sqlite/0028_v07_signed_events_chain.sql");
+// v0.7.0 QW-3 — context-offload substrate primitive (offloaded_blobs
+// table + namespace and TTL indexes). CREATE TABLE IF NOT EXISTS +
+// CREATE INDEX IF NOT EXISTS — fully idempotent; safe to replay on a
+// database that already ran this migration. Substrate-only;
+// v0.8.0 short-term-context-compression will read/write via
+// `src/offload/mod.rs`.
+const MIGRATION_V35_SQLITE: &str =
+    include_str!("../../migrations/sqlite/0029_v07_offloaded_blobs.sql");
 
 // COVERAGE: per-version ALTER/CREATE branches inside this function
 // are guarded by `has_X` column-existence probes and `IF NOT EXISTS`
@@ -1076,6 +1090,13 @@ pub(crate) fn migrate(conn: &Connection) -> Result<()> {
                 conn.execute_batch(MIGRATION_V34_SQLITE)?;
             }
         }
+        if version < 35 {
+            // v0.7.0 QW-3 — `offloaded_blobs` table backing the
+            // context-offload substrate primitive. CREATE TABLE IF
+            // NOT EXISTS + CREATE INDEX IF NOT EXISTS — fully
+            // idempotent, no Rust-emitted ALTERs needed.
+            conn.execute_batch(MIGRATION_V35_SQLITE)?;
+        }
 
         conn.execute("DELETE FROM schema_version", [])?;
         conn.execute(
@@ -1277,12 +1298,13 @@ mod tests {
 
     #[test]
     fn current_schema_version_matches_module_docstring() {
-        // The module docstring advertises 33; bumping the constant
-        // without updating the docstring is a documented foot-gun.
-        // We pin the relationship so a future bump is loud.
+        // The module docstring is updated in lockstep with the
+        // CURRENT_SCHEMA_VERSION constant. Bumping one without the
+        // other is a documented foot-gun. We pin the relationship
+        // so a future bump is loud.
         assert_eq!(
-            CURRENT_SCHEMA_VERSION, 34,
-            "module docstring advertises 33; bump the docstring when this number changes"
+            CURRENT_SCHEMA_VERSION, 35,
+            "module docstring advertises 35; bump the docstring when this number changes"
         );
     }
 

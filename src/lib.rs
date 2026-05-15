@@ -16,6 +16,10 @@ pub mod approvals;
 pub mod audit;
 pub mod autonomy;
 pub mod bench;
+// v0.7.0 QW-3 — daemon-side background tasks. Carries the TTL sweep
+// loop for `offloaded_blobs`; future v0.8.0 substrate tasks land
+// here without churning `daemon_runtime`.
+pub mod background;
 pub mod cli;
 pub mod color;
 pub mod config;
@@ -68,6 +72,11 @@ pub mod models;
 // edge lands: walks `reflects_on` edges from dependents and writes
 // notification memories into `<namespace>/_invalidations`.
 pub mod notification;
+// v0.7.0 QW-3 — context-offload substrate primitive. Offload+deref
+// store with Ed25519-signed audit events; v0.8.0 short-term-context-
+// compression (Mermaid canvas + auto-cadence + node_id integration)
+// builds on this plumbing.
+pub mod offload;
 // v0.7.0 L1-5 — SKILL.md parser and structured-document ingestion pipelines.
 pub mod parsing;
 // v0.7.0 K9 — unified permission system. Composes declarative

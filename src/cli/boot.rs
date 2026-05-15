@@ -86,7 +86,7 @@ pub const MIN_SUPPORTED_SCHEMA: u32 = 16;
 /// the JSONL property in `audit.rs`). When a DB's `schema_version`
 /// exceeds this, the binary is too old for a newer DB and we
 /// surface a warning. v0.6.3.1 (PR-9h / issue #487 PR #497 req #72).
-pub const MAX_SUPPORTED_SCHEMA: u32 = 34;
+pub const MAX_SUPPORTED_SCHEMA: u32 = 35;
 
 /// Pure boundary check: `true` when `v` lies within
 /// `[MIN_SUPPORTED_SCHEMA, MAX_SUPPORTED_SCHEMA]`. Extracted so the

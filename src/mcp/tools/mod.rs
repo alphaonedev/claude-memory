@@ -62,6 +62,11 @@ pub(super) mod skill_export;
 pub(super) mod skill_promote;
 // v0.7.0 L2-7 (issue #672) — reflection-skill composition declaration.
 pub(super) mod skill_compositional_context;
+// v0.7.0 QW-3 — context-offload substrate primitive. Handlers ship
+// as substrate-only at v0.7.0; v0.8.0 short-term-context-compression
+// wires them into `tool_definitions_for_profile` after the
+// profile-count test fleet is rolled forward.
+pub mod offload;
 
 // Re-export all handler functions and types to make them accessible from
 // the parent `mcp` module (super) without requiring callers to know the

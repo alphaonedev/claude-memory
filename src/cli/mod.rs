@@ -38,6 +38,9 @@ pub mod io;
 pub mod io_writer;
 pub mod link;
 pub mod logs;
+/// v0.7.0 QW-3 — `ai-memory offload` / `ai-memory deref` subcommands.
+/// Substrate-only wrappers over `crate::offload::ContextOffloader`.
+pub mod offload;
 pub mod promote;
 pub mod recall;
 /// v0.7.0 (issue #691) — `ai-memory rules` subcommand. CRUD for the
