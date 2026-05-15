@@ -203,6 +203,20 @@ pub fn handle_recall(
         .as_u64()
         .and_then(|n| usize::try_from(n).ok());
 
+    // v0.7.0 WT-1-E — atom-preference recall semantics.
+    //
+    // By default recall surfaces atoms in place of archived sources
+    // (the WT-1-B atomiser sets `atomised_into > 0` AND
+    // `metadata.atomisation_archived_at` on the parent row when atoms
+    // exist). Auditors and the forensic-export path opt in via
+    // `include_archived=true` to see both atoms AND the archived
+    // source for the same query — the substrate read is the same;
+    // only the WHERE clause changes.
+    //
+    // Composes with namespace, memory_kind (via storage filter),
+    // time-window, tier, and the existing visibility predicate.
+    let include_archived = params["include_archived"].as_bool().unwrap_or(false);
+
     // v0.6.0.0 contextual recall — caller-supplied recent conversation tokens.
     let context_tokens: Vec<String> = params["context_tokens"]
         .as_array()
@@ -332,6 +346,7 @@ pub fn handle_recall(
                     as_agent,
                     budget_tokens,
                     resolved_scoring,
+                    include_archived,
                 )
                 .map_err(|e| e.to_string())?;
 
@@ -379,6 +394,7 @@ pub fn handle_recall(
         resolved_ttl.mid_extend_secs,
         as_agent,
         budget_tokens,
+        include_archived,
     )
     .map_err(|e| e.to_string())?;
     let memories = scored_memories(results);

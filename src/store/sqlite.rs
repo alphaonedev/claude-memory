@@ -174,6 +174,7 @@ impl MemoryStore for SqliteStore {
             tags_first,
             filter.agent_id.as_deref(),
             ctx.as_agent.as_deref(),
+            false,
         )
         .map_err(box_err)
     }
@@ -363,6 +364,7 @@ impl MemoryStore for SqliteStore {
                 ctx.as_agent.as_deref(),
                 None,
                 &scoring,
+                false,
             )
             .map_err(box_err)?;
             Ok(results)
@@ -379,6 +381,7 @@ impl MemoryStore for SqliteStore {
                 86_400,
                 ctx.as_agent.as_deref(),
                 None,
+                false,
             )
             .map_err(box_err)?;
             Ok(results)

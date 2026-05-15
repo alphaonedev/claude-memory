@@ -60,6 +60,12 @@ pub struct RecallArgs {
     /// defaults. Default `false` preserves v0.6.x recall semantics.
     #[arg(long)]
     pub session_default: bool,
+    /// v0.7.0 WT-1-E — when set, recall returns archived sources
+    /// (those replaced by their atoms after WT-1-B atomisation)
+    /// alongside the atoms. Default `false` surfaces atoms only,
+    /// which is the canonical post-atomisation recall unit.
+    #[arg(long)]
+    pub include_archived: bool,
 }
 
 /// `recall` handler. Mirrors `cmd_recall` from the pre-W5b `main.rs`
@@ -268,6 +274,7 @@ pub(crate) fn run_with_embedder(
                     args.as_agent.as_deref(),
                     args.budget_tokens,
                     &resolved_scoring,
+                    args.include_archived,
                 )?;
                 if let Some(ref ce) = reranker {
                     (ce.rerank(&args.context, results), outcome, "hybrid+rerank")
@@ -292,6 +299,7 @@ pub(crate) fn run_with_embedder(
                     resolved_ttl.mid_extend_secs,
                     args.as_agent.as_deref(),
                     args.budget_tokens,
+                    args.include_archived,
                 )?;
                 (results, outcome, "keyword")
             }
@@ -309,6 +317,7 @@ pub(crate) fn run_with_embedder(
             resolved_ttl.mid_extend_secs,
             args.as_agent.as_deref(),
             args.budget_tokens,
+            args.include_archived,
         )?;
         (results, outcome, "keyword")
     };
@@ -403,6 +412,7 @@ mod tests {
             budget_tokens: None,
             context_tokens: None,
             session_default: false,
+            include_archived: false,
         }
     }
 

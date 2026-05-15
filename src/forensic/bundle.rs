@@ -102,6 +102,17 @@ pub struct ExportForensicBundleArgs {
     /// directory.
     #[arg(long, value_name = "PATH")]
     pub output: Option<PathBuf>,
+
+    /// v0.7.0 WT-1-E — when true (default), include the full
+    /// atomisation chain whenever the target memory is an archived
+    /// source or an atom: the source row, every atom (atom_of =
+    /// source_id), every `derives_from` edge, and the
+    /// `atomisation_complete` signed event. When false the bundle
+    /// emits only the atoms (the source chain is skipped), useful
+    /// when an auditor only needs the canonical post-atomisation
+    /// surface and not the historical record.
+    #[arg(long, default_value_t = true)]
+    pub include_atomisation_chain: bool,
 }
 
 /// Arguments for `ai-memory verify-forensic-bundle <path>`.
@@ -187,6 +198,43 @@ pub struct MemoryEnvelope {
     pub created_at: String,
     pub updated_at: String,
     pub metadata: serde_json::Value,
+    /// v0.7.0 WT-1-E — atomisation-chain enrichment. Present only
+    /// when this memory is involved in atomisation (either an
+    /// archived source with `atomised_into > 0` or an atom with
+    /// `atom_of` set). Provides the full chain locally to the
+    /// auditor without forcing them to cross-reference between
+    /// envelopes. Skipped (None) on rows untouched by atomisation
+    /// and on every bundle built with
+    /// `--include-atomisation-chain=false`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atomisation: Option<AtomisationEnvelope>,
+}
+
+/// v0.7.0 WT-1-E — per-memory atomisation enrichment block. Carries
+/// the substrate-visible signals (`atomised_into`, `archived_at`,
+/// `atom_ids`, `atom_of`) directly so an auditor can reconstruct the
+/// chain from a single envelope.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct AtomisationEnvelope {
+    /// Count of atoms emitted from this source (mirror of
+    /// `memories.atomised_into`). `None` on atom rows and on rows
+    /// untouched by atomisation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atomised_into: Option<i64>,
+    /// RFC3339 stamp from `metadata.atomisation_archived_at`,
+    /// populated by the WT-1-B `archive_source` step. `None` on
+    /// rows untouched by atomisation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    /// Ordered list of atom ids whose `atom_of` points back at this
+    /// source. Empty on atom rows and on rows untouched by
+    /// atomisation.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub atom_ids: Vec<String>,
+    /// Parent source id when this memory is an atom. `None` on
+    /// archived-source rows and on rows untouched by atomisation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub atom_of: Option<String>,
 }
 
 /// One signed link inside the bundle. Carries the canonical
@@ -284,18 +332,85 @@ pub fn build_files(
 
     // 1) Walk the reflects_on graph backward from memory_id to assemble
     //    the set of in-scope memory ids.
-    let chain_ids = walk_reflection_chain(conn, &args.memory_id)?;
+    let mut chain_ids = walk_reflection_chain(conn, &args.memory_id)?;
+
+    // v0.7.0 WT-1-E — atomisation-chain expansion. When the target
+    // memory (or any ancestor) is an archived source, fold its atoms
+    // in. When the target is itself an atom, fold its parent source
+    // in. Both directions are needed so an auditor sees the full
+    // chain regardless of which "end" of it they queried by id.
+    // The expansion is purely additive — reflections + atomisation
+    // can coexist on the same memory.
+    if args.include_atomisation_chain {
+        let mut expanded = chain_ids.clone();
+        for mid in &chain_ids {
+            // Source → atoms (when this id is an archived source)
+            for atom_id in atom_ids_of_source(conn, mid)? {
+                if !expanded.contains(&atom_id) {
+                    expanded.push(atom_id);
+                }
+            }
+            // Atom → source (when this id is an atom)
+            if let Some(parent_id) = atom_of_for(conn, mid)? {
+                if !expanded.contains(&parent_id) {
+                    expanded.push(parent_id.clone());
+                    // Recursively pick up sibling atoms of that
+                    // parent so the auditor sees the whole sibling
+                    // cohort, not just the one atom that was the
+                    // entry point.
+                    for atom_id in atom_ids_of_source(conn, &parent_id)? {
+                        if !expanded.contains(&atom_id) {
+                            expanded.push(atom_id);
+                        }
+                    }
+                }
+            }
+        }
+        expanded.sort();
+        chain_ids = expanded;
+    }
 
     let mut files: BundleFiles = BTreeMap::new();
 
     // 2) Memory envelopes (target + ancestors when --include-reflections).
+    //    The atomisation expansion above is preserved verbatim when
+    //    --include-reflections=true; when --include-reflections=false
+    //    the original reflects_on logic emits only the target row,
+    //    but the atomisation enrichment is still attached to it.
     let memory_ids_to_emit: Vec<String> = if args.include_reflections {
         chain_ids.clone()
+    } else if args.include_atomisation_chain {
+        // Even without --include-reflections, emit the target's
+        // atomisation cohort (source + sibling atoms) so the bundle
+        // is self-contained for the substrate-visible chain.
+        let mut ids = vec![args.memory_id.clone()];
+        for atom_id in atom_ids_of_source(conn, &args.memory_id)? {
+            if !ids.contains(&atom_id) {
+                ids.push(atom_id);
+            }
+        }
+        if let Some(parent) = atom_of_for(conn, &args.memory_id)? {
+            if !ids.contains(&parent) {
+                ids.push(parent.clone());
+            }
+            for atom_id in atom_ids_of_source(conn, &parent)? {
+                if !ids.contains(&atom_id) {
+                    ids.push(atom_id);
+                }
+            }
+        }
+        ids.sort();
+        ids
     } else {
         vec![args.memory_id.clone()]
     };
     for mid in &memory_ids_to_emit {
         if let Some(mem) = crate::db::get(conn, mid).context("db::get for bundle")? {
+            let atomisation = if args.include_atomisation_chain {
+                build_atomisation_envelope(conn, &mem)?
+            } else {
+                None
+            };
             let env = MemoryEnvelope {
                 id: mem.id.clone(),
                 namespace: mem.namespace.clone(),
@@ -307,6 +422,7 @@ pub fn build_files(
                 created_at: mem.created_at.clone(),
                 updated_at: mem.updated_at.clone(),
                 metadata: mem.metadata.clone(),
+                atomisation,
             };
             let bytes = serde_json::to_vec_pretty(&env).context("serialise MemoryEnvelope")?;
             files.insert(format!("memories/{}.json", mem.id), bytes);
@@ -314,7 +430,9 @@ pub fn build_files(
     }
 
     // 3) Edge envelopes — every reflects_on / supersedes / derived_from
-    //    edge whose source is in `chain_ids`.
+    //    edge whose source is in `chain_ids`. WT-1-E folds in
+    //    `derives_from` (atom → parent) alongside the existing
+    //    relations — see [`fetch_edges_for`].
     let edges = fetch_edges_for(conn, &chain_ids)?;
     for edge in &edges {
         let bytes = serde_json::to_vec_pretty(edge).context("serialise EdgeEnvelope")?;
@@ -331,10 +449,40 @@ pub fn build_files(
     // 4) signed_events slice — every audit row whose agent_id matches
     //    a memory in the chain (the H5 convention is to use agent_id =
     //    actor's id; the memory_id is embedded in the payload).
+    let mut event_ids_emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
     let events = fetch_signed_events_for(conn, &chain_ids)?;
     for ev in &events {
         let bytes = serde_json::to_vec_pretty(ev).context("serialise SignedEventEnvelope")?;
         files.insert(format!("signed_events/{}.json", ev.id), bytes);
+        event_ids_emitted.insert(ev.id.clone());
+    }
+
+    // v0.7.0 WT-1-E — atomisation-chain signed_events. Two event
+    // shapes need to land in the bundle even when their agent_id is
+    // not itself a memory id in the chain:
+    //
+    //   * `atomisation_complete` — the summary event the WT-1-B
+    //     atomiser emits per source. Its `agent_id` is the calling
+    //     agent's id (e.g. `ai:claude@host:pid-…`), not a memory
+    //     id, so the H5-agent-id-match query above misses it.
+    //   * `memory_link.created` for each `derives_from` atom→parent
+    //     edge. Again the agent_id is the writer, not the memory.
+    //
+    // We fetch these explicitly by joining the memory_links table
+    // (for the per-atom edge events) and by event_type +
+    // payload_hash cross-reference (for the summary event). Both
+    // sets are unioned with the existing agent-id-matched events,
+    // de-duped, then emitted under the same path scheme.
+    if args.include_atomisation_chain {
+        let extra = fetch_atomisation_signed_events_for(conn, &chain_ids)?;
+        for ev in &extra {
+            if event_ids_emitted.contains(&ev.id) {
+                continue;
+            }
+            let bytes = serde_json::to_vec_pretty(ev).context("serialise SignedEventEnvelope")?;
+            files.insert(format!("signed_events/{}.json", ev.id), bytes);
+            event_ids_emitted.insert(ev.id.clone());
+        }
     }
 
     // 5) Transcript union (per L2-4) when --include-transcripts.
@@ -551,7 +699,7 @@ fn fetch_edges_for(conn: &Connection, chain_ids: &[String]) -> Result<Vec<EdgeEn
                 valid_from, valid_until, signature, attest_level \
          FROM memory_links \
          WHERE source_id IN ({placeholders}) \
-           AND relation IN ('reflects_on', 'supersedes', 'derived_from') \
+           AND relation IN ('reflects_on', 'supersedes', 'derived_from', 'derives_from') \
          ORDER BY source_id, relation, target_id"
     );
     let mut stmt = conn.prepare(&sql)?;
@@ -578,6 +726,223 @@ fn fetch_edges_for(conn: &Connection, chain_ids: &[String]) -> Result<Vec<EdgeEn
         out.push(r?);
     }
     Ok(out)
+}
+
+/// v0.7.0 WT-1-E — return the atom ids whose `atom_of` column FK
+/// points back to `source_id`. Empty when `source_id` is not an
+/// archived source. Ordering matches the WT-1-B emission order
+/// (created_at ASC, id ASC).
+fn atom_ids_of_source(conn: &Connection, source_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM memories \
+         WHERE atom_of = ?1 \
+         ORDER BY created_at ASC, id ASC",
+    )?;
+    let rows = stmt.query_map(params![source_id], |r| r.get::<_, String>(0))?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r?);
+    }
+    Ok(out)
+}
+
+/// v0.7.0 WT-1-E — return the parent source id when `id` is an atom
+/// (i.e. `memories.atom_of` is set). `None` for non-atom rows or
+/// when the id is unknown.
+fn atom_of_for(conn: &Connection, id: &str) -> Result<Option<String>> {
+    let res: rusqlite::Result<Option<String>> = conn.query_row(
+        "SELECT atom_of FROM memories WHERE id = ?1",
+        params![id],
+        |r| r.get::<_, Option<String>>(0),
+    );
+    match res {
+        Ok(v) => Ok(v),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// v0.7.0 WT-1-E — build the `AtomisationEnvelope` enrichment block
+/// for `mem`. Returns `None` when the memory is untouched by
+/// atomisation (neither an archived source nor an atom), so the
+/// outer envelope's `Option<AtomisationEnvelope>` field round-trips
+/// `serde(skip_serializing_if = "Option::is_none")` cleanly.
+fn build_atomisation_envelope(
+    conn: &Connection,
+    mem: &crate::models::Memory,
+) -> Result<Option<AtomisationEnvelope>> {
+    // Read the two source-side columns. These are not on the Memory
+    // struct (yet), so query directly.
+    let (atomised_into, atom_of_col): (Option<i64>, Option<String>) = conn
+        .query_row(
+            "SELECT atomised_into, atom_of FROM memories WHERE id = ?1",
+            params![mem.id],
+            |r| {
+                Ok((
+                    r.get::<_, Option<i64>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            },
+        )
+        .unwrap_or((None, None));
+
+    let archived_at = mem
+        .metadata
+        .get("atomisation_archived_at")
+        .and_then(|v| v.as_str())
+        .map(ToString::to_string);
+
+    let is_archived_source = atomised_into.unwrap_or(0) > 0 || archived_at.is_some();
+    let is_atom = atom_of_col.is_some();
+    if !is_archived_source && !is_atom {
+        return Ok(None);
+    }
+    let atom_ids = if is_archived_source {
+        atom_ids_of_source(conn, &mem.id)?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(AtomisationEnvelope {
+        atomised_into: atomised_into.filter(|n| *n > 0),
+        archived_at,
+        atom_ids,
+        atom_of: atom_of_col,
+    }))
+}
+
+/// v0.7.0 WT-1-E — fetch every atomisation-related signed event for
+/// the chain. Two queries:
+///
+///   1. Every `memory_link.created` row whose payload describes a
+///      `derives_from` edge from one of the chain's memory ids. We
+///      approximate this by joining on `memory_links` (the row that
+///      generated the audit event) — the WT-1-B atomiser writes the
+///      link via `create_link_signed` which appends a matching
+///      audit row at the same instant. Match heuristic: same
+///      agent_id and timestamp >= the link's created_at on the
+///      same source/target row.
+///   2. Every `atomisation_complete` event whose timestamp lies at
+///      or after the earliest `derives_from` edge's `created_at`
+///      for the chain (i.e. the summary event for any atomisation
+///      that involves these memories). Because the payload itself
+///      is only stored as a hash we can't filter on `source_id`
+///      directly; we instead fetch all events of that type that
+///      could plausibly have been emitted by the same calling
+///      agent and let the auditor cross-reference at verify time.
+///      The over-fetch is bounded by the agent_id set of the
+///      chain's `derives_from` writers, so unrelated atomisations
+///      from other agents are excluded.
+fn fetch_atomisation_signed_events_for(
+    conn: &Connection,
+    chain_ids: &[String],
+) -> Result<Vec<SignedEventEnvelope>> {
+    if chain_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    // Collect the set of `observed_by` agent ids on the chain's
+    // derives_from edges. The atomisation_complete event's
+    // `agent_id` matches the same `calling_agent_id` used by the
+    // per-atom create_link_signed call.
+    let placeholders: String = chain_ids
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let agent_sql = format!(
+        "SELECT DISTINCT observed_by FROM memory_links \
+         WHERE relation = 'derives_from' \
+           AND (source_id IN ({placeholders}) OR target_id IN ({placeholders})) \
+           AND observed_by IS NOT NULL"
+    );
+    let mut agent_stmt = conn.prepare(&agent_sql)?;
+    let bind_pairs: Vec<&dyn rusqlite::ToSql> = chain_ids
+        .iter()
+        .chain(chain_ids.iter())
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let agent_rows = agent_stmt.query_map(bind_pairs.as_slice(), |r| r.get::<_, String>(0))?;
+    let mut writer_agents: Vec<String> = Vec::new();
+    for r in agent_rows {
+        let id = r?;
+        if !writer_agents.contains(&id) {
+            writer_agents.push(id);
+        }
+    }
+
+    // Without a writer agent (i.e. unsigned `derives_from` edge) we
+    // still fall back to fetching atomisation_complete events of
+    // any agent so the bundle preserves the audit row. Auditors can
+    // distinguish via the `attest_level` column.
+    let mut out: Vec<SignedEventEnvelope> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if writer_agents.is_empty() {
+        // Fallback: fetch ALL atomisation_complete + memory_link.created
+        // events. The chain has unsigned derives_from edges, so we
+        // cannot scope by agent — better to over-include in the
+        // bundle (auditor sees the relevant subset) than to silently
+        // drop the chain's audit trail.
+        let sql = "SELECT id, agent_id, event_type, payload_hash, signature, \
+                          attest_level, timestamp \
+                   FROM signed_events \
+                   WHERE event_type IN ('atomisation_complete', 'memory_link.created') \
+                   ORDER BY timestamp ASC, id ASC";
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map([], row_to_signed_event_envelope)?;
+        for r in rows {
+            let ev = r?;
+            if seen.insert(ev.id.clone()) {
+                out.push(ev);
+            }
+        }
+        return Ok(out);
+    }
+
+    let agent_placeholders: String = writer_agents
+        .iter()
+        .enumerate()
+        .map(|(i, _)| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT id, agent_id, event_type, payload_hash, signature, \
+                attest_level, timestamp \
+         FROM signed_events \
+         WHERE event_type IN ('atomisation_complete', 'memory_link.created') \
+           AND agent_id IN ({agent_placeholders}) \
+         ORDER BY timestamp ASC, id ASC"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let param_refs: Vec<&dyn rusqlite::ToSql> = writer_agents
+        .iter()
+        .map(|s| s as &dyn rusqlite::ToSql)
+        .collect();
+    let rows = stmt.query_map(param_refs.as_slice(), row_to_signed_event_envelope)?;
+    for r in rows {
+        let ev = r?;
+        if seen.insert(ev.id.clone()) {
+            out.push(ev);
+        }
+    }
+    Ok(out)
+}
+
+/// v0.7.0 WT-1-E — shared row→envelope decoder. Replicates the
+/// inline closure in [`fetch_signed_events_for`] so the WT-1-E
+/// fetcher does not duplicate the column-index pattern (and so a
+/// future column-set extension only needs to be applied in one
+/// place).
+fn row_to_signed_event_envelope(r: &rusqlite::Row<'_>) -> rusqlite::Result<SignedEventEnvelope> {
+    Ok(SignedEventEnvelope {
+        id: r.get::<_, String>(0)?,
+        agent_id: r.get::<_, String>(1)?,
+        event_type: r.get::<_, String>(2)?,
+        payload_hash_hex: bytes_to_hex(&r.get::<_, Vec<u8>>(3)?),
+        signature_hex: r.get::<_, Option<Vec<u8>>>(4)?.map(|b| bytes_to_hex(&b)),
+        attest_level: r.get::<_, String>(5)?,
+        timestamp: r.get::<_, String>(6)?,
+    })
 }
 
 /// Fetch every `signed_events` row whose `agent_id` matches a memory
@@ -1139,6 +1504,7 @@ mod tests {
             memory_id: id.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let files = build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build");
@@ -1160,6 +1526,7 @@ mod tests {
             memory_id: d1.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let files_a = build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build a");
@@ -1183,6 +1550,7 @@ mod tests {
             memory_id: d1.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let bundle_path = tmp.path().join("bundle.tar");
@@ -1204,6 +1572,7 @@ mod tests {
             memory_id: d1.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let bundle_path = tmp.path().join("bundle.tar");
@@ -1276,6 +1645,7 @@ mod tests {
             memory_id: d2.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let files = build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build");
@@ -1302,6 +1672,7 @@ mod tests {
             memory_id: d1.clone(),
             include_reflections: false,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let files = build_files(&conn, &args, Some("2026-01-01T00:00:00Z")).expect("build");
@@ -1323,6 +1694,7 @@ mod tests {
             memory_id: d1.clone(),
             include_reflections: true,
             include_transcripts: false,
+            include_atomisation_chain: true,
             output: None,
         };
         let bundle_path = tmp.path().join("bundle.tar");

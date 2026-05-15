@@ -62,6 +62,7 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 models::MID_TTL_EXTEND_SECS,
                 None,
                 None,
+                false,
             ) {
                 Ok((results, _outcome)) => {
                     for (mem, score) in &results {
@@ -89,7 +90,7 @@ pub fn handle_command(parts: &[&str], conn: &Connection, out: &mut CliOutput<'_>
                 let _ = writeln!(out.stderr, "usage: search <query>");
                 return ShellAction::Continue;
             }
-            match db::search(conn, &q, None, None, 20, None, None, None, None, None, None) {
+            match db::search(conn, &q, None, None, 20, None, None, None, None, None, None, false) {
                 Ok(results) => {
                     for mem in &results {
                         let _ = writeln!(

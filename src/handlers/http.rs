@@ -2764,6 +2764,7 @@ pub async fn search_memories(
         p.tags.as_deref(),
         p.agent_id.as_deref(),
         p.as_agent.as_deref(),
+        false,
     ) {
         Ok(r) => Json(json!({"results": r, "count": r.len(), "query": p.q})).into_response(),
         Err(e) => {
@@ -3129,6 +3130,7 @@ async fn recall_response(
             as_agent,
             budget_tokens,
             app.scoring.as_ref(),
+            false,
         );
         drop(vi_guard);
         (r, "hybrid")
@@ -3145,6 +3147,7 @@ async fn recall_response(
             mid_extend,
             as_agent,
             budget_tokens,
+            false,
         );
         (r, "keyword")
     };
