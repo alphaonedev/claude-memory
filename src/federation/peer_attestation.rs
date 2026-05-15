@@ -511,9 +511,28 @@ mod tests {
     }
 
     // ---- PeerAttestationConfig::from_env --------------------------------
+    //
+    // These three tests all mutate the process-wide PEER_ATTESTATION_ENV
+    // env var, so they MUST be serialised against each other under
+    // `cargo test --test-threads=N` (N >= 2). Without the shared mutex
+    // one test's set_var races another test's remove_var and the
+    // assertion non-deterministically observes the wrong configuration.
+    // The Coverage CI gate caught this at `--test-threads=2`:
+    // `from_env_parse_error_is_empty` saw a valid JSON payload from a
+    // concurrent `from_env_parses_valid_json` and failed
+    // `cfg.peers.is_empty()`. Same idiom as the rules-store guard.
+
+    static ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_env() -> std::sync::MutexGuard<'static, ()> {
+        ENV_GUARD
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     #[test]
     fn from_env_absent_is_empty() {
+        let _g = lock_env();
         unsafe { std::env::remove_var(PEER_ATTESTATION_ENV) };
         let cfg = PeerAttestationConfig::from_env();
         assert!(cfg.peers.is_empty());
@@ -521,6 +540,7 @@ mod tests {
 
     #[test]
     fn from_env_parses_valid_json() {
+        let _g = lock_env();
         let body = r#"{
             "peer-1": {
                 "allowed_sender_agent_ids": ["alice", "bob"],
@@ -537,6 +557,7 @@ mod tests {
 
     #[test]
     fn from_env_parse_error_is_empty() {
+        let _g = lock_env();
         unsafe { std::env::set_var(PEER_ATTESTATION_ENV, "not json{{") };
         let cfg = PeerAttestationConfig::from_env();
         unsafe { std::env::remove_var(PEER_ATTESTATION_ENV) };

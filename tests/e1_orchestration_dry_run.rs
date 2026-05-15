@@ -156,9 +156,13 @@ fn e1_dry_run_advertises_result_file_template() {
         out.contains("summary_template:"),
         "E1: dry-run missing summary_template line\nfull output:\n{out}"
     );
+    // Windows uses '\' as a path separator; the `results: ...` line in
+    // dry-run output reproduces the OS-native separator without a
+    // trailing separator. Match either form, with or without trailing
+    // separator (the prior `results/t0/` form was Linux/macOS only).
     assert!(
-        out.contains("results/t0/") || out.contains("results\\t0\\"),
-        "E1: dry-run results path should sit under results/t0/\nfull output:\n{out}"
+        out.contains("results/t0") || out.contains("results\\t0"),
+        "E1: dry-run results path should sit under results/t0\nfull output:\n{out}"
     );
 }
 
