@@ -4590,4 +4590,284 @@ decision = "allow"
         .unwrap();
         run(cli, &cfg).await.unwrap();
     }
+
+    // ----- v0.7.0 coverage close: fold-A2A1.4 mTLS bypass on /sync/* ----
+    //
+    // The grand-slam cascade landed `e188503` (fold-A2A1.4) which added 61
+    // lines to `daemon_runtime.rs`: the `mtls_enforced` computation in
+    // `bootstrap_serve` (true iff all of `--tls-cert`, `--tls-key`, and
+    // `--mtls-allowlist` are set), the threaded api-key into
+    // `FederationConfig::build`, and the differentiated tracing message
+    // when api-key auth is enabled alongside mTLS. The post-cascade
+    // coverage gate (run 25892100734) caught the regression at 85.60% on
+    // `daemon_runtime.rs` — below the 86 floor — because the new
+    // mtls_enforced=true branch + the bypass exit path through the
+    // router were never entered by an existing test.
+    //
+    // The tests below close the gap by:
+    //   1. Bootstrapping with all three TLS args set + api_key set so the
+    //      `if mtls_enforced { tracing::info!(...federation endpoints...) }`
+    //      branch executes and `api_key_state.mtls_enforced` is observed
+    //      as true on the returned `ServeBootstrap`.
+    //   2. Bootstrapping with the half-configured cases (cert+key, no
+    //      allowlist; allowlist alone) to pin the AND-short-circuit on
+    //      the `mtls_enforced` predicate.
+    //   3. Driving the `build_router`-wired `api_key_auth` middleware
+    //      through `daemon_runtime::build_router` with
+    //      `mtls_enforced=true` so the `/api/v1/sync/...` bypass path is
+    //      exercised, and asserting a non-`/sync/` path still 401s
+    //      without the header.
+    //
+    // All hermetic: bootstrap_serve does NOT load the TLS cert / key /
+    // allowlist files (that happens in `serve()` at the rustls config
+    // site, after this struct is built), so passing non-existent paths
+    // is sufficient to flip `mtls_enforced` to true without writing
+    // real certificates.
+
+    #[tokio::test]
+    async fn test_bootstrap_serve_mtls_enforced_true_with_all_three_tls_args() {
+        // Covers `let mtls_enforced = ... && ... && ...` with the all-Some
+        // case (true branch). Paired with `api_key = Some(...)` so the
+        // outer `if api_key_state.key.is_some()` also fires and the
+        // `if mtls_enforced { ... } else { ... }` chooses the
+        // federation-bypass log message.
+        let env = TestEnv::fresh();
+        let mut cfg = AppConfig::default();
+        cfg.tier = Some("keyword".to_string());
+        cfg.api_key = Some("s3cret".to_string());
+        let mut args = args_with_db(&env.db_path);
+        // Paths don't need to exist — bootstrap_serve only inspects
+        // Option presence to compute `mtls_enforced`. The rustls config
+        // load that would actually read these files lives in `serve()`,
+        // which we are NOT calling here.
+        let cert_path = env.db_path.parent().unwrap().join("cert.pem");
+        let key_path = env.db_path.parent().unwrap().join("key.pem");
+        let allowlist_path = env.db_path.parent().unwrap().join("allowlist.json");
+        args.tls_cert = Some(cert_path);
+        args.tls_key = Some(key_path);
+        args.mtls_allowlist = Some(allowlist_path);
+        let bs = bootstrap_serve(&env.db_path, &args, &cfg).await.unwrap();
+        assert!(
+            bs.api_key_state.mtls_enforced,
+            "mtls_enforced should be true when cert+key+allowlist all set"
+        );
+        assert_eq!(bs.api_key_state.key.as_deref(), Some("s3cret"));
+        for h in bs.task_handles {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_serve_mtls_enforced_false_when_allowlist_absent() {
+        // Covers the AND short-circuit: cert+key set, allowlist None →
+        // `mtls_enforced = false`. This is the TLS-but-no-mTLS
+        // half-configured case (the `tracing::warn!("TLS enabled but
+        // mTLS NOT configured …")` path in `serve()`). Bootstrap_serve
+        // itself just records the flag as false; the `else` arm of the
+        // api-key log fires.
+        let env = TestEnv::fresh();
+        let mut cfg = AppConfig::default();
+        cfg.tier = Some("keyword".to_string());
+        cfg.api_key = Some("only-tls".to_string());
+        let mut args = args_with_db(&env.db_path);
+        args.tls_cert = Some(env.db_path.parent().unwrap().join("cert.pem"));
+        args.tls_key = Some(env.db_path.parent().unwrap().join("key.pem"));
+        // mtls_allowlist intentionally left None.
+        let bs = bootstrap_serve(&env.db_path, &args, &cfg).await.unwrap();
+        assert!(
+            !bs.api_key_state.mtls_enforced,
+            "mtls_enforced should be false without --mtls-allowlist"
+        );
+        assert_eq!(bs.api_key_state.key.as_deref(), Some("only-tls"));
+        for h in bs.task_handles {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_serve_mtls_enforced_false_when_only_allowlist_set() {
+        // Covers the AND short-circuit: cert/key None, allowlist Some →
+        // false. (clap's `requires = "tls_cert"` would block this combo
+        // at the CLI surface, but we're constructing `ServeArgs`
+        // directly here so the inner predicate is the only gate. This
+        // pins the predicate behaviour even if a refactor moves the
+        // validation back to the call site.)
+        let env = TestEnv::fresh();
+        let mut cfg = AppConfig::default();
+        cfg.tier = Some("keyword".to_string());
+        let mut args = args_with_db(&env.db_path);
+        args.mtls_allowlist = Some(env.db_path.parent().unwrap().join("allowlist.json"));
+        // tls_cert and tls_key intentionally None.
+        let bs = bootstrap_serve(&env.db_path, &args, &cfg).await.unwrap();
+        assert!(
+            !bs.api_key_state.mtls_enforced,
+            "mtls_enforced should be false without --tls-cert"
+        );
+        for h in bs.task_handles {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn test_bootstrap_serve_mtls_enforced_with_federation_threads_api_key() {
+        // Joint exercise of the two fold-A2A1.4 surfaces in one
+        // bootstrap: federation outbound carries the configured
+        // `[api] api_key` (line ~2155, `app_config.api_key.clone()` into
+        // `FederationConfig::build`) AND `mtls_enforced` is true.
+        // Confirms both the api_key thread-through and the new tracing
+        // message are activated together — the exact procurement-grade
+        // deployment shape #702 was filed for.
+        let env = TestEnv::fresh();
+        let mut cfg = AppConfig::default();
+        cfg.tier = Some("keyword".to_string());
+        cfg.api_key = Some("fed-key".to_string());
+        let mut args = args_with_db(&env.db_path);
+        args.tls_cert = Some(env.db_path.parent().unwrap().join("cert.pem"));
+        args.tls_key = Some(env.db_path.parent().unwrap().join("key.pem"));
+        args.mtls_allowlist = Some(env.db_path.parent().unwrap().join("allowlist.json"));
+        args.quorum_writes = 1;
+        args.quorum_peers = vec!["http://127.0.0.1:65520".to_string()];
+        args.quorum_timeout_ms = 100;
+        let bs = bootstrap_serve(&env.db_path, &args, &cfg).await.unwrap();
+        assert!(bs.api_key_state.mtls_enforced);
+        assert_eq!(bs.api_key_state.key.as_deref(), Some("fed-key"));
+        assert!(
+            bs.app_state.federation.is_some(),
+            "federation should be wired when quorum_writes>0 and peers nonempty"
+        );
+        for h in bs.task_handles {
+            h.abort();
+        }
+    }
+
+    // ----- v0.7.0 coverage close: api_key_auth bypass through build_router ---
+    //
+    // Drives the `api_key_auth` middleware path with `mtls_enforced=true`
+    // and a configured key. Two probes:
+    //   - `/api/v1/sync/push` without `x-api-key` should be admitted to
+    //     the handler stack (the federation-bypass arm). The handler
+    //     itself rejects on payload shape, but the status is not 401 —
+    //     proving the bypass fired.
+    //   - `/api/v1/memories` without `x-api-key` should still 401, since
+    //     the bypass is scoped to `/api/v1/sync/*`.
+
+    #[tokio::test]
+    async fn test_build_router_with_mtls_enforced_allows_sync_without_api_key() {
+        let env = TestEnv::fresh();
+        let app_state = keyword_app_state(&env.db_path);
+        let api_key_state = ApiKeyState {
+            key: Some("s3cret".to_string()),
+            mtls_enforced: true,
+        };
+        let router = build_router(app_state, api_key_state);
+        // POST /api/v1/sync/push with empty body — the api_key_auth
+        // middleware should NOT 401 (bypass scope hit). The downstream
+        // handler will likely return 400/415/422 for a malformed body;
+        // anything other than 401 proves the bypass executed.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sync/push")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "expected /sync/* to bypass api-key with mtls_enforced=true, got 401"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_router_with_mtls_enforced_still_requires_key_on_non_sync() {
+        let env = TestEnv::fresh();
+        let app_state = keyword_app_state(&env.db_path);
+        let api_key_state = ApiKeyState {
+            key: Some("s3cret".to_string()),
+            mtls_enforced: true,
+        };
+        let router = build_router(app_state, api_key_state);
+        // GET /api/v1/memories without x-api-key — bypass is scoped to
+        // /api/v1/sync/*, so this should still 401.
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/memories")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "non-/sync/ path must still demand x-api-key even with mtls_enforced"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_router_with_mtls_off_does_not_bypass_sync() {
+        // Pins the negative: mtls_enforced=false → /sync/* WITHOUT the
+        // header still gets 401. This is the v0.6.x backward-compatible
+        // posture (api-key required on every path when set, no bypass).
+        let env = TestEnv::fresh();
+        let app_state = keyword_app_state(&env.db_path);
+        let api_key_state = ApiKeyState {
+            key: Some("s3cret".to_string()),
+            mtls_enforced: false,
+        };
+        let router = build_router(app_state, api_key_state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/sync/push")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "without mtls_enforced, /sync/* must still demand x-api-key"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_build_router_with_mtls_enforced_accepts_valid_key_on_non_sync() {
+        // Defense-in-depth: even with mtls_enforced=true, supplying the
+        // correct key on a non-/sync/ path still succeeds. Pins that
+        // the bypass branch does not steal requests that legitimately
+        // carry the header.
+        let env = TestEnv::fresh();
+        let app_state = keyword_app_state(&env.db_path);
+        let api_key_state = ApiKeyState {
+            key: Some("s3cret".to_string()),
+            mtls_enforced: true,
+        };
+        let router = build_router(app_state, api_key_state);
+        let resp = router
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri("/api/v1/memories")
+                    .header("x-api-key", "s3cret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            resp.status().is_success(),
+            "valid api-key on non-/sync/ path should succeed, got {}",
+            resp.status()
+        );
+    }
 }
