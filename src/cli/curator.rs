@@ -921,6 +921,14 @@ mod tests {
         // No assertion on the value; the test exercises lines 55-56.
     }
 
+    // Unix-only — the test self-fires `libc::kill(getpid, SIGINT)` to
+    // exercise the ctrl_c shutdown path. The libc crate's `getpid` /
+    // `kill` / `SIGINT` symbols are not available on Windows, where
+    // signal handling uses a different surface entirely. The daemon
+    // shutdown path itself is cross-platform (tokio::signal::ctrl_c
+    // works on Windows); only the self-fire test mechanism is
+    // POSIX-bound.
+    #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread")]
     async fn curator_daemon_mode_short_loop_returns_on_shutdown() {
         // Drives lines 128-150 — daemon mode entry. We fire SIGINT to
