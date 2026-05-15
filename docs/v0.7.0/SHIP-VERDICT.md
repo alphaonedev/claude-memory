@@ -1,14 +1,14 @@
 # ai-memory v0.7.0 — SHIP-VERDICT memo (Phase I)
 
 **Status:** FINAL · ready for tag-cut.
-**HEAD:** `b0e2014` (test gates + lint cleanup + security fixes on top of 7-PR cascade on top of `41bd382` build-fix on top of `dfa4847`)
+**HEAD:** `e62c22d` (ci/release separation + fmt cleanup + test gates + lint cleanup + security fixes on top of 7-PR cascade on top of `41bd382` build-fix on top of `dfa4847`)
 **Date:** 2026-05-14
 **Authors:** AI NHI cross-LLM campaign (Claude Opus 4.7 driving, Grok 4.20-0309-reasoning cross-verifying)
 **Tracking:** #700, #29
 
 ## Fix-all-gaps closeout (operator directive: no v0.8.0 deferral)
 
-The campaign surfaced and addressed **16 distinct gaps** end-to-end. Every
+The campaign surfaced and addressed **17 distinct gaps** end-to-end. Every
 single one landed in v0.7.0 — zero deferred to v0.8.0 except (a) the
 cert-SAN extraction substrate that requires axum-server contribution
 (#717) and (b) the A2A campaign harness modernization (#718). Both
@@ -32,8 +32,9 @@ documented and tracked.
 | 14 | Federation security #238 + #239 (sender_agent_id attestation + per-peer scope) | PR #716 | ✅ merged |
 | 15 | Default-features lint warnings introduced in #716 (unused imports + dead code at non-sal builds) | PR #719 | ✅ merged |
 | 16 | Default-features Check matrix: 2 SAL-only endpoint tests (http_kg_find_paths_happy + http_verify_link_unsigned) needed `#[cfg(feature = "sal")]` gates | PR #720 | ✅ merged |
+| 17 | CI/release coupling — ci.yml auto-published on tag-push when Check matrix passed. Split publish fanout into `release.yml` (workflow_dispatch-only). Releases now require explicit `gh workflow run release.yml -f tag=...` | PR #722 | ✅ merged |
 
-This is what "we are not shipping gaps" looks like in practice: 16
+This is what "we are not shipping gaps" looks like in practice: 17
 substrate/CI/test/security gaps closed, with the substrate-cures for
 #238 + #239 documented as having a v0.8.0 follow-up for cert-SAN
 extraction once axum-server exposes verified-cert state to handlers
