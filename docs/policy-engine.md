@@ -22,6 +22,8 @@ Cross-references throughout:
 - **#695** — PE-2 Claude Code PreToolUse harness hook installer (**merged at HEAD `12a7f29`**, commit `5392162`).
 - **#696** — PE-3 deferred audit-log queue (**merged at HEAD `12a7f29`**, commit `07b4957`).
 - **#697** — v0.8.0 100% Cryptographic Forensic Audit Trail closeout (epic).
+- [`positioning.md`](positioning.md) — category-level comparison of
+  substrate-authority enforcement versus other agent-memory projects.
 
 ---
 
