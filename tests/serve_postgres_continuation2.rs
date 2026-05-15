@@ -45,7 +45,22 @@ fn free_port() -> u16 {
     listener.local_addr().expect("local_addr").port()
 }
 
+/// v0.7.0 #238/#239 — set the federation legacy-bypass env vars
+/// once per test process so this postgres-only suite drives
+/// /sync/push and /sync/since against in-process daemons without
+/// the new wire-level `x-peer-id` header. The new regression tests
+/// at `tests/g_issue_238_*` and `tests/g_issue_239_*` exercise the
+/// default-enforce posture in separate test binaries.
+static FED_LEGACY_BYPASS_INIT: std::sync::Once = std::sync::Once::new();
+fn install_federation_legacy_bypass() {
+    FED_LEGACY_BYPASS_INIT.call_once(|| unsafe {
+        std::env::set_var("AI_MEMORY_FED_TRUST_BODY_AGENT_ID", "1");
+        std::env::set_var("AI_MEMORY_FED_SYNC_TRUST_PEER", "1");
+    });
+}
+
 async fn build_postgres_app_state(url: &str) -> AppState {
+    install_federation_legacy_bypass();
     let conn = ai_memory::db::open(std::path::Path::new(":memory:")).expect("scratch sqlite");
     let path = std::path::PathBuf::from(":memory:");
     let db: Db = Arc::new(Mutex::new((conn, path, ResolvedTtl::default(), true)));

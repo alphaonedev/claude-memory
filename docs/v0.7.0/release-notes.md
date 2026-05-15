@@ -115,9 +115,14 @@ proper rather than deferred to v0.8.0:
   behaviour via `AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`. See
   [`docs/security/audit-trail-coverage.md` §9.1](../security/audit-trail-coverage.md#91-per-author-attestation-on-syncpush-v070-238).
 - **[#239](https://github.com/alphaonedev/ai-memory-mcp/issues/239)
-  `/api/v1/sync/since` per-peer namespace allowlist** lands in the
-  companion commit on this branch. See §9.2 of the audit-trail
-  coverage doc for the full matrix.
+  `/api/v1/sync/since` now applies a per-peer namespace allowlist**
+  to the projection before returning rows. Default-deny posture for
+  peers without an operator-configured allowlist (empty page + WARN);
+  legacy "full dump" posture preserved via
+  `AI_MEMORY_FED_SYNC_TRUST_PEER=1`. Response envelope gains
+  `excluded_for_scope: <count>` + `scope_status: …` for honest
+  partial-view diagnostics. See
+  [`docs/security/audit-trail-coverage.md` §9.2](../security/audit-trail-coverage.md#92-per-peer-namespace-scope-on-syncsince-v070-239).
 
 **Cert-SAN extraction follow-up.** Today's mTLS substrate
 (`FingerprintAllowlistVerifier`) pins client certificates by SHA-256

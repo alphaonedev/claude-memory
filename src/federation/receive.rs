@@ -138,7 +138,21 @@ pub(super) async fn catchup_once_with_store(
             None => format!("{base}/api/v1/sync/since?peer={local_id}"),
         };
 
-        let resp = match config.client.get(&url).send().await {
+        // v0.7.0 #239 — attach `x-peer-id` to the outbound /sync/since
+        // GET so the peer's per-peer namespace allowlist can scope
+        // the returned rows. Without this, a v0.7.0 peer that's
+        // configured an allowlist will default-deny our catchup and
+        // hand back an empty page.
+        let resp = match config
+            .client
+            .get(&url)
+            .header(
+                crate::federation::peer_attestation::PEER_ID_HEADER,
+                local_id.as_str(),
+            )
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 tracing::debug!(
@@ -286,7 +300,19 @@ async fn catchup_once_legacy(config: &FederationConfig, db: &crate::handlers::Db
             None => format!("{base}/api/v1/sync/since?peer={local_id}"),
         };
 
-        let resp = match config.client.get(&url).send().await {
+        // v0.7.0 #239 — attach `x-peer-id` so the peer's per-peer
+        // namespace allowlist can scope the returned rows (sqlite
+        // catchup path, parity with the SAL-routed loop above).
+        let resp = match config
+            .client
+            .get(&url)
+            .header(
+                crate::federation::peer_attestation::PEER_ID_HEADER,
+                local_id.as_str(),
+            )
+            .send()
+            .await
+        {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
                 tracing::debug!(

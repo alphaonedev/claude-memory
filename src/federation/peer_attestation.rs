@@ -1,18 +1,20 @@
 // Copyright 2026 AlphaOne LLC
 // SPDX-License-Identifier: Apache-2.0
 
-//! v0.7.0 federation security — peer attestation substrate for
-//! `/api/v1/sync/push` (issue #238). The companion `/sync/since`
-//! scope-allowlist machinery for issue #239 lands in the next
-//! commit on this branch.
+//! v0.7.0 federation security — peer attestation + scope-allowlist
+//! substrate for `/api/v1/sync/push` and `/api/v1/sync/since`.
 //!
-//! ## Gap context (red-team #230, issue #238)
+//! ## Gap context (red-team #230, issues #238 + #239)
 //!
-//! `SyncPushBody::sender_agent_id` is a body-claimed identity.
-//! Pre-v0.7.0 the receiver logged it for audit and used it to charge
-//! per-agent quotas, but never attested it against anything. A peer
-//! with a valid mTLS cert could claim ANY `agent_id` in the body,
-//! defeating per-agent audit-trail integrity.
+//! - **#238** — `SyncPushBody::sender_agent_id` is a body-claimed
+//!   identity. Pre-v0.7.0 the receiver logged it for audit and used
+//!   it to charge per-agent quotas, but never attested it against
+//!   anything. A peer with a valid mTLS cert could claim ANY
+//!   `agent_id` in the body, defeating per-agent audit-trail
+//!   integrity.
+//! - **#239** — `/api/v1/sync/since` returned every memory newer
+//!   than the watermark with no per-peer namespace scope. Compromise
+//!   of one mTLS peer key exfiltrated the entire database.
 //!
 //! ## Substrate honesty (operator-must-read)
 //!
@@ -25,25 +27,27 @@
 //! non-trivial axum-server PR or a new x509-parser dependency wired
 //! into a custom `ClientCertVerifier` that stashes per-connection
 //! state. **That work is escalated to v0.8.0** and tracked under the
-//! follow-up to issue #238 in the PR body that landed this module.
+//! follow-up to issues #238/#239 in the PR body that landed this
+//! module.
 //!
 //! What this module DOES give v0.7.0:
 //!
 //! 1. A NEW required outbound header `x-peer-id` carrying the peer's
 //!    self-claim of its `sender_agent_id`. The federation client
 //!    (`src/federation/sync.rs::post_once`) attaches it on every
-//!    outbound `/sync/push` request. The receiver cross-checks
-//!    `body.sender_agent_id` against this header — the body field can
-//!    no longer silently disagree with the wire-level peer-id without
-//!    an explicit operator override.
+//!    outbound `/sync/push` and `/sync/since` request. The receiver
+//!    cross-checks `body.sender_agent_id` against this header — the
+//!    body field can no longer silently disagree with the wire-level
+//!    peer-id without an explicit operator override.
 //! 2. An operator-configured allowlist that binds **claimed peer-id**
-//!    to **allowed sender_agent_ids**. Loaded from the env var
-//!    `AI_MEMORY_FED_PEER_ATTESTATION` (JSON; see
-//!    [`PeerAttestationConfig::from_env`] for the schema). Peers not
-//!    in the allowlist still get a clear refusal envelope.
-//! 3. An opt-in env bypass (`AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`) so
-//!    the live Mac Mini test cell and the DigitalOcean campaign keep
-//!    working without config updates.
+//!    to **allowed sender_agent_ids** + **allowed namespaces**.
+//!    Loaded from the env var `AI_MEMORY_FED_PEER_ATTESTATION` (JSON;
+//!    see [`PeerAttestationConfig::from_env`] for the schema). Peers
+//!    not in the allowlist still get a clear refusal envelope.
+//! 3. Opt-in env bypasses so the live Mac Mini test cell and the
+//!    DigitalOcean campaign keep working without config updates
+//!    (`AI_MEMORY_FED_TRUST_BODY_AGENT_ID=1`,
+//!    `AI_MEMORY_FED_SYNC_TRUST_PEER=1`).
 //!
 //! The end-to-end trust chain in v0.7.0 is therefore:
 //!
@@ -54,31 +58,20 @@
 //!        └─ handler reads `x-peer-id` header (operator-bound to
 //!           fingerprints via deployment runbook, NOT cryptographic-
 //!           ally tied to the cert TODAY)
-//!           └─ this module validates body.sender_agent_id.
+//!           └─ this module validates body.sender_agent_id /
+//!              filters /sync/since projection.
 //! ```
 //!
 //! The weak link is the operator-bound binding between fingerprint
 //! and `x-peer-id`. v0.8.0 will replace that with the cert-SAN
 //! attestation surface and remove this caveat.
-//!
-//! ## Note on the `allowed_namespaces` field
-//!
-//! `PeerScope` carries an `allowed_namespaces: Vec<String>` field that
-//! this commit does not yet read. The field is added now (rather than
-//! in the #239 commit) so the operator-facing
-//! `AI_MEMORY_FED_PEER_ATTESTATION` JSON schema is stable across the
-//! two security commits — operators don't need to migrate their
-//! allowlist file between v0.7.0 substrate updates. The #239 commit
-//! consumes the field via the `/sync/since` scope filter it ships.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Env var carrying the operator's per-peer attestation allowlist
-/// (JSON). Absent / parse-error = empty allowlist. The #239 commit
-/// extends the read-side use of this map to gate `/sync/since`
-/// projections by namespace; this commit reads only the
-/// `allowed_sender_agent_ids` member of each entry.
+/// (JSON). Absent / parse-error = empty allowlist (default-deny on
+/// `/sync/since` unless [`SYNC_TRUST_PEER_ENV`] is set).
 pub const PEER_ATTESTATION_ENV: &str = "AI_MEMORY_FED_PEER_ATTESTATION";
 
 /// Env var that, when set to `"1"`, disables the #238 attestation
@@ -86,6 +79,13 @@ pub const PEER_ATTESTATION_ENV: &str = "AI_MEMORY_FED_PEER_ATTESTATION";
 /// any body-claimed `sender_agent_id`). Backwards-compat for test
 /// cells where the operator hasn't yet wired the allowlist.
 pub const TRUST_BODY_AGENT_ID_ENV: &str = "AI_MEMORY_FED_TRUST_BODY_AGENT_ID";
+
+/// Env var that, when set to `"1"`, disables the #239 namespace-
+/// allowlist check and reverts `/sync/since` to its pre-v0.7.0
+/// "full dump" posture. Backwards-compat for the v0.6.x federation
+/// mesh and the live test cells that don't yet ship a peer-scope
+/// allowlist.
+pub const SYNC_TRUST_PEER_ENV: &str = "AI_MEMORY_FED_SYNC_TRUST_PEER";
 
 /// HTTP header carrying the peer's self-claim of `sender_agent_id`.
 /// Lowercase per the HTTP/2 wire convention; axum's `HeaderMap`
@@ -101,19 +101,18 @@ pub const PEER_ID_HEADER: &str = "x-peer-id";
 /// and the list (exact strings, no glob) is the authoritative set of
 /// `body.sender_agent_id` values the peer may claim.
 ///
-/// `allowed_namespaces` is reserved for the issue #239 follow-up
-/// commit on this branch — schema is fixed now so operator-facing
-/// JSON does not churn between security commits. See the module
-/// docs for the staging rationale.
+/// `allowed_namespaces` follows the glob convention used elsewhere
+/// in the codebase: `*` matches a single segment, `**` matches any
+/// suffix. Empty = peer may not pull any namespace (default-deny).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct PeerScope {
     /// Exact `body.sender_agent_id` values this peer may claim on
     /// `/sync/push`. Empty = only the peer-id itself.
     #[serde(default)]
     pub allowed_sender_agent_ids: Vec<String>,
-    /// Reserved for issue #239 — `/sync/since` namespace scope.
-    /// Operators may populate it now; the read-side gate lands in
-    /// the next commit on this branch.
+    /// Glob patterns matched against `Memory::namespace` on
+    /// `/sync/since`. Empty = peer may not pull any rows
+    /// (default-deny) unless [`SYNC_TRUST_PEER_ENV`] is set.
     #[serde(default)]
     pub allowed_namespaces: Vec<String>,
 }
@@ -134,7 +133,8 @@ pub struct PeerScope {
 /// ```
 ///
 /// The empty map (`{}` or no env var at all) is a valid state. It
-/// triggers the "header must equal body" posture on `/sync/push`.
+/// triggers the default-deny posture on `/sync/since` and the
+/// "header must equal body" posture on `/sync/push`.
 #[derive(Clone, Debug, Default)]
 pub struct PeerAttestationConfig {
     pub peers: HashMap<String, PeerScope>,
@@ -170,11 +170,10 @@ impl AttestError {
 
 impl PeerAttestationConfig {
     /// Load the allowlist from the [`PEER_ATTESTATION_ENV`] env var.
-    /// Missing env var = empty config (default-deny on cross-author
-    /// claims). Parse error = empty config + a `tracing::warn!` so
-    /// the operator sees the typo immediately. Refusing to start on
-    /// a malformed allowlist would be a self-DOS hazard during config
-    /// rollouts.
+    /// Missing env var = empty config (default-deny). Parse error =
+    /// empty config + a `tracing::warn!` so the operator sees the
+    /// typo immediately. Refusing to start on a malformed allowlist
+    /// would be a self-DOS hazard during config rollouts.
     #[must_use]
     pub fn from_env() -> Self {
         match std::env::var(PEER_ATTESTATION_ENV) {
@@ -187,7 +186,8 @@ impl PeerAttestationConfig {
                             env = PEER_ATTESTATION_ENV,
                             error = %e,
                             "failed to parse peer-attestation env var as JSON — \
-                             falling back to empty allowlist"
+                             falling back to empty allowlist (default-deny on \
+                             /sync/since, header-must-equal-body on /sync/push)"
                         );
                         Self::default()
                     }
@@ -210,6 +210,13 @@ impl PeerAttestationConfig {
 #[must_use]
 pub fn trust_body_agent_id_bypass() -> bool {
     matches!(std::env::var(TRUST_BODY_AGENT_ID_ENV).as_deref(), Ok("1"))
+}
+
+/// Whether the operator has explicitly opted out of #239 scope
+/// filtering (legacy behaviour: full database dump per peer).
+#[must_use]
+pub fn sync_trust_peer_bypass() -> bool {
+    matches!(std::env::var(SYNC_TRUST_PEER_ENV).as_deref(), Ok("1"))
 }
 
 /// #238 attestation core.
@@ -266,6 +273,83 @@ pub fn attest_sender(
         claimed: claimed.to_string(),
         peer_header: peer.to_string(),
     })
+}
+
+/// Glob match used by [`namespace_allowed`] — supports `*` (single
+/// segment) and `**` (any suffix). Mirrors the convention used
+/// elsewhere in the codebase (governance rules, allowlist patterns).
+/// Pure-function ASCII glob; no regex engine to avoid a new dep.
+///
+/// Re-exported as [`namespace_allowed_test_glob`] for callers that
+/// need to drive the per-pattern decision directly (the `sync_since`
+/// handler iterates the scope's pattern list itself so the
+/// `excluded_for_scope` count stays accurate against the pre-filter
+/// projection).
+#[must_use]
+pub fn namespace_allowed_test_glob(pattern: &str, target: &str) -> bool {
+    glob_match(pattern, target)
+}
+
+#[must_use]
+fn glob_match(pattern: &str, target: &str) -> bool {
+    if pattern == "**" || pattern == "*" {
+        return true;
+    }
+    if let Some(prefix) = pattern.strip_suffix("/**") {
+        // `prefix/**` matches `prefix` itself OR anything starting with `prefix/`.
+        return target == prefix || target.starts_with(&format!("{prefix}/"));
+    }
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        // `prefix/*` matches exactly one path-segment after `prefix/`.
+        if let Some(rest) = target.strip_prefix(&format!("{prefix}/")) {
+            return !rest.contains('/');
+        }
+        return false;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*/") {
+        // `*/suffix` matches exactly one path-segment before `/suffix`.
+        if let Some(rest) = target.strip_suffix(&format!("/{suffix}")) {
+            return !rest.contains('/');
+        }
+        return false;
+    }
+    pattern == target
+}
+
+/// #239 scope-filter core.
+///
+/// Returns `true` when `namespace` is allowed for the peer identified
+/// by `peer_header`. Decision matrix:
+///
+/// | `peer_header` | scope row    | bypass env | result |
+/// |---------------|--------------|------------|--------|
+/// | `None`        | n/a          | unset      | false (default-deny) |
+/// | `None`        | n/a          | set        | true (legacy full dump) |
+/// | `Some(p)`     | None         | unset      | false (default-deny) |
+/// | `Some(p)`     | None         | set        | true (legacy full dump) |
+/// | `Some(p)`     | Some(scope)  | unset/set  | true iff any pattern in `scope.allowed_namespaces` matches `namespace` |
+///
+/// The bypass env (`AI_MEMORY_FED_SYNC_TRUST_PEER=1`) ONLY widens
+/// the "no scope row" case; once a scope row exists for the peer,
+/// its namespace list is the authoritative gate and the bypass is
+/// ignored (operator's explicit allowlist wins over the legacy
+/// override).
+#[must_use]
+pub fn namespace_allowed(
+    peer_header: Option<&str>,
+    namespace: &str,
+    config: &PeerAttestationConfig,
+) -> bool {
+    let Some(peer) = peer_header.map(str::trim).filter(|s| !s.is_empty()) else {
+        return sync_trust_peer_bypass();
+    };
+    match config.scope_for(peer) {
+        Some(scope) => scope
+            .allowed_namespaces
+            .iter()
+            .any(|p| glob_match(p, namespace)),
+        None => sync_trust_peer_bypass(),
+    }
 }
 
 #[cfg(test)]
@@ -354,6 +438,78 @@ mod tests {
         assert!(matches!(err, AttestError::Mismatch { .. }));
     }
 
+    // ---- glob_match -----------------------------------------------------
+
+    #[test]
+    fn glob_wildcard_all() {
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("**", "anything/even/nested"));
+    }
+
+    #[test]
+    fn glob_prefix_double_star() {
+        assert!(glob_match("public/**", "public"));
+        assert!(glob_match("public/**", "public/a"));
+        assert!(glob_match("public/**", "public/a/b/c"));
+        assert!(!glob_match("public/**", "private"));
+        assert!(!glob_match("public/**", "publicx"));
+    }
+
+    #[test]
+    fn glob_prefix_single_star() {
+        assert!(glob_match("public/*", "public/foo"));
+        assert!(!glob_match("public/*", "public/foo/bar"));
+        assert!(!glob_match("public/*", "public"));
+    }
+
+    #[test]
+    fn glob_suffix_single_star() {
+        assert!(glob_match("*/notes", "alice/notes"));
+        assert!(!glob_match("*/notes", "alice/team/notes"));
+        assert!(!glob_match("*/notes", "notes"));
+    }
+
+    #[test]
+    fn glob_exact_literal() {
+        assert!(glob_match("ai-memory-mcp", "ai-memory-mcp"));
+        assert!(!glob_match("ai-memory-mcp", "ai-memory"));
+    }
+
+    // ---- namespace_allowed ----------------------------------------------
+
+    #[test]
+    fn namespace_no_header_no_bypass_denies() {
+        // Make sure no test contamination from env vars.
+        // SAFETY: the value cleared belongs to this test only;
+        // serial-by-default cargo test isolation is sufficient.
+        unsafe { std::env::remove_var(SYNC_TRUST_PEER_ENV) };
+        let cfg = PeerAttestationConfig::default();
+        assert!(!namespace_allowed(None, "any", &cfg));
+        assert!(!namespace_allowed(Some(""), "any", &cfg));
+    }
+
+    #[test]
+    fn namespace_match_via_glob() {
+        let cfg = cfg(&[(
+            "peer-1",
+            PeerScope {
+                allowed_namespaces: vec!["public/*".to_string(), "shared/team-x/**".to_string()],
+                ..PeerScope::default()
+            },
+        )]);
+        assert!(namespace_allowed(Some("peer-1"), "public/foo", &cfg));
+        assert!(namespace_allowed(Some("peer-1"), "shared/team-x/a/b", &cfg));
+        assert!(!namespace_allowed(Some("peer-1"), "private/foo", &cfg));
+        assert!(!namespace_allowed(Some("peer-1"), "public/foo/bar", &cfg));
+    }
+
+    #[test]
+    fn namespace_no_scope_row_denies_without_bypass() {
+        unsafe { std::env::remove_var(SYNC_TRUST_PEER_ENV) };
+        let cfg = PeerAttestationConfig::default();
+        assert!(!namespace_allowed(Some("peer-1"), "any", &cfg));
+    }
+
     // ---- PeerAttestationConfig::from_env --------------------------------
 
     #[test]
@@ -367,7 +523,8 @@ mod tests {
     fn from_env_parses_valid_json() {
         let body = r#"{
             "peer-1": {
-                "allowed_sender_agent_ids": ["alice", "bob"]
+                "allowed_sender_agent_ids": ["alice", "bob"],
+                "allowed_namespaces": ["public/*"]
             }
         }"#;
         unsafe { std::env::set_var(PEER_ATTESTATION_ENV, body) };
@@ -375,6 +532,7 @@ mod tests {
         unsafe { std::env::remove_var(PEER_ATTESTATION_ENV) };
         let scope = cfg.scope_for("peer-1").expect("peer-1 row present");
         assert_eq!(scope.allowed_sender_agent_ids, vec!["alice", "bob"]);
+        assert_eq!(scope.allowed_namespaces, vec!["public/*"]);
     }
 
     #[test]

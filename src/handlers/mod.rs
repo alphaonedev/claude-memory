@@ -723,18 +723,16 @@ pub async fn approvals_sse(
 mod tests {
     use super::*;
 
-    /// v0.7.0 #238 (security hardening): the lib-tier in-process
+    /// v0.7.0 #238/#239 (security hardening): the lib-tier in-process
     /// federation tests pre-date the `x-peer-id` attestation step and
     /// don't carry the header. They model legacy peers that the
-    /// brief's `AI_MEMORY_FED_TRUST_BODY_AGENT_ID` env bypass is
-    /// designed for exactly. Set it at module-load time so every lib
-    /// test sees the legacy posture. Integration tests at
-    /// `tests/g_issue_238_*` exercise the default-enforce posture in
-    /// a separate test binary (independent process env), so this flip
-    /// does not contaminate the new regression tests. The #239
-    /// follow-up commit on this branch extends this scaffold with
-    /// `SYNC_TRUST_PEER_ENV` for the matching `/sync/since` legacy
-    /// posture.
+    /// brief's `AI_MEMORY_FED_TRUST_BODY_AGENT_ID` /
+    /// `AI_MEMORY_FED_SYNC_TRUST_PEER` env bypasses are designed for
+    /// exactly. Set both at module-load time so every lib test sees
+    /// the legacy posture. Integration tests at `tests/g_issue_238_*`
+    /// and `tests/g_issue_239_*` exercise the default-enforce posture
+    /// in a separate test binary (independent process env), so this
+    /// flip does not contaminate the new regression tests.
     static SECURITY_BYPASS_INIT: std::sync::Once = std::sync::Once::new();
     fn install_security_bypass_for_legacy_tests() {
         SECURITY_BYPASS_INIT.call_once(|| {
@@ -743,6 +741,10 @@ mod tests {
             unsafe {
                 std::env::set_var(
                     crate::federation::peer_attestation::TRUST_BODY_AGENT_ID_ENV,
+                    "1",
+                );
+                std::env::set_var(
+                    crate::federation::peer_attestation::SYNC_TRUST_PEER_ENV,
                     "1",
                 );
             }
