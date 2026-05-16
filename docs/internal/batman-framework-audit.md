@@ -1,5 +1,34 @@
 # ai-memory vs Batman's 6-Form Write-Time-Investment Framework — Honest Audit
 
+> ## Post-audit status (2026-05-15, HEAD `c9472c1`)
+>
+> **This document reflects state at commit `53b4d39` (audit baseline).**
+> The 0-of-6-IMPLEMENTED + 4-partial + 2-absent findings (and the
+> PARTIAL grade for the 7th-form claim) **drove the Forms 1-6 + 7th-form
+> closeout wave** — PRs [#761](https://github.com/alphaonedev/ai-memory-mcp/pull/761),
+> [#762](https://github.com/alphaonedev/ai-memory-mcp/pull/762),
+> [#763](https://github.com/alphaonedev/ai-memory-mcp/pull/763),
+> [#764](https://github.com/alphaonedev/ai-memory-mcp/pull/764),
+> [#765](https://github.com/alphaonedev/ai-memory-mcp/pull/765),
+> [#766](https://github.com/alphaonedev/ai-memory-mcp/pull/766) — all
+> merged 2026-05-15.
+>
+> **Post-closeout state at HEAD `c9472c1`: all 7 forms IMPLEMENTED.**
+>
+> - Form 1 — `src/synthesis/mod.rs` + `tests/form_1_synthesis.rs` (issue [#754](https://github.com/alphaonedev/ai-memory-mcp/issues/754)).
+> - Form 2 — `src/atomisation/mod.rs` + `Synchronous` mode branch in `src/hooks/pre_store/auto_atomise.rs` + `tests/form_2_synchronous_atomise.rs` (issue [#755](https://github.com/alphaonedev/ai-memory-mcp/issues/755)).
+> - Form 3 — `src/multistep_ingest/{mod,executor,helpers,pipeline,cache}.rs` + `tests/form_3_multistep_ingest.rs` (issue [#756](https://github.com/alphaonedev/ai-memory-mcp/issues/756)).
+> - Form 4 — `migrations/sqlite/0032_v07_form4_provenance.sql` + `migrations/postgres/0019_v07_form4_provenance.sql` + `tests/form_4_provenance.rs` (issue [#757](https://github.com/alphaonedev/ai-memory-mcp/issues/757)).
+> - Form 5 — `src/confidence/{mod,calibrate,shadow,decay}.rs` + `tests/form_5_confidence_calibration.rs` (issue [#758](https://github.com/alphaonedev/ai-memory-mcp/issues/758)).
+> - Form 6 — `src/models/memory.rs:38-200` (10-variant `MemoryKind` enum) + `tests/form_6_memorykind_vocab.rs` (issue [#759](https://github.com/alphaonedev/ai-memory-mcp/issues/759)).
+> - 7th-form (Option-B foundation) — `src/governance/{mod,agent_action,deferred_audit,rules_store,wire_point}.rs` + `tests/form_7_agent_external_wiring.rs` (issue [#760](https://github.com/alphaonedev/ai-memory-mcp/issues/760)). The agent-EXTERNAL Layer-4 surface (Bash / FilesystemWrite / NetworkRequest / ProcessSpawn) is `callable_now=false` at the substrate boundary; v0.8.0 wires it 100% per [#697](https://github.com/alphaonedev/ai-memory-mcp/issues/697).
+>
+> The audit body below is preserved verbatim as the historical record
+> that drove the wave. For the canonical post-wave feature inventory,
+> see [`docs/internal/v070-feature-inventory.md`](v070-feature-inventory.md).
+
+---
+
 > Audit date: 2026-05-15
 > ai-memory commit hash audited: `53b4d399db7bf8c08700ba9ea860f784ef3d2baa`
 > Branches inspected: `audit/batman-6-form` (off `feat/v0.7.0-grand-slam` which subsumes `wt-1-integration` after the 2026-05-15 cascade); cross-referenced against `main`.

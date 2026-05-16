@@ -39,14 +39,14 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/../.." && pwd)"
-scratch_root="${SCRATCH_ROOT:-/Users/fate/v07/v07-fixes/.local-runs}"
+scratch_root="${SCRATCH_ROOT:-${repo_root}/.local-runs}"
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 run_dir="${scratch_root}/cookbook-multistep-${ts}"
 mkdir -p "${run_dir}"
 
 export TMPDIR="${scratch_root}/tmp"
 mkdir -p "${TMPDIR}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/Users/fate/v07/v07-fixes/.cargo-shared-target}"
+export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-${repo_root}/target}"
 
 echo "==> Form 3 multi-step ingest cookbook recipe"
 echo "    repo: ${repo_root}"
