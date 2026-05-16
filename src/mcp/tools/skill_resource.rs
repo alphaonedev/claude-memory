@@ -11,7 +11,17 @@ use rusqlite::Connection;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 
-pub(super) fn handle_skill_resource(conn: &Connection, params: &Value) -> Result<Value, String> {
+/// MCP `memory_skill_resource` substrate handler.
+///
+/// Promoted to `pub` for v0.7.0 Cluster E API-2 (issue #767) so the
+/// CLI `ai-memory skill resource` and HTTP routes can dispatch into
+/// the same implementation.
+///
+/// # Errors
+/// Returns a substrate error string when `skill_id` / `resource_path`
+/// are missing, the row is not found, zstd decompression fails, or
+/// the SHA-256 digest mismatches the stored digest (tampering check).
+pub fn handle_skill_resource(conn: &Connection, params: &Value) -> Result<Value, String> {
     let skill_id = params["skill_id"]
         .as_str()
         .filter(|s| !s.is_empty())

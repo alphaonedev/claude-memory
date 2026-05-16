@@ -417,9 +417,19 @@ pub use verify::handle_verify;
 // substrate handlers. These are public so the L2-6 regression suite
 // (`tests/skill_promote_test.rs`) can drive the full promote → export
 // → re-register round-trip without needing the stdio JSON-RPC layer.
+//
+// v0.7.0 Cluster E API-2 (issue #767) — extended the public re-export
+// set so the new CLI subcommands under `src/cli/commands/skill.rs`
+// and the HTTP routes under `src/handlers/http.rs` can dispatch into
+// the same substrate without re-implementing business logic. CLI/HTTP
+// parity with the seven MCP `memory_skill_*` tools is the contract.
+pub use skill_compositional_context::handle_skill_compositional_context;
 pub use skill_export::handle_skill_export;
+pub use skill_get::handle_skill_get;
+pub use skill_list::handle_skill_list;
 pub use skill_promote::handle_skill_promote_from_reflection;
 pub use skill_register::handle_skill_register;
+pub use skill_resource::handle_skill_resource;
 
 /// v0.7.0 L2-3 (issue #668) — test-only dispatcher into
 /// `handle_link`. Re-exports the handler at a stable
@@ -549,7 +559,10 @@ use promote::handle_promote;
 use reflect::handle_reflect;
 use reflection_origin::handle_reflection_origin;
 use search::handle_search;
-use skill_compositional_context::handle_skill_compositional_context;
+// handle_skill_compositional_context is re-exported above via
+// `pub use skill_compositional_context::handle_skill_compositional_context`
+// so the dispatch arm in `handle_request` can resolve it through the
+// crate path without an additional `use` here.
 
 /// v0.7.0 L2-7 (issue #672) — integration-test entry point for
 /// `memory_skill_compositional_context`. Hides the internal
@@ -577,13 +590,12 @@ pub fn skill_compositional_context_for_tests(
 ) -> Result<serde_json::Value, String> {
     handle_skill_compositional_context(conn, params)
 }
-use skill_get::handle_skill_get;
-use skill_list::handle_skill_list;
-use skill_resource::handle_skill_resource;
-// handle_skill_export, handle_skill_promote_from_reflection, and
-// handle_skill_register are imported via the `pub use` above so the
-// L1-5 / L2-6 regression suites can drive them directly without going
-// through the stdio JSON-RPC layer.
+// handle_skill_export, handle_skill_promote_from_reflection,
+// handle_skill_register, handle_skill_get, handle_skill_list, and
+// handle_skill_resource are all imported via the `pub use` block above
+// (v0.7.0 Cluster E API-2 — issue #767, CLI/HTTP/MCP parity) so the
+// L1-5 / L2-6 regression suites and the CLI/HTTP surfaces can drive
+// them directly without going through the stdio JSON-RPC layer.
 use store::handle_store;
 use subscribe::{handle_list_subscriptions, handle_subscribe, handle_subscription_replay};
 use update::handle_update;

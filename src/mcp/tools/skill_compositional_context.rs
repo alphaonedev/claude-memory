@@ -63,7 +63,16 @@ const MAX_BUDGET_TOKENS: usize = 32_000;
 /// Pinned in module docs.
 const RECALL_SATURATION: i64 = 50;
 
-pub(super) fn handle_skill_compositional_context(
+/// MCP `memory_skill_compositional_context` substrate handler.
+///
+/// Promoted to `pub` for v0.7.0 Cluster E API-2 (issue #767) so the
+/// CLI `ai-memory skill compose` and HTTP routes can dispatch into
+/// the same implementation.
+///
+/// # Errors
+/// Returns a substrate error string when `skill_id` is missing/invalid,
+/// the skill is not found, or zstd body decompression fails.
+pub fn handle_skill_compositional_context(
     conn: &Connection,
     params: &Value,
 ) -> Result<Value, String> {

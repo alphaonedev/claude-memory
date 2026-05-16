@@ -10,7 +10,17 @@
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
-pub(super) fn handle_skill_get(conn: &Connection, params: &Value) -> Result<Value, String> {
+/// MCP `memory_skill_get` substrate handler.
+///
+/// Promoted to `pub` for v0.7.0 Cluster E API-2 (issue #767) so the
+/// CLI `ai-memory skill get` subcommand and the HTTP
+/// `GET /api/v1/skill/{id}` route can dispatch into the same
+/// implementation.
+///
+/// # Errors
+/// Returns a substrate error string when `skill_id` is missing/invalid,
+/// the skill is not found, or zstd body decompression fails.
+pub fn handle_skill_get(conn: &Connection, params: &Value) -> Result<Value, String> {
     let skill_id = params["skill_id"]
         .as_str()
         .filter(|s| !s.is_empty())

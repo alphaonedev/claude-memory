@@ -142,26 +142,54 @@ impl MemoryKind {
     }
 
     /// v0.7.x Form 6 — parse a comma-separated list of kind names
-    /// into a deduplicated `Vec<MemoryKind>`. Returns `None` when the
-    /// input is empty (after trim) so callers can treat "no filter"
-    /// distinctly from "empty filter list ⇒ nothing matches". Unknown
-    /// tokens are skipped silently so a future variant emitted by a
-    /// newer client doesn't break recall on an older binary.
+    /// into a deduplicated `Vec<MemoryKind>`.
+    ///
+    /// Two distinct empty cases are intentionally preserved (Cluster E
+    /// audit COR-4 — issue #767):
+    ///   * Input is **empty** (whitespace-only or zero non-empty tokens
+    ///     after trim) → `None`. Callers treat this as "no filter
+    ///     declared, return everything".
+    ///   * Input is **non-empty but every token is unrecognised** (e.g.
+    ///     `"reflektion,observetion"`) → `Some(vec![])`. Callers treat
+    ///     this as "an intentional filter was declared and matched
+    ///     nothing", returning zero rows. Collapsing this case to
+    ///     `None` (the pre-COR-4 behaviour) silently inverted a typo
+    ///     into "show ALL kinds", which is the bug the v0.7.0 audit
+    ///     flagged.
+    ///
+    /// Known tokens are deduplicated; unknown tokens are dropped
+    /// silently (forward-compat — a future variant emitted by a newer
+    /// client should not break recall on an older binary), but the
+    /// distinction above means dropping every token does NOT collapse
+    /// into "no filter".
     #[must_use]
     pub fn parse_csv(s: &str) -> Option<Vec<Self>> {
         let mut out: Vec<Self> = Vec::new();
+        let mut saw_any_token = false;
         for tok in s.split(',') {
             let t = tok.trim();
             if t.is_empty() {
                 continue;
             }
+            saw_any_token = true;
             if let Some(k) = Self::from_str(t)
                 && !out.contains(&k)
             {
                 out.push(k);
             }
         }
-        if out.is_empty() { None } else { Some(out) }
+        if !saw_any_token {
+            // Input was empty / whitespace-only — caller treats as
+            // "no filter declared".
+            None
+        } else {
+            // At least one non-empty token was supplied. Return the
+            // recognised set verbatim — including the empty-vec case
+            // when every token was unknown, so the caller can apply a
+            // strict "match nothing" filter rather than silently
+            // collapsing to "match everything".
+            Some(out)
+        }
     }
 }
 
@@ -815,6 +843,13 @@ impl RecallBody {
     /// Accepts a JSON array of strings or a single comma-separated
     /// string. Treats `"all"` as "no filter" (returns `None`).
     /// Drops unknown tokens silently.
+    ///
+    /// Cluster E audit COR-4 (issue #767): mirrors
+    /// [`MemoryKind::parse_csv`] semantics — an explicit array of
+    /// only-unknown tokens (e.g. `["reflektion"]`) returns
+    /// `Some(vec![])` (intentional zero-match filter), distinct from
+    /// the absent / empty / `"all"` cases which return `None`
+    /// (no filter declared).
     #[must_use]
     pub fn resolved_kinds(&self) -> Option<Vec<MemoryKind>> {
         let raw = self.kinds.as_ref()?;
@@ -825,6 +860,11 @@ impl RecallBody {
             return MemoryKind::parse_csv(s);
         }
         if let Some(arr) = raw.as_array() {
+            // Empty JSON array → no filter declared (matches the
+            // CSV "" case in parse_csv).
+            if arr.is_empty() {
+                return None;
+            }
             let mut out: Vec<MemoryKind> = Vec::new();
             for v in arr {
                 if let Some(name) = v.as_str()
@@ -834,7 +874,10 @@ impl RecallBody {
                     out.push(k);
                 }
             }
-            if out.is_empty() { None } else { Some(out) }
+            // Non-empty array (even if every entry was unknown)
+            // returns Some(out); collapsing to None would silently
+            // invert a typo'd filter into "match all" (COR-4 bug).
+            Some(out)
         } else {
             None
         }

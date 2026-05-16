@@ -11,7 +11,16 @@
 use rusqlite::Connection;
 use serde_json::{Value, json};
 
-pub(super) fn handle_skill_list(conn: &Connection, params: &Value) -> Result<Value, String> {
+/// MCP `memory_skill_list` substrate handler.
+///
+/// Promoted to `pub` for v0.7.0 Cluster E API-2 (issue #767) so the
+/// CLI `ai-memory skill list` subcommand and the HTTP
+/// `GET /api/v1/skill/list` route can dispatch into the same
+/// implementation without duplicating SQL.
+///
+/// # Errors
+/// Returns the substrate's error string when SQL prepare/query fails.
+pub fn handle_skill_list(conn: &Connection, params: &Value) -> Result<Value, String> {
     let namespace = params["namespace"].as_str().unwrap_or("%");
     let filter = params["filter"].as_str().unwrap_or("");
 
