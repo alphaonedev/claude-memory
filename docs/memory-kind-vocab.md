@@ -131,8 +131,14 @@ under the `memory_kind_vocab` block of the v3 capabilities
 response. Operators can read the live state via:
 
 ```bash
-ai-memory doctor --capabilities=v3 | jq .memory_kind_vocab
+ai-memory mcp call memory_capabilities '{"schema_version":"3"}' | jq .memory_kind_vocab
 ```
+
+(The v0.7-alpha drafts referenced `ai-memory doctor --capabilities=v3`;
+that flag was not shipped. The MCP `memory_capabilities` tool is the
+canonical inspection surface — it works against any running daemon
+regardless of profile because `memory_capabilities` is on the
+`ALWAYS_ON_TOOLS` allowlist.)
 
 ```jsonc
 {
