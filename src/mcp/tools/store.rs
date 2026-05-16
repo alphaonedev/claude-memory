@@ -447,12 +447,14 @@ pub(crate) fn handle_store(
         && !mem.namespace.starts_with('_')
         && !ns_policy.effective_legacy_per_pair_classifier();
     if synthesis_eligible {
-        // Filter out self/exact-dup matches so the synthesiser sees
-        // only genuinely-other candidates.
-        let cands: Vec<crate::models::Memory> = existing
+        // Cluster-F PERF-14 — borrow the candidates as `&[&Memory]`
+        // so the recall hit-set is NOT cloned just to feed the
+        // synthesiser. The filter narrows by reference; the
+        // synthesiser only reads `title` / `content` / `id` on each
+        // candidate, all behind shared borrows.
+        let cands: Vec<&crate::models::Memory> = existing
             .iter()
             .filter(|c| c.id != mem.id && c.title != mem.title)
-            .cloned()
             .collect();
         if !cands.is_empty()
             && let Some(llm_client) = llm
@@ -1012,22 +1014,24 @@ pub(crate) fn handle_store(
     // ensures a denied write never feeds the curator.
     let mut atomise_outcome: Option<&'static str> = None;
     {
-        // Build a fresh in-flight Memory carrying the actual_id (which
-        // may differ from mem.id under merge-mode upserts).
-        let post_mem = crate::models::Memory {
-            id: actual_id.clone(),
-            ..mem.clone()
-        };
+        // Cluster-F PERF-10 — pass the in-flight Memory by reference
+        // along with the resolved `actual_id` (which may differ from
+        // `mem.id` under merge-mode upserts). Avoids cloning the
+        // multi-KB content / tags / metadata blob just to swap the id.
         match atomise_mode {
             crate::models::AutoAtomiseMode::Synchronous => {
                 // Form 2 — synchronous atomise-before-the-response.
                 atomise_outcome = Some(crate::hooks::pre_store::run_synchronous_auto_atomise(
-                    conn, &post_mem, &agent_id,
+                    conn, &mem, &actual_id, &agent_id,
                 ));
             }
             crate::models::AutoAtomiseMode::Deferred => {
-                let _outcome =
-                    crate::hooks::pre_store::maybe_enqueue_auto_atomise(&post_mem, &agent_id);
+                // Cluster-F PERF-1 — reuse the caller's connection
+                // for policy resolution; the worker thread spawns
+                // inside the hook still opens its own connection.
+                let _outcome = crate::hooks::pre_store::maybe_enqueue_auto_atomise(
+                    conn, &mem, &actual_id, &agent_id,
+                );
                 // Outcome is for telemetry only; the response shape
                 // does NOT surface it (the curator pass is
                 // fire-and-forget by design).
@@ -1980,6 +1984,7 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
@@ -2049,6 +2054,7 @@ mod tests {
             auto_atomise: None,
             auto_atomise_threshold_cl100k: None,
             auto_atomise_max_atom_tokens: None,
+            auto_atomise_max_retries: None,
             auto_persona_trigger_every_n_memories: None,
             auto_export_personas_to_filesystem: None,
             auto_atomise_mode: None,
