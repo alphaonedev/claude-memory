@@ -138,12 +138,19 @@ jobs:
   #   1. A service container running postgres:16 with pgvector + AGE
   #      preinstalled (image: pgvector/pgvector:pg16, then `CREATE
   #      EXTENSION age` inside the SAL test fixture).
-  #   2. `cargo test --features sal-postgres --lib` so the lib-level
-  #      compile + unit suite is exercised under the postgres feature
-  #      gate. Tests gated by `AI_MEMORY_TEST_POSTGRES_URL` (e.g.
-  #      g3_postgres_verify_link_signature_roundtrip) self-skip when
-  #      the URL is unset; that is the soft-skip path until the
-  #      pgvector/age service image is wired here.
+  #   2. `cargo test --features sal-postgres` exercising BOTH the lib
+  #      unit suite AND the 17 postgres integration test binaries
+  #      (`tests/{g1..g5,governance_postgres,postgres_schema_parity,
+  #      s79_postgres,sal_v07_postgres,serve_postgres_*,
+  #      federation_postgres_*}.rs`). Until v0.7.0 cluster-I this job
+  #      ran with `--lib`, which silently excluded the integration
+  #      binaries — ~56 `#[tokio::test]` cases compiled but never ran
+  #      under the feature gate (issue #767, finding COV-1). Tests
+  #      gated by `AI_MEMORY_TEST_POSTGRES_URL` (e.g.
+  #      g3_postgres_verify_link_signature_roundtrip,
+  #      postgres_memory_kind_backfill) self-skip when the URL is
+  #      unset; the AI_MEMORY_TEST_POSTGRES_URL set below switches
+  #      them on against the service container.
   #   3. Clippy pedantic at the same feature gate so the postgres-only
   #      code paths inherit the same lint budget as the default build.
   # The lint advisory job above (`lint`) only runs `cargo clippy` at
@@ -196,10 +203,10 @@ jobs:
           done
           echo "::warning::postgres did not become ready within 60s — postgres-gated tests will soft-skip"
 
-      - name: Clippy (sal-postgres feature)
-        run: cargo clippy --features sal-postgres -- -D warnings -D clippy::all -D clippy::pedantic
+      - name: Clippy (sal-postgres feature, lib + tests)
+        run: cargo clippy --features sal-postgres --tests -- -D warnings -D clippy::all -D clippy::pedantic
 
-      - name: Run lib tests (sal-postgres feature)
+      - name: Run lib + integration tests (sal-postgres feature)
         env:
           AI_MEMORY_NO_CONFIG: "1"
           # Soft-skip pattern: postgres-gated integration tests check
@@ -208,20 +215,26 @@ jobs:
           # available those tests log a skip and exit 0 (see
           # `tests/age_cte_equivalence.rs` for the gating logic).
           AI_MEMORY_TEST_POSTGRES_URL: postgres://ai_memory:ai_memory_ci@localhost:5432/ai_memory_ci
-        # v0.7.0 ship-readiness: serialize postgres tests with
-        # `--test-threads=1`. The 30+ `live_*` postgres integration
-        # tests concurrently call `PostgresStore::connect()` which
-        # runs `CREATE EXTENSION` and `CREATE INDEX` DDLs against the
-        # same postgres service container. Postgres' catalog serializes
-        # EXTENSION + TYPE + INDEX installs at a lower layer than
-        # `IF NOT EXISTS`, so parallel callers collide on
-        # `pg_extension_name_index` / `pg_type_typname_nsp_index` /
-        # deadlock-detected / tuple-concurrently-updated despite the
-        # DDL being idempotent. Per-call retry (added in postgres.rs
-        # init path) handles the init_sql collision; serialising the
-        # test workers eliminates the deeper `migrate_vN()` races at
-        # the cost of slightly longer wallclock.
-        run: cargo test --features sal-postgres --lib -- --test-threads=1
+        # Combined v0.7.0 ship-readiness fixes (issue #767):
+        #
+        # 1. Cluster-I (COV-1): drop `--lib` so the 17 postgres
+        #    integration binaries (~56 `#[tokio::test]` cases) actually
+        #    run under the feature gate. Before this change they compiled
+        #    but never executed in CI — a massive coverage hole.
+        # 2. Concurrent-init serialisation (`-- --test-threads=1`): the
+        #    30+ `live_*` postgres tests concurrently call
+        #    `PostgresStore::connect()` which runs `CREATE EXTENSION` and
+        #    `CREATE INDEX` DDLs against the same postgres service
+        #    container. Postgres' catalog serialises EXTENSION + TYPE +
+        #    INDEX installs at a lower layer than `IF NOT EXISTS`, so
+        #    parallel callers collide on `pg_extension_name_index` /
+        #    `pg_type_typname_nsp_index` / deadlock-detected /
+        #    tuple-concurrently-updated despite the DDL being idempotent.
+        #    Per-call retry (added in postgres.rs init path) handles the
+        #    init_sql collision; serialising the test workers eliminates
+        #    the deeper `migrate_vN()` races at the cost of slightly
+        #    longer wallclock.
+        run: cargo test --features sal-postgres -- --test-threads=1
 
   # v0.7.0 Phase D regression closeout — `sal`-only feature gate. The
   # `check` matrix above builds the default (sqlite-bundled only) and
