@@ -143,18 +143,21 @@ fn test_migration_v36_applies_cleanly() {
             |r| r.get(0),
         )
         .expect("read schema_version");
-    // The migration ladder reaches v39 in current HEAD (Form 5 confidence
-    // calibration); it passes through v36 (WT-1-A atomisation foundation)
-    // on its way there, so the v36 column + index probes above still
-    // exercise WT-1-A's migration step. The final stamped version tracks
-    // `CURRENT_SCHEMA_VERSION` in src/storage/migrations.rs:
+    // The migration ladder reaches v42 in current HEAD; it passes through
+    // v36 (WT-1-A atomisation foundation) on its way there, so the v36
+    // column + index probes above still exercise WT-1-A's migration step.
+    // Final stamped version tracks `CURRENT_SCHEMA_VERSION` in
+    // src/storage/migrations.rs:
     //   v37 (QW-2 persona substrate) → v38 (Form 4 source-uri provenance)
-    //   → v39 (Form 5 confidence calibration shadow table).
+    //   → v39 (Form 5 confidence calibration shadow table)
+    //   → v40 (Cluster C signed-events DLQ, issue #767 SEC-3)
+    //   → v41 (Cluster G shadow-retention denormalised column + compound index)
+    //   → v42 (Polish #781 PERF-8 auto_persona mentioned_entity_id column).
     // When CURRENT_SCHEMA_VERSION bumps, update this assertion in lockstep.
     assert_eq!(
-        v, 39,
-        "v36→v39: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
-         (migration ladder passes through v36 on its way to v39)"
+        v, 42,
+        "v36→v42: schema_version must be stamped at CURRENT_SCHEMA_VERSION \
+         (migration ladder passes through v36 on its way to v42)"
     );
 }
 
@@ -184,11 +187,11 @@ fn test_migration_v36_idempotent() {
         )
         .expect("read v2");
 
-    // The migration ladder reaches v39 (Form 5 confidence calibration);
+    // The migration ladder reaches v42 (Polish #781 PERF-8 mentioned_entity_id);
     // pass-through v36 still exercises WT-1-A's atomisation migration.
     // Tracks `CURRENT_SCHEMA_VERSION` in src/storage/migrations.rs.
-    assert_eq!(v1, 39);
-    assert_eq!(v1, v2, "v39: migrate is not idempotent — version drifted");
+    assert_eq!(v1, 42);
+    assert_eq!(v1, v2, "v42: migrate is not idempotent — version drifted");
 
     // Columns + indexes still present after replay.
     assert!(column_exists(&conn2, "memories", "atomised_into"));
