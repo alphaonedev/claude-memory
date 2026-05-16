@@ -182,29 +182,19 @@ async fn s75_capabilities_surfaces_runtime_db_schema_version() {
          time); got {v}"
     );
     assert_eq!(
-        v, 37,
+        v, 41,
         "S75: db_schema_version must match `CURRENT_SCHEMA_VERSION` \
-         (37 at v0.7.0 — issue #691 bumped 29 to 30 to add the \
-         `governance_rules` table, L1-1 bumped 30 to 31 to add the \
-         typed `memories.memory_kind` column, L1-5 bumped 31 to 32 \
-         to add `skills` + `skill_resources` tables for the Agent \
-         Skills ingestion substrate, v0.7.1-fold (commit 58877c7) \
-         bumped 32 to 33 to add the column-level CHECK constraint on \
-         `memory_links.relation` per the closed-taxonomy hardening \
-         backlog, V-4 closeout (#698) bumped 33 to 34 to add \
-         the cross-row hash chain columns (`prev_hash` + `sequence`) \
-         on `signed_events`, QW-3 bumped 34 to 35 to add the \
-         `offloaded_blobs` context-offload substrate, WT-1-A \
-         bumped 35 to 36 to add the atomisation foundation \
-         (`memories.atomised_into` + `memories.atom_of` columns plus \
-         `derives_from` extension to the closed-taxonomy CHECK on \
-         `memory_links.relation`), and QW-2 bumped 36 to 37 to add \
-         the Persona-as-artifact substrate (`memories.entity_id` + \
-         `memories.persona_version` columns plus the \
-         `idx_personas_by_entity` partial index). A drift here means \
-         either the binary's migrate ladder skipped a step or the \
-         new SAL `schema_version()` lookup is reading from the wrong \
-         source."
+         (41 at v0.7.0 ship-readiness — v0.7.0 grand-slam delta over \
+         the prior 37: Form 4 (#757, citations/source-uri/atom-span) \
+         bumped 37 to 38, Form 5 (#758, confidence-calibration + \
+         shadow-mode) bumped 38 to 39, Cluster C signed-events DLQ \
+         (issue #767 / SEC-3) bumped 39 to 40, and Cluster G \
+         shadow-retention denormalised source column + compound \
+         index (issue #767 / PERF-4) bumped 40 to 41. Pre-grand-slam \
+         baseline 37 history retained in the pre-cluster-G version \
+         of this test. A drift here means either the binary's migrate \
+         ladder skipped a step or the new SAL `schema_version()` \
+         lookup is reading from the wrong source."
     );
 
     // 4) The wire-format discriminator stays alongside but distinct
